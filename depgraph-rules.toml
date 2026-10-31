@@ -1,0 +1,9 @@
+[rules]
+einfach-mail-domain = []
+einfach-mail-application = ["einfach-mail-domain"]
+einfach-mail-desktop = ["einfach-mail-application"]
+
+[options]
+strict = true
+check_dev_deps = true
+unmatched_config_entries = "error"
