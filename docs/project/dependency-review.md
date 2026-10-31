@@ -150,6 +150,7 @@ The Windows runner image lists Perl but does not list NASM or `Text::Template`, 
 - [`huskarl` ID-token validation and `azp` behavior](https://github.com/huskarl-rs/huskarl/blob/huskarl-v0.11.10/huskarl/src/token/id_token.rs#L1451-L1468)
 - [`huskarl` 0.11.10 CI workflow](https://github.com/huskarl-rs/huskarl/blob/huskarl-v0.11.10/.github/workflows/ci.yml)
 - [`huskarl-reqwest` 0.9.3 documentation and package metadata](https://docs.rs/crate/huskarl-reqwest/0.9.3)
+- [`huskarl-reqwest` 0.9.3 source](https://docs.rs/crate/huskarl-reqwest/0.9.3/source/src/lib.rs)
 - [`huskarl-core` custom JWS verifier guide](https://github.com/huskarl-rs/huskarl/blob/huskarl-v0.11.10/huskarl-core/docs/guide/configuring_jwt_verification.md)
 - [RustSec RUSTSEC-2023-0071 for RSA](https://rustsec.org/advisories/RUSTSEC-2023-0071.html)
 - [`jsonwebtoken` 11.1.0 documentation and dependency list](https://docs.rs/crate/jsonwebtoken/11.1.0)
