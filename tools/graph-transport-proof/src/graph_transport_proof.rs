@@ -41,6 +41,12 @@ enum RetryAfter {
     Unrepresentable,
 }
 
+#[derive(Clone, Copy)]
+enum ProxyPolicy {
+    System,
+    Disabled,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum ProviderError {
     Startup,
@@ -330,7 +336,7 @@ impl GraphProvider {
                     return;
                 };
 
-                let Ok(client) = build_http_client(REQUEST_TIMEOUT) else {
+                let Ok(client) = build_http_client(REQUEST_TIMEOUT, ProxyPolicy::Disabled) else {
                     let _ = ready_tx.send_blocking(Err(ProviderError::Startup));
                     drop(runtime);
                     let _ = stopped_tx.send_blocking(());
@@ -1024,16 +1030,20 @@ fn authorization_header(token: &BearerToken) -> Result<HeaderValue, ProviderErro
     Ok(header)
 }
 
-fn build_http_client(request_timeout: Duration) -> Result<Client, ProviderError> {
-    Client::builder()
-        // The proof uses a local mock server; production must retain system proxy support.
-        .no_proxy()
+fn build_http_client(
+    request_timeout: Duration,
+    proxy_policy: ProxyPolicy,
+) -> Result<Client, ProviderError> {
+    let builder = Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(request_timeout)
         .redirect(Policy::none())
-        .retry(reqwest::retry::never())
-        .build()
-        .map_err(|_| ProviderError::Startup)
+        .retry(reqwest::retry::never());
+    let builder = match proxy_policy {
+        ProxyPolicy::System => builder,
+        ProxyPolicy::Disabled => builder.no_proxy(),
+    };
+    builder.build().map_err(|_| ProviderError::Startup)
 }
 
 async fn run_worker(
@@ -1222,6 +1232,9 @@ fn fallback_delay(attempt: u32) -> Duration {
 mod tests {
     use super::*;
     use httpmock::{HttpMockRequest, HttpMockResponse, MockServer};
+    use std::process::Command;
+
+    const SYSTEM_PROXY_CHILD: &str = "EINFACH_MAIL_GRAPH_SYSTEM_PROXY_TEST_CHILD";
 
     fn loopback_authority(server: &MockServer) -> GraphAuthority {
         GraphAuthority::for_loopback_mock(&server.base_url())
@@ -1749,7 +1762,7 @@ mod tests {
                 .build()
                 .expect("test HTTP runtime builds")
                 .block_on(async {
-                    build_http_client(REQUEST_TIMEOUT)
+                    build_http_client(REQUEST_TIMEOUT, ProxyPolicy::Disabled)
                         .expect("HTTP client builds")
                         .get(format!("{}/v1.0/me/mailFolders", server.base_url()))
                         .send()
@@ -2473,7 +2486,8 @@ mod tests {
                 .await;
             let test_deadline = Duration::from_millis(100);
             let request_url = format!("{}/v1.0/slow", server.base_url());
-            let client = build_http_client(test_deadline).expect("HTTP client builds");
+            let client = build_http_client(test_deadline, ProxyPolicy::Disabled)
+                .expect("HTTP client builds");
             let timeout_error = Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -2487,6 +2501,77 @@ mod tests {
             );
             delayed_response.assert_async().await;
         });
+    }
+
+    #[test]
+    fn configured_system_proxy_routes_synthetic_http_requests() {
+        if std::env::var_os(SYSTEM_PROXY_CHILD).is_some() {
+            assert_system_proxy_child_request();
+            return;
+        }
+
+        let proxy = smol::block_on(MockServer::start_async());
+        smol::block_on(assert_system_proxy_request_is_routed(&proxy));
+    }
+
+    async fn assert_system_proxy_request_is_routed(proxy: &MockServer) {
+        let routed_request = proxy
+            .mock_async(|when, then| {
+                when.any_request();
+                then.status(200).body("synthetic proxy response");
+            })
+            .await;
+        let proxy_url = proxy.base_url();
+        let child_output = Command::new(
+            std::env::current_exe().expect("current test executable is available"),
+        )
+        .args([
+            "--exact",
+            "graph_transport_proof::tests::configured_system_proxy_routes_synthetic_http_requests",
+        ])
+        .env(SYSTEM_PROXY_CHILD, "1")
+        .env("HTTP_PROXY", &proxy_url)
+        .env("http_proxy", &proxy_url)
+        .env("NO_PROXY", "")
+        .env("no_proxy", "")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("https_proxy")
+        .output()
+        .expect("system-proxy test child starts");
+        let child_stdout = String::from_utf8_lossy(&child_output.stdout);
+        assert!(
+            child_output.status.success() && child_stdout.contains("running 1 test"),
+            "system-proxy test child failed: stdout: {child_stdout}; stderr: {}",
+            String::from_utf8_lossy(&child_output.stderr)
+        );
+        routed_request.assert_calls_async(1).await;
+    }
+
+    fn assert_system_proxy_child_request() {
+        let client = build_http_client(Duration::from_secs(2), ProxyPolicy::System)
+            .expect("system-proxy HTTP client builds");
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("system-proxy test runtime builds");
+        let (status, body) = runtime.block_on(async {
+            let response = client
+                .get("http://proxy-check.example.test/v1.0/probe")
+                .send()
+                .await
+                .expect("synthetic request reaches configured proxy");
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .expect("synthetic proxy response body is readable");
+            (status, body)
+        });
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "synthetic proxy response");
     }
 
     #[test]
