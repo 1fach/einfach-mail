@@ -14,9 +14,9 @@ Connect a supported Microsoft account with delegated access and prove that crede
 
 M1 work is grouped under the [GitHub milestone](https://github.com/1fach/einfach-mail/milestone/2): [prove delegated sign-in](https://github.com/1fach/einfach-mail/issues/3), [prove encrypted storage](https://github.com/1fach/einfach-mail/issues/4), and [connect an account and display its identity](https://github.com/1fach/einfach-mail/issues/5). The foundation and main-branch audit gates are satisfied. The storage proof passed on Linux and Windows x64 in [PR #15](https://github.com/1fach/einfach-mail/pull/15), and ADR 0005 is accepted. Issue #3 still needs Windows and Microsoft 365 test-tenant evidence. Start issue #5 after the authentication proof in issue #3 passes. Issue #2 tracks the separate interactive shell launch and may remain open while M1 proceeds.
 
-## M2: Read-only mail — not started
+## M2: Read-only mail — transport proof underway
 
-Let the user browse folders, read synchronized messages from the offline cache, and view message content safely. M2 does not change mail on the server; mail and event actions belong to M4. The Graph transport and message renderer remain subject to ADRs [0006](../decisions/0006-graph-http-transport.md) and [0007](../decisions/0007-message-body-rendering.md).
+Let the user browse folders, read synchronized messages from the offline cache, and view message content safely. M2 does not change mail on the server; mail and event actions belong to M4. The Graph transport proof in issue #7 is underway; folder browsing, offline synchronization, and message rendering remain unimplemented. The transport and renderer remain subject to ADRs [0006](../decisions/0006-graph-http-transport.md) and [0007](../decisions/0007-message-body-rendering.md).
 
 M2 work is grouped under the [GitHub milestone](https://github.com/1fach/einfach-mail/milestone/4): [prove the Graph mail transport and delta contracts](https://github.com/1fach/einfach-mail/issues/7), [browse folders and read synchronized mail offline](https://github.com/1fach/einfach-mail/issues/8), and [render cached message bodies safely in native GPUI](https://github.com/1fach/einfach-mail/issues/9). The workflow and rendering depend on M1 identity and encrypted-cache proofs.
 

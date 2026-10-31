@@ -83,6 +83,20 @@ Local Linux proof passed with `OPENSSL_NO_VENDOR=1` because this Fedora image la
 
 The Windows runner image lists Perl but does not list NASM or `Text::Template`, so CI installs these explicitly. `shogo82148/actions-setup-perl` 1.44.2 supports Windows Server 2025, uses Strawberry Perl, and installs the required CPAN module. `ilammy/setup-nasm` 1.5.2 installs the official NASM binary; CI pins NASM 2.16.01. Both actions are MIT-licensed build tools and are not application dependencies. The hosted Windows setup passed in PR #15.
 
+## Graph transport proof candidates — 2026-10-31
+
+The `tools/graph-transport-proof/` package keeps all candidate dependencies under `[dev-dependencies]` while ADR 0006 remains proposed. It adds no runtime dependency to `apps/desktop`, `crates/application`, or `crates/domain`.
+
+| Crate | Evidence and use |
+| --- | --- |
+| `reqwest` 0.13.5 | MIT OR Apache-2.0, Rust 1.85. This async HTTP client exposes response headers and controls redirects, retries, HTTP/2, and system proxy behavior. Select `default-features = false` with only `rustls`, `http2`, and `system-proxy`; parse JSON with direct `serde_json` calls. The `rustls` feature selects AWS-LC, whose `aws-lc-sys` dependency compiles native C with CMake. The proof keeps this build cost out of production until ADR 0006 is accepted. The lockfile selects Rustls 0.23.46; run RustSec before accepting the ADR. The client stays on the private Tokio worker. |
+| `async-channel` 2.5.0 | Apache-2.0 OR MIT, Rust 1.60, small cross-executor channel with async send/receive and `Sender::closed()` cancellation. Use it to pass provider requests and results between a `smol` caller and the private Tokio worker without exposing executor types. |
+| `httpmock` 0.9.0 | MIT, Rust 1.88, edition 2024. It supports async local HTTP mocks, request checks, delayed responses, and optional HTTPS. The 0.9 release cuts its no-default-feature tree from 74 crates to 52 and removes `async-trait` and `tls-detect`. Use `calls_async`; `hits_async` remains deprecated. `wiremock` 0.6.5 has a smaller direct dependency list and uses MIT OR Apache-2.0, but declares no MSRV. Its latest upstream commit was 2025-08-24. We chose `httpmock` because its upstream released 0.9.0 in 2026 and remains active. The proof disables its default features. The larger test dependency tree does not enter application builds. |
+| `httpdate` 1.0.3 | MIT OR Apache-2.0, Rust 1.56, parses standardized HTTP-date values with no normal dependencies. Use it for `Retry-After` dates; use Rust's integer parser for the seconds form. The `reqwest-retry-after` 0.2.1 middleware remains unsuitable because it depends on `reqwest` 0.12 and applies delay state across later requests from its client. |
+| `smol` 2.0.2, `tokio` 1.x, `serde` 1.x | Development-only runtime and data-model dependencies for the integration proof. `smol` is already used by the storage proof and matches GPUI Kit's executor family. Tokio remains local to the proof worker; serde models only synthetic Graph response fields. |
+
+The Graph library alternatives remain `graph-rs-sdk` 3.0.1, `io-msgraph` 0.6.0, `isahc` 2.0.2, and `ureq` 3.5.0 as recorded in the candidate table. The runtime comparison covers a private Tokio worker, a blocking `ureq` worker, and an executor-agnostic `isahc` client. The synthetic contracts pass on Linux, and RustSec found no vulnerable or yanked crates. Cross-platform CI and any test-tenant evidence needed for behavior that fixtures cannot prove remain before ADR 0006 can be accepted or production dependencies added.
+
 ## Current constraints
 
 - The application currently has no dependency on Graph, OAuth, local storage, MIME parsing, or HTML sanitization crates.
@@ -111,8 +125,14 @@ The Windows runner image lists Perl but does not list NASM or `Text::Template`, 
 - [Microsoft guidance for Graph use without a supported SDK](https://github.com/MicrosoftDocs/microsoft-cloud/blob/main/docs/dev/dev-proxy/concepts/why-use-microsoft-graph-sdk.md)
 - [`reqwest` documentation](https://docs.rs/reqwest/latest/reqwest/)
 - [`reqwest` 0.13.5 release](https://github.com/seanmonstar/reqwest/releases/tag/v0.13.5)
+- [`reqwest` 0.13.5 manifest and feature list](https://docs.rs/crate/reqwest/0.13.5/source/Cargo.toml)
 - [`reqwest` retry behavior](https://docs.rs/reqwest/0.13.5/reqwest/retry/)
 - [`reqwest-retry-after` 0.2.1 documentation](https://docs.rs/reqwest-retry-after/0.2.1/reqwest_retry_after/)
+- [`httpmock` 0.9.0 package metadata and dependency list](https://docs.rs/crate/httpmock/0.9.0)
+- [`httpmock` 0.9.0 changelog](https://docs.rs/crate/httpmock/0.9.0/source/CHANGELOG.md)
+- [`wiremock` 0.6.5 manifest](https://docs.rs/crate/wiremock/0.6.5/source/Cargo.toml.orig)
+- [`async-channel` 2.5.0 manifest and API](https://docs.rs/crate/async-channel/2.5.0)
+- [`httpdate` 1.0.3 manifest and API](https://docs.rs/crate/httpdate/1.0.3)
 - [`io-msgraph` 0.6.0 changelog](https://docs.rs/crate/io-msgraph/0.6.0/source/CHANGELOG.md)
 - [`io-msgraph` 0.6.0 manifest](https://docs.rs/crate/io-msgraph/0.6.0/source/Cargo.toml.orig)
 - [`io-msgraph` Graph error handling](https://raw.githubusercontent.com/pimalaya/io-msgraph/v0.6.0/src/v1/send.rs)
