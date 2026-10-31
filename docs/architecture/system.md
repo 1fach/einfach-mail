@@ -49,7 +49,7 @@ Domain entity IDs are opaque provider values and are always scoped by account. P
 - Use Microsoft Graph v1.0 delta queries for mail folders and calendar views where supported.
 - Treat `@odata.nextLink` and `@odata.deltaLink` as opaque provider values. Follow the complete next-link chain before advancing a sync cursor.
 - Before sending a bearer token to a next link, verify HTTPS and the configured Graph authority. Disable redirects for authorized Graph requests.
-- Commit page changes and cursor state atomically. A restart or retry must not skip changes or duplicate visible records.
+- Follow [ADR 0004](../decisions/0004-local-data-and-sync.md) for atomic page checkpoints, final delta-link commits, and one active sync round per cursor scope.
 - Keep cursor state scoped to the account and the exact Graph collection or calendar-view range that created it.
 - Use an outbox for local actions that may retry. Give each action a stable local identity and represent pending, confirmed, and failed states explicitly.
 - Respect Graph throttling and retry guidance. Do not loop on authorization or validation failures.
