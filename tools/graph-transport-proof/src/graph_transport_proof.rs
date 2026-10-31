@@ -13,6 +13,7 @@ use std::{
     collections::{HashSet, VecDeque},
     future::Future,
     net::IpAddr,
+    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -34,6 +35,27 @@ const MAX_PAGINATION_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
 const FOLDER_SELECT: &str = "id,displayName";
 const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MailSyncCutoff(OffsetDateTime);
+
+impl FromStr for MailSyncCutoff {
+    type Err = ProviderError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        OffsetDateTime::parse(value, &Rfc3339)
+            .map(Self)
+            .map_err(|_| ProviderError::InvalidRecord)
+    }
+}
+
+impl MailSyncCutoff {
+    fn format_rfc3339(self) -> Result<String, ProviderError> {
+        self.0
+            .format(&Rfc3339)
+            .map_err(|_| ProviderError::InvalidRecord)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RetryAfter {
@@ -161,10 +183,11 @@ impl GraphAuthority {
 
     fn initial_message_delta_path(
         &self,
-        folder_id: &str,
-        received_since: &str,
+        folder_id: &FolderId,
+        received_since: MailSyncCutoff,
     ) -> Result<GraphUrl, ProviderError> {
-        let mut url = self.folder_path(folder_id, &["messages", "delta"])?;
+        let mut url = self.folder_path(folder_id.as_str(), &["messages", "delta"])?;
+        let received_since = received_since.format_rfc3339()?;
         let filter = format!("receivedDateTime ge {received_since}");
         url.query_pairs_mut()
             .append_pair("$select", MESSAGE_SELECT)
@@ -1266,15 +1289,23 @@ mod tests {
     }
 
     fn synthetic_folder_reference(folder_id: &str) -> FolderReference {
-        let folder_id =
-            FolderId::try_from(folder_id.to_owned()).expect("synthetic folder ID is non-empty");
-        FolderReference::new(synthetic_account_id(), folder_id)
+        FolderReference::new(synthetic_account_id(), synthetic_folder_id(folder_id))
+    }
+
+    fn synthetic_folder_id(id: &str) -> FolderId {
+        FolderId::try_from(id.to_owned()).expect("synthetic folder ID is non-empty")
     }
 
     fn synthetic_received_at() -> SystemTime {
         OffsetDateTime::parse("2026-10-30T12:00:00Z", &Rfc3339)
             .expect("synthetic timestamp is RFC 3339")
             .into()
+    }
+
+    fn synthetic_mail_sync_cutoff() -> MailSyncCutoff {
+        "2026-08-02T00:00:00Z"
+            .parse()
+            .expect("synthetic cutoff is RFC 3339")
     }
 
     fn synthetic_mailbox(address: &str, display_name: Option<&str>) -> Mailbox {
@@ -2075,8 +2106,10 @@ mod tests {
     fn initial_message_delta_path_selects_metadata_without_a_server_cutoff() {
         let authority = GraphAuthority::for_deployment(GraphDeployment::Global)
             .expect("global Graph deployment is valid");
+        let folder_id = synthetic_folder_id("folder/one");
+        let received_since = synthetic_mail_sync_cutoff();
         let path = authority
-            .initial_message_delta_path("folder/one", "2026-08-02T00:00:00Z")
+            .initial_message_delta_path(&folder_id, received_since)
             .expect("valid folder ID and sync cutoff produce a Graph URL");
         let url = Url::parse(path.as_str()).expect("constructed Graph URL is valid");
         let query = url.query_pairs().collect::<Vec<_>>();
@@ -2090,6 +2123,15 @@ mod tests {
             "$filter".into(),
             "receivedDateTime ge 2026-08-02T00:00:00Z".into(),
         )));
+    }
+
+    #[test]
+    fn mail_sync_cutoff_rejects_values_outside_rfc3339() {
+        assert!(
+            "2026-08-02T00:00:00Z or isRead eq true"
+                .parse::<MailSyncCutoff>()
+                .is_err()
+        );
     }
 
     #[test]
@@ -2302,7 +2344,10 @@ mod tests {
                 .await
                 .expect("provider worker starts");
             let first_start = authority
-                .initial_message_delta_path("folder-1", "2026-08-02T00:00:00Z")
+                .initial_message_delta_path(
+                    &synthetic_folder_id("folder-1"),
+                    synthetic_mail_sync_cutoff(),
+                )
                 .expect("synthetic folder delta path is valid");
             let first = provider
                 .message_delta(first_start, &BearerToken::synthetic())
@@ -2377,7 +2422,10 @@ mod tests {
                 .await
                 .expect("provider worker starts");
             let start = authority
-                .initial_message_delta_path("folder-1", "2026-08-02T00:00:00Z")
+                .initial_message_delta_path(
+                    &synthetic_folder_id("folder-1"),
+                    synthetic_mail_sync_cutoff(),
+                )
                 .expect("synthetic folder delta path is valid");
             let changes = provider
                 .message_delta(start, &BearerToken::synthetic())
