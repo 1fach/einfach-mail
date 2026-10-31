@@ -2,15 +2,12 @@
 # `tauri-winrt-notification` remains in Cargo.lock through
 # `gpui-pre-linux -> notify-rust`, but those Linux and Windows target conditions
 # cannot be active together. It provides WinRT notifications, not a Tauri app
-# runtime or WebView. Cargo-deny merges the target-specific edges in its resolved
-# graph. `scripts/check-no-tauri-target-dependencies.sh` checks each supported
-# target separately so no active desktop build can use a Tauri or WebView crate.
+# runtime or WebView. Check only active Linux targets; add Windows and macOS
+# target triples when those support milestones begin.
 [graph]
 targets = [
     "x86_64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
-    "x86_64-apple-darwin",
-    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
 ]
 all-features = true
 

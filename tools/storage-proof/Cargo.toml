@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Test-only proof for encrypted SQLite and Windows credential storage"
+description = "Test-only proof for encrypted SQLite and Linux credential storage"
 
 [dev-dependencies]
 async-sqlite = { version = "0.6.0", default-features = false, features = ["backup", "bundled-sqlcipher-vendored-openssl"] }
@@ -15,7 +15,7 @@ smol = "2.0.2"
 tempfile = "3.27.0"
 zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
 
-[target.'cfg(windows)'.dev-dependencies]
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
 
 [lints]

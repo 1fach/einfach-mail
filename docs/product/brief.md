@@ -8,7 +8,7 @@ The product name is Einfach Mail. The first product decision is to make Exchange
 
 ## First users
 
-The first release targets people who use Microsoft 365 work or school accounts on Windows. Keep the code portable enough to evaluate macOS and Linux after the Windows mail and calendar workflows work. Personal Microsoft accounts and Exchange Server installed on premises need explicit acceptance tests before they become supported targets.
+Develop and validate the first workflows on Linux for people who use Microsoft 365 work or school accounts. Add Windows and macOS support in later milestones. Keep Windows-specific Outlook integration in the product plan. Personal Microsoft accounts and Exchange Server installed on premises need explicit acceptance tests before they become supported targets.
 
 ## User outcomes
 
@@ -31,7 +31,7 @@ The first release targets people who use Microsoft 365 work or school accounts o
 
 ## First-release scope
 
-The initial release plan covers one signed-in Microsoft account, inbox and folder browsing, message reading, basic message actions, calendar viewing and event editing, local cache, and Windows desktop integration. The roadmap sequences these workflows. It does not promise all of them in the first runnable prototype.
+The initial release plan covers one signed-in Microsoft account, inbox and folder browsing, message reading, basic message actions, calendar viewing and event editing, and a local cache. Build and verify the first workflows on Linux. Add Windows desktop integration and macOS support in later milestones. The roadmap sequences these workflows. It does not promise all of them in the first runnable prototype.
 
 ## Out of scope until a decision changes the brief
 

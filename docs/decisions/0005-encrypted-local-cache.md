@@ -1,6 +1,6 @@
 # ADR 0005: Use SQLCipher-backed SQLite for the local cache
 
-- Status: Accepted based on the Windows x64 storage and key-lifecycle proof
+- Status: Accepted for Linux based on the Linux Secret Service proof
 - Date: 2026-10-31
 - Owners: Project maintainer
 
@@ -8,7 +8,7 @@
 
 ADR 0004 requires durable offline mail and calendar data, with Graph changes and their sync cursor committed atomically. That cache needs relational queries for folders, message lists, calendar ranges, and pending operations. The product also requires an at-rest encryption decision before real mailbox data is stored.
 
-The app is a native Rust desktop application. A pure-Rust UI and application stack is preferred, but the database choice must also provide mature relational behavior and a maintained encryption implementation. The first support target is Windows.
+The app is a native Rust desktop application. A pure-Rust UI and application stack is preferred, but the database choice must also provide mature relational behavior and a maintained encryption implementation. Linux is the only current development target. Linux Secret Service and cache-key lifecycle tests passed in Fedora on 2026-10-31, including the missing-key byte-preservation assertions; see [project status](../project/status.md). An earlier Windows Credential Manager proof remains platform-specific evidence and does not establish Windows support.
 
 ## Decision
 
@@ -22,18 +22,31 @@ The reviewed migration and executor crates depend on rusqlite 0.40.x, so Cargo r
 
 `async-rusqlite` 0.6.0 is an alternative wrapper for rusqlite 0.41. It declares no MSRV, depends on `asyncified` for its channel implementation, and its README describes those channels as naive. Its README recommends `tokio-rusqlite` when executor independence is not needed. Do not use it for the current candidate set.
 
-Use `keyring` 4.2.0 with its default `v1` API for platform credential storage. On Windows, that API selects `windows-native-keyring-store` 1.1.0 and Windows Credential Manager. Do not enable `keyring`'s `cli` feature. The test-only proof in [PR #15](https://github.com/1fach/einfach-mail/pull/15) passed on Windows x64. It creates and retrieves a binary key, reopens the encrypted database and backup, rejects a missing key without replacing it or deleting encrypted files, and deletes the credential and account files on removal.
+Use `keyring` 4.2.0 with its `v1` API for Linux credential storage. This selects the zbus Secret Service backend. Do not enable `keyring`'s `cli` feature. The earlier Windows x64 proof in [PR #15](https://github.com/1fach/einfach-mail/pull/15) exercised Windows Credential Manager, but Windows support remains deferred. Recheck the credential-store candidate and run its platform proof when Windows or macOS support begins.
 
-The proof uses an OS-generated 32-byte key, stores it as binary credential data, and zeroizes Rust-owned copies. The backup destination receives the same SQLCipher key before SQLite's online backup API writes to it. The key is not included in the backup, so a backup can be opened only while its matching credential is available. Portable backup recovery remains an open product decision. If the credential is missing, the encrypted cache and pending local actions remain on disk but unavailable. The app must not create a replacement key or replay those actions. Account removal deletes the credential and account files.
+The Linux test-only proof passed on 2026-10-31 in a Fedora desktop session. GNOME Keyring provided the Secret Service. After `DatabaseKey::from_secret` changed to zeroize an intermediate key copy, both ignored lifecycle tests passed against the source then under review. They used random synthetic credentials and temporary files to reopen an encrypted database and backup, verify that a missing key did not trigger key replacement when only a backup remained, and check account removal. The updated missing-key test verified that the encrypted database and backup remain byte-for-byte unchanged when the credential is missing. See [project status](../project/status.md). Run the tests with `cargo test --locked -p einfach-mail-storage-proof -- --ignored --test-threads=1`.
+
+A child process used an unavailable D-Bus address. Cache opening returned `NoDefaultStore` for both a new cache and an existing encrypted database and backup. The existing files remained byte-for-byte unchanged. A separate decision test injects `NoStorageAccess` and checks that the error propagates instead of being treated as a missing key. The live keyring was unlocked. Live locked-store behavior remains unverified. The tests do not establish behavior for every Secret Service implementation. Issue #20 remains open until the proof changes are published in a GitHub PR and pass review.
+
+The proof uses an OS-generated 32-byte key, stores it as binary credential data, and zeroizes Rust-owned copies. The backup destination receives the same SQLCipher key before SQLite's online backup API writes to it. The key is not included in the backup, so a backup can be opened only while its matching credential is available. Portable backup recovery remains an open product decision. If the credential is missing, the encrypted cache, any backup, and pending local actions remain on disk but unavailable. The app must not create a replacement key or replay those actions. Treat any existing cache or backup file as prior encrypted data before deciding to create a new key. Account removal deletes the credential and account files.
 
 ## Alternatives
 
 | Option | Benefits | Costs and risks |
 | --- | --- | --- |
-| SQLCipher-backed SQLite through rusqlite | Relational queries, transactions, bundled encryption, mature SQLite ecosystem; Rust API stays behind the persistence adapter | SQLCipher and OpenSSL add native C build and licensing inputs. The vendored OpenSSL build needs a C compiler, Perl, `Text::Template`, and make. Windows also needs MSVC and NASM. CI now installs these tools and proves the vendored build on Windows x64. |
+| SQLCipher-backed SQLite through rusqlite | Relational queries, transactions, bundled encryption, mature SQLite ecosystem; Rust API stays behind the persistence adapter | SQLCipher and OpenSSL add native C build and licensing inputs. The vendored OpenSSL build needs a C compiler, Perl, `Text::Template`, and make. Windows also needs MSVC and NASM; the Windows proof in PR #15 installed these tools and passed on x64. Current CI is Linux-only. |
 | SQLx with SQLite | Async query API, migrations, supports SQLite and server databases | The documented SQLite feature set does not offer a supported SQLCipher configuration. The SQLite driver also uses `libsqlite3-sys`, which must be coordinated with any rusqlite dependency. |
 | redb | Pure Rust, ACID transactions, concurrent readers | Key-value model increases query/index work for mail and calendar; the project docs do not provide database encryption. |
 | Turso | In-process relational engine implemented in Rust and compatible with much of SQLite | The project documents beta status and missing SQLite features; its manual says encryption is experimental and not ready for critical data. |
+
+### Linux credential-store comparison
+
+| Candidate | Fit and trade-offs |
+| --- | --- |
+| `keyring` 4.2.0 | Preferred candidate. Its `v1` API provides synchronous binary secret operations and selects the zbus Secret Service backend on Linux. The same API has native store adapters for Windows and macOS when those support milestones begin. Keep the `cli` feature disabled. |
+| `oo7` 0.6.0 | Maintained Secret Service client with D-Bus and encrypted file backends, including portal integration for sandboxed applications. It is async-only and documents Tokio, async-std, or GLib runtime use. The current GPUI application is not sandboxed and uses `smol`; its file/portal support and runtime choices do not fit the present boundary as closely as `keyring`. |
+
+The Linux proof package uses only `keyring`'s Secret Service path. Its default test run verifies that an unavailable service neither creates a new cache nor changes existing encrypted files. The tests that create, retrieve, and remove synthetic credentials require a desktop Secret Service and remain opt-in. Issue #20 tracks the proof changes through review and merge.
 
 ### Migration library comparison
 
@@ -53,7 +66,8 @@ The proof uses an OS-generated 32-byte key, stores it as binary credential data,
 
 - Persistence owns SQL schemas, migrations, encryption setup, and transactions. It commits Graph changes and the matching cursor together.
 - SQLCipher is a deliberate native-code dependency in an otherwise Rust-first application because the compared pure-Rust database options do not meet the current relational and encryption requirements.
-- The test-only proof passed in PR #15. Windows x64 CI built vendored SQLCipher and OpenSSL, exercised Windows Credential Manager, and verified migrations, encrypted reads and writes, wrong-key rejection, backup reopening, missing-key behavior, and account removal.
+- The earlier Windows test-only proof in PR #15 built vendored SQLCipher and OpenSSL on Windows x64. It exercised Windows Credential Manager, migrations, encrypted reads and writes, wrong-key rejection, backup reopening, missing-key behavior, and account removal.
+- The two ignored Linux Secret Service lifecycle tests passed in Fedora GNOME Keyring on 2026-10-31, including the missing-key byte-preservation assertions. The service was unlocked. A synthetic `NoStorageAccess` error covers the locked-store branch.
 - The proof uses a synthetic pending action. Losing the key leaves the encrypted files intact but makes the action inaccessible. Production code must report that state and must not generate a replacement key or replay the action.
 - The test-only backup proof applies the SQLCipher key to both database connections and verifies that the backup is encrypted and reopens with the original key. It does not export or package the key. Portable recovery remains unresolved.
 - Do not put mailbox content or OAuth tokens in test fixtures, logs, or the credential-store test evidence.
@@ -73,7 +87,10 @@ The proof uses an OS-generated 32-byte key, stores it as binary credential data,
 - [`async-rusqlite` 0.6.0 documentation](https://docs.rs/crate/async-rusqlite/0.6.0)
 - [`async-rusqlite` 0.6.0 manifest](https://docs.rs/crate/async-rusqlite/0.6.0/source/Cargo.toml.orig)
 - [`keyring` 4.2.0 documentation and feature list](https://docs.rs/crate/keyring/4.2.0)
+- [`keyring` 4.2.0 v1 API and platform stores](https://docs.rs/keyring/4.2.0/keyring/v1/index.html)
 - [`keyring` release notes](https://github.com/open-source-cooperative/keyring-rs/releases)
+- [`oo7` 0.6.0 documentation](https://docs.rs/oo7/0.6.0/oo7/)
+- [`oo7` repository and release history](https://github.com/linux-credentials/oo7/releases)
 - [`windows-native-keyring-store` 1.1.0 manifest](https://docs.rs/crate/windows-native-keyring-store/1.1.0/source/Cargo.toml.orig)
 - [SQLCipher key and raw-key documentation](https://github.com/sqlcipher/sqlcipher#encrypting-a-database)
 - [`rusqlite` 0.40.2 online backup API](https://docs.rs/rusqlite/0.40.2/rusqlite/backup/struct.Backup.html)
