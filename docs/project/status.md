@@ -1,0 +1,56 @@
+# Project status
+
+Last updated: 2026-10-31
+
+## Current milestone
+
+Milestone 0, repository foundation. The workspace now has a native GPUI Kit app shell. Account sign-in, mail, calendar, and synchronization are not implemented.
+
+## Verified state
+
+- Rust and Cargo 1.99.1 are installed under `~/.cargo/bin`, but that directory is missing from this execution environment's `PATH`.
+- A direct compiler check found that the locked GPUI snapshot does not build on Rust 1.92 or 1.93. The workspace minimum is now Rust 1.95; `cargo +1.95.0 check --workspace --all-targets --locked --offline` passes on Linux. The Linux, Windows, and macOS MSRV jobs run in CI; see [MSRV research](../research/gpui-kit.md#minimum-rust-version).
+- `cargo fmt --all -- --check` passes, and `cargo metadata --no-deps` recognizes the three workspace crates. `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` also passes.
+- `Cargo.lock` resolves `gpui-kit` 0.8.1 and GPUI snapshot 0.3.10. `cargo tree` shows the desktop has only GPUI Kit as a direct external dependency; its default component and asset layers are used by the current shell.
+- `cargo check --workspace --locked --offline` and `cargo build --locked --offline --package einfach-mail-desktop --bin einfach-mail` pass on Fedora 44. The original Fedora Linux 44 Wayland (`wayland-1`) and Hyprland launch opened, rendered, and closed the native window with exit status 0; its screenshot is attached to [issue #1](https://github.com/1fach/einfach-mail/issues/1). On 2026-10-31, the renamed binary rendered the current “Einfach Mail” title and shell placeholder. The issue screenshot remains historical and shows the previous title; no replacement capture was uploaded.
+- GitHub Actions [CI run 41140985071](https://github.com/1fach/einfach-mail/actions/runs/41140985071) passed formatting, Clippy, and workspace tests on Ubuntu, Windows, and macOS for baseline commit `97c9540c38887cd9c883b355637eafb80ddc69fe`. The current `main` points to an empty root commit, and `chore/einfach-mail-branding` contains the foundation in one commit. M0 verification requires the current PR's CI and RustSec audit to pass, plus the interactive Windows launch tracked in issue #2. Windows CI checks compilation; issue #2 tracks interactive launch in a Windows environment.
+- The workspace requires documentation for public Rust items and builds rustdoc with warnings denied. `cargo doc --workspace --no-deps --locked --offline` passes locally; the updated documentation gate is configured in CI but has not yet run on GitHub.
+- `cargo test --workspace --locked --offline` passes locally. The domain crate covers empty-ID rejection and exact preservation of a synthetic provider ID; the application and desktop crates currently have no unit tests.
+- Workspace crate dependencies have a strict allowlist in `depgraph-rules.toml`. The local `cargo depgraph-check check` passes; the first GitHub run remains unverified. The pinned tool is early-stage and checks direct crate edges rather than module-level dependencies.
+- `deny.toml` and CI now run `cargo deny check bans` across Linux, Windows, Intel and Apple Silicon macOS targets, with all workspace features enabled. The check passes locally and bans the Tauri runtime/tooling crates, Wry, and `gpui-webview`. `tauri-winrt-notification` remains in the cross-platform lockfile through a target-disjoint GPUI/`notify-rust` path; `cargo tree --target` shows no active path on the supported targets checked. Cargo-deny's merged graph reports that mismatched target path, so the WinRT wrapper is documented rather than falsely treated as an app runtime dependency.
+- Dependabot groups weekly Cargo updates and checks GitHub Actions monthly. A local `cargo audit --deny yanked` run updated the crates.io index and scanned 797 locked dependencies. It found no vulnerable or yanked versions and reported eight unmaintained transitive crates. Their paths and RustSec replacement guidance are recorded in the [dependency review](dependency-review.md#unmaintained-warning-triage--2026-10-31); they are owned by GPUI Kit and its platform/rendering stack, so no direct replacement or audit suppression was added. Offline Windows/macOS dependency-path inspection still lacks platform crate sources. The [RustSec audit workflow](../../.github/workflows/rustsec-audit.yml) must run on GitHub before [issue #10](https://github.com/1fach/einfach-mail/issues/10) can close.
+- The initial `main` baseline commit captures the project scaffold, resolved `Cargo.lock`, and pinned GPUI Kit agent skills. Current foundation changes are on `chore/einfach-mail-branding`.
+- The workspace contains pinned rust and GPUI Kit coding and design skills; their source and hashes are recorded in `skills-lock.json`.
+- The domain crate exposes distinct opaque IDs for accounts, folders, messages, calendars, and events. Construction rejects empty values and preserves the provider-issued string exactly; provider adapters do not consume these types yet.
+- The old desktop shell and browser assets have been removed. The workspace and source now point to GPUI Kit.
+- The workspace manifests and application source contain no Tauri runtime, Wry, or `gpui-webview` dependency. Linux `cargo tree` shows `notify-rust` under GPUI's Linux backend and no active path to `tauri-winrt-notification`; the cross-platform lockfile retains that nested Windows-only package entry.
+- The GPUI Kit v0.8.1 API, platform requirements, and optional WebView limits were checked against its current documentation on 2026-10-30.
+- The dependency review records candidates for Graph, authentication, credential storage, local storage, MIME, and HTML sanitization. No provider, authentication, storage, parsing, or rendering dependency has been added.
+- Authentication research now separates Microsoft's Entra requirements from Graph API research. `oauth2` 5.0.0 and `openidconnect` 4.0.1 provide protocol operations; `loopauth` 0.5.1 adds the browser and loopback flow but remains an unaccepted candidate. No Windows, Entra, or managed-device proof has passed.
+- ADR 0008 accepts the identity-token ownership boundary: the Microsoft provider keeps tokens private, while ADR 0003's OAuth flow and library remain unselected pending the Windows and tenant spike.
+- ADR 0009 accepts opaque account-scoped domain identifiers. The Graph adapter will request immutable Outlook item IDs for supported message and event operations; provider fixtures still need to verify the header and ID behavior.
+- The Graph client review is current through 2026-10-30. `io-msgraph` 0.6.0 added calendar and event operations, but its error type drops `Retry-After`. ADR 0006 proposes `reqwest` behind the Graph provider, pending a private Tokio runtime and sanitized contract spike.
+- Calendar time-zone research found that Graph returns wall-clock date/time values with Windows or additional calendar zone IDs. Jiff is a strong IANA datetime candidate but does not map arbitrary Graph Windows IDs. No time-zone dependency is selected; resolve the mapping and recurrence behavior before M3 implementation. See [Graph research](../research/microsoft-graph.md#calendar-date-time-and-time-zones) and the [dependency review](dependency-review.md#candidates).
+- Storage research proposes SQLCipher-backed SQLite with `rusqlite` 0.40.2 and `rusqlite_migration` 2.6.0. ADR 0005 remains proposed until the dependency graph, Windows x64 encryption, and key lifecycle are proven.
+- Email rendering research proposes Ammonia 4.2.4 plus GPUI Kit's native `TextView::html`; ADR 0007 remains proposed until the sanitizer policy, link handling, image blocking, and rendered output pass synthetic-fixture checks.
+
+## Active risks
+
+- GPUI Kit is pre-1.0. Fedora 44 shell startup is verified; Windows startup remains unverified under [issue #2](https://github.com/1fach/einfach-mail/issues/2).
+- GPUI Kit's locked dependency graph contains eight RustSec unmaintained-crate notices. The local audit found no vulnerable or yanked versions; platform/rendering replacements depend on compatible upstream stack updates. Keep [issue #10](https://github.com/1fach/einfach-mail/issues/10) open until its GitHub audit workflow has a successful run.
+- The workspace dependency policy job now combines `cargo-depgraph-check` 0.1.0 with `cargo-deny` 0.20.2. The depgraph checker's published lockfile contains `anyhow` 1.0.102 with RustSec's unsoundness advisory for `Error::downcast_mut`; the checker and its `cargo_metadata` dependency do not call that API. Its yanked-version status could not be verified because the local Cargo index lacks some package records. `cargo-arc` 0.6.2 was evaluated as a more featureful alternative; its 392-package lockfile includes the same advisory and a `cargo install` warning for yanked `spin` 0.9.8, while its module analysis is unnecessary for these crate-level rules. Keep the simpler exact-edge checker pinned and review its maintenance and security history before upgrading. The local dependency-policy checks pass, and pull-request CI repeats them on GitHub.
+- The message-body HTML approach is proposed, not proven. Ammonia has a documented security patch history, and the optional WebView is experimental with platform and resource-blocking questions.
+- No Microsoft-supported Rust MSAL implementation is listed. WAM is documented through MSAL, and its managed-device behavior may be required by enterprise Conditional Access. The Rust OAuth/OIDC candidates need a Windows and test-tenant proof before real account access.
+- Microsoft does not publish a Rust Graph SDK. `graph-rs-sdk` has broad coverage but its latest stable release is dated 2025-04-20. `io-msgraph` 0.6.0 includes calendar operations in its changelog, but drops response headers needed for Graph throttling and logs request URLs at trace level. ADR 0006 proposes `reqwest`; its GPUI/Tokio boundary, throttling, and security behavior need proof before implementation.
+- The local database direction is proposed, not accepted. SQLCipher adds native C/OpenSSL build requirements; Windows x64 encryption, keyring behavior, key-loss recovery, and account-removal deletion need an integration proof.
+- The local workflow configuration defines Ubuntu, Windows, and macOS Rust checks, a workspace dependency policy job, and a separate RustSec audit job. On 2026-10-31, GitHub's branch-protection and ruleset APIs returned 403 for this private repository with “Upgrade to GitHub Pro or make this repository public.” Server-side enforcement could not be verified; use the manual PR/check gate described in [development setup](setup.md) until the host makes it available.
+- Exchange Server on premises is not supported by the first provider plan.
+
+## Next actions
+
+1. Complete [issues #2 and #10](https://github.com/1fach/einfach-mail/milestone/1), and confirm the workspace dependency policy and Rust 1.95 Linux, Windows, and macOS jobs pass, to finish M0 verification.
+2. After M0 passes, start M1 using [issues #3–#5](https://github.com/1fach/einfach-mail/milestone/2). Their decision gates are recorded in ADRs 0003, 0005, and 0008; the issues are blocked by their prerequisites.
+
+## Update rule
+
+Update this file when a milestone, blocker, or next action changes. Keep task-by-task history in issues and pull requests.
