@@ -1,0 +1,13 @@
+[package]
+name = "einfach-mail-message-body-proof"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Test-only proof for the untrusted email HTML allowlist"
+
+[dev-dependencies]
+ammonia = "4.2.4"
+
+[lints]
+workspace = true

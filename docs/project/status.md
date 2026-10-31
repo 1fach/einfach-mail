@@ -15,6 +15,7 @@ M0 closeout and M1 identity and storage proofs. The one-commit native GPUI Kit f
 - `crates/domain` implements opaque account, folder, message, calendar, and event IDs. `crates/application` has no workflows yet. No provider, identity, persistence, or synchronization adapter exists.
 - Dependency candidates and the eight unmaintained transitive-crate findings are recorded in the [dependency review](dependency-review.md). The strict audit found no vulnerable or yanked crates.
 - The test-only [storage proof package](../../tools/storage-proof/) locks the candidate SQLCipher, migration, async-wrapper, and Windows keyring dependencies as dev-dependencies. Linux and Windows x64 CI passed in [PR #15](https://github.com/1fach/einfach-mail/pull/15), including vendored OpenSSL, migrations, encrypted backup, wrong-key rejection, Windows Credential Manager, missing-key behavior, and account removal. ADR 0005 is accepted from this proof. No production persistence dependency or cache API exists yet.
+- The test-only [message-body proof package](../../tools/message-body-proof/) passes five synthetic Ammonia allowlist tests on Rust 1.95. The tests do not verify TextView rendering, link handling, remote-resource blocking, selection, or copy. ADR 0007 remains proposed. `crates/application` has no sanitizer dependency.
 
 ## Active risks
 
@@ -27,6 +28,7 @@ M0 closeout and M1 identity and storage proofs. The one-commit native GPUI Kit f
 
 1. Use the completed authentication library comparison in the [dependency review](dependency-review.md) to guide [issue #3](https://github.com/1fach/einfach-mail/issues/3). Windows and Microsoft test-tenant evidence remain required before accepting ADR 0003.
 2. Start account connection work in [issue #5](https://github.com/1fach/einfach-mail/issues/5) after the authentication proof in issue #3 passes. Keep [issue #2](https://github.com/1fach/einfach-mail/issues/2) open until a Windows environment is available; it can remain open while M1 proceeds.
+3. Continue [issue #9](https://github.com/1fach/einfach-mail/issues/9) with adversarial sanitizer fixtures, then prove native GPUI rendering, link handling, remote-resource blocking, selection, and copy before accepting ADR 0007.
 
 ## Update rule
 

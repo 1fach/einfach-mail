@@ -1,6 +1,6 @@
 # ADR 0007: Render sanitized message HTML in native GPUI
 
-- Status: Proposed; sanitizer and renderer proof required
+- Status: Proposed; test-only sanitizer proof passes; renderer proof required
 - Date: 2026-10-30
 - Owners: Project maintainer
 
@@ -14,7 +14,7 @@ The separate `gpui-webview` crate wraps Wry and uses WKWebView on macOS, WebView
 
 ## Decision
 
-Propose Ammonia 4.2.4 for the application-owned message-body sanitization policy and GPUI Kit `TextView::html` for native rendering. Do not add Ammonia or renderer integration until the proof below passes; GPUI Kit is already part of the workspace.
+Propose Ammonia 4.2.4 for application-owned message-body sanitization. Use GPUI Kit `TextView::html` for native rendering. Keep Ammonia in a test-only proof package until the sanitizer and renderer acceptance checks below pass. Do not add Ammonia to the application crate or integrate the renderer yet. GPUI Kit is already in the workspace.
 
 The application workflow will accept the untrusted domain body and produce an opaque `SanitizedEmailHtml` value. Keep this type and the Ammonia allowlist policy in `crates/application`; do not add GPUI or Ammonia types to `crates/domain`. Do not persist the sanitized output: sanitize when a body is prepared for display so an updated policy is applied to cached mail too.
 
@@ -26,7 +26,7 @@ Do not add `gpui-webview` for the first renderer. Revisit it in a separate secur
 
 | Option | Benefits | Costs and risks |
 | --- | --- | --- |
-| Ammonia plus native GPUI `TextView` (proposed) | Reuses GPUI Kit's maintained HTML5-backed text renderer and keeps the message body in the native UI process without browser privileges. Ammonia provides a configurable allowlist and HTML5 parsing. | `TextView` supports common HTML, not full browser CSS layout. Its default links and image handling need explicit overrides. The allowlist and synthetic-fixture results are not yet proven. |
+| Ammonia plus native GPUI `TextView` (proposed) | Reuses GPUI Kit's maintained HTML5-backed text renderer and keeps the message body in the native UI process without browser privileges. Ammonia provides a configurable allowlist and HTML5 parsing. | `TextView` supports common HTML, not full browser CSS layout. Its default links and image handling need explicit overrides. The current tests cover a small fixture set. Adversarial coverage and renderer behavior remain unverified. |
 | Ammonia plus `gpui-webview` | More browser HTML and CSS fidelity while keeping the rest of the application native. | Experimental platform integration, Linux Wayland unsupported, Windows overlay/clipping limits, and no reviewed cross-platform subresource-blocking proof. A missed sanitizer case runs in a browser engine. |
 | Plain-text-only body | Smallest active-content surface and no HTML sanitizer dependency. | Loses useful formatting, tables, and links for HTML-only messages. It remains a fallback when a body cannot be rendered safely. |
 
@@ -34,7 +34,8 @@ Do not add `gpui-webview` for the first renderer. Revisit it in a separate secur
 
 - Ammonia is the only proposed parser/sanitizer dependency. Its 4.2.4 release uses HTML5 parsing, has MIT OR Apache-2.0 licensing, requires Rust 1.85, and depends on `html5ever`, `cssparser`, `maplit`, and `url`. This fits the workspace MSRV of Rust 1.95. RustSec has recorded multiple historical Ammonia vulnerabilities; 4.2.4 includes the fix for RUSTSEC-2026-0373. Recheck the advisory database and audit the resolved lockfile before accepting the dependency.
 - The Ammonia configuration is Einfach Mail policy, not a replacement sanitizer. Keep its allowlist narrow and do not reimplement HTML parsing, URL parsing, or CSS sanitization.
-- Verify synthetic fixtures for malformed HTML, script/event payloads, SVG and MathML mutation-XSS cases, `javascript:` and non-web links, CSS `url()` variations, remote images, frames, and forms. Include a positive fixture for common paragraphs, emphasis, lists, links, and tables.
+- The test-only package at [`tools/message-body-proof`](../../tools/message-body-proof/) passes five synthetic tests on Rust 1.95. The fixtures cover common formatting, active content, remote-resource elements, and event, style, and navigation attributes. They also cover non-web links, malformed HTML, CSS URL variations, and malformed SVG and MathML namespace payloads. These tests confirm only the included fixtures. They do not verify GPUI rendering or cover all mutation-XSS cases.
+- Review the remaining mutation-XSS and URL parser cases before accepting Ammonia in the application crate. Keep the dependency in the proof package until that review passes.
 - Verify the actual rendered body does not load remote images or other network resources, does not open unsafe URLs, and keeps copy and selection usable. Never use real mailbox content in fixtures.
 - Browser rendering remains a separate decision. If selected later, prove remote-resource blocking and navigation policy on every supported OS before exposing real message bodies to it.
 
