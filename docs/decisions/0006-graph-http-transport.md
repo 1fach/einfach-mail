@@ -1,7 +1,7 @@
 # ADR 0006: Use reqwest for Microsoft Graph transport
 
-- Status: Proposed; runtime and contract spike required
-- Date: 2026-10-30
+- Status: Accepted for Linux provider implementation
+- Date: 2026-10-31
 - Owners: Project maintainer
 
 ## Context
@@ -14,7 +14,7 @@ The desktop currently uses GPUI Kit. The active Linux dependency graph uses `smo
 
 ## Decision
 
-Prefer `reqwest` and `serde` for HTTP and JSON in the planned `crates/providers/microsoft-graph/` adapter. Keep Einfach Mail's Graph endpoint calls, API-to-domain mapping, pagination, error mapping, and throttling policy in that adapter. Do not write a general HTTP client, JSON parser, or OAuth protocol.
+Use `reqwest` and `serde` for HTTP and JSON in the planned `crates/providers/microsoft-graph/` adapter. Keep Einfach Mail's Graph endpoint calls, API-to-domain mapping, pagination, error mapping, and throttling policy in that adapter. Do not write a general HTTP client, JSON parser, or OAuth protocol.
 
 The application-facing provider port will expose provider-independent values and errors. It will not expose `reqwest`, Tokio, Graph JSON, or response-header types. The provider will obtain credentials through the approved identity boundary. Views will not receive tokens.
 
