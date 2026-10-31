@@ -5,6 +5,7 @@
 Install Rust with `rustup`, then install the components declared in `rust-toolchain.toml`:
 
 ```sh
+rustup toolchain install 1.95.0
 rustup toolchain install stable --component rustfmt --component clippy
 rustup default stable
 ```
@@ -15,7 +16,7 @@ If `cargo` or `rustc` is not found but `~/.cargo/bin` exists, add that directory
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-GPUI Kit's current dependency graph needs Rust 1.92 or newer. Check the version with `rustc --version`.
+GPUI Kit's published docs state Rust 1.92 or newer, but the locked GPUI dependency graph uses APIs stable in Rust 1.95. Einfach Mail therefore requires Rust 1.95 or newer; see the [MSRV evidence](../research/gpui-kit.md#minimum-rust-version).
 
 ## Install native build tools
 
@@ -73,14 +74,25 @@ git remote add origin <repository-url>
 git push --set-upstream origin main
 ```
 
-In the hosting service, protect `main`: require pull requests and the three `Rust checks` CI jobs before merging. A solo project can omit reviewer approval while still requiring CI. Do not enable auto-merge until the first CI run has succeeded.
+If the hosting plan supports branch protection, protect `main` by requiring pull requests and these CI checks before merging:
+
+- `Rust checks (ubuntu-latest)`
+- `Rust checks (windows-latest)`
+- `Rust checks (macos-latest)`
+- `Rust MSRV check 1.95.0 (ubuntu-latest)`
+- `Rust MSRV check 1.95.0 (windows-latest)`
+- `Rust MSRV check 1.95.0 (macos-latest)`
+- `Workspace dependency policy`
+- `RustSec audit`
+
+A solo project can omit reviewer approval while still requiring CI. Do not enable auto-merge until the first CI run has succeeded. If server-side protection is unavailable, use pull requests and verify all eight checks manually before merging; document that the gate is not enforced by the host.
 
 ## Start the desktop shell
 
 From the repository root, run:
 
 ```sh
-cargo run --locked --package hey-mail-desktop
+cargo run --locked --package einfach-mail-desktop --bin einfach-mail
 ```
 
 The window is a native GPUI shell. It does not sign in or access mailbox data yet.
@@ -95,13 +107,40 @@ cargo check --workspace --locked
 
 When intentionally changing dependencies, run `cargo check --workspace` without `--locked` to update the lockfile. Review the `Cargo.lock` diff and dependency tree (`cargo tree --workspace --duplicates --locked`), then commit the lockfile. Never hand-edit it.
 
+Install the pinned RustSec audit tool and check the lockfile against the current advisory database:
+
+```sh
+cargo install cargo-audit --version 0.22.2 --locked --no-default-features
+cargo audit --deny yanked
+```
+
+`cargo audit --deny yanked` reads `Cargo.lock`, fails when a locked crate is yanked, and does not update the lockfile. Do not suppress advisories globally; resolve them or record a narrow, reviewed exception.
+
+The [RustSec audit workflow](../../.github/workflows/rustsec-audit.yml) runs on pull requests, pushes to `main`, and weekly.
+
+Install the pinned workspace dependency policy tools:
+
+```sh
+cargo install cargo-depgraph-check --version 0.1.0 --locked
+cargo install cargo-deny --version 0.20.2 --locked
+cargo depgraph-check check
+cargo deny check bans
+```
+
+The strict allowlist in `depgraph-rules.toml` includes every workspace crate and its permitted direct internal dependencies, including dev-dependencies. Update it when adding a workspace crate or changing a crate boundary. The checker validates direct workspace edges; it does not inspect module-level boundaries inside a crate. `cargo deny check bans` enforces the explicit Tauri runtime and WebView crate bans in `deny.toml`; the similarly named, target-disjoint `tauri-winrt-notification` lockfile entry is documented there and is not a Tauri app runtime.
+
 ## Run project checks
 
 Run these commands from the repository root:
 
 ```sh
+cargo depgraph-check check
+cargo deny check bans
+cargo +1.95.0 check --workspace --all-targets --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo doc --workspace --no-deps --locked
+cargo audit --deny yanked
 cargo test --workspace --locked
 ```
 

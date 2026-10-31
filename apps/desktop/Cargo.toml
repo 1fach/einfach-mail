@@ -1,8 +1,13 @@
 [package]
-name = "hey-mail-desktop"
+name = "einfach-mail-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+autobins = false
+
+[[bin]]
+name = "einfach-mail"
+path = "src/main.rs"
 
 [dependencies]
 gpui-kit.workspace = true

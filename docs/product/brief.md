@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Hey Mail is a desktop workspace for email and calendar. It aims to pair a familiar, keyboard-friendly mail client with direct Microsoft 365 integration and useful operating-system behavior.
+Einfach Mail is a desktop workspace for email and calendar. It aims to pair a familiar, keyboard-friendly mail client with direct Microsoft 365 integration and useful operating-system behavior.
 
-The name is provisional. The first product decision is to make Exchange Online work well. The app will use Microsoft Graph and delegated access for the signed-in user.
+The product name is Einfach Mail. The first product decision is to make Exchange Online work well. The app will use Microsoft Graph and delegated access for the signed-in user.
 
 ## First users
 
@@ -47,4 +47,4 @@ The initial release plan covers one signed-in Microsoft account, inbox and folde
 - Which Windows-specific features matter most: notifications, taskbar unread count, startup behavior, or calendar reminders?
 - Should the first release support multiple accounts?
 - Which offline actions may queue, and how should the UI explain conflicts?
-- What product name and license should the project use?
+- What license should the project use?

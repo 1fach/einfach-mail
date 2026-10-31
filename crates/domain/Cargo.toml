@@ -1,5 +1,5 @@
 [package]
-name = "hey-mail-domain"
+name = "einfach-mail-domain"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

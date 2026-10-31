@@ -25,12 +25,14 @@ Read nearby source and tests before editing them. Treat checked-in files as the 
 
 ## Look for a library before writing general-purpose code
 
-When a need comes up, first look for a maintained Rust library that fits it. For general-purpose capabilities such as protocols, parsing, sanitization, storage, and operating-system integration, use a suitable library instead of writing that capability ourselves. Write custom code only when the review shows that no good library fits the requirements, and record why. Check current maintenance, platform support, license, MSRV, security history, API fit, features, and dependency cost. Compare alternatives for authentication, storage, network access, and untrusted content. Use `docs/project/dependency-review.md` to record the evidence. Keep Hey Mail-specific product rules in the domain and application crates. Record major dependency choices in an ADR. Commit `Cargo.lock` for this application.
+When a need comes up, first look for a maintained Rust library that fits it. For general-purpose capabilities such as protocols, parsing, sanitization, storage, and operating-system integration, use a suitable library instead of writing that capability ourselves. Write custom code only when the review shows that no good library fits the requirements, and record why. Check current maintenance, platform support, license, MSRV, security history, API fit, features, and dependency cost. Compare alternatives for authentication, storage, network access, and untrusted content. Use `docs/project/dependency-review.md` to record the evidence. Keep Einfach Mail-specific product rules in the domain and application crates. Record major dependency choices in an ADR. Commit `Cargo.lock` for this application.
 
 ## Use project skills
 
+- Use `Einfach Mail` as the product name in user-facing text and project documents. Use the `einfach-` prefix for Cargo package names.
 - Use the relevant pstack skill for design and investigation. Use `architect` for new boundaries, ownership, and data flow. Use `how` and `why` to inspect existing behavior and rationale. Use `blast-radius` for changes that cross callers, persistence, providers, or lifecycle boundaries. Apply the relevant `principle-*` skills when their design problem appears.
-- Use `rust-best-practices` for every Rust change. Do not force unrelated skills onto a task.
+- Run the `clean-code-guard` pass after code edits and when reviewing code, before presenting or committing the result.
+- Use `rust-best-practices` when writing or refactoring Rust and `rust-review` when reviewing Rust. Do not force unrelated skills onto a task.
 - Before GPUI framework, lifecycle, state, or component work, read `.agents/skills/gpui-kit/SKILL.md` and the relevant coding-guide sections. Before designing or changing visible UI, read `.agents/skills/gpui-kit-design-guides/SKILL.md` and its required design-guide sections.
 
 ## Work in small, reviewable changes
@@ -70,6 +72,7 @@ Do not add an abstraction that only forwards calls. Add a crate when it owns a r
 - Avoid public APIs until another crate needs them. Keep domain types independent of Graph JSON and database rows.
 - Do not add `unsafe` code. The workspace forbids it unless a future ADR approves a narrow, justified exception.
 - Put lint configuration in `Cargo.toml`. Do not add `#![deny(warnings)]`.
+- Keep `depgraph-rules.toml` aligned with every workspace crate and its allowed direct internal dependencies. Run `cargo depgraph-check check` after changing workspace manifests. Run `cargo deny check bans` after changing dependencies; CI enforces both checks.
 
 ## Mail and calendar security
 
@@ -96,7 +99,7 @@ Every pull request must:
 - state the user-visible outcome;
 - list behavior and security risks;
 - update the relevant docs and ADRs;
-- pass formatting, Clippy, and workspace tests in CI;
+- pass workspace dependency policy checks, the Rust 1.95 MSRV compile check, formatting, Clippy, rustdoc, `cargo audit --deny yanked`, and workspace tests in CI;
 - include evidence for any UI or provider behavior it changes.
 
 Use `.github/PULL_REQUEST_TEMPLATE.md` and the issue templates. Do not merge with a failing required check.

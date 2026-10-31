@@ -5,7 +5,7 @@
 
 ## Context
 
-Hey Mail is a Rust desktop application. Its main window, navigation, mail list, calendar, and settings should use native Rust UI. Rich email bodies may need an HTML renderer, but that renderer should not own the rest of the application.
+Einfach Mail is a Rust desktop application. Its main window, navigation, mail list, calendar, and settings should use native Rust UI. Rich email bodies may need an HTML renderer, but that renderer should not own the rest of the application.
 
 GPUI Kit packages GPUI, its base layer, styled components, and default assets behind one Rust dependency. Its optional `gpui-webview` crate is separate from the `gpui-kit` dependency.
 
@@ -13,7 +13,7 @@ GPUI Kit packages GPUI, its base layer, styled components, and default assets be
 
 Use GPUI Kit 0.8.1 for the application shell and native views. Keep workflows in the application crate and domain rules in the domain crate.
 
-Do not add a browser-based app frontend. If sanitized HTML email later needs a browser engine, evaluate `gpui-webview` only for an isolated message-body view and record a separate security decision before adding it. Keep scripts, remote content, navigation, and access to application data disabled.
+Do not use the Tauri runtime or add a browser-based app frontend. If sanitized HTML email later needs a browser engine, evaluate `gpui-webview` only for an isolated message-body view and record a separate security decision before adding it. Keep scripts, remote content, navigation, and access to application data disabled.
 
 ## Consequences
 

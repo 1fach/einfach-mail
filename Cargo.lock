@@ -1330,6 +1330,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "einfach-mail-application"
+version = "0.1.0"
+dependencies = [
+ "einfach-mail-domain",
+]
+
+[[package]]
+name = "einfach-mail-desktop"
+version = "0.1.0"
+dependencies = [
+ "gpui-kit",
+]
+
+[[package]]
+name = "einfach-mail-domain"
+version = "0.1.0"
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2731,24 +2749,6 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
-
-[[package]]
-name = "hey-mail-application"
-version = "0.1.0"
-dependencies = [
- "hey-mail-domain",
-]
-
-[[package]]
-name = "hey-mail-desktop"
-version = "0.1.0"
-dependencies = [
- "gpui-kit",
-]
-
-[[package]]
-name = "hey-mail-domain"
-version = "0.1.0"
 
 [[package]]
 name = "hkdf"

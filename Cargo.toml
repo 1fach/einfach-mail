@@ -9,12 +9,13 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 
 [workspace.dependencies]
 gpui-kit = "0.8.1"
 
 [workspace.lints.rust]
+missing_docs = "warn"
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]

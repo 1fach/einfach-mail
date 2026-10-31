@@ -14,3 +14,8 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0002](0002-exchange-online-provider.md) | Use Microsoft Graph v1.0 for Exchange Online | Accepted |
 | [0003](0003-desktop-authentication.md) | Desktop authentication implementation | Proposed; spike required |
 | [0004](0004-local-data-and-sync.md) | Keep a local cache and synchronize with Graph | Accepted; encryption design open |
+| [0005](0005-encrypted-local-cache.md) | Use SQLCipher-backed SQLite for the local cache | Proposed; Windows and key-lifecycle proof required |
+| [0006](0006-graph-http-transport.md) | Use reqwest for Microsoft Graph transport | Proposed; runtime and contract spike required |
+| [0007](0007-message-body-rendering.md) | Render sanitized message HTML in native GPUI | Proposed; sanitizer and renderer proof required |
+| [0008](0008-identity-token-boundary.md) | Keep identity tokens inside the Microsoft provider | Accepted |
+| [0009](0009-account-scoped-domain-identifiers.md) | Use account-scoped opaque domain identifiers | Accepted |

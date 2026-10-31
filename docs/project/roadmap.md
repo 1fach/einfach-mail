@@ -1,58 +1,39 @@
 # Roadmap
 
-Milestones describe outcomes. Keep individual tasks in issues once a Git remote is configured. Reorder work only after updating `docs/project/status.md` and recording any changed architectural choice.
+Milestones describe product outcomes. Track active implementation tasks and their acceptance criteria in GitHub issues. Use [project status](status.md) for the current milestone and immediate next actions. Update this roadmap when milestone scope or sequencing changes.
 
-## M0: Repository foundation
+## M0: Repository foundation — in progress
 
-- [x] Create the Rust workspace and native GPUI Kit shell.
-- [x] Define product scope, module ownership, agent workflow, and CI gates.
-- [x] Research Microsoft Graph and record provider constraints.
-- [x] Research GPUI Kit and record platform and optional WebView limits.
-- [x] Establish a Rust dependency review process and research likely candidates.
-- [x] Initialize Git metadata and review the resolved Cargo lock graph.
-- [ ] Build and launch the shell on Windows and the current Linux development target.
+Provide a reproducible Rust workspace, native GPUI Kit shell, contributor workflow, and cross-platform baseline.
 
-## M1: Identity and local data design
+Fedora startup is verified in [issue #1](https://github.com/1fach/einfach-mail/issues/1). Remaining work is grouped under the [M0 GitHub milestone](https://github.com/1fach/einfach-mail/milestone/1): [verify Windows shell startup](https://github.com/1fach/einfach-mail/issues/2), [validate scheduled RustSec lockfile auditing](https://github.com/1fach/einfach-mail/issues/10), and confirm the workspace dependency policy and Rust 1.95 MSRV jobs pass on GitHub after the local workflow changes are published.
 
-- [ ] Prove system-browser sign-in with authorization code and PKCE for supported account types.
-- [ ] Test MFA, Conditional Access, cancellation, token refresh, and sign-out.
-- [ ] Choose the Rust identity library or platform broker and record the decision.
-- [ ] Select local storage, schema migration, encryption-at-rest, and key recovery behavior.
-- [ ] Verify that tokens never enter GPUI view state, application logs, or local mail data.
+## M1: Identity and local data — not started
 
-## M2: Read-only mail
+Connect a supported Microsoft account with delegated access and prove that credentials and cached data stay within their approved security boundaries. Authentication and encrypted-storage decisions remain subject to the proofs in ADRs [0003](../decisions/0003-desktop-authentication.md), [0005](../decisions/0005-encrypted-local-cache.md), and [0008](../decisions/0008-identity-token-boundary.md).
 
-- [ ] Connect one supported account and show its folders.
-- [ ] Fetch and display a paginated inbox with sender, subject, date, and unread state.
-- [ ] Read message content with remote content blocked by default.
-- [ ] Choose and review maintained HTML parser, sanitizer, and rendering libraries before implementing rich message content.
-- [ ] Synchronize changes incrementally and recover safely after restart or network failure.
-- [ ] Add contract fixtures for Graph pagination, delta links, deleted messages, throttling, and invalid tokens.
+M1 work is grouped under the [GitHub milestone](https://github.com/1fach/einfach-mail/milestone/2): [prove delegated sign-in](https://github.com/1fach/einfach-mail/issues/3), [prove encrypted storage](https://github.com/1fach/einfach-mail/issues/4), and [connect an account and display its identity](https://github.com/1fach/einfach-mail/issues/5). These issues are blocked by M0 or the prerequisite authentication proof.
 
-## M3: Read-only calendar
+## M2: Read-only mail — not started
 
-- [ ] Show a date-range calendar view with correct time-zone handling.
-- [ ] Handle recurring events and exceptions in the supported range.
-- [ ] Synchronize a fixed calendar view incrementally and handle expired sync state.
-- [ ] Add contract fixtures for daylight-saving transitions and recurring events.
+Let the user browse folders, read synchronized messages from the offline cache, and view message content safely. M2 does not change mail on the server; mail and event actions belong to M4. The Graph transport and message renderer remain subject to ADRs [0006](../decisions/0006-graph-http-transport.md) and [0007](../decisions/0007-message-body-rendering.md).
 
-## M4: Mail and calendar actions
+M2 work is grouped under the [GitHub milestone](https://github.com/1fach/einfach-mail/milestone/4): [prove the Graph mail transport and delta contracts](https://github.com/1fach/einfach-mail/issues/7), [browse folders and read synchronized mail offline](https://github.com/1fach/einfach-mail/issues/8), and [render cached message bodies safely in native GPUI](https://github.com/1fach/einfach-mail/issues/9). The workflow and rendering depend on M1 identity and encrypted-cache proofs.
 
-- [ ] Mark, move, and delete messages with visible pending and confirmed states.
-- [ ] Compose and send messages with attachment-size and failure handling.
-- [ ] Create and update events with attendees, reminders, and time zones.
-- [ ] Queue only actions with a defined retry and conflict policy.
-- [ ] Request write permissions only when the user enables the matching feature.
+## M3: Read-only calendar — not started
 
-## M5: Windows daily-use integration
+Show and synchronize calendar events with correct time-zone and recurrence behavior.
 
-- [ ] Add system notifications with user-controlled settings.
-- [ ] Add taskbar unread state and calendar reminders if they improve the main workflow.
-- [ ] Test installer upgrade, uninstall, and account removal.
-- [ ] Complete accessibility and keyboard-flow review.
+The [M3 GitHub milestone](https://github.com/1fach/einfach-mail/milestone/3) tracks this work. Resolve the Graph time-zone mapping and recurrence design gate in [issue #6](https://github.com/1fach/einfach-mail/issues/6) before calendar implementation.
 
-## M6: Broader release targets
+## M4: Mail and calendar actions — not started
 
-- [ ] Evaluate macOS and Linux parity using their native UI backends and credential stores.
-- [ ] Decide whether personal Microsoft accounts and multiple accounts are release requirements.
-- [ ] Define support, telemetry, privacy, and release/update policies.
+Support the first defined mail and event changes with clear pending, confirmed, and failed states.
+
+## M5: Windows daily-use integration — not started
+
+Add and verify the Windows integrations that improve the core mail and calendar workflow, accessibility, installation, and account removal.
+
+## M6: Broader release targets — not started
+
+Evaluate additional operating systems, account types, and release policies after the Windows workflow is reliable.

@@ -1,11 +1,11 @@
 [package]
-name = "hey-mail-application"
+name = "einfach-mail-application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-hey-mail-domain = { path = "../domain" }
+einfach-mail-domain = { path = "../domain" }
 
 [lints]
 workspace = true

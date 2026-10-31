@@ -19,7 +19,7 @@ Do not put secrets or real mail, calendar, or account data in an issue. Use synt
 4. Write an ADR before code if the work changes an accepted boundary, provider, permission scope, persistence model, or security rule.
 5. Implement one vertical slice. Keep the user outcome visible at the boundary.
 6. Add behavior tests and sanitized provider fixtures. Do not test against a personal mailbox in CI.
-7. Run format, Clippy, and workspace tests. Use a test tenant for provider behavior that fixtures cannot prove.
+7. Run every check listed in the [README](../../README.md), including workspace crate-boundary and banned-dependency checks, the Rust 1.95 MSRV compile check, formatting, Clippy, rustdoc, RustSec auditing, and workspace tests. Use a test tenant for provider behavior that fixtures cannot prove.
 8. Update setup, architecture, research, roadmap, or status docs when their facts change.
 9. Open a pull request with user impact, dependency choices, implementation notes, security risks, and actual check results.
 
