@@ -1,6 +1,22 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "linux")]
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use ammonia::{Builder, UrlRelative};
+#[cfg(target_os = "linux")]
+use url::Url;
+
+#[cfg(target_os = "linux")]
+use gpui_kit::{
+    Context, ImageSource, InteractiveElement, IntoElement, Modifiers, MouseButton, ParentElement,
+    Render, Styled, TestAppContext, VisualTestContext, Window,
+    base::{TextSelection, TextSelectionLayer},
+    component::text::TextView,
+    div, point, px,
+};
 
 const ALLOWED_TAGS: &[&str] = &[
     "a",
@@ -241,4 +257,199 @@ fn repairs_malformed_html_to_a_stable_fragment() {
     assert!(sanitized.contains("second"));
     assert!(sanitized.contains("italic"));
     assert_eq!(sanitized, sanitize(&sanitized));
+}
+
+#[cfg(target_os = "linux")]
+struct EmailBodyTestView {
+    html: String,
+    link_clicks: Arc<Mutex<Vec<String>>>,
+    image_resolutions: Arc<AtomicUsize>,
+}
+
+#[cfg(target_os = "linux")]
+fn allowed_web_url(href: &str) -> Option<Url> {
+    let url = Url::parse(href).ok()?;
+    matches!(url.scheme(), "http" | "https").then_some(url)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn only_http_and_https_urls_are_external_link_targets() {
+    for href in [
+        "http://mail.example.invalid",
+        "https://mail.example.invalid",
+    ] {
+        assert!(allowed_web_url(href).is_some(), "web URL rejected: {href}");
+    }
+
+    for href in [
+        "javascript:alert(1)",
+        "data:text/html,unsafe",
+        "mailto:person@example.invalid",
+        "file:///etc/passwd",
+        "/relative/path",
+        "//tracker.invalid/path",
+    ] {
+        assert!(
+            allowed_web_url(href).is_none(),
+            "non-web URL accepted: {href}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mount_email_body(
+    test_app: &mut TestAppContext,
+    html: String,
+    link_clicks: Arc<Mutex<Vec<String>>>,
+    image_resolutions: Arc<AtomicUsize>,
+) -> &mut VisualTestContext {
+    test_app.update(gpui_kit::init);
+    let (_, visual_context) = test_app.add_window_view(move |_, _| EmailBodyTestView {
+        html,
+        link_clicks,
+        image_resolutions,
+    });
+    visual_context.run_until_parked();
+    visual_context.update(|window, app| {
+        let _ = window.draw(app);
+    });
+    visual_context
+}
+
+#[cfg(target_os = "linux")]
+impl Render for EmailBodyTestView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let link_clicks = Arc::clone(&self.link_clicks);
+        let image_resolutions = Arc::clone(&self.image_resolutions);
+
+        div()
+            .w(px(600.))
+            .debug_selector(|| "email-body".into())
+            .child(TextSelectionLayer)
+            .child(
+                TextView::html("email-body-content", self.html.clone())
+                    .selectable(true)
+                    .image_source(move |_| {
+                        image_resolutions.fetch_add(1, Ordering::SeqCst);
+                        ImageSource::Custom(Arc::new(|_, _| None))
+                    })
+                    .on_link_click(move |url, _, _, cx| {
+                        let Some(parsed_url) = allowed_web_url(url.as_ref()) else {
+                            return;
+                        };
+                        link_clicks
+                            .lock()
+                            .expect("test link recorder lock is healthy")
+                            .push(url.to_string());
+                        cx.open_url(parsed_url.as_str());
+                    }),
+            )
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[gpui::test]
+fn native_html_renderer_routes_safe_links_only_after_a_click_and_does_not_resolve_images(
+    cx: &mut TestAppContext,
+) {
+    let html = sanitize(
+        r#"
+            <p><a href="https://mail.example.invalid/thread">Open thread</a></p>
+            <img src="https://tracker.invalid/pixel.png" alt="remote image">
+            <script>untrusted script marker</script>
+        "#,
+    );
+    let link_clicks = Arc::new(Mutex::new(Vec::new()));
+    let image_resolutions = Arc::new(AtomicUsize::new(0));
+    let cx = mount_email_body(
+        cx,
+        html,
+        Arc::clone(&link_clicks),
+        Arc::clone(&image_resolutions),
+    );
+
+    assert_eq!(cx.opened_url(), None);
+    assert_eq!(image_resolutions.load(Ordering::SeqCst), 0);
+
+    cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
+
+    assert_eq!(
+        link_clicks
+            .lock()
+            .expect("test link recorder lock is healthy")
+            .as_slice(),
+        ["https://mail.example.invalid/thread"]
+    );
+    assert_eq!(
+        cx.opened_url(),
+        Some("https://mail.example.invalid/thread".to_owned())
+    );
+    assert_eq!(image_resolutions.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[gpui::test]
+fn native_html_renderer_does_not_open_an_unsafe_sanitized_link(cx: &mut TestAppContext) {
+    let html = sanitize(r#"<p><a href="javascript:alert(1)">unsafe destination</a></p>"#);
+    assert!(!html.contains("href="));
+
+    let link_clicks = Arc::new(Mutex::new(Vec::new()));
+    let image_resolutions = Arc::new(AtomicUsize::new(0));
+    let cx = mount_email_body(
+        cx,
+        html,
+        Arc::clone(&link_clicks),
+        Arc::clone(&image_resolutions),
+    );
+
+    cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
+
+    assert!(
+        link_clicks
+            .lock()
+            .expect("test link recorder lock is healthy")
+            .is_empty()
+    );
+    assert_eq!(cx.opened_url(), None);
+}
+
+#[cfg(target_os = "linux")]
+#[gpui::test]
+fn native_html_renderer_supports_selection_and_copy(cx: &mut TestAppContext) {
+    let cx = mount_email_body(
+        cx,
+        "Readable message content for selection and copy".to_owned(),
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(AtomicUsize::new(0)),
+    );
+
+    let body_bounds = cx.debug_bounds("email-body").expect("email body bounds");
+    let start = point(body_bounds.left() + px(1.), body_bounds.top() + px(8.));
+    let end = point(body_bounds.right() - px(1.), body_bounds.top() + px(8.));
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+    cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    cx.update(|window, app| {
+        let _ = window.draw(app);
+    });
+
+    let selected_text = cx.update(TextSelection::selected_text);
+    assert!(
+        selected_text.contains("Readable message content"),
+        "unexpected selected text: {selected_text:?}"
+    );
+
+    cx.simulate_keystrokes("ctrl-c");
+    let copied_text = cx.update(|_, app| {
+        app.read_from_clipboard()
+            .and_then(|clipboard| clipboard.text())
+    });
+    assert_eq!(copied_text, Some(selected_text.trim_end().to_owned()));
 }

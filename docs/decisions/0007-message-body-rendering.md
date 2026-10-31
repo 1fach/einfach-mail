@@ -1,7 +1,7 @@
 # ADR 0007: Render sanitized message HTML in native GPUI
 
-- Status: Proposed; sanitizer and renderer proof required
-- Date: 2026-10-30
+- Status: Accepted for the Linux first renderer; application integration pending
+- Date: 2026-10-31
 - Owners: Project maintainer
 
 ## Context
@@ -32,7 +32,7 @@ Do not add `gpui-webview` for the first renderer. Revisit it in a separate secur
 
 ## Consequences
 
-- Ammonia is the only proposed parser/sanitizer dependency. Its 4.2.4 release uses HTML5 parsing, has MIT OR Apache-2.0 licensing, requires Rust 1.85, and depends on `html5ever`, `cssparser`, `maplit`, and `url`. This fits the workspace MSRV of Rust 1.95. RustSec has recorded multiple historical Ammonia vulnerabilities; 4.2.4 includes the fix for RUSTSEC-2026-0373. Recheck the advisory database and audit the resolved lockfile before accepting the dependency.
+- Ammonia is the selected parser/sanitizer for the first renderer, but remains test-only until production integration. Its 4.2.4 release uses HTML5 parsing, has MIT OR Apache-2.0 licensing, requires Rust 1.85, and depends on `html5ever`, `cssparser`, `maplit`, and `url`. This fits the workspace MSRV of Rust 1.95. RustSec has recorded multiple historical Ammonia vulnerabilities; 4.2.4 includes the fix for RUSTSEC-2026-0373. Recheck the advisory database and audit the resolved lockfile before adding Ammonia to production dependencies.
 - The Ammonia configuration is Einfach Mail policy, not a replacement sanitizer. Keep its allowlist narrow and do not reimplement HTML parsing, URL parsing, or CSS sanitization.
 - Verify synthetic fixtures for malformed HTML, script/event payloads, SVG and MathML mutation-XSS cases, `javascript:` and non-web links, CSS `url()` variations, remote images, frames, and forms. Include a positive fixture for common paragraphs, emphasis, lists, links, and tables.
 - Verify the actual rendered body does not load remote images or other network resources, does not open unsafe URLs, and keeps copy and selection usable. Never use real mailbox content in fixtures.

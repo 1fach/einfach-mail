@@ -61,7 +61,7 @@ These are design constraints, not implemented behavior yet.
 
 - Parse Graph responses, configuration, and stored data at their boundaries.
 - Treat message HTML as untrusted input. The application must sanitize it with a maintained library before it reaches a view, and expose only `SanitizedEmailHtml` to the desktop. Never persist the sanitized result.
-- The proposed first renderer is GPUI Kit `TextView::html`. Keep scripts, styles, images, and other remote content blocked by default; override link routing and image resolution as defense in depth.
+- ADR 0007 accepts GPUI Kit `TextView::html` as the Linux first renderer. Keep scripts, styles, images, and other remote content blocked by default; override link routing and image resolution as defense in depth. Production integration waits for the cached-message workflow and issue #9's remaining evidence.
 - Keep the app UI in GPUI. A browser renderer for email HTML needs a separate security decision and must be limited to the message body. Give message content no application commands, tokens, IPC bridge, or access to mailbox data.
 - Store refresh credentials in the operating-system credential store. Do not persist access tokens in SQLite or UI state.
 - Decide local database encryption and key recovery before the app stores real mailbox content.
@@ -71,7 +71,7 @@ These are design constraints, not implemented behavior yet.
 - Microsoft Graph does not support Exchange Server installed on premises. Supporting it needs a separate provider design.
 - Microsoft does not list an official Rust MSAL implementation in its desktop app library table. The Linux implementation uses Huskarl with the system browser, but callback registration, browser behavior, MFA, Conditional Access, refresh, consent revocation, and sign-out still need live Entra evidence under issue #3.
 - GPUI Kit is pre-1.0. Keep its resolved dependency graph in `Cargo.lock` and check the app on each supported platform.
-- GPUI Kit's optional WebView package is experimental. Linux embedding requires X11 or XWayland, not Wayland. Windows WebView bounds cover GPUI overlays. It is not part of the proposed first message renderer; see [ADR 0007](../decisions/0007-message-body-rendering.md).
+- GPUI Kit's optional WebView package is experimental. Linux embedding requires X11 or XWayland, not Wayland. Windows WebView bounds cover GPUI overlays. It is not part of the accepted first message renderer; see [ADR 0007](../decisions/0007-message-body-rendering.md).
 - Delta sync, recurring events, shared mailboxes, attachments, and calendar time zones have provider-specific behavior. Add a focused contract check for each supported behavior.
 - The proposed Graph transport is `reqwest`, but its async client requires Tokio while the current GPUI dependency graph uses `smol`. Keep that runtime boundary inside the provider and prove it before adding the dependency.
 - The current `io-msgraph` release includes calendar calls in its changelog, but its published README is stale and its error type drops `Retry-After`. See [ADR 0006](../decisions/0006-graph-http-transport.md) for the candidate review.

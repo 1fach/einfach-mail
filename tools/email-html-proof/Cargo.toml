@@ -4,10 +4,22 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Test-only proof for untrusted email HTML sanitization"
+description = "Test-only proof for email HTML sanitization and native rendering"
 
 [dev-dependencies]
 ammonia = "4.2.4"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Avoid gpui-kit/test-support here: it currently resolves optional gpui-fast,
+# which conflicts with the workspace's locked taffy 0.15.1 dependency.
+gpui = {
+    package = "gpui-pre",
+    version = "=0.3.10",
+    default-features = false,
+    features = ["test-support"],
+}
+gpui-kit.workspace = true
+url = "2.5.8"
 
 [lints]
 workspace = true

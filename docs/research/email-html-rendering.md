@@ -1,6 +1,6 @@
 # Email HTML rendering research
 
-Research checked: 2026-10-31. This is a proposed design, not an implementation. Recheck library releases and advisories before adding a dependency.
+Research checked: 2026-10-31. ADR 0007 accepts the Linux first-renderer direction. Production integration remains pending. Recheck library releases and advisories before adding a production dependency.
 
 ## Requirements
 
@@ -37,7 +37,7 @@ GPUI Kit's native `TextView` behavior was checked in the 0.8.1 source. The HTML 
 
 The current GPUI Kit WebView guide documents WKWebView on macOS, WebView2 on Windows, and WebKitGTK on Linux X11. Linux Wayland is unsupported. GPUI Fast supports deferred overlays above WebViews on macOS and Linux; Windows retains child-view overlay and clipping limits. Wry exposes page navigation and new-window callbacks, but the reviewed guidance does not document a cross-platform hook to block all remote subresource requests. That is an evidence gap, not a claim that platform-specific interception is impossible.
 
-## Proposed pipeline
+## Accepted Linux first-renderer pipeline
 
 1. Keep raw provider and cached body values untrusted.
 2. In `crates/application`, sanitize each body prepared for display with Ammonia 4.2.4 and the product allowlist, producing an opaque `SanitizedEmailHtml` value. Do not persist the sanitized output.
@@ -45,7 +45,7 @@ The current GPUI Kit WebView guide documents WKWebView on macOS, WebView2 on Win
 4. In the desktop view, render only `SanitizedEmailHtml` with `TextView::html`. Supply an `on_link_click` handler that validates the scheme again and opens only a user-clicked web link externally. If a later decision enables image markup, install an image resolver that accepts only app-owned, validated inline attachment content.
 5. Keep `gpui-webview` out of the first renderer. Reconsider it in a separate security ADR only if the native view fails supported mail-format checks and remote subresource blocking is proven across the supported platforms.
 
-## Proof required before accepting ADR 0007
+## Remaining evidence before production integration
 
 - Run Ammonia 4.2.4 against synthetic fixtures for malformed markup, scripts and event attributes, SVG/MathML mutation-XSS inputs, unsafe schemes, CSS URL case variations, remote images, frames, and forms.
 - Verify positive rendering for common paragraphs, emphasis, lists, links, and tables using synthetic content.
