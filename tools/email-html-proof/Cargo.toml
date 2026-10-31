@@ -1,0 +1,13 @@
+[package]
+name = "einfach-mail-email-html-proof"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Test-only proof for untrusted email HTML sanitization"
+
+[dev-dependencies]
+ammonia = "4.2.4"
+
+[lints]
+workspace = true

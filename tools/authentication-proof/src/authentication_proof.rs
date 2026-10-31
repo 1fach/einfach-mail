@@ -55,6 +55,28 @@ const SYNTHETIC_CODE: &str = "synthetic-authorization-code";
 const RS256_ALGORITHMS: &[&str] = &["RS256"];
 const JWKS_RESPONSE: &str = r#"{"keys":[{"kty":"RSA","n":"pyafoLADweUKq014AefApo87uNG-coNpRvHJdGFiH2TDvRAj-DW0M1w7iVcm9jyTMMWGtKuk7EjFYScOAriIHnVXVkm4axMOQCnj300YMZaMySDQGC9FtjMHCwpD0daJ6MCz6QOYHmrwyJfj3-bLx9ybp8x5DCmSd9Xg7mWpIYnOk8oAyLMLJAWVUCJhVT6eYB4i55UtnKyzAmBCWHRNN0wxggdcxpmPbb2k1sFEkmya9fI4XJaOslZlseCWa-HIocGNQ-Zk6zakYKvsTgIF8miFzF_Y1w-fyZERcuNNAUg4KXM6BiWhpPPHBWK6XxTgSMX_7I4YR_AO62RyHE0UhQ","e":"AQAB","use":"sig","alg":"RS256","kid":"synthetic-signing-key"}]}"#;
 
+#[derive(Clone, Copy, Debug)]
+enum SyntheticTokenValidity {
+    Valid,
+    Expired,
+    NotYetValid,
+}
+
+#[derive(Clone, Copy)]
+struct SyntheticIdTokenClaims<'a> {
+    issuer: &'a str,
+    audience: &'a str,
+    nonce: &'a str,
+    authorized_party: &'a str,
+    validity: SyntheticTokenValidity,
+}
+
+struct SyntheticTokenTimes {
+    issued_at: u64,
+    not_before: Option<u64>,
+    expires_at: u64,
+}
+
 // This synthetic key signs runtime-generated tokens and contains no real identity data.
 const SYNTHETIC_PRIVATE_KEY_PEM: &str = r"-----BEGIN PRIVATE KEY-----
 MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCnJp+gsAPB5Qqr
@@ -228,7 +250,17 @@ impl FakeIdentityProvider {
         nonce: &str,
         authorized_party: &str,
     ) -> ProofResult<()> {
-        let id_token = sign_synthetic_id_token(issuer, audience, nonce, authorized_party)?;
+        self.set_token_response_for_claims(SyntheticIdTokenClaims {
+            issuer,
+            audience,
+            nonce,
+            authorized_party,
+            validity: SyntheticTokenValidity::Valid,
+        })
+    }
+
+    fn set_token_response_for_claims(&self, claims: SyntheticIdTokenClaims<'_>) -> ProofResult<()> {
+        let id_token = sign_synthetic_id_token(claims)?;
         self.store_token_response(&id_token)
     }
 
@@ -239,7 +271,13 @@ impl FakeIdentityProvider {
         nonce: &str,
         authorized_party: &str,
     ) -> ProofResult<()> {
-        let id_token = sign_synthetic_id_token(issuer, audience, nonce, authorized_party)?;
+        let id_token = sign_synthetic_id_token(SyntheticIdTokenClaims {
+            issuer,
+            audience,
+            nonce,
+            authorized_party,
+            validity: SyntheticTokenValidity::Valid,
+        })?;
         let tampered_id_token = tamper_jws_signature(&id_token)?;
         self.store_token_response(&tampered_id_token)
     }
@@ -439,26 +477,56 @@ async fn build_grant(
     Ok(grant)
 }
 
-fn sign_synthetic_id_token(
-    issuer: &str,
-    audience: &str,
-    nonce: &str,
-    authorized_party: &str,
-) -> ProofResult<String> {
+fn sign_synthetic_id_token(id_token_claims: SyntheticIdTokenClaims<'_>) -> ProofResult<String> {
     let current_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let token_times = synthetic_token_times(id_token_claims.validity, current_time);
+    let jwt_claims = synthetic_id_token_claims(id_token_claims, &token_times);
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(TEST_KEY_ID.to_owned());
-    let claims = json!({
-        "iss": issuer,
-        "sub": "synthetic-subject",
-        "aud": audience,
-        "iat": current_time,
-        "exp": current_time + 3600,
-        "nonce": nonce,
-        "azp": authorized_party,
-    });
     let signing_key = EncodingKey::from_rsa_pem(SYNTHETIC_PRIVATE_KEY_PEM.as_bytes())?;
-    Ok(encode(&header, &claims, &signing_key)?)
+    Ok(encode(&header, &jwt_claims, &signing_key)?)
+}
+
+fn synthetic_token_times(
+    validity: SyntheticTokenValidity,
+    current_time: u64,
+) -> SyntheticTokenTimes {
+    match validity {
+        SyntheticTokenValidity::Valid => SyntheticTokenTimes {
+            issued_at: current_time,
+            not_before: None,
+            expires_at: current_time.saturating_add(3600),
+        },
+        SyntheticTokenValidity::Expired => SyntheticTokenTimes {
+            issued_at: current_time.saturating_sub(7200),
+            not_before: None,
+            expires_at: current_time.saturating_sub(3600),
+        },
+        SyntheticTokenValidity::NotYetValid => SyntheticTokenTimes {
+            issued_at: current_time,
+            not_before: Some(current_time.saturating_add(3600)),
+            expires_at: current_time.saturating_add(7200),
+        },
+    }
+}
+
+fn synthetic_id_token_claims(
+    id_token: SyntheticIdTokenClaims<'_>,
+    token_times: &SyntheticTokenTimes,
+) -> Value {
+    let mut jwt_claims = json!({
+        "iss": id_token.issuer,
+        "sub": "synthetic-subject",
+        "aud": id_token.audience,
+        "iat": token_times.issued_at,
+        "exp": token_times.expires_at,
+        "nonce": id_token.nonce,
+        "azp": id_token.authorized_party,
+    });
+    if let Some(not_before) = token_times.not_before {
+        jwt_claims["nbf"] = json!(not_before);
+    }
+    jwt_claims
 }
 
 fn tamper_jws_signature(compact_jws: &str) -> ProofResult<String> {
@@ -539,6 +607,10 @@ fn validate_authorized_party(
 }
 
 fn assert_pkce_round_trip(authorization_url: &Url, token_request: &str) -> ProofResult<()> {
+    assert_eq!(
+        query_field(authorization_url, "code_challenge_method")?,
+        "S256"
+    );
     let authorization_challenge = query_field(authorization_url, "code_challenge")?;
     let verifier = form_field(token_request, "code_verifier")?;
     let derived_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -556,6 +628,7 @@ async fn delegated_flow_validates_pkce_state_oidc_claims_and_authorized_party() 
     assert_audience_mismatch_is_rejected(&fixture).await?;
     assert_nonce_mismatch_is_rejected(&fixture).await?;
     assert_authorized_party_mismatch_is_rejected(&fixture).await?;
+    assert_temporal_token_claims_are_rejected(&fixture).await?;
     assert_matching_flow_succeeds(&fixture).await?;
     Ok(())
 }
@@ -676,6 +749,36 @@ async fn assert_matching_flow_succeeds(fixture: &AuthenticationFixture) -> Proof
         &accepted_url,
         &fixture.identity_provider.last_token_request()?,
     )?;
+    Ok(())
+}
+
+async fn assert_temporal_token_claims_are_rejected(
+    fixture: &AuthenticationFixture,
+) -> ProofResult<()> {
+    assert_token_validity_is_rejected(fixture, SyntheticTokenValidity::Expired).await?;
+    assert_token_validity_is_rejected(fixture, SyntheticTokenValidity::NotYetValid).await?;
+    Ok(())
+}
+
+async fn assert_token_validity_is_rejected(
+    fixture: &AuthenticationFixture,
+    validity: SyntheticTokenValidity,
+) -> ProofResult<()> {
+    let login = fixture.start_login().await?;
+    fixture
+        .identity_provider
+        .set_token_response_for_claims(SyntheticIdTokenClaims {
+            issuer: ISSUER,
+            audience: CLIENT_ID,
+            nonce: &login.nonce,
+            authorized_party: CLIENT_ID,
+            validity,
+        })?;
+    let completed_login = fixture.complete_login(login).await?;
+    assert!(
+        completed_login.result.is_err(),
+        "{validity:?} token was accepted"
+    );
     Ok(())
 }
 
