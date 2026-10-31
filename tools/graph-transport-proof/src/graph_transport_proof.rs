@@ -24,10 +24,10 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{runtime::Builder, task::JoinSet};
 
 const MAX_THROTTLE_RETRIES: u32 = 2;
-const MAX_AUTOMATIC_RETRY_DELAY: Duration = Duration::from_secs(60);
+const MAX_AUTOMATIC_RETRY_DELAY: Duration = Duration::from_mins(1);
 const REQUEST_CHANNEL_CAPACITY: usize = 16;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PAGINATION_PAGES: usize = 1_000;
 const MAX_PAGINATION_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
