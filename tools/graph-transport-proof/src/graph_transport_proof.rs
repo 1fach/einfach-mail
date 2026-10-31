@@ -336,10 +336,10 @@ impl GraphProvider {
         &self,
         start: GraphUrl,
         token: &BearerToken,
-    ) -> Result<DeltaRound<Message>, ProviderError> {
+    ) -> Result<DeltaRound<MessageChange>, ProviderError> {
         self.delta_pages::<WireMessage>(GraphOperation::MessageDelta, start, token)
             .await?
-            .map_records(Message::try_from)
+            .map_records(MessageChange::try_from)
     }
 
     async fn calendar_view_delta(
@@ -456,25 +456,33 @@ impl TryFrom<WireFolder> for Folder {
 struct WireMessage {
     id: String,
     subject: Option<String>,
+    #[serde(rename = "@removed")]
+    removed: Option<WireRemoved>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct Message {
-    id: String,
-    subject: Option<String>,
+enum MessageChange {
+    Upsert { id: String, subject: Option<String> },
+    Removed { id: String, reason: Option<String> },
 }
 
-impl TryFrom<WireMessage> for Message {
+impl TryFrom<WireMessage> for MessageChange {
     type Error = ProviderError;
 
     fn try_from(message: WireMessage) -> Result<Self, Self::Error> {
         if message.id.is_empty() {
             return Err(ProviderError::InvalidRecord);
         }
-        Ok(Self {
-            id: message.id,
-            subject: message.subject,
-        })
+        match message.removed {
+            Some(removed) => Ok(Self::Removed {
+                id: message.id,
+                reason: removed.reason,
+            }),
+            None => Ok(Self::Upsert {
+                id: message.id,
+                subject: message.subject,
+            }),
+        }
     }
 }
 
@@ -488,13 +496,13 @@ struct WireCalendarEvent {
 
 #[derive(Deserialize)]
 struct WireRemoved {
-    reason: String,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum CalendarChange {
     Upsert { id: String, subject: Option<String> },
-    Removed { id: String, reason: String },
+    Removed { id: String, reason: Option<String> },
 }
 
 impl TryFrom<WireCalendarEvent> for CalendarChange {
@@ -759,7 +767,38 @@ mod tests {
             next[1],
             CalendarChange::Removed {
                 id: "event-4".to_owned(),
-                reason: "deleted".to_owned(),
+                reason: Some("deleted".to_owned()),
+            }
+        );
+        assert_eq!(actual_cursor, expected_cursor);
+    }
+
+    fn assert_message_delta_records(
+        first: &[MessageChange],
+        next: &[MessageChange],
+        actual_cursor: &str,
+        expected_cursor: &str,
+    ) {
+        assert_eq!(first.len(), 2);
+        assert_eq!(
+            first[0],
+            MessageChange::Upsert {
+                id: "message-1".to_owned(),
+                subject: Some("Synthetic subject".to_owned()),
+            }
+        );
+        assert_eq!(
+            first[1],
+            MessageChange::Upsert {
+                id: "message-2".to_owned(),
+                subject: None,
+            }
+        );
+        assert_eq!(
+            next[0],
+            MessageChange::Upsert {
+                id: "message-3".to_owned(),
+                subject: None,
             }
         );
         assert_eq!(actual_cursor, expected_cursor);
@@ -972,19 +1011,75 @@ mod tests {
                 .await
                 .expect("next delta round parses");
 
-            assert_eq!(first.records.len(), 2);
-            assert_eq!(first.records[0].id, "message-1");
-            assert_eq!(
-                first.records[0].subject.as_deref(),
-                Some("Synthetic subject")
+            assert_message_delta_records(
+                &first.records,
+                &second.records,
+                second.delta_link.as_str(),
+                &second_cursor,
             );
-            assert_eq!(first.records[1].id, "message-2");
-            assert_eq!(second.records[0].id, "message-3");
-            assert_eq!(second.records[0].subject, None);
-            assert_eq!(second.delta_link.as_str(), second_cursor);
             first_page.assert_async().await;
             second_page.assert_async().await;
             next_round.assert_async().await;
+            provider.shutdown().await.expect("provider shuts down");
+        });
+    }
+
+    #[test]
+    fn message_delta_maps_removed_records_with_optional_reason() {
+        smol::block_on(async {
+            let server = MockServer::start_async().await;
+            let delta_link = format!(
+                "{}/v1.0/me/messages/delta?$deltatoken=opaque%2Fdeleted",
+                server.base_url()
+            );
+            let body = serde_json::json!({
+                "value": [
+                    { "id": "message-removed", "@removed": { "reason": "deleted" } },
+                    { "id": "message-removed-no-reason", "@removed": {} },
+                ],
+                "@odata.deltaLink": delta_link.clone(),
+            })
+            .to_string();
+            let response = server
+                .mock_async(move |when, then| {
+                    when.method("GET")
+                        .path("/v1.0/me/messages/delta")
+                        .query_param("phase", "removals")
+                        .header("Prefer", "IdType=\"ImmutableId\"");
+                    then.status(200)
+                        .header("content-type", "application/json")
+                        .body(body);
+                })
+                .await;
+            let authority = loopback_authority(&server);
+            let provider = GraphProvider::start(authority.clone())
+                .await
+                .expect("provider worker starts");
+            let start = authority
+                .initial_path("me/messages/delta?phase=removals")
+                .expect("synthetic delta path is valid");
+            let changes = provider
+                .message_delta(start, &BearerToken::synthetic())
+                .await
+                .expect("removed message records parse");
+
+            assert_eq!(changes.records.len(), 2);
+            assert_eq!(
+                changes.records[0],
+                MessageChange::Removed {
+                    id: "message-removed".to_owned(),
+                    reason: Some("deleted".to_owned()),
+                }
+            );
+            assert_eq!(
+                changes.records[1],
+                MessageChange::Removed {
+                    id: "message-removed-no-reason".to_owned(),
+                    reason: None,
+                }
+            );
+            assert_eq!(changes.delta_link.as_str(), delta_link);
+            response.assert_async().await;
             provider.shutdown().await.expect("provider shuts down");
         });
     }
@@ -1229,7 +1324,7 @@ mod tests {
         );
         assert_eq!(retry_after_delay(None, now, 0), Duration::from_secs(1));
         assert_eq!(retry_after_delay(None, now, 5), Duration::from_secs(32));
-        assert_eq!(retry_after_delay(None, now, 99), Duration::from_secs(60));
+        assert_eq!(retry_after_delay(None, now, 99), Duration::from_mins(1));
     }
 
     #[test]

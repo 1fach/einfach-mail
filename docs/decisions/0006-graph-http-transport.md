@@ -1,6 +1,6 @@
 # ADR 0006: Use reqwest for Microsoft Graph transport
 
-- Status: Proposed; 13 synthetic contract tests and Rust 1.95 checks pass on Linux, Windows, and macOS in [CI run 41176065254](https://github.com/1fach/einfach-mail/actions/runs/41176065254). RustSec passed in [run 41176065229](https://github.com/1fach/einfach-mail/actions/runs/41176065229); any required live Graph evidence remains pending.
+- Status: Proposed; 14 synthetic contract tests and pedantic Clippy pass locally on Rust 1.95. Updated-head CI is blocked because GitHub Actions reports an account billing or spending-limit issue in [run 41183360129](https://github.com/1fach/einfach-mail/actions/runs/41183360129). Live Graph evidence remains open.
 - Date: 2026-10-30
 - Owners: Project maintainer
 
@@ -44,9 +44,9 @@ Use the smallest `reqwest` feature set that supports the chosen TLS backend, HTT
 - This is a proposed direction, not an accepted production dependency. The test-only `tools/graph-transport-proof/` package keeps every candidate under `[dev-dependencies]`.
 - The proof keeps Tokio and `reqwest::Client` on a private worker. A test confirms that a `smol` timer advances while a mock request is pending. Dropping the response receiver cancels that request. Shutdown waits for the runtime to drop and joins the worker off the `smol` executor.
 - The package has no application API. Tokio and HTTP types do not appear in the desktop or application crate interfaces.
-- Synthetic fixtures cover folder pagination, message and calendar-view delta rounds, malformed responses, Graph errors, `Retry-After` seconds and dates, fallback delay, redirects, and unauthorized responses. They also verify cancellation, shutdown, immutable IDs, and opaque-link validation.
+- Synthetic fixtures cover folder pagination, message and calendar-view delta rounds, removed records with optional reasons, malformed responses, Graph errors, `Retry-After` seconds and dates, fallback delay, redirects, and unauthorized responses. They also verify cancellation, shutdown, immutable IDs, and opaque-link validation.
 - The client does not retry 401 or 403 responses, does not follow redirects, rejects a next link outside the configured Graph authority, and emits no logs containing tokens, response bodies, or full URLs.
-- Linux, Windows, and macOS checks and tests pass in [CI run 41176065254](https://github.com/1fach/einfach-mail/actions/runs/41176065254). RustSec found no vulnerable or yanked crates in [run 41176065229](https://github.com/1fach/einfach-mail/actions/runs/41176065229); eight unmaintained transitive platform and rendering crates remain documented in the dependency review. The lockfile selects Rustls 0.23.46. Any required live Graph evidence remains before accepting the ADR.
+- The previous proof revision passed Linux, Windows, and macOS checks in [CI run 41178596491](https://github.com/1fach/einfach-mail/actions/runs/41178596491). RustSec found no vulnerable or yanked crates in [run 41178596439](https://github.com/1fach/einfach-mail/actions/runs/41178596439). The updated proof has 14 tests and passes pedantic Clippy locally on Rust 1.95. Updated-head jobs did not start because GitHub Actions reported an account billing or spending-limit issue in [run 41183360129](https://github.com/1fach/einfach-mail/actions/runs/41183360129). Eight unmaintained transitive platform and rendering crates remain in the dependency review. The lockfile selects Rustls 0.23.46.
 - Use a test tenant for Graph behavior that synthetic fixtures cannot establish. Do not use personal mailbox data.
 
 ## Sources
