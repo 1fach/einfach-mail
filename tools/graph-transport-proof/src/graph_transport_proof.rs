@@ -15,7 +15,7 @@ use std::{
     net::IpAddr,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, SystemTime},
@@ -1372,6 +1372,19 @@ mod tests {
             smol::Timer::after(Duration::from_millis(10)).await;
         }
         assert_eq!(provider.active_requests(), 0, "provider tasks must stop");
+    }
+
+    async fn wait_for_smol_progress(progress: &AtomicBool) {
+        for _ in 0..300 {
+            if progress.load(Ordering::SeqCst) {
+                return;
+            }
+            smol::Timer::after(Duration::from_millis(10)).await;
+        }
+        assert!(
+            progress.load(Ordering::SeqCst),
+            "smol must make progress during Graph I/O"
+        );
     }
 
     fn assert_calendar_delta_records(
@@ -2833,17 +2846,14 @@ mod tests {
                 .expect("request is queued");
             wait_for_hits(&slow, 1).await;
 
-            let smol_progress = Arc::new(AtomicUsize::new(0));
+            let smol_progress = Arc::new(AtomicBool::new(false));
             let mark_progress = Arc::clone(&smol_progress);
             smol::spawn(async move {
                 smol::Timer::after(Duration::from_millis(10)).await;
-                mark_progress.store(1, Ordering::SeqCst);
+                mark_progress.store(true, Ordering::SeqCst);
             })
             .detach();
-            while smol_progress.load(Ordering::SeqCst) == 0 {
-                smol::Timer::after(Duration::from_millis(1)).await;
-            }
-            assert_eq!(smol_progress.load(Ordering::SeqCst), 1);
+            wait_for_smol_progress(&smol_progress).await;
             drop(request);
             wait_for_idle(&provider).await;
 
