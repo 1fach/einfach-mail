@@ -383,6 +383,7 @@ impl GraphProvider {
         url: GraphUrl,
         token: BearerToken,
     ) -> Result<PendingResponse, ProviderError> {
+        let url = self.authority.opaque_link(url.as_str())?;
         let (reply, response) = bounded(1);
         self.commands
             .send(GetCommand {
@@ -1678,6 +1679,40 @@ mod tests {
                 "unsafe Graph link accepted: {unsafe_link}"
             );
         }
+    }
+
+    #[test]
+    fn provider_rejects_a_url_from_another_authority_before_sending_a_token() {
+        smol::block_on(async {
+            let foreign_server = MockServer::start_async().await;
+            let foreign_request = foreign_server
+                .mock_async(|when, then| {
+                    when.any_request();
+                    then.status(200).body("synthetic foreign response");
+                })
+                .await;
+            let authority = GraphAuthority::for_deployment(GraphDeployment::Global)
+                .expect("global Graph authority is valid");
+            let provider = GraphProvider::start(authority)
+                .await
+                .expect("provider worker starts");
+            let foreign_url = loopback_authority(&foreign_server)
+                .initial_path("me/messages")
+                .expect("foreign Graph URL is valid for its authority");
+
+            assert_eq!(
+                provider
+                    .get(
+                        GraphOperation::Messages,
+                        foreign_url,
+                        &BearerToken::synthetic()
+                    )
+                    .await,
+                Err(ProviderError::UnsafeLink)
+            );
+            foreign_request.assert_calls_async(0).await;
+            provider.shutdown().await.expect("provider shuts down");
+        });
     }
 
     #[test]
