@@ -29,6 +29,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo doc --workspace --no-deps --locked
 cargo audit --deny yanked
+cargo test --locked --package einfach-mail-storage-proof
 cargo test --workspace --locked
 ```
 
@@ -39,6 +40,7 @@ Install `cargo-depgraph-check`, `cargo-deny`, and `cargo-audit` as described in 
 - `apps/desktop/` contains the GPUI application and native views.
 - `crates/domain/` currently contains account-scoped opaque identifier types. Mail, calendar, and account entities are not implemented yet.
 - `crates/application/` will hold user workflows and provider/storage ports.
+- `tools/storage-proof/` contains test-only SQLCipher and Windows Credential Manager proofs; it exposes no application API.
 - `docs/product/` contains product scope.
 - `docs/architecture/` describes module ownership and data flow.
 - `docs/decisions/` contains accepted and proposed architecture decisions plus the ADR template.
