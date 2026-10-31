@@ -1236,6 +1236,16 @@ mod tests {
     use std::process::Command;
 
     const SYSTEM_PROXY_CHILD: &str = "EINFACH_MAIL_GRAPH_SYSTEM_PROXY_TEST_CHILD";
+    const LARGE_DELTA_PAGE_SIZE: usize = 1_000;
+    const LARGE_DELTA_MESSAGE_TOTAL: usize = 5_001;
+    const LARGE_DELTA_NEXT_TOKENS: [&str; 5] = [
+        "opaque/page-2",
+        "opaque/page-3",
+        "opaque/page-4",
+        "opaque/page-5",
+        "opaque/page-6",
+    ];
+    const LARGE_DELTA_ENDPOINT: &str = "/v1.0/me/mailFolders/folder-1/messages/delta";
 
     fn loopback_authority(server: &MockServer) -> GraphAuthority {
         GraphAuthority::for_loopback_mock(&server.base_url())
@@ -1323,6 +1333,99 @@ mod tests {
                     .body(body);
             })
             .await
+    }
+
+    fn synthetic_message_delta_page(
+        first_message: usize,
+        message_count: usize,
+        next_link: Option<&str>,
+        delta_link: Option<&str>,
+    ) -> String {
+        serde_json::json!({
+            "value": (first_message..first_message + message_count)
+                .map(|index| serde_json::json!({
+                    "id": format!("message-{index:04}"),
+                    "receivedDateTime": "2026-10-30T12:00:00Z",
+                    "isRead": false
+                }))
+                .collect::<Vec<_>>(),
+            "@odata.nextLink": next_link,
+            "@odata.deltaLink": delta_link
+        })
+        .to_string()
+    }
+
+    fn expected_initial_delta_page_query(page_index: usize) -> Vec<(&'static str, &'static str)> {
+        if page_index == 0 {
+            vec![("$select", MESSAGE_SELECT)]
+        } else {
+            vec![("$skiptoken", LARGE_DELTA_NEXT_TOKENS[page_index - 1])]
+        }
+    }
+
+    async fn mock_initial_delta_page<'a>(
+        server: &'a MockServer,
+        page_index: usize,
+        base_url: &str,
+        delta_link: &str,
+    ) -> httpmock::Mock<'a> {
+        let first_message = page_index * LARGE_DELTA_PAGE_SIZE;
+        let next_link = LARGE_DELTA_NEXT_TOKENS
+            .get(page_index)
+            .map(|token| format!("{base_url}?$skiptoken={token}"));
+        let body = synthetic_message_delta_page(
+            first_message,
+            LARGE_DELTA_PAGE_SIZE.min(LARGE_DELTA_MESSAGE_TOTAL - first_message),
+            next_link.as_deref(),
+            next_link.is_none().then_some(delta_link),
+        );
+
+        mock_message_page(
+            server,
+            LARGE_DELTA_ENDPOINT,
+            expected_initial_delta_page_query(page_index),
+            body,
+        )
+        .await
+    }
+
+    async fn mock_initial_delta_pages<'a>(
+        server: &'a MockServer,
+        base_url: &str,
+        delta_link: &str,
+    ) -> Vec<httpmock::Mock<'a>> {
+        let mut page_mocks = Vec::new();
+        for page_index in 0..=LARGE_DELTA_NEXT_TOKENS.len() {
+            page_mocks
+                .push(mock_initial_delta_page(server, page_index, base_url, delta_link).await);
+        }
+        page_mocks
+    }
+
+    async fn fetch_initial_message_delta(server: &MockServer) -> DeltaRound<MessageChange> {
+        let authority = loopback_authority(server);
+        let provider = GraphProvider::start(authority.clone())
+            .await
+            .expect("provider worker starts");
+        let start = authority
+            .initial_message_delta_path(&synthetic_folder_id("folder-1"))
+            .expect("synthetic folder delta path is valid");
+        let round = provider
+            .message_delta(start, &BearerToken::synthetic())
+            .await
+            .expect("unfiltered delta follows each opaque page link");
+        provider.shutdown().await.expect("provider shuts down");
+        round
+    }
+
+    fn assert_complete_initial_delta(round: &DeltaRound<MessageChange>) {
+        assert_eq!(round.records.len(), LARGE_DELTA_MESSAGE_TOTAL);
+        for (index, change) in round.records.iter().enumerate() {
+            let MessageChange::Upsert { id, .. } = change else {
+                panic!("synthetic initial delta records are upserts");
+            };
+            assert_eq!(id.as_str(), format!("message-{index:04}"));
+        }
     }
 
     async fn mock_folder_page<'a>(
@@ -1969,7 +2072,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_message_delta_path_scopes_folder_and_metadata() {
+    fn initial_message_delta_path_selects_metadata_without_a_server_cutoff() {
         let authority = GraphAuthority::for_deployment(GraphDeployment::Global)
             .expect("global Graph deployment is valid");
         let path = authority
@@ -2136,13 +2239,10 @@ mod tests {
         smol::block_on(async {
             let server = MockServer::start_async().await;
             let base_path = "/v1.0/me/mailFolders/folder-1/messages/delta";
-            let query = format!(
-                "$select={MESSAGE_SELECT}&$filter=receivedDateTime%20ge%202026-08-02T00%3A00%3A00Z"
-            );
-            let base_delta_url = format!("{}{base_path}?{query}", server.base_url());
-            let next_link = format!("{base_delta_url}&page=2&$skiptoken=opaque%2Fnext");
-            let first_cursor = format!("{base_delta_url}&$deltatoken=opaque%2Fone");
-            let second_cursor = format!("{base_delta_url}&$deltatoken=opaque%2Ftwo");
+            let base_delta_url = format!("{}{base_path}", server.base_url());
+            let next_link = format!("{base_delta_url}?$skiptoken=opaque%2Fnext");
+            let first_cursor = format!("{base_delta_url}?$deltatoken=opaque%2Fone");
+            let second_cursor = format!("{base_delta_url}?$deltatoken=opaque%2Ftwo");
 
             let first_body = serde_json::json!({
                 "value": [{ "id": "message-1", "subject": "Synthetic subject" }],
@@ -2165,8 +2265,7 @@ mod tests {
                     when.method("GET")
                         .path(base_path)
                         .query_param("$select", MESSAGE_SELECT)
-                        .query_param("$filter", "receivedDateTime ge 2026-08-02T00:00:00Z")
-                        .is_true(|request| request.query_params().len() == 2)
+                        .is_true(|request| request.query_params().len() == 1)
                         .header("Prefer", "IdType=\"ImmutableId\"");
                     then.status(200)
                         .header("content-type", "application/json")
@@ -2177,11 +2276,8 @@ mod tests {
                 .mock_async(move |when, then| {
                     when.method("GET")
                         .path(base_path)
-                        .query_param("$select", MESSAGE_SELECT)
-                        .query_param("$filter", "receivedDateTime ge 2026-08-02T00:00:00Z")
-                        .query_param("page", "2")
                         .query_param("$skiptoken", "opaque/next")
-                        .is_true(|request| request.query_params().len() == 4)
+                        .is_true(|request| request.query_params().len() == 1)
                         .header("Prefer", "IdType=\"ImmutableId\"");
                     then.status(200)
                         .header("content-type", "application/json")
@@ -2192,10 +2288,8 @@ mod tests {
                 .mock_async(move |when, then| {
                     when.method("GET")
                         .path(base_path)
-                        .query_param("$select", MESSAGE_SELECT)
-                        .query_param("$filter", "receivedDateTime ge 2026-08-02T00:00:00Z")
                         .query_param("$deltatoken", "opaque/one")
-                        .is_true(|request| request.query_params().len() == 3)
+                        .is_true(|request| request.query_params().len() == 1)
                         .header("Prefer", "IdType=\"ImmutableId\"");
                     then.status(200)
                         .header("content-type", "application/json")
@@ -2233,12 +2327,29 @@ mod tests {
     }
 
     #[test]
+    fn unfiltered_initial_delta_follows_pages_beyond_five_thousand_messages() {
+        smol::block_on(async {
+            let server = MockServer::start_async().await;
+            let base_url = format!("{}{}", server.base_url(), LARGE_DELTA_ENDPOINT);
+            let delta_link = format!("{base_url}?$deltatoken=opaque%2Fcomplete");
+            let page_mocks = mock_initial_delta_pages(&server, &base_url, &delta_link).await;
+            let round = fetch_initial_message_delta(&server).await;
+
+            assert_complete_initial_delta(&round);
+            assert_eq!(round.delta_link.as_str(), delta_link);
+            for page_mock in page_mocks {
+                page_mock.assert_async().await;
+            }
+        });
+    }
+
+    #[test]
     fn message_delta_maps_removed_records_with_optional_reason() {
         smol::block_on(async {
             let server = MockServer::start_async().await;
             let endpoint = "/v1.0/me/mailFolders/folder-1/messages/delta";
             let delta_link = format!(
-                "{}{endpoint}?$select={MESSAGE_SELECT}&$filter=receivedDateTime%20ge%202026-08-02T00%3A00%3A00Z&$deltatoken=opaque%2Fdeleted",
+                "{}{endpoint}?$deltatoken=opaque%2Fdeleted",
                 server.base_url()
             );
             let body = serde_json::json!({
@@ -2254,8 +2365,7 @@ mod tests {
                     when.method("GET")
                         .path(endpoint)
                         .query_param("$select", MESSAGE_SELECT)
-                        .query_param("$filter", "receivedDateTime ge 2026-08-02T00:00:00Z")
-                        .is_true(|request| request.query_params().len() == 2)
+                        .is_true(|request| request.query_params().len() == 1)
                         .header("Prefer", "IdType=\"ImmutableId\"");
                     then.status(200)
                         .header("content-type", "application/json")
