@@ -1,6 +1,6 @@
 # ADR 0005: Use SQLCipher-backed SQLite for the local cache
 
-- Status: Proposed; Windows and key-lifecycle proof required
+- Status: Accepted based on the Windows x64 storage and key-lifecycle proof
 - Date: 2026-10-31
 - Owners: Project maintainer
 
@@ -18,19 +18,19 @@ The current candidate set is `async-sqlite` 0.6.0 with `rusqlite_migration` 2.6.
 
 The reviewed migration and executor crates depend on rusqlite 0.40.x, so Cargo resolves `rusqlite` 0.40.2. `rusqlite` 0.41.1 is newer, but the current `async-sqlite` and `rusqlite_migration` releases do not accept that line. Revisit this constraint when either library supports rusqlite 0.41.
 
-`rusqlite_migration` uses SQLite's `user_version` and applies migrations atomically. It has a smaller SQLite-specific dependency surface than Refinery 0.10.0, which supports rusqlite 0.40.x and Rust 1.92 but also provides other database backends, macros, and a CLI. Prefer `rusqlite_migration` for the SQLite-only cache. The exact candidate dependencies now appear as development dependencies in `tools/storage-proof/`; the package has no runtime code or application API. RustSec review and Windows x64 proof remain required before adding these dependencies to production crates.
+`rusqlite_migration` uses SQLite's `user_version` and applies migrations atomically. It has a smaller SQLite-specific dependency surface than Refinery 0.10.0, which supports rusqlite 0.40.x and Rust 1.92 but also provides other database backends, macros, and a CLI. Use `rusqlite_migration` for the SQLite-only cache. The exact candidate dependencies remain development dependencies in `tools/storage-proof/`; that package has no runtime code or application API. The implementation issue can add them to the persistence crate when it owns a real schema and cache workflow.
 
 `async-rusqlite` 0.6.0 is an alternative wrapper for rusqlite 0.41. It declares no MSRV, depends on `asyncified` for its channel implementation, and its README describes those channels as naive. Its README recommends `tokio-rusqlite` when executor independence is not needed. Do not use it for the current candidate set.
 
-Use `keyring` 4.2.0 with its default `v1` API as the cross-platform credential-store candidate. On Windows, that API selects `windows-native-keyring-store` 1.1.0 and Windows Credential Manager. Do not enable `keyring`'s `cli` feature. The key lifecycle, missing-key recovery, cache backup, and account-removal deletion behavior remain open, so this ADR is not accepted and no real mailbox data may be stored yet.
+Use `keyring` 4.2.0 with its default `v1` API for platform credential storage. On Windows, that API selects `windows-native-keyring-store` 1.1.0 and Windows Credential Manager. Do not enable `keyring`'s `cli` feature. The test-only proof in [PR #15](https://github.com/1fach/einfach-mail/pull/15) passed on Windows x64. It creates and retrieves a binary key, reopens the encrypted database and backup, rejects a missing key without replacing it or deleting encrypted files, and deletes the credential and account files on removal.
 
-The proof uses an OS-generated 32-byte key, stores it as binary credential data, and zeroizes Rust-owned copies. The backup destination receives the same SQLCipher key before SQLite's online backup API writes to it. The key is not included in the backup, so the proof only supports reopening a backup while the matching credential is available. Portable backup recovery remains an open product decision.
+The proof uses an OS-generated 32-byte key, stores it as binary credential data, and zeroizes Rust-owned copies. The backup destination receives the same SQLCipher key before SQLite's online backup API writes to it. The key is not included in the backup, so a backup can be opened only while its matching credential is available. Portable backup recovery remains an open product decision. If the credential is missing, the encrypted cache and pending local actions remain on disk but unavailable. The app must not create a replacement key or replay those actions. Account removal deletes the credential and account files.
 
 ## Alternatives
 
 | Option | Benefits | Costs and risks |
 | --- | --- | --- |
-| SQLCipher-backed SQLite through rusqlite | Relational queries, transactions, bundled encryption, mature SQLite ecosystem; Rust API stays behind the persistence adapter | SQLCipher and OpenSSL add native C build and licensing inputs. The vendored OpenSSL build needs a C compiler, Perl, and make. Windows also needs MSVC and NASM. A community Windows x64 report uses static OpenSSL from vcpkg and does not prove the vendored build. Windows encrypted read/write and credential-store behavior need project proof. |
+| SQLCipher-backed SQLite through rusqlite | Relational queries, transactions, bundled encryption, mature SQLite ecosystem; Rust API stays behind the persistence adapter | SQLCipher and OpenSSL add native C build and licensing inputs. The vendored OpenSSL build needs a C compiler, Perl, `Text::Template`, and make. Windows also needs MSVC and NASM. CI now installs these tools and proves the vendored build on Windows x64. |
 | SQLx with SQLite | Async query API, migrations, supports SQLite and server databases | The documented SQLite feature set does not offer a supported SQLCipher configuration. The SQLite driver also uses `libsqlite3-sys`, which must be coordinated with any rusqlite dependency. |
 | redb | Pure Rust, ACID transactions, concurrent readers | Key-value model increases query/index work for mail and calendar; the project docs do not provide database encryption. |
 | Turso | In-process relational engine implemented in Rust and compatible with much of SQLite | The project documents beta status and missing SQLite features; its manual says encryption is experimental and not ready for critical data. |
@@ -53,9 +53,9 @@ The proof uses an OS-generated 32-byte key, stores it as binary credential data,
 
 - Persistence owns SQL schemas, migrations, encryption setup, and transactions. It commits Graph changes and the matching cursor together.
 - SQLCipher is a deliberate native-code dependency in an otherwise Rust-first application because the compared pure-Rust database options do not meet the current relational and encryption requirements.
-- A proposed integration must build and run on Windows x64, create an encrypted database, write and reopen it, reject a wrong key, and apply migrations through the selected library set.
-- Before accepting the ADR, verify key creation and access through the Windows credential store, missing-key behavior, cache deletion on account removal, and what happens to local-only pending data if the key is lost.
-- The test-only backup proof applies the SQLCipher key to both database connections and verifies that the backup is encrypted and reopens with the original key. It does not export or package the key.
+- The test-only proof passed in PR #15. Windows x64 CI built vendored SQLCipher and OpenSSL, exercised Windows Credential Manager, and verified migrations, encrypted reads and writes, wrong-key rejection, backup reopening, missing-key behavior, and account removal.
+- The proof uses a synthetic pending action. Losing the key leaves the encrypted files intact but makes the action inaccessible. Production code must report that state and must not generate a replacement key or replay the action.
+- The test-only backup proof applies the SQLCipher key to both database connections and verifies that the backup is encrypted and reopens with the original key. It does not export or package the key. Portable recovery remains unresolved.
 - Do not put mailbox content or OAuth tokens in test fixtures, logs, or the credential-store test evidence.
 
 ## Sources
