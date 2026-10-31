@@ -1,6 +1,6 @@
 # ADR 0006: Use reqwest for Microsoft Graph transport
 
-- Status: Proposed; Linux synthetic proof passes, cross-platform CI and any required live Graph evidence pending
+- Status: Proposed; 13 synthetic contract tests and Rust 1.95 checks pass on Linux, Windows, and macOS in [CI run 41176065254](https://github.com/1fach/einfach-mail/actions/runs/41176065254). RustSec passed in [run 41176065229](https://github.com/1fach/einfach-mail/actions/runs/41176065229); any required live Graph evidence remains pending.
 - Date: 2026-10-30
 - Owners: Project maintainer
 
@@ -14,7 +14,7 @@ The desktop uses GPUI Kit and `smol`. `reqwest` uses Tokio, so keep its runtime 
 
 ## Decision
 
-Use `reqwest`, `serde`, and `serde_json` in the planned `crates/providers/microsoft-graph/` adapter. Keep the candidate dependencies in the proof package's `[dev-dependencies]` until the proof and cross-platform checks pass.
+Use `reqwest`, `serde`, and `serde_json` in the planned `crates/providers/microsoft-graph/` adapter. Keep candidate dependencies in the proof package's `[dev-dependencies]`; promote them only with the production provider implementation after this proposed boundary is accepted.
 
 Set `reqwest`'s default features to off. Enable only Rustls, HTTP/2, and system proxy support. Parse Graph JSON with `serde_json` instead of enabling `reqwest`'s JSON feature. Reuse one client. Disable redirects and automatic retries so the adapter controls Graph retry behavior.
 
@@ -46,7 +46,7 @@ Use the smallest `reqwest` feature set that supports the chosen TLS backend, HTT
 - The package has no application API. Tokio and HTTP types do not appear in the desktop or application crate interfaces.
 - Synthetic fixtures cover folder pagination, message and calendar-view delta rounds, malformed responses, Graph errors, `Retry-After` seconds and dates, fallback delay, redirects, and unauthorized responses. They also verify cancellation, shutdown, immutable IDs, and opaque-link validation.
 - The client does not retry 401 or 403 responses, does not follow redirects, rejects a next link outside the configured Graph authority, and emits no logs containing tokens, response bodies, or full URLs.
-- Linux tests and the RustSec audit pass. RustSec found no vulnerable or yanked crates; eight unmaintained transitive platform and rendering crates remain documented in the dependency review. The lockfile selects Rustls 0.23.46. Before accepting the ADR, verify Windows and macOS builds and tests in CI.
+- Linux, Windows, and macOS checks and tests pass in [CI run 41176065254](https://github.com/1fach/einfach-mail/actions/runs/41176065254). RustSec found no vulnerable or yanked crates in [run 41176065229](https://github.com/1fach/einfach-mail/actions/runs/41176065229); eight unmaintained transitive platform and rendering crates remain documented in the dependency review. The lockfile selects Rustls 0.23.46. Any required live Graph evidence remains before accepting the ADR.
 - Use a test tenant for Graph behavior that synthetic fixtures cannot establish. Do not use personal mailbox data.
 
 ## Sources

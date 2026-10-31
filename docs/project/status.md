@@ -15,7 +15,7 @@ M0 closeout and M1 identity and storage proofs. The one-commit native GPUI Kit f
 - `crates/domain` implements opaque account, folder, message, calendar, and event IDs. `crates/application` has no workflows yet. No provider, identity, persistence, or synchronization adapter exists.
 - Dependency candidates and the eight unmaintained transitive-crate findings are recorded in the [dependency review](dependency-review.md). The strict audit found no vulnerable or yanked crates.
 - The test-only [storage proof package](../../tools/storage-proof/) locks the candidate SQLCipher, migration, async-wrapper, and Windows keyring dependencies as dev-dependencies. Linux and Windows x64 CI passed in [PR #15](https://github.com/1fach/einfach-mail/pull/15), including vendored OpenSSL, migrations, encrypted backup, wrong-key rejection, Windows Credential Manager, missing-key behavior, and account removal. ADR 0005 is accepted from this proof. No production persistence dependency or cache API exists yet.
-- The test-only Graph transport proof passes 13 synthetic contract tests on Linux, including pagination, message and calendar delta rounds, immutable IDs, throttling, redirect and link validation, cancellation, and shutdown. Rust 1.95 checking and RustSec pass locally. Windows/macOS CI and any test-tenant evidence needed for live Graph behavior remain outstanding; ADR 0006 is still proposed.
+- The test-only Graph transport proof passes 13 synthetic contract tests on Linux, Windows, and macOS in [CI run 41176065254](https://github.com/1fach/einfach-mail/actions/runs/41176065254). Rust 1.95 checks pass on all three platforms, and [RustSec run 41176065229](https://github.com/1fach/einfach-mail/actions/runs/41176065229) found no vulnerable or yanked crates. Any test-tenant evidence needed for behavior that fixtures cannot establish remains outstanding; ADR 0006 is still proposed.
 
 ## Active risks
 
@@ -26,7 +26,7 @@ M0 closeout and M1 identity and storage proofs. The one-commit native GPUI Kit f
 
 ## Next actions
 
-1. Finish [issue #7](https://github.com/1fach/einfach-mail/issues/7) by confirming cross-platform CI and obtaining test-tenant evidence for any Graph behavior that fixtures cannot establish. Keep ADR 0006 proposed until its evidence is complete.
+1. Finish [issue #7](https://github.com/1fach/einfach-mail/issues/7) by obtaining test-tenant evidence for any Graph behavior that fixtures cannot establish. Keep ADR 0006 proposed until its evidence is complete.
 2. Use the completed authentication library comparison in the [dependency review](dependency-review.md) to guide [issue #3](https://github.com/1fach/einfach-mail/issues/3). Windows and Microsoft test-tenant evidence remain required before accepting ADR 0003.
 3. Start account connection work in [issue #5](https://github.com/1fach/einfach-mail/issues/5) after the authentication proof in issue #3 passes. Keep [issue #2](https://github.com/1fach/einfach-mail/issues/2) open until a Windows environment is available; it can remain open while M1 proceeds.
 
