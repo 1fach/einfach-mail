@@ -2,6 +2,7 @@
 einfach-mail-domain = []
 einfach-mail-application = ["einfach-mail-domain"]
 einfach-mail-desktop = ["einfach-mail-application"]
+einfach-mail-storage-proof = []
 
 [options]
 strict = true

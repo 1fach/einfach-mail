@@ -4,6 +4,7 @@ members = [
     "apps/desktop",
     "crates/application",
     "crates/domain",
+    "tools/storage-proof",
 ]
 
 [workspace.package]

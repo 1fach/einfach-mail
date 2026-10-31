@@ -23,12 +23,12 @@ GPUI Kit's published docs state Rust 1.92 or newer, but the locked GPUI dependen
 GPUI Kit documents these requirements for desktop development:
 
 - macOS 15 or later with Xcode Command Line Tools.
-- Windows 10 or later with Visual Studio 2022 Build Tools or Community, the Desktop development with C++ workload, a Windows SDK, and CMake. Use the MSVC Rust toolchain.
+- Windows 10 or later with Visual Studio 2022 Build Tools or Community, the Desktop development with C++ workload, a Windows SDK, and CMake. Use the MSVC Rust toolchain. The encrypted storage proof also needs Strawberry Perl with `Text::Template` and NASM for vendored OpenSSL; CI installs these explicitly.
 - Ubuntu 24.04 with the packages below. Other Linux distributions need equivalent development packages.
 
 ```sh
 sudo apt update
-sudo apt install -y gcc g++ clang pkg-config libfontconfig-dev libwayland-dev \
+sudo apt install -y gcc g++ clang make perl libtext-template-perl pkg-config libfontconfig-dev libwayland-dev \
   libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev \
   vulkan-validationlayers libvulkan1
 ```
@@ -41,8 +41,11 @@ On Fedora 44, install the corresponding development packages with:
 sudo dnf install gcc gcc-c++ clang pkgconf-pkg-config \
   fontconfig-devel freetype-devel wayland-devel wayland-protocols-devel \
   libxkbcommon-x11-devel libX11-devel libxcb-devel openssl-devel \
-  libzstd-devel vulkan-loader-devel vulkan-validation-layers
+  libzstd-devel vulkan-loader-devel vulkan-validation-layers make \
+  perl-FindBin perl-Text-Template
 ```
+
+The encrypted storage proof builds SQLCipher with vendored OpenSSL. Fedora packages Perl's `FindBin` and `Text::Template` modules separately, so install both packages before building the proof.
 
 The package list follows GPUI Kit's Linux build requirements. It omits GTK and WebKitGTK because the desktop app does not include the optional email WebView.
 
@@ -143,5 +146,13 @@ cargo doc --workspace --no-deps --locked
 cargo audit --deny yanked
 cargo test --workspace --locked
 ```
+
+Run the storage dependency proof by itself when working on the encryption or credential-store choices:
+
+```sh
+cargo test --locked --package einfach-mail-storage-proof
+```
+
+On Windows, this also exercises the current user's Windows Credential Manager with isolated, randomly named test entries. It uses synthetic records and removes the test credentials and cache files when the test finishes. The Windows CI job runs this test as part of the workspace suite.
 
 Use `cargo fmt --all` to format Rust files. Fix Clippy findings instead of suppressing them. Add an `#[expect(..., reason = "...")]` only for a narrow lint that is demonstrably wrong.

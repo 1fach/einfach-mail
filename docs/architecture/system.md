@@ -15,7 +15,7 @@ flowchart LR
     Graph -->|HTTPS with a private delegated token| MS[Microsoft Graph v1.0]
 ```
 
-The diagram shows planned behavior. The workspace currently contains a desktop shell, an application crate with no workflows yet, and a domain crate with opaque identifier types. Provider, persistence, and mail/calendar workflows are not implemented yet.
+The diagram shows planned behavior. The workspace currently contains a desktop shell, an application crate with no workflows yet, a domain crate with opaque identifier types, and a test-only storage proof package. Provider, production persistence, and mail/calendar workflows are not implemented yet.
 
 ## Module ownership
 
