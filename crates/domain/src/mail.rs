@@ -34,18 +34,26 @@ impl FolderReference {
     }
 }
 
-/// The parent folder belongs to a different account.
+/// The parent reference is invalid for this folder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use]
-pub struct ParentFolderAccountMismatch;
+pub enum FolderParentError {
+    /// The parent folder belongs to another account.
+    AccountMismatch,
+    /// A folder cannot be its own parent.
+    SelfParent,
+}
 
-impl fmt::Display for ParentFolderAccountMismatch {
+impl fmt::Display for FolderParentError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("parent folder must belong to the same account")
+        formatter.write_str(match self {
+            Self::AccountMismatch => "parent folder must belong to the same account",
+            Self::SelfParent => "a folder cannot be its own parent",
+        })
     }
 }
 
-impl std::error::Error for ParentFolderAccountMismatch {}
+impl std::error::Error for FolderParentError {}
 
 /// The mailbox address contains no non-whitespace characters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,17 +81,19 @@ impl MailFolder {
     ///
     /// # Errors
     ///
-    /// Returns [`ParentFolderAccountMismatch`] if the parent belongs to another account.
+    /// Returns [`FolderParentError`] if the parent belongs to another account or is this folder.
     pub fn new(
         reference: FolderReference,
         parent: Option<FolderReference>,
         display_name: String,
-    ) -> Result<Self, ParentFolderAccountMismatch> {
-        if parent
-            .as_ref()
-            .is_some_and(|parent| parent.account_id() != reference.account_id())
-        {
-            return Err(ParentFolderAccountMismatch);
+    ) -> Result<Self, FolderParentError> {
+        if let Some(parent) = parent.as_ref() {
+            if parent.account_id() != reference.account_id() {
+                return Err(FolderParentError::AccountMismatch);
+            }
+            if parent.folder_id() == reference.folder_id() {
+                return Err(FolderParentError::SelfParent);
+            }
         }
 
         Ok(Self {
@@ -348,10 +358,50 @@ impl MailMessage {
 mod tests {
     use std::time::{Duration, SystemTime};
 
+    use crate::{AccountId, FolderId, FolderReference};
+
     use super::{
-        EmptyMailboxAddress, Mailbox, MessageMetadata, MessageMetadataPatch, MessageOrigin,
-        ReadState,
+        EmptyMailboxAddress, FolderParentError, MailFolder, Mailbox, MessageMetadata,
+        MessageMetadataPatch, MessageOrigin, ReadState,
     };
+
+    fn folder_reference(account_id: &str, folder_id: &str) -> FolderReference {
+        let account_id =
+            AccountId::try_from(account_id.to_owned()).expect("synthetic account ID is non-empty");
+        let folder_id =
+            FolderId::try_from(folder_id.to_owned()).expect("synthetic folder ID is non-empty");
+        FolderReference::new(account_id, folder_id)
+    }
+
+    #[test]
+    fn mail_folder_rejects_parent_from_another_account() {
+        let reference = folder_reference("account-1", "folder-1");
+        let parent = folder_reference("account-2", "folder-2");
+
+        assert_eq!(
+            MailFolder::new(reference, Some(parent), "Child".to_owned()),
+            Err(FolderParentError::AccountMismatch)
+        );
+    }
+
+    #[test]
+    fn mail_folder_rejects_itself_as_parent() {
+        let reference = folder_reference("account-1", "folder-1");
+        let parent = reference.clone();
+
+        assert_eq!(
+            MailFolder::new(reference, Some(parent), "Folder".to_owned()),
+            Err(FolderParentError::SelfParent)
+        );
+    }
+
+    #[test]
+    fn mail_folder_accepts_a_distinct_parent_from_the_same_account() {
+        let reference = folder_reference("account-1", "folder-1");
+        let parent = folder_reference("account-1", "folder-2");
+
+        assert!(MailFolder::new(reference, Some(parent), "Child".to_owned()).is_ok());
+    }
 
     #[test]
     fn mailbox_requires_a_non_empty_address() {
