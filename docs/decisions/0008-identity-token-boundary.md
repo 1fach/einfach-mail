@@ -20,7 +20,7 @@ The provider's private identity module owns browser sign-in, PKCE, token exchang
 
 The desktop composition root wires the application workflows to one Microsoft provider instance. GPUI views receive account state, domain data, and user-safe errors. They never receive tokens or call identity, Graph, or credential-store code.
 
-This decision accepts ownership boundaries only. ADR 0003 still controls the OAuth implementation choice. Do not implement sign-in until its browser, tenant, Windows, Conditional Access, cancellation, refresh, sign-out, and credential-store checks pass.
+This decision accepts ownership boundaries only. ADR 0003 still controls the OAuth implementation choice. Do not implement sign-in until its Linux system-browser, test-tenant, Conditional Access, cancellation, refresh, sign-out, and Linux credential-store checks pass. Defer broker-specific and other-platform checks to their support milestones.
 
 ## Usage sketch
 

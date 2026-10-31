@@ -5,6 +5,8 @@
 
 ## Context
 
+Linux is the current development target. Windows and macOS support are deferred under [ADR 0010](0010-linux-first-development.md). Select and prove an authentication path for Linux first. Revisit WAM and other Windows-only requirements when Windows support begins.
+
 The desktop app is a public client. It cannot keep a client secret confidential. Microsoft recommends authorization code with PKCE and OpenID Connect through the system browser. The desktop configuration guide shows `http://localhost` for system-browser sign-in. Microsoft's redirect guidance prefers the loopback IP literal `127.0.0.1` because `localhost` can resolve incorrectly. Entra ignores the port for loopback redirect matching, but adding an HTTP IP-literal redirect requires editing the app registration manifest. Verify that registration path with a test tenant before choosing the callback host.
 
 Microsoft's published MSAL library list does not include Rust. The official `azure_identity` Rust crate documents developer-tool, Azure-hosted, and service-principal credentials, but not an interactive desktop public-client flow. Microsoft recommends MSAL where available and the system browser when MSAL cannot be used. Microsoft also notes that some native-app capabilities, such as proving that the app runs on a managed device, may not be available without MSAL. Windows WAM broker support is documented through MSAL and includes Conditional Access, FIDO, and Windows account integration.
@@ -34,16 +36,16 @@ No authentication implementation is selected. Keep the Rust library candidate re
 ## Spike acceptance criteria
 
 - Sign in and cancel sign-in through the system browser without embedding the Microsoft sign-in page in the app.
-- Verify the Entra app registration, loopback host and ephemeral port, redirect callback, PKCE verifier, state, and OIDC nonce handling on Windows.
+- Verify the Entra app registration, loopback host and ephemeral port, redirect callback, PKCE verifier, state, and OIDC nonce handling on Linux.
 - Prove that cancellation closes the callback listener and releases any waiting task.
-- Test work or school accounts, the selected personal-account policy, MFA, and Conditional Access with a test tenant. Include a managed-device policy case and record any limitation without MSAL or WAM.
+- Test work or school accounts, the selected personal-account policy, MFA, and Linux-compatible Conditional Access with a dedicated test tenant. If a policy requires managed-device attestation or a Windows broker, record the limitation and defer that case to M5.
 - Refresh tokens without prompting when allowed by tenant policy. Handle revoked consent and sign-out.
-- Store and remove credentials through the selected operating-system credential service.
+- Store and remove credentials through the selected Linux credential service. Defer Windows Credential Manager and macOS Keychain validation until those support milestones begin.
 - Prove that tokens never enter UI state, application logs, SQLite, crash reports, or test artifacts.
 - Compare `oauth2` plus `openidconnect`, `huskarl`, `loopauth`, `oauthkit`, and `oauth-toolkit` for the required flow. Document current maintenance, supported targets, license, feature cost, cancellation behavior, and security evidence.
 - If a candidate needs a different JWS verifier, use a maintained cryptography library. Do not implement signature algorithms in Einfach Mail.
 - Review the exact selected dependency graph with RustSec. Disable HTTP redirects for token and discovery requests.
-- Document any Microsoft-supported library or platform broker used, and identify remaining support gaps.
+- Document any Microsoft-supported library or platform broker used, and identify remaining support gaps. Record broker-only requirements as limitations until Windows support begins.
 
 ## Sources
 

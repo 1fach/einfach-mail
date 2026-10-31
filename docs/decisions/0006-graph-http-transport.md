@@ -41,7 +41,7 @@ Use the smallest `reqwest` feature set that supports the chosen TLS backend, JSO
 - The spike must prove that GPUI can await provider calls without blocking the UI, that shutdown and cancellation release requests, and that Tokio types remain private to the provider.
 - Sanitized fixtures must cover mail-folder pagination, message delta, calendar-view delta, Graph error responses, `Retry-After` as seconds and HTTP date, and the missing-header backoff path.
 - Verify that the client does not retry 401 or 403 responses, does not repeat a non-idempotent write, rejects a next link outside the configured Graph authority, and does not log tokens, message bodies, or full URLs.
-- Before accepting the ADR, build on Windows x64 and the current Linux target, run RustSec against the resolved lockfile, and verify that Rustls is at least 0.23.46. RustSec advisories for earlier Rustls releases were published in October 2026.
+- Before accepting the ADR, build and verify the transport on Linux, run RustSec against the resolved lockfile, and verify that Rustls is at least 0.23.46. Defer Windows and macOS validation to their support milestones. RustSec advisories for earlier Rustls releases were published in October 2026.
 - Use a test tenant only for behavior that fixtures cannot prove. Do not use personal mailbox data.
 
 ## Sources

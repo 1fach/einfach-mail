@@ -32,12 +32,8 @@ jobs:
         run: cargo deny check bans
 
   msrv:
-    name: Rust MSRV check 1.95.0 (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [blacksmith-2vcpu-ubuntu-2404-arm, blacksmith-2vcpu-windows-2025]
-    runs-on: ${{ matrix.os }}
+    name: Rust MSRV check 1.95.0 (Linux)
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -45,25 +41,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes gcc g++ clang make perl libtext-template-perl pkg-config libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev vulkan-validationlayers libvulkan1
-
-      - name: Install Windows OpenSSL build prerequisites
-        if: runner.os == 'Windows'
-        uses: ./.github/actions/windows-openssl-tools
 
       - name: Check the declared MSRV
         run: cargo check --workspace --all-targets --locked
 
   rust:
-    name: Rust checks (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [blacksmith-2vcpu-ubuntu-2404-arm, blacksmith-2vcpu-windows-2025]
-    runs-on: ${{ matrix.os }}
+    name: Rust checks (Linux)
+    runs-on: blacksmith-2vcpu-ubuntu-2404-arm
     steps:
       - uses: actions/checkout@v7
 
@@ -72,14 +59,9 @@ jobs:
           components: clippy, rustfmt
 
       - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes gcc g++ clang make perl libtext-template-perl pkg-config libfontconfig-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libssl-dev libzstd-dev vulkan-validationlayers libvulkan1
-
-      - name: Install Windows OpenSSL build prerequisites
-        if: runner.os == 'Windows'
-        uses: ./.github/actions/windows-openssl-tools
 
       - name: Check formatting
         run: cargo fmt --all -- --check

@@ -20,10 +20,10 @@ GPUI Kit's published docs state Rust 1.92 or newer, but the locked GPUI dependen
 
 ## Install native build tools
 
-GPUI Kit documents these requirements for desktop development:
+Linux is the only current development target. Add Windows and macOS setup instructions when those support milestones begin.
 
-- macOS 15 or later with Xcode Command Line Tools.
-- Windows 10 or later with Visual Studio 2022 Build Tools or Community, the Desktop development with C++ workload, a Windows SDK, and CMake. Use the MSVC Rust toolchain. The encrypted storage proof also needs Strawberry Perl with `Text::Template` and NASM for vendored OpenSSL; CI installs these explicitly.
+GPUI Kit documents these requirements for Linux desktop development:
+
 - Ubuntu 24.04 with the packages below. Other Linux distributions need equivalent development packages.
 
 ```sh
@@ -49,46 +49,15 @@ The encrypted storage proof builds SQLCipher with vendored OpenSSL. Fedora packa
 
 The package list follows GPUI Kit's Linux build requirements. It omits GTK and WebKitGTK because the desktop app does not include the optional email WebView.
 
-## Initialize Git and the main branch
+## Use the configured Git repository
 
-If `git status` says that this directory is not a repository, initialize Git on `main`:
-
-```sh
-git init -b main
-```
-
-If Git is already initialized, has no commits, and the current branch is `master`, rename it before the first commit:
+This repository already has a `main` branch and an `origin` remote. Do not initialize Git or create a first commit in this checkout. Before editing, check the current branch and preserve existing work:
 
 ```sh
-git branch -m main
+git status --short --branch
 ```
 
-Create the first commit:
-
-```sh
-git add .
-git commit -m "chore: establish project scaffold"
-```
-
-Create a remote repository, then connect it:
-
-```sh
-git remote add origin <repository-url>
-git push --set-upstream origin main
-```
-
-If the hosting plan supports branch protection, protect `main` by requiring pull requests and these CI checks before merging:
-
-- `Rust checks (ubuntu-latest)`
-- `Rust checks (windows-latest)`
-- `Rust checks (macos-latest)`
-- `Rust MSRV check 1.95.0 (ubuntu-latest)`
-- `Rust MSRV check 1.95.0 (windows-latest)`
-- `Rust MSRV check 1.95.0 (macos-latest)`
-- `Workspace dependency policy`
-- `RustSec audit`
-
-A solo project can omit reviewer approval while still requiring CI. Do not enable auto-merge until the first CI run has succeeded. If server-side protection is unavailable, use pull requests and verify all eight checks manually before merging; document that the gate is not enforced by the host.
+The private repository plan does not support required branch protection. Run the Linux project gate locally and review pull request checks before merging. Current CI checks are `Rust checks (Linux)`, `Rust MSRV check 1.95.0 (Linux)`, `Workspace dependency policy`, and `RustSec audit`.
 
 ## Start the desktop shell
 
@@ -114,10 +83,11 @@ Install the pinned RustSec audit tool and check the lockfile against the current
 
 ```sh
 cargo install cargo-audit --version 0.22.2 --locked --no-default-features
-cargo audit --deny yanked
+mkdir -p target
+cargo audit --db target/rustsec-advisory-db --deny yanked
 ```
 
-`cargo audit --deny yanked` reads `Cargo.lock`, fails when a locked crate is yanked, and does not update the lockfile. Do not suppress advisories globally; resolve them or record a narrow, reviewed exception.
+`cargo audit` reads `Cargo.lock`, fails when a locked crate is yanked, and does not update the lockfile. It stores the advisory database under ignored `target/rustsec-advisory-db` and may fetch updates. Do not suppress advisories globally; resolve them or record a narrow, reviewed exception.
 
 The [RustSec audit workflow](../../.github/workflows/rustsec-audit.yml) runs on pull requests, pushes to `main`, and weekly.
 
@@ -130,22 +100,17 @@ cargo depgraph-check check
 cargo deny check bans
 ```
 
-The strict allowlist in `depgraph-rules.toml` includes every workspace crate and its permitted direct internal dependencies, including dev-dependencies. Update it when adding a workspace crate or changing a crate boundary. The checker validates direct workspace edges; it does not inspect module-level boundaries inside a crate. `cargo deny check bans` enforces the explicit Tauri runtime and WebView crate bans in `deny.toml`. Run `bash scripts/check-no-tauri-target-dependencies.sh` to check the active dependency graph for each supported target. The target-disjoint `tauri-winrt-notification` lockfile entry is not part of an app build.
+The strict allowlist in `depgraph-rules.toml` includes every workspace crate and its permitted direct internal dependencies, including dev-dependencies. Update it when adding a workspace crate or changing a crate boundary. The checker validates direct workspace edges; it does not inspect module-level boundaries inside a crate. `cargo deny check bans` enforces the explicit Tauri runtime and WebView crate bans in `deny.toml`. Run `bash scripts/check-no-tauri-target-dependencies.sh` to check the active Linux dependency graph. The target-disjoint `tauri-winrt-notification` lockfile entry is not part of a Linux app build.
 
 ## Run project checks
 
-Run these commands from the repository root:
+Run the full Linux gate from the repository root before updating a branch:
 
 ```sh
-cargo depgraph-check check
-cargo deny check bans
-cargo +1.95.0 check --workspace --all-targets --locked
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo doc --workspace --no-deps --locked
-cargo audit --deny yanked
-cargo test --workspace --locked
+bash scripts/check-linux-local.sh
 ```
+
+The script runs the Rust 1.95 check, dependency-boundary and ban checks, the active Linux target graph, formatting, Clippy, documentation, RustSec, and workspace tests. If Perl lacks `FindBin.pm` but `pkg-config` finds system OpenSSL, it reports that it uses system OpenSSL for the local run. The workspace test command skips tests marked `ignore`.
 
 Run the storage dependency proof by itself when working on the encryption or credential-store choices:
 
@@ -153,6 +118,12 @@ Run the storage dependency proof by itself when working on the encryption or cre
 cargo test --locked --package einfach-mail-storage-proof
 ```
 
-On Windows, this also exercises the current user's Windows Credential Manager with isolated, randomly named test entries. It uses synthetic records and removes the test credentials and cache files when the test finishes. The Windows CI job runs this test as part of the workspace suite.
+On Linux, the default run includes a headless-safe test that verifies cache opening fails when Secret Service is unavailable. The credential lifecycle tests require an unlocked desktop Secret Service and are ignored by default. Run them explicitly with:
+
+```sh
+cargo test --locked --package einfach-mail-storage-proof -- --ignored --test-threads=1
+```
+
+They use randomly named synthetic credentials and clean them up. The earlier Windows Credential Manager proof in PR #15 is platform-specific evidence; Windows support remains deferred.
 
 Use `cargo fmt --all` to format Rust files. Fix Clippy findings instead of suppressing them. Add an `#[expect(..., reason = "...")]` only for a narrow lint that is demonstrably wrong.

@@ -15,14 +15,7 @@ Describe platform, permission, privacy, persistence, sync, and rollback risks.
 
 ## Checks and evidence
 
-- [ ] `cargo depgraph-check check`
-- [ ] `cargo deny check bans`
-- [ ] `cargo +1.95.0 check --workspace --all-targets --locked`
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- [ ] `cargo doc --workspace --no-deps --locked`
-- [ ] `cargo audit --deny yanked`
-- [ ] `cargo test --workspace --locked`
+- [ ] `bash scripts/check-linux-local.sh`
 - [ ] Attach UI or test-tenant evidence for behavior that source checks cannot prove.
 
-List the checks actually run. Do not claim checks that did not run.
+List any additional checks you ran and their results. Do not claim checks that did not run. The local gate skips the ignored live Secret Service tests; record those separately when you run them.

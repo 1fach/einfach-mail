@@ -2,17 +2,17 @@
 
 Milestones describe product outcomes. Track active implementation tasks and their acceptance criteria in GitHub issues. Use [project status](status.md) for the current milestone and immediate next actions. Update this roadmap when milestone scope or sequencing changes.
 
-## M0: Repository foundation — in progress
+## M0: Repository foundation — complete for Linux
 
-Provide a reproducible Rust workspace, native GPUI Kit shell, contributor workflow, and cross-platform baseline.
+Provide a reproducible Rust workspace, native GPUI Kit shell, contributor workflow, and Linux development baseline.
 
-Fedora startup is verified in [issue #1](https://github.com/1fach/einfach-mail/issues/1). Foundation [PR #13](https://github.com/1fach/einfach-mail/pull/13) was rebase-merged on 2026-10-31 as the single commit above the empty root. All eight PR checks passed, and the RustSec workflow passed on `main`; [issue #10](https://github.com/1fach/einfach-mail/issues/10) is closed. All jobs in the post-merge [main CI run](https://github.com/1fach/einfach-mail/actions/runs/41163440578) passed, including the Windows full Rust check. Keep [issue #2](https://github.com/1fach/einfach-mail/issues/2) open for the interactive Windows launch and complete it before closing M0. M1 can proceed while issue #2 remains open.
+Fedora startup is verified in [issue #1](https://github.com/1fach/einfach-mail/issues/1). Foundation [PR #13](https://github.com/1fach/einfach-mail/pull/13) was rebase-merged on 2026-10-31 as the single commit above the empty root. The historical Windows CI check passed in the post-merge run, but current development CI targets Linux only. The interactive Windows shell launch is deferred to [M5 issue #2](https://github.com/1fach/einfach-mail/issues/2); see [ADR 0010](../decisions/0010-linux-first-development.md).
 
 ## M1: Identity and local data — in progress
 
 Connect a supported Microsoft account with delegated access and prove that credentials and cached data stay within their approved security boundaries. The authentication and storage choices are recorded in ADRs [0003](../decisions/0003-desktop-authentication.md), [0005](../decisions/0005-encrypted-local-cache.md), and [0008](../decisions/0008-identity-token-boundary.md).
 
-M1 work is grouped under the [GitHub milestone](https://github.com/1fach/einfach-mail/milestone/2): [prove delegated sign-in](https://github.com/1fach/einfach-mail/issues/3), [prove encrypted storage](https://github.com/1fach/einfach-mail/issues/4), and [connect an account and display its identity](https://github.com/1fach/einfach-mail/issues/5). The foundation and main-branch audit gates are satisfied. The storage proof passed on Linux and Windows x64 in [PR #15](https://github.com/1fach/einfach-mail/pull/15), and ADR 0005 is accepted. Issue #3 still needs Windows and Microsoft 365 test-tenant evidence. Start issue #5 after the authentication proof in issue #3 passes. Issue #2 tracks the separate interactive shell launch and may remain open while M1 proceeds.
+M1 work is grouped under the [GitHub milestone](https://github.com/1fach/einfach-mail/milestone/2): [prove delegated sign-in](https://github.com/1fach/einfach-mail/issues/3), [connect an account and display its identity](https://github.com/1fach/einfach-mail/issues/5), and [prove Linux credential storage](https://github.com/1fach/einfach-mail/issues/20). The earlier storage proof in [PR #15](https://github.com/1fach/einfach-mail/pull/15) established Windows Credential Manager and SQLCipher behavior; it did not prove Linux Secret Service. The Linux credential lifecycle checks passed locally in Fedora. Keep issue #20 open until the current proof changes pass review. Issue #3 needs Linux system-browser and Microsoft 365 test-tenant evidence. Start issue #5 after the Linux authentication and storage gates pass.
 
 ## M2: Read-only mail — not started
 
@@ -22,18 +22,16 @@ M2 work is grouped under the [GitHub milestone](https://github.com/1fach/einfach
 
 ## M3: Read-only calendar — not started
 
-Show and synchronize calendar events with correct time-zone and recurrence behavior.
-
-The [M3 GitHub milestone](https://github.com/1fach/einfach-mail/milestone/3) tracks this work. Resolve the Graph time-zone mapping and recurrence design gate in [issue #6](https://github.com/1fach/einfach-mail/issues/6) before calendar implementation.
+Show and synchronize calendar events with correct time-zone and recurrence behavior. The [M3 GitHub milestone](https://github.com/1fach/einfach-mail/milestone/3) tracks this work. Resolve the Graph time-zone and recurrence design gate in [issue #6](https://github.com/1fach/einfach-mail/issues/6) before implementation.
 
 ## M4: Mail and calendar actions — not started
 
 Support the first defined mail and event changes with clear pending, confirmed, and failed states.
 
-## M5: Windows daily-use integration — not started
+## M5: Windows support and daily-use integration — not started
 
-Add and verify the Windows integrations that improve the core mail and calendar workflow, accessibility, installation, and account removal.
+Add and verify Windows shell launch, authentication and credential storage, accessibility, installation, account removal, and operating-system integrations for mail and calendar use.
 
-## M6: Broader release targets — not started
+## M6: macOS and broader release targets — not started
 
-Evaluate additional operating systems, account types, and release policies after the Windows workflow is reliable.
+Add and verify macOS support, then evaluate other account types and release policies after the core workflow is reliable.

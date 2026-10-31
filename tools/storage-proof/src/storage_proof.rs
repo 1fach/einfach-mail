@@ -3,7 +3,7 @@ use async_sqlite::{
     rusqlite::{Connection, backup::Backup},
 };
 use rusqlite_migration::{M, Migrations};
-#[cfg(windows)]
+#[cfg(target_os = "linux")]
 use std::io;
 use std::{
     error::Error,
@@ -28,20 +28,25 @@ impl DatabaseKey {
         Self(Zeroizing::new([byte; KEY_BYTES]))
     }
 
-    #[cfg(windows)]
+    #[cfg(target_os = "linux")]
     fn generate() -> ProofResult<Self> {
         let mut key = Zeroizing::new([0; KEY_BYTES]);
         getrandom::fill(key.as_mut())?;
         Ok(Self(key))
     }
 
-    #[cfg(windows)]
+    #[cfg(target_os = "linux")]
     fn from_secret(secret: Vec<u8>) -> ProofResult<Self> {
         let secret = Zeroizing::new(secret);
-        let key = <[u8; KEY_BYTES]>::try_from(secret.as_slice()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid database key length")
-        })?;
-        Ok(Self(Zeroizing::new(key)))
+        if secret.len() != KEY_BYTES {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "invalid database key length").into(),
+            );
+        }
+
+        let mut key = Zeroizing::new([0; KEY_BYTES]);
+        key.as_mut().copy_from_slice(secret.as_slice());
+        Ok(Self(key))
     }
 
     fn as_bytes(&self) -> &[u8; KEY_BYTES] {
@@ -237,30 +242,47 @@ fn encrypted_backup_can_be_reopened_with_the_original_key() -> ProofResult<()> {
     })
 }
 
-#[cfg(windows)]
-mod windows_credential_tests {
+#[cfg(target_os = "linux")]
+mod credential_tests {
     use super::*;
     use keyring::{Entry, Error as KeyringError};
+    use std::process::{Command, Output};
 
     const CREDENTIAL_SERVICE: &str = "com.einfach-mail.storage-proof";
+    const UNAVAILABLE_SERVICE_CHILD: &str = "EINFACH_MAIL_STORAGE_PROOF_UNAVAILABLE_SERVICE_CHILD";
 
-    struct TestCredential(Entry);
+    struct TestCredential {
+        username: String,
+    }
 
     impl TestCredential {
         fn create() -> ProofResult<Self> {
             let mut random_id = [0_u8; 16];
             getrandom::fill(&mut random_id)?;
             let username = format!("storage-proof-{}", hex::encode(random_id));
-            Ok(Self(Entry::new(CREDENTIAL_SERVICE, &username)?))
+            Ok(Self { username })
+        }
+
+        fn entry(&self) -> ProofResult<Entry> {
+            Ok(Entry::new(CREDENTIAL_SERVICE, &self.username)?)
         }
     }
 
     impl Drop for TestCredential {
         fn drop(&mut self) {
-            match self.0.delete_credential() {
+            let entry = match self.entry() {
+                Ok(entry) => entry,
+                Err(error) => {
+                    eprintln!(
+                        "could not initialize isolated storage proof credential for cleanup: {error}"
+                    );
+                    return;
+                }
+            };
+            match entry.delete_credential() {
                 Ok(()) | Err(KeyringError::NoEntry) => {}
                 Err(error) => {
-                    eprintln!("could not clean up isolated storage proof credential: {error}")
+                    eprintln!("could not clean up isolated storage proof credential: {error}");
                 }
             }
         }
@@ -271,23 +293,109 @@ mod windows_credential_tests {
         MissingKey,
     }
 
-    async fn open_or_create_cache(path: &Path, credential: &Entry) -> ProofResult<CacheOpen> {
-        let database_exists = path.try_exists()?;
-        let key = match credential.get_secret() {
-            Ok(secret) => DatabaseKey::from_secret(secret)?,
-            Err(KeyringError::NoEntry) if database_exists => return Ok(CacheOpen::MissingKey),
-            Err(KeyringError::NoEntry) => {
-                let key = DatabaseKey::generate()?;
-                credential.set_secret(key.as_bytes())?;
-                key
-            }
-            Err(error) => return Err(Box::new(error)),
-        };
-        Ok(CacheOpen::Open(open_encrypted_database(path, key).await?))
+    enum CredentialKey {
+        Existing(DatabaseKey),
+        Create,
+        Missing,
     }
 
-    async fn remove_account_data(credential: &Entry, account_directory: &Path) -> ProofResult<()> {
-        match credential.delete_credential() {
+    fn credential_key(
+        encrypted_data_exists: bool,
+        secret_result: keyring::Result<Vec<u8>>,
+    ) -> ProofResult<CredentialKey> {
+        match secret_result {
+            Ok(secret) => Ok(CredentialKey::Existing(DatabaseKey::from_secret(secret)?)),
+            Err(KeyringError::NoEntry) if encrypted_data_exists => Ok(CredentialKey::Missing),
+            Err(KeyringError::NoEntry) => Ok(CredentialKey::Create),
+            Err(error) => Err(Box::new(error)),
+        }
+    }
+
+    fn encrypted_data_exists(database_path: &Path, backup_path: &Path) -> ProofResult<bool> {
+        Ok(database_path.try_exists()? || backup_path.try_exists()?)
+    }
+
+    #[test]
+    fn credential_lookup_distinguishes_new_and_existing_caches() -> ProofResult<()> {
+        assert!(matches!(
+            credential_key(false, Err(KeyringError::NoEntry))?,
+            CredentialKey::Create
+        ));
+        assert!(matches!(
+            credential_key(true, Err(KeyringError::NoEntry))?,
+            CredentialKey::Missing
+        ));
+        let CredentialKey::Existing(existing_key) =
+            credential_key(true, Ok(vec![0x31; KEY_BYTES]))?
+        else {
+            return Err(io::Error::other("valid key was not accepted").into());
+        };
+        assert_eq!(existing_key.as_bytes(), &[0x31; KEY_BYTES]);
+        assert!(credential_key(true, Ok(vec![0x31; KEY_BYTES - 1])).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn backup_without_primary_still_requires_its_missing_credential() -> ProofResult<()> {
+        let directory = TempDir::new()?;
+        let database_path = directory.path().join("cache.sqlite3");
+        let backup_path = directory.path().join("cache.backup.sqlite3");
+        fs::write(&backup_path, b"synthetic encrypted backup")?;
+
+        let has_encrypted_data = encrypted_data_exists(&database_path, &backup_path)?;
+        assert!(!database_path.exists());
+        assert!(has_encrypted_data);
+        assert!(matches!(
+            credential_key(has_encrypted_data, Err(KeyringError::NoEntry))?,
+            CredentialKey::Missing
+        ));
+        assert!(backup_path.exists());
+        Ok(())
+    }
+
+    async fn open_or_create_cache(
+        database_path: &Path,
+        backup_path: &Path,
+        credential: &TestCredential,
+    ) -> ProofResult<CacheOpen> {
+        let credential_entry = credential.entry()?;
+        let has_encrypted_data = encrypted_data_exists(database_path, backup_path)?;
+        let key = match credential_key(has_encrypted_data, credential_entry.get_secret())? {
+            CredentialKey::Existing(key) => key,
+            CredentialKey::Missing => return Ok(CacheOpen::MissingKey),
+            CredentialKey::Create => {
+                let key = DatabaseKey::generate()?;
+                credential_entry.set_secret(key.as_bytes())?;
+                key
+            }
+        };
+        Ok(CacheOpen::Open(
+            open_encrypted_database(database_path, key).await?,
+        ))
+    }
+
+    #[test]
+    fn locked_credential_store_is_not_treated_as_a_missing_key() -> ProofResult<()> {
+        let locked_error = KeyringError::NoStorageAccess(Box::new(io::Error::other(
+            "synthetic locked Secret Service",
+        )));
+        let credential_lookup = credential_key(true, Err(locked_error));
+        let error = credential_lookup
+            .err()
+            .ok_or_else(|| io::Error::other("locked credential store was accepted as a key"))?;
+
+        assert!(matches!(
+            error.downcast_ref::<KeyringError>(),
+            Some(KeyringError::NoStorageAccess(_))
+        ));
+        Ok(())
+    }
+
+    fn remove_account_data(
+        credential: &TestCredential,
+        account_directory: &Path,
+    ) -> ProofResult<()> {
+        match credential.entry()?.delete_credential() {
             Ok(()) | Err(KeyringError::NoEntry) => {}
             Err(error) => return Err(Box::new(error)),
         }
@@ -306,31 +414,34 @@ mod windows_credential_tests {
     }
 
     async fn create_credentialed_cache(
-        credential: &Entry,
+        credential: &TestCredential,
         database_path: &Path,
         backup_path: &Path,
     ) -> ProofResult<()> {
-        let CacheOpen::Open(database) = open_or_create_cache(database_path, credential).await?
+        let CacheOpen::Open(database) =
+            open_or_create_cache(database_path, backup_path, credential).await?
         else {
             return Err(io::Error::other("new cache unexpectedly had no key").into());
         };
-        let stored_key = Zeroizing::new(credential.get_secret()?);
-        assert!(stored_key.as_slice() == database.key.as_bytes());
+        let stored_key = Zeroizing::new(credential.entry()?.get_secret()?);
+        assert_eq!(stored_key.as_slice(), database.key.as_bytes());
         apply_proof_migrations(&database.client).await?;
         write_synthetic_action(&database.client).await?;
         create_encrypted_backup(&database.client, backup_path, &database.key).await?;
         database.client.close().await?;
         drop(database);
-        assert_credentialed_cache_reopens(credential, database_path).await?;
-        assert_credentialed_cache_reopens(credential, backup_path).await?;
+        assert_credentialed_cache_reopens(credential, database_path, backup_path).await?;
+        assert_credentialed_cache_reopens(credential, backup_path, backup_path).await?;
         Ok(())
     }
 
     async fn assert_credentialed_cache_reopens(
-        credential: &Entry,
+        credential: &TestCredential,
         database_path: &Path,
+        backup_path: &Path,
     ) -> ProofResult<()> {
-        let CacheOpen::Open(database) = open_or_create_cache(database_path, credential).await?
+        let CacheOpen::Open(database) =
+            open_or_create_cache(database_path, backup_path, credential).await?
         else {
             return Err(io::Error::other("stored credential did not reopen the cache").into());
         };
@@ -345,23 +456,80 @@ mod windows_credential_tests {
     }
 
     async fn assert_missing_key_preserves_encrypted_files(
-        credential: &Entry,
+        credential: &TestCredential,
         database_path: &Path,
         backup_path: &Path,
     ) -> ProofResult<()> {
+        let database_before = fs::read(database_path)?;
+        let backup_before = fs::read(backup_path)?;
+
         assert!(matches!(
-            open_or_create_cache(database_path, credential).await?,
+            open_or_create_cache(database_path, backup_path, credential).await?,
             CacheOpen::MissingKey
         ));
-        assert!(database_path.exists());
-        assert!(backup_path.exists());
+        assert_file_unchanged(
+            database_path,
+            &database_before,
+            "database changed while its key was missing",
+        )?;
+        assert_file_unchanged(
+            backup_path,
+            &backup_before,
+            "backup changed while its key was missing",
+        )?;
+        assert_credential_is_missing(credential)?;
+        Ok(())
+    }
+
+    fn assert_credential_is_missing(credential: &TestCredential) -> ProofResult<()> {
         assert!(matches!(
-            credential.get_secret(),
+            credential.entry()?.get_secret(),
             Err(KeyringError::NoEntry)
         ));
         Ok(())
     }
 
+    fn assert_file_unchanged(
+        path: &Path,
+        expected_bytes: &[u8],
+        failure_message: &str,
+    ) -> ProofResult<()> {
+        assert_eq!(fs::read(path)?, expected_bytes, "{failure_message}");
+        Ok(())
+    }
+
+    async fn assert_missing_key_preserves_primary_cache(
+        credential: &TestCredential,
+        database_path: &Path,
+        backup_path: &Path,
+    ) -> ProofResult<()> {
+        create_credentialed_cache(credential, database_path, backup_path).await?;
+        credential.entry()?.delete_credential()?;
+        assert_missing_key_preserves_encrypted_files(credential, database_path, backup_path).await
+    }
+
+    async fn assert_missing_key_preserves_backup_without_primary(
+        credential: &TestCredential,
+        database_path: &Path,
+        backup_path: &Path,
+    ) -> ProofResult<()> {
+        fs::remove_file(database_path)?;
+        let backup_before_missing_key = fs::read(backup_path)?;
+        assert!(matches!(
+            open_or_create_cache(database_path, backup_path, credential).await?,
+            CacheOpen::MissingKey
+        ));
+        assert!(!database_path.exists());
+        assert_file_unchanged(
+            backup_path,
+            &backup_before_missing_key,
+            "backup changed while its key was missing",
+        )?;
+        assert_credential_is_missing(credential)?;
+        Ok(())
+    }
+
+    #[ignore = "requires a desktop Secret Service; run explicitly with --ignored"]
     #[test]
     fn missing_key_does_not_replace_a_key_or_open_pending_data() -> ProofResult<()> {
         smol::block_on(async {
@@ -370,20 +538,112 @@ mod windows_credential_tests {
             let database_path = account_directory.join("cache.sqlite3");
             let backup_path = account_directory.join("cache.backup.sqlite3");
             let credential = TestCredential::create()?;
-            create_credentialed_cache(&credential.0, &database_path, &backup_path).await?;
-            credential.0.delete_credential()?;
-            assert_missing_key_preserves_encrypted_files(
-                &credential.0,
+            assert_missing_key_preserves_primary_cache(&credential, &database_path, &backup_path)
+                .await?;
+            assert_missing_key_preserves_backup_without_primary(
+                &credential,
                 &database_path,
                 &backup_path,
             )
             .await?;
-            remove_account_data(&credential.0, &account_directory).await?;
+            remove_account_data(&credential, &account_directory)?;
             assert!(!account_directory.exists());
             Ok(())
         })
     }
 
+    fn assert_cache_open_fails_without_secret_service(
+        database_path: &Path,
+        backup_path: &Path,
+        credential: &TestCredential,
+    ) -> ProofResult<()> {
+        let error = smol::block_on(open_or_create_cache(database_path, backup_path, credential))
+            .err()
+            .ok_or_else(|| {
+                io::Error::other("cache opened even though the Secret Service was unavailable")
+            })?;
+        if matches!(
+            error.downcast_ref::<KeyringError>(),
+            Some(KeyringError::NoDefaultStore)
+        ) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    fn assert_existing_cache_is_preserved_without_secret_service(
+        directory: &TempDir,
+        credential: &TestCredential,
+    ) -> ProofResult<()> {
+        let database_path = directory.path().join("existing-cache.sqlite3");
+        let backup_path = directory.path().join("existing-cache.backup.sqlite3");
+        smol::block_on(create_database_backup(&database_path, &backup_path, 0x52))?;
+        assert_database_file_is_encrypted(&database_path)?;
+        assert_database_file_is_encrypted(&backup_path)?;
+        let database_before = fs::read(&database_path)?;
+        let backup_before = fs::read(&backup_path)?;
+
+        assert_cache_open_fails_without_secret_service(&database_path, &backup_path, credential)?;
+
+        assert_eq!(fs::read(database_path)?, database_before);
+        assert_eq!(fs::read(backup_path)?, backup_before);
+        Ok(())
+    }
+
+    fn assert_unavailable_secret_service_does_not_create_or_modify_a_cache() -> ProofResult<()> {
+        let directory = TempDir::new()?;
+        let database_path = directory.path().join("new-cache.sqlite3");
+        let backup_path = directory.path().join("new-cache.backup.sqlite3");
+        let credential = TestCredential::create()?;
+
+        assert_cache_open_fails_without_secret_service(&database_path, &backup_path, &credential)?;
+        assert!(!database_path.exists());
+        assert!(!backup_path.exists());
+        assert_existing_cache_is_preserved_without_secret_service(&directory, &credential)?;
+        Ok(())
+    }
+
+    fn run_with_unavailable_secret_service() -> ProofResult<()> {
+        let directory = TempDir::new()?;
+        let socket_path = directory.path().join("no-session-bus");
+        let bus_address = format!("unix:path={}", socket_path.display());
+        let child_test_output = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "storage_proof::credential_tests::unavailable_secret_service_does_not_create_or_modify_a_cache",
+            ])
+            .env("DBUS_SESSION_BUS_ADDRESS", bus_address)
+            .env(UNAVAILABLE_SERVICE_CHILD, "1")
+            .output()?;
+        verify_unavailable_service_child_run(&child_test_output)
+    }
+
+    fn verify_unavailable_service_child_run(child_test_output: &Output) -> ProofResult<()> {
+        let child_stdout = String::from_utf8_lossy(&child_test_output.stdout);
+        let test_started = child_stdout.contains("running 1 test");
+        if !child_test_output.status.success() || !test_started {
+            return Err(io::Error::other(format!(
+                "isolated unavailable-service check did not pass: stdout: {}; stderr: {}",
+                child_stdout,
+                String::from_utf8_lossy(&child_test_output.stderr),
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_secret_service_does_not_create_or_modify_a_cache() -> ProofResult<()> {
+        if std::env::var_os(UNAVAILABLE_SERVICE_CHILD).is_some() {
+            return assert_unavailable_secret_service_does_not_create_or_modify_a_cache();
+        }
+
+        // Keyring initialization is process-global, so use a child with an isolated D-Bus address.
+        run_with_unavailable_secret_service()
+    }
+
+    #[ignore = "requires a desktop Secret Service; run explicitly with --ignored"]
     #[test]
     fn account_removal_deletes_the_credential_and_is_idempotent() -> ProofResult<()> {
         smol::block_on(async {
@@ -392,14 +652,11 @@ mod windows_credential_tests {
             let database_path = account_directory.join("cache.sqlite3");
             let backup_path = account_directory.join("cache.backup.sqlite3");
             let credential = TestCredential::create()?;
-            create_credentialed_cache(&credential.0, &database_path, &backup_path).await?;
-            remove_account_data(&credential.0, &account_directory).await?;
-            assert!(matches!(
-                credential.0.get_secret(),
-                Err(KeyringError::NoEntry)
-            ));
+            create_credentialed_cache(&credential, &database_path, &backup_path).await?;
+            remove_account_data(&credential, &account_directory)?;
+            assert_credential_is_missing(&credential)?;
             assert!(!account_directory.exists());
-            remove_account_data(&credential.0, &account_directory).await?;
+            remove_account_data(&credential, &account_directory)?;
             Ok(())
         })
     }

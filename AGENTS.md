@@ -46,6 +46,11 @@ When a need comes up, first look for a maintained Rust library that fits it. For
 
 Do not claim that a feature works because it compiles. For provider work, verify the real request and response path against a test tenant or a recorded, sanitized fixture. Never place tokens, message bodies, addresses, or calendar details in fixtures, issues, logs, or pull request text.
 
+## Current platform and remote workflow
+
+- Focus current development and verification on Linux. Defer Windows and macOS implementation work until a later roadmap milestone.
+- Run applicable checks locally. Batch related changes into a reviewable unit; do not push partial changes just to start GitHub Actions.
+
 ## Keep the dependency direction
 
 ```text
