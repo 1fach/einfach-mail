@@ -36,6 +36,9 @@ pub enum MailWorkflowError {
     /// The encrypted local cache could not read or commit mail data.
     #[error("the local mail cache is unavailable")]
     Cache(#[from] MailCacheError),
+    /// The destination is not another visible folder in the same account.
+    #[error("the selected destination folder is unavailable")]
+    InvalidMoveDestination,
     /// Another mail operation already owns this account or folder.
     #[error("a mail operation is already active for this account or folder")]
     OperationInProgress,
@@ -207,6 +210,15 @@ pub enum FollowUpFlagUpdateOutcome {
         /// The cache error that prevented the update from being stored.
         cache_error: MailCacheError,
     },
+}
+
+/// Describes the local cache state after the provider confirms a message move.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageMoveOutcome {
+    /// The provider and encrypted cache both contain the moved message.
+    ConfirmedAndCached,
+    /// The provider confirmed the move, but a later account sync must repair the cache.
+    ConfirmedNeedsSync,
 }
 
 impl MailSyncReport {
@@ -766,12 +778,97 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         }
     }
 
+    /// Moves a cached message between two visible folders in one account.
+    ///
+    /// The operation holds both folder reservations through provider dispatch
+    /// and the cache transaction. A confirmed provider move remains successful
+    /// when the cache transaction fails; the caller then synchronizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailWorkflowError::InvalidMoveDestination`] for identical,
+    /// cross-account, or non-visible folders, a cache error when the folder
+    /// tree or source message is unavailable, or a provider error when Graph
+    /// does not confirm the move,
+    /// or [`MailWorkflowError::OperationInProgress`] when an affected scope is busy.
+    pub async fn move_message(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+        destination_folder: &FolderReference,
+    ) -> Result<MessageMoveOutcome, MailWorkflowError> {
+        validate_move_folder_pair(source_folder, destination_folder)?;
+        let _reservation =
+            self.reserve_folders(&[source_folder.clone(), destination_folder.clone()])?;
+        self.ensure_visible_move_folders(source_folder, destination_folder)
+            .await?;
+        self.ensure_cached_message(source_folder, message_id)
+            .await?;
+        self.confirm_and_cache_move(source_folder, message_id, destination_folder)
+            .await
+    }
+
+    async fn ensure_visible_move_folders(
+        &self,
+        source_folder: &FolderReference,
+        destination_folder: &FolderReference,
+    ) -> Result<(), MailWorkflowError> {
+        let folders = self.cache.list_folders(source_folder.account_id()).await?;
+        let source_visible = folders
+            .iter()
+            .any(|folder| folder.reference() == source_folder);
+        let destination_visible = folders
+            .iter()
+            .any(|folder| folder.reference() == destination_folder);
+        if source_visible && destination_visible {
+            Ok(())
+        } else {
+            Err(MailWorkflowError::InvalidMoveDestination)
+        }
+    }
+
+    async fn ensure_cached_message(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> Result<(), MailWorkflowError> {
+        if self
+            .cache
+            .read_message(source_folder, message_id)
+            .await?
+            .is_some()
+        {
+            Ok(())
+        } else {
+            Err(MailCacheError::MessageNotCached.into())
+        }
+    }
+
+    async fn confirm_and_cache_move(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+        destination_folder: &FolderReference,
+    ) -> Result<MessageMoveOutcome, MailWorkflowError> {
+        self.provider
+            .move_message(source_folder, message_id, destination_folder)
+            .await?;
+        match self
+            .cache
+            .move_message(source_folder, destination_folder, message_id)
+            .await
+        {
+            Ok(()) => Ok(MessageMoveOutcome::ConfirmedAndCached),
+            Err(_) => Ok(MessageMoveOutcome::ConfirmedNeedsSync),
+        }
+    }
+
     async fn prepare_message_write(
         &self,
         folder: &FolderReference,
         message_id: &MessageId,
     ) -> Result<OperationReservation, MailWorkflowError> {
-        let reservation = self.reserve_folder(folder)?;
+        let reservation = self.reserve_folders(std::slice::from_ref(folder))?;
         if self.cache.folder_write_sync_required(folder).await? {
             return Err(MailWorkflowError::FolderSyncRequired);
         }
@@ -819,7 +916,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         folder: &FolderReference,
         message_id: &MessageId,
     ) -> Result<(MailMessage, MessageBody, bool), MailWorkflowError> {
-        let _reservation = self.reserve_folder(folder)?;
+        let _reservation = self.reserve_folders(std::slice::from_ref(folder))?;
         let Some((message, cached_body)) = self.cache.read_message(folder, message_id).await?
         else {
             return Err(MailCacheError::MessageNotCached.into());
@@ -846,22 +943,26 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         Ok(())
     }
 
-    fn reserve_folder(
+    /// Atomically reserves every requested folder against account and folder operations.
+    fn reserve_folders(
         &self,
-        folder: &FolderReference,
+        folders: &[FolderReference],
     ) -> Result<OperationReservation, MailWorkflowError> {
+        let folders = folders.iter().cloned().collect::<HashSet<_>>();
         let mut reservations = self
             .reservations
             .lock()
             .map_err(|_| MailWorkflowError::StateUnavailable)?;
-        if reservations.accounts.contains(folder.account_id())
-            || !reservations.folders.insert(folder.clone())
-        {
+        if folders.iter().any(|folder| {
+            reservations.accounts.contains(folder.account_id())
+                || reservations.folders.contains(folder)
+        }) {
             return Err(MailWorkflowError::OperationInProgress);
         }
+        reservations.folders.extend(folders.iter().cloned());
         Ok(OperationReservation {
             reservations: Arc::clone(&self.reservations),
-            key: ReservationKey::Folder(folder.clone()),
+            key: ReservationKey::Folders(folders),
         })
     }
 
@@ -978,6 +1079,19 @@ fn request_cursor(
     }
 }
 
+fn validate_move_folder_pair(
+    source_folder: &FolderReference,
+    destination_folder: &FolderReference,
+) -> Result<(), MailWorkflowError> {
+    if source_folder.account_id() == destination_folder.account_id()
+        && source_folder != destination_folder
+    {
+        Ok(())
+    } else {
+        Err(MailWorkflowError::InvalidMoveDestination)
+    }
+}
+
 pub(crate) fn reserve_calendar_view(
     active: &Arc<Mutex<ActiveOperations>>,
     view: &CalendarViewReference,
@@ -1005,7 +1119,7 @@ pub(crate) struct ActiveOperations {
 
 enum ReservationKey {
     Account(AccountId),
-    Folder(FolderReference),
+    Folders(HashSet<FolderReference>),
     CalendarView(CalendarViewReference),
 }
 
@@ -1021,8 +1135,10 @@ impl Drop for OperationReservation {
                 ReservationKey::Account(account) => {
                     reservations.accounts.remove(account);
                 }
-                ReservationKey::Folder(folder) => {
-                    reservations.folders.remove(folder);
+                ReservationKey::Folders(folders) => {
+                    for folder in folders {
+                        reservations.folders.remove(folder);
+                    }
                 }
                 ReservationKey::CalendarView(view) => {
                     reservations.calendar_views.remove(view);

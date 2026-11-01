@@ -41,6 +41,9 @@ pub enum MailOperationError {
     /// The provider returned data that cannot be mapped to mail domain values.
     #[error("the mail service returned invalid data")]
     InvalidResponse,
+    /// The provider may have moved a message but did not return exact confirmation.
+    #[error("the message move outcome is unknown")]
+    MoveOutcomeUnknown,
     /// The response or traversal exceeded the provider's bounded work limits.
     #[error("the mail request exceeded its resource limits")]
     ResourceLimitExceeded,
@@ -249,6 +252,24 @@ pub trait MailProvider: Send + Sync {
         message_id: &MessageId,
         status: FollowUpFlagStatus,
     ) -> impl Future<Output = Result<FollowUpFlagStatus, MailOperationError>> + Send + '_;
+
+    /// Moves one message from `source_folder` into `destination_folder`.
+    ///
+    /// Implementations confirm the returned message ID and destination and do
+    /// not retry a request whose outcome is uncertain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailOperationError::AccountMismatch`] when either folder is
+    /// outside the signed-in account, [`MailOperationError::MoveOutcomeUnknown`]
+    /// when the provider may have moved the message without exact confirmation,
+    /// or another provider error when it rejects the request.
+    fn move_message(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+        destination_folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailOperationError>> + Send + '_;
 
     /// Sends one plain-text message as the signed-in account.
     ///

@@ -311,6 +311,22 @@ impl SqliteMailCache {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) async fn set_message_move_failure_for_tests(&self, enabled: bool) {
+        let statement = if enabled {
+            "CREATE TRIGGER fail_message_move BEFORE DELETE ON mail_messages BEGIN SELECT RAISE(ABORT, 'synthetic move failure'); END;"
+        } else {
+            "DROP TRIGGER IF EXISTS fail_message_move;"
+        };
+        self.client
+            .conn_and_then(|connection| -> Result<(), async_sqlite::Error> {
+                connection.execute_batch(statement)?;
+                Ok(())
+            })
+            .await
+            .expect("synthetic message move trigger can be updated");
+    }
+
     fn check_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
         if &self.account_id == account_id {
             Ok(())
@@ -779,6 +795,41 @@ impl MailCache for SqliteMailCache {
                         "DELETE FROM mail_folder_write_sync_requirement
                          WHERE account_id = ?1 AND folder_id = ?2",
                         params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                    )?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn move_message(
+        &self,
+        source_folder: &FolderReference,
+        destination_folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self
+            .check_folder(source_folder)
+            .and_then(|()| self.check_folder(destination_folder));
+        let source_folder = source_folder.clone();
+        let destination_folder = destination_folder.clone();
+        let message_id = message_id.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            if source_folder == destination_folder {
+                return Err(MailCacheError::InvalidData);
+            }
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    move_cached_message(
+                        &transaction,
+                        &source_folder,
+                        &destination_folder,
+                        &message_id,
                     )?;
                     transaction.commit()?;
                     Ok(())
@@ -1850,6 +1901,89 @@ fn folder_exists(connection: &Connection, folder: &FolderReference) -> CacheResu
         .is_some();
     Ok(exists)
 }
+
+fn move_cached_message(
+    transaction: &Transaction<'_>,
+    source_folder: &FolderReference,
+    destination_folder: &FolderReference,
+    message_id: &MessageId,
+) -> CacheResult<()> {
+    if !folder_exists(transaction, destination_folder)? {
+        return Err(CacheFailure::InvalidData);
+    }
+    insert_or_merge_destination_message(
+        transaction,
+        source_folder,
+        destination_folder,
+        message_id,
+    )?;
+    remove_source_message(transaction, source_folder, message_id)
+}
+
+fn insert_or_merge_destination_message(
+    transaction: &Transaction<'_>,
+    source_folder: &FolderReference,
+    destination_folder: &FolderReference,
+    message_id: &MessageId,
+) -> CacheResult<()> {
+    let inserted = transaction.execute(
+        MOVE_CACHED_MESSAGE_SQL,
+        params![
+            source_folder.account_id().as_str(),
+            source_folder.folder_id().as_str(),
+            message_id.as_str(),
+            destination_folder.folder_id().as_str()
+        ],
+    )?;
+    if inserted != 1 {
+        return Err(CacheFailure::MessageNotCached);
+    }
+    Ok(())
+}
+
+fn remove_source_message(
+    transaction: &Transaction<'_>,
+    source_folder: &FolderReference,
+    message_id: &MessageId,
+) -> CacheResult<()> {
+    let removed = transaction.execute(
+        "DELETE FROM mail_messages
+         WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+        params![
+            source_folder.account_id().as_str(),
+            source_folder.folder_id().as_str(),
+            message_id.as_str()
+        ],
+    )?;
+    if removed != 1 {
+        return Err(CacheFailure::MessageNotCached);
+    }
+    Ok(())
+}
+
+const MOVE_CACHED_MESSAGE_SQL: &str = "
+    INSERT INTO mail_messages (
+        account_id, folder_id, message_id, subject,
+        from_display_name, from_address, sender_display_name, sender_address,
+        received_seconds, received_nanoseconds, is_read, flag_status,
+        body_type, body_content
+    )
+    SELECT account_id, ?4, message_id, subject,
+           from_display_name, from_address, sender_display_name, sender_address,
+           received_seconds, received_nanoseconds, is_read, flag_status,
+           body_type, body_content
+    FROM mail_messages
+    WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3
+    ON CONFLICT (account_id, folder_id, message_id) DO UPDATE SET
+        subject = COALESCE(mail_messages.subject, excluded.subject),
+        from_display_name = COALESCE(mail_messages.from_display_name, excluded.from_display_name),
+        from_address = COALESCE(mail_messages.from_address, excluded.from_address),
+        sender_display_name = COALESCE(mail_messages.sender_display_name, excluded.sender_display_name),
+        sender_address = COALESCE(mail_messages.sender_address, excluded.sender_address),
+        flag_status = COALESCE(mail_messages.flag_status, excluded.flag_status),
+        body_type = COALESCE(mail_messages.body_type, excluded.body_type),
+        body_content = COALESCE(mail_messages.body_content, excluded.body_content)
+";
 
 fn read_cached_message(
     connection: &Connection,

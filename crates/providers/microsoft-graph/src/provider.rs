@@ -338,6 +338,30 @@ impl MailProvider for MicrosoftGraphProvider {
         })
     }
 
+    fn move_message(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+        destination_folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let source_folder = source_folder.clone();
+        let message_id = message_id.clone();
+        let destination_folder = destination_folder.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            if source_folder.account_id() != destination_folder.account_id() {
+                return Err(MailOperationError::AccountMismatch);
+            }
+            let account_id = source_folder.account_id();
+            let token = ensure_access_token(&config, account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let result = graph_api
+                .move_message(&message_id, &destination_folder, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, account_id, &token, result).await
+        })
+    }
+
     fn send_mail(
         &self,
         account_id: &AccountId,
@@ -506,6 +530,7 @@ fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
         | GraphError::Transport
         | GraphError::SendRejected
         | GraphError::SendOutcomeUnknown
+        | GraphError::MessageMoveOutcomeUnknown
         | GraphError::InvalidToken => CalendarOperationError::ServiceUnavailable,
     }
 }
@@ -553,6 +578,7 @@ fn map_graph_error(error: GraphError) -> MailOperationError {
         GraphError::InvalidResponse | GraphError::UnsafeLink | GraphError::InvalidRecord => {
             MailOperationError::InvalidResponse
         }
+        GraphError::MessageMoveOutcomeUnknown => MailOperationError::MoveOutcomeUnknown,
         GraphError::WorkerStart
         | GraphError::WorkerClosed
         | GraphError::Transport
@@ -578,6 +604,7 @@ fn map_profile_graph_error(error: GraphError) -> AccountOperationError {
         | GraphError::InvalidToken
         | GraphError::SendRejected
         | GraphError::SendOutcomeUnknown
+        | GraphError::MessageMoveOutcomeUnknown
         | GraphError::RateLimited { .. } => AccountOperationError::ServiceUnavailable,
     }
 }
@@ -615,8 +642,9 @@ fn map_send_graph_error(error: GraphError) -> MailSendProviderError {
         | GraphError::UnsafeLink
         | GraphError::InvalidRecord
         | GraphError::ResponseTooLarge
+        | GraphError::PaginationLimitExceeded
         | GraphError::MessageUpdateOutcomeUnknown
-        | GraphError::PaginationLimitExceeded => MailSendProviderError::ServiceUnavailable,
+        | GraphError::MessageMoveOutcomeUnknown => MailSendProviderError::ServiceUnavailable,
     }
 }
 
@@ -987,6 +1015,65 @@ mod tests {
             Err(MailSendProviderError::AccountMismatch)
         );
         unexpected_reply.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn message_move_is_account_scoped_and_uses_graph_confirmation() {
+        let server = MockServer::start_async().await;
+        let move_request = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/messages/message-123/move")
+                    .header("authorization", "Bearer synthetic-move-access")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .body(r#"{"destinationId":"archive"}"#);
+                then.status(201)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"message-123","parentFolderId":"archive"}"#);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let provider = synthetic_provider(
+            &server,
+            browser_sender,
+            Arc::new(MemoryRefreshTokenStore::new(None)),
+        );
+        let account =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: account.clone(),
+            access_token: Some(access_token("synthetic-move-access")),
+        });
+        let source = FolderReference::new(
+            account.clone(),
+            FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let destination = FolderReference::new(
+            account,
+            FolderId::try_from("archive".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let message_id =
+            MessageId::try_from("message-123".to_owned()).expect("synthetic message ID is valid");
+
+        assert_eq!(
+            provider
+                .move_message(&source, &message_id, &destination)
+                .await,
+            Ok(())
+        );
+        let other_account =
+            AccountId::try_from("other-account".to_owned()).expect("synthetic account ID is valid");
+        let other_destination = FolderReference::new(
+            other_account,
+            FolderId::try_from("archive".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        assert_eq!(
+            provider
+                .move_message(&source, &message_id, &other_destination)
+                .await,
+            Err(MailOperationError::AccountMismatch)
+        );
+        move_request.assert_calls_async(1).await;
     }
 
     #[test]

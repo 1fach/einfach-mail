@@ -32,6 +32,7 @@ pub(super) enum GraphOperation {
     MessageDelta,
     MessageBody,
     MessageUpdate,
+    MessageMove,
     MailSend,
     CalendarViewDelta,
 }
@@ -51,6 +52,7 @@ impl GraphOperation {
                 | Self::MessageDelta
                 | Self::MessageBody
                 | Self::MessageUpdate
+                | Self::MessageMove
                 | Self::CalendarViewDelta
         )
     }
@@ -141,6 +143,18 @@ impl GraphTransportHandle {
         }
     }
 
+    pub(super) async fn post_json(
+        &self,
+        operation: GraphOperation,
+        url: GraphUrl,
+        token: Arc<AccessToken>,
+        body: Vec<u8>,
+    ) -> Result<Vec<u8>, GraphError> {
+        self.request(operation, GraphRequestMethod::PostJson(body), url, token)
+            .await?
+            .into_body()
+    }
+
     pub(super) async fn get_message_delta(
         &self,
         url: GraphUrl,
@@ -190,6 +204,7 @@ impl GraphTransportHandle {
         response.await.map_err(|_| match operation {
             GraphOperation::MailSend => GraphError::SendOutcomeUnknown,
             GraphOperation::MessageUpdate => GraphError::MessageUpdateOutcomeUnknown,
+            GraphOperation::MessageMove => GraphError::MessageMoveOutcomeUnknown,
             _ => GraphError::WorkerClosed,
         })?
     }
@@ -404,8 +419,16 @@ async fn request_with_retry(
             Err(GraphError::Transport) if matches!(request.operation, GraphOperation::MailSend) => {
                 return Some(Err(GraphError::SendOutcomeUnknown));
             }
+            Err(GraphError::Transport)
+                if matches!(request.operation, GraphOperation::MessageMove) =>
+            {
+                return Some(Err(GraphError::MessageMoveOutcomeUnknown));
+            }
             Err(error) => return Some(Err(error)),
         };
+        if matches!(request.operation, GraphOperation::MessageMove) {
+            return message_move_response_result(response, reply).await;
+        }
         if matches!(request.operation, GraphOperation::MessageUpdate) {
             return message_update_response_result(response, reply).await;
         }
@@ -511,6 +534,31 @@ async fn response_result(
         status if status.is_success() => read_limited_body(response, reply).await,
         _ => Some(Err(GraphError::Transport)),
     }
+}
+
+/// Returns a single move response, preserving uncertainty when Graph may have applied it.
+async fn message_move_response_result(
+    response: Response,
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
+) -> Option<Result<GraphResponse, GraphError>> {
+    let status = response.status();
+    if status == StatusCode::CREATED {
+        return match read_limited_body(response, reply).await? {
+            Ok(body) => Some(Ok(body)),
+            Err(_) => Some(Err(GraphError::MessageMoveOutcomeUnknown)),
+        };
+    }
+    let error = match status {
+        StatusCode::UNAUTHORIZED => Err(GraphError::AccessTokenRejected),
+        StatusCode::FORBIDDEN => Err(GraphError::AccessDenied),
+        StatusCode::TOO_MANY_REQUESTS => Err(rate_limit_error(&response)),
+        StatusCode::REQUEST_TIMEOUT => Err(GraphError::MessageMoveOutcomeUnknown),
+        status if status.is_server_error() || status.is_success() || status.is_redirection() => {
+            Err(GraphError::MessageMoveOutcomeUnknown)
+        }
+        _ => Err(GraphError::Transport),
+    };
+    Some(error)
 }
 
 async fn message_update_response_result(
@@ -1092,6 +1140,74 @@ mod tests {
             };
             assert_eq!(result, expected, "PATCH response status {status}");
             patch.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn message_move_post_uses_immutable_ids_and_accepts_created_once() {
+        let server = MockServer::start_async().await;
+        let post = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/messages/synthetic-message/move")
+                    .header("authorization", "Bearer synthetic-access-token")
+                    .header("content-type", "application/json")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .body(r#"{"destinationId":"archive"}"#);
+                then.status(201).body("synthetic move response");
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+        let response = transport
+            .handle()
+            .post_json(
+                GraphOperation::MessageMove,
+                graph_url(&server.url("/v1.0/me/messages/synthetic-message/move")),
+                synthetic_access_token(),
+                br#"{"destinationId":"archive"}"#.to_vec(),
+            )
+            .await
+            .expect("201 returns the move confirmation body");
+
+        assert_eq!(response, b"synthetic move response");
+        post.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn message_move_post_never_retries_uncertain_statuses() {
+        for status in [200, 503] {
+            let server = MockServer::start_async().await;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let responder_calls = Arc::clone(&calls);
+            let post = server
+                .mock_async(move |when, then| {
+                    when.method(POST)
+                        .path("/v1.0/me/messages/synthetic-message/move");
+                    then.respond_with(move |_request: &HttpMockRequest| {
+                        responder_calls.fetch_add(1, Ordering::SeqCst);
+                        HttpMockResponse::builder()
+                            .status(status)
+                            .body("synthetic uncertain response")
+                            .build()
+                    });
+                })
+                .await;
+            let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+            let result = transport
+                .handle()
+                .post_json(
+                    GraphOperation::MessageMove,
+                    graph_url(&server.url("/v1.0/me/messages/synthetic-message/move")),
+                    synthetic_access_token(),
+                    br#"{"destinationId":"archive"}"#.to_vec(),
+                )
+                .await;
+
+            assert_eq!(result, Err(GraphError::MessageMoveOutcomeUnknown));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            post.assert_calls_async(1).await;
         }
     }
 

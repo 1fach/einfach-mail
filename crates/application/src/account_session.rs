@@ -11,8 +11,8 @@ use crate::{
     CalendarCache, CalendarProvider, CalendarSnapshot, CalendarSyncReport, CalendarWorkflow,
     CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCache, MailCacheError, MailProvider,
     MailSendOutcome, MailSendResolutionError, MailSendWorkflowError, MailSyncProgress,
-    MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError, OpenedMessage,
-    ReadStateUpdateOutcome,
+    MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError, MessageMoveOutcome,
+    OpenedMessage, ReadStateUpdateOutcome,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -118,6 +118,21 @@ pub trait MailSession: Send + Sync {
         message_id: &'a MessageId,
         status: FollowUpFlagStatus,
     ) -> AccountSessionFuture<'a, Result<FollowUpFlagUpdateOutcome, MailWorkflowError>>;
+
+    /// Moves a cached message to another visible folder in the same account.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider or cache error when the move cannot be confirmed,
+    /// [`MailWorkflowError::InvalidMoveDestination`] for a folder outside the
+    /// cached visible tree, or [`MailWorkflowError::OperationInProgress`] when
+    /// another operation owns either folder or the account.
+    fn move_message<'a>(
+        &'a self,
+        source_folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        destination_folder: &'a FolderReference,
+    ) -> AccountSessionFuture<'a, Result<MessageMoveOutcome, MailWorkflowError>>;
 
     /// Sends a plain-text message and saves a body-free marker before dispatch.
     fn send_message<'a>(
@@ -358,6 +373,20 @@ where
     ) -> AccountSessionFuture<'a, Result<FollowUpFlagUpdateOutcome, MailWorkflowError>> {
         Box::pin(MailWorkflow::set_message_follow_up_flag_status(
             self, folder, message_id, status,
+        ))
+    }
+
+    fn move_message<'a>(
+        &'a self,
+        source_folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        destination_folder: &'a FolderReference,
+    ) -> AccountSessionFuture<'a, Result<MessageMoveOutcome, MailWorkflowError>> {
+        Box::pin(MailWorkflow::move_message(
+            self,
+            source_folder,
+            message_id,
+            destination_folder,
         ))
     }
 

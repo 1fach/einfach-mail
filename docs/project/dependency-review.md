@@ -68,6 +68,10 @@ No direct replacement or audit suppression is added for M0. These maintenance wa
 
 ## Candidates
 
+### Native message move — 2026-11-01
+
+No new crate is needed for issue #33. Microsoft Graph v1.0 provides a message move action with a `destinationId`; the existing private Reqwest transport, Serde response parsing, GPUI Kit `DropdownMenu` and `PopupMenuItem`, and SQLCipher cache transaction cover the operation. The application can coordinate account and folder reservations without a general-purpose queue library. The move uses delegated `Mail.ReadWrite`, which the provider already requests for message updates. A generic Graph SDK would not replace the app's strict unknown-outcome policy or transactional cache reconciliation, so the implementation keeps the existing boundary.
+
 ### Plain-text message recipient validation — 2026-11-01
 
 | Candidate | Evidence | Decision |

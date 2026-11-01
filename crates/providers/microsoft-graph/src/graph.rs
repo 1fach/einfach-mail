@@ -237,6 +237,31 @@ impl GraphApi {
         confirmed_follow_up_flag_status(&response, status)
     }
 
+    pub(super) async fn move_message(
+        &self,
+        message_id: &MessageId,
+        destination_folder: &FolderReference,
+        token: Arc<AccessToken>,
+    ) -> Result<(), GraphError> {
+        let url = self.authority.message_move_path(message_id.as_str())?;
+        let response = self
+            .transport
+            .post_json(
+                GraphOperation::MessageMove,
+                url,
+                token,
+                message_move_body(destination_folder.folder_id().as_str())?
+                    .as_ref()
+                    .to_vec(),
+            )
+            .await?;
+        confirmed_message_move(
+            &response,
+            message_id,
+            destination_folder.folder_id().as_str(),
+        )
+    }
+
     pub(super) async fn send_mail(
         &self,
         draft: &MailDraft,
@@ -1025,6 +1050,40 @@ fn follow_up_flag_patch_body(status: FollowUpFlagStatus) -> Arc<[u8]> {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WireMessageMoveRequest<'a> {
+    destination_id: &'a str,
+}
+
+fn message_move_body(destination_id: &str) -> Result<Arc<[u8]>, GraphError> {
+    serde_json::to_vec(&WireMessageMoveRequest { destination_id })
+        .map(Arc::from)
+        .map_err(|_| GraphError::InvalidRecord)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireMovedMessage {
+    id: String,
+    parent_folder_id: String,
+}
+
+fn confirmed_message_move(
+    response: &[u8],
+    requested_message_id: &MessageId,
+    requested_destination_id: &str,
+) -> Result<(), GraphError> {
+    let moved = serde_json::from_slice::<WireMovedMessage>(response)
+        .map_err(|_| GraphError::MessageMoveOutcomeUnknown)?;
+    if moved.id != requested_message_id.as_str()
+        || moved.parent_folder_id != requested_destination_id
+    {
+        return Err(GraphError::MessageMoveOutcomeUnknown);
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct WireMessageFollowUpFlagUpdate {
     flag: WireFollowUpFlag,
@@ -1082,8 +1141,8 @@ mod tests {
     use super::{
         GraphApi, MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget,
         WireCalendarEvent, WireFolder, WireMessage, WireMessageChange,
-        confirmed_follow_up_flag_status, confirmed_read_state, follow_up_flag_patch_body,
-        mail_reply_body, read_state_patch_body,
+        confirmed_follow_up_flag_status, confirmed_message_move, confirmed_read_state,
+        follow_up_flag_patch_body, mail_reply_body, message_move_body, read_state_patch_body,
     };
     use crate::{
         error::GraphError,
@@ -1152,6 +1211,69 @@ mod tests {
             GraphTransport::start_for_fixtures().expect("synthetic Graph transport worker starts");
         let handle: GraphTransportHandle = transport.handle();
         (GraphApi::new(authority, handle), transport)
+    }
+
+    #[tokio::test]
+    async fn move_message_sends_one_immutable_id_request_and_checks_destination() {
+        let server = MockServer::start_async().await;
+        let post = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/messages/synthetic-message/move")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .header("content-type", "application/json")
+                    .body(r#"{"destinationId":"archive"}"#);
+                then.status(201)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"synthetic-message","parentFolderId":"archive"}"#);
+            })
+            .await;
+        let (graph_api, transport) = synthetic_graph_api(&server);
+        let message_id = MessageId::try_from("synthetic-message".to_owned())
+            .expect("synthetic message ID is valid");
+        let destination = FolderReference::new(
+            AccountId::try_from("synthetic-account".to_owned())
+                .expect("synthetic account ID is valid"),
+            FolderId::try_from("archive".to_owned()).expect("synthetic folder ID is valid"),
+        );
+
+        let result = graph_api
+            .move_message(&message_id, &destination, synthetic_access_token())
+            .await;
+
+        assert_eq!(result, Ok(()));
+        post.assert_calls_async(1).await;
+        drop(transport);
+    }
+
+    #[test]
+    fn message_move_confirmation_requires_matching_message_and_folder() {
+        let message_id = MessageId::try_from("synthetic-message".to_owned())
+            .expect("synthetic message ID is valid");
+        assert_eq!(
+            message_move_body("archive")
+                .expect("synthetic move body serializes")
+                .as_ref(),
+            br#"{"destinationId":"archive"}"#
+        );
+        assert_eq!(
+            confirmed_message_move(
+                br#"{"id":"synthetic-message","parentFolderId":"archive"}"#,
+                &message_id,
+                "archive"
+            ),
+            Ok(())
+        );
+        for response in [
+            br#"{}"#.as_slice(),
+            br#"{"id":"different-message","parentFolderId":"archive"}"#,
+            br#"{"id":"synthetic-message","parentFolderId":"inbox"}"#,
+        ] {
+            assert_eq!(
+                confirmed_message_move(response, &message_id, "archive"),
+                Err(GraphError::MessageMoveOutcomeUnknown)
+            );
+        }
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub(super) enum GraphError {
     MessageUpdateOutcomeUnknown,
     SendRejected,
     SendOutcomeUnknown,
+    MessageMoveOutcomeUnknown,
     InvalidResponse,
     UnsafeLink,
     InvalidRecord,

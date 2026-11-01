@@ -83,6 +83,14 @@ impl GraphAuthority {
         self.validated_url(self.message_path(message_id)?)
     }
 
+    pub(super) fn message_move_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
+        let mut url = self.message_path(message_id)?;
+        url.path_segments_mut()
+            .map_err(|()| GraphError::UnsafeLink)?
+            .push("move");
+        self.validated_url(url)
+    }
+
     pub(super) fn message_reply_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
         let mut url = self.message_path(message_id)?;
         url.path_segments_mut()
