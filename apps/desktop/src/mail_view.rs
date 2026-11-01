@@ -21,6 +21,28 @@ use gpui_kit::{
     prelude::*, px, size,
 };
 
+gpui_kit::actions!(
+    mail_message_list,
+    [
+        SelectPreviousMessage,
+        SelectNextMessage,
+        SelectFirstMessage,
+        SelectLastMessage,
+    ]
+);
+
+const MESSAGE_LIST_CONTEXT: &str = "MailMessageList";
+
+pub(crate) fn bind_message_navigation_keys(cx: &mut App) {
+    let context = Some(MESSAGE_LIST_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("up", SelectPreviousMessage, context),
+        KeyBinding::new("down", SelectNextMessage, context),
+        KeyBinding::new("home", SelectFirstMessage, context),
+        KeyBinding::new("end", SelectLastMessage, context),
+    ]);
+}
+
 pub(crate) enum MailViewEvent {
     BackToAccount,
 }
@@ -36,6 +58,8 @@ where
     selected_folder: Option<FolderReference>,
     messages: Vec<MailMessage>,
     message_row_sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
+    message_list_focus: FocusHandle,
+    message_list_scroll: VirtualListScrollHandle,
     sync_state: Option<MailSyncState>,
     sync_status: SyncStatus,
     sync_running: bool,
@@ -83,6 +107,8 @@ where
             selected_folder: None,
             messages: Vec::new(),
             message_row_sizes: Rc::new(Vec::new()),
+            message_list_focus: cx.focus_handle().tab_stop(true),
+            message_list_scroll: VirtualListScrollHandle::new(),
             sync_state: None,
             sync_status: SyncStatus::LoadingCache,
             sync_running: true,
@@ -145,6 +171,8 @@ where
     }
 
     fn set_messages(&mut self, messages: Vec<MailMessage>) {
+        self.message_list_scroll
+            .scroll_to_item(0, ScrollStrategy::Top);
         self.message_row_sizes = Rc::new(vec![size(px(1.), px(72.)); messages.len()]);
         self.messages = messages;
     }
@@ -246,6 +274,80 @@ where
             });
         }));
         cx.notify();
+    }
+
+    fn navigate_message(&mut self, navigation: MessageNavigation, cx: &mut Context<Self>) {
+        if self.sync_running || self.message_update_in_progress() {
+            return;
+        }
+        let selected_index = self.selected_message_id.as_ref().and_then(|selected| {
+            self.messages
+                .iter()
+                .position(|message| message.id() == selected)
+        });
+        let Some(target_index) = navigation.target_index(selected_index, self.messages.len())
+        else {
+            return;
+        };
+        let Some(message) = self.messages.get(target_index) else {
+            return;
+        };
+        if self.selected_message_id.as_ref() == Some(message.id()) {
+            return;
+        }
+        self.message_list_scroll
+            .scroll_to_item(target_index, ScrollStrategy::Nearest);
+        self.select_message(message.id().clone(), cx);
+    }
+
+    fn select_message_from_option(
+        &mut self,
+        message_id: MessageId,
+        expected_folder: &FolderReference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_folder.as_ref() != Some(expected_folder) {
+            return;
+        }
+        self.message_list_focus.focus(window, cx);
+        self.select_message(message_id, cx);
+    }
+
+    fn on_select_previous_message(
+        &mut self,
+        _: &SelectPreviousMessage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_message(MessageNavigation::Previous, cx);
+    }
+
+    fn on_select_next_message(
+        &mut self,
+        _: &SelectNextMessage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_message(MessageNavigation::Next, cx);
+    }
+
+    fn on_select_first_message(
+        &mut self,
+        _: &SelectFirstMessage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_message(MessageNavigation::First, cx);
+    }
+
+    fn on_select_last_message(
+        &mut self,
+        _: &SelectLastMessage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_message(MessageNavigation::Last, cx);
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -752,6 +854,55 @@ fn message_sender(message: &MailMessage) -> String {
         )
 }
 
+fn message_option_element(
+    presentation: &MessageOptionPresentation,
+    colors: MessageRowColors,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let message_id = &presentation.message_id;
+    let selected = presentation.selected;
+    div()
+        .id(format!("message-option-{}", message_id.as_str()))
+        .debug_selector(|| format!("message-row-{}", message_id.as_str()))
+        .w_full()
+        .h(px(72.))
+        .px_3()
+        .py_3()
+        .rounded_md()
+        .text_color(colors.foreground)
+        .role(Role::ListBoxOption)
+        .aria_label(presentation.accessible_label.clone())
+        .aria_position_in_set(presentation.position)
+        .aria_size_of_set(presentation.list_size)
+        .aria_selected(selected)
+        .when(selected, |option| {
+            option
+                .aria_active_descendant()
+                .bg(colors.selected_background)
+        })
+        .hover(|option| {
+            option.bg(if selected {
+                colors.selected_background
+            } else {
+                colors.hover_background
+            })
+        })
+        .when(presentation.disabled, |option| option.opacity(0.6))
+        .child(message_option_content(
+            presentation.sender.clone(),
+            presentation.subject.clone(),
+        ))
+}
+
+fn message_option_content(sender: SharedString, subject: SharedString) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().w_full().text_sm().font_bold().child(sender))
+        .child(div().w_full().text_sm().child(subject))
+}
+
 fn elapsed_label(last_sync: SystemTime) -> String {
     let elapsed = SystemTime::now()
         .duration_since(last_sync)
@@ -1066,6 +1217,141 @@ mod tests {
         context.update(|window, app| {
             let _ = window.draw(app);
         });
+    }
+
+    fn append_synthetic_messages(cache: &FixtureCache, message_count: usize) -> Vec<MessageId> {
+        let mut state = cache.0.lock().expect("fixture cache mutex is healthy");
+        let template = state
+            .messages
+            .first()
+            .cloned()
+            .expect("fixture cache has a synthetic message");
+        let mut message_ids = vec![template.id().clone()];
+        for index in 2..=message_count {
+            let message_id = MessageId::try_from(format!("message-{index}"))
+                .expect("synthetic message ID is valid");
+            state.messages.push(MailMessage::new(
+                template.folder().clone(),
+                message_id.clone(),
+                template.metadata().clone(),
+            ));
+            message_ids.push(message_id);
+        }
+        message_ids
+    }
+
+    fn press_window_key(context: &mut VisualTestContext, key: &str) {
+        context.simulate_keystrokes(key);
+    }
+
+    fn assert_selected_message(
+        context: &mut VisualTestContext,
+        view: &gpui_kit::Entity<MailView<OfflineProvider, FixtureCache>>,
+        expected: Option<&MessageId>,
+    ) {
+        let selected = context
+            .cx
+            .update(|cx| view.read(cx).selected_message_id.clone());
+        assert_eq!(selected.as_ref(), expected);
+    }
+
+    #[gpui_kit::test]
+    async fn cached_message_list_navigates_by_keyboard_and_keeps_one_tab_stop(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            bind_message_navigation_keys(cx);
+        });
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, _) = fixture(account);
+        let message_ids = append_synthetic_messages(&cache, 20);
+        let workflow = Arc::new(MailWorkflow::new(
+            OfflineProvider {
+                body_fetches: Arc::new(AtomicUsize::new(0)),
+            },
+            cache,
+        ));
+        let mut mail_view = None;
+        let (_, context) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+            mail_view = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = mail_view.expect("mail view is created with the test window");
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if !context.cx.update(|cx| view.read(cx).sync_running) {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+
+        context.update(gpui_kit::Window::focus_next);
+        let mut list_focused = false;
+        for _ in 0..20 {
+            press_window_key(context, "tab");
+            list_focused =
+                context.update(|window, cx| view.read(cx).message_list_focus.is_focused(window));
+            if list_focused {
+                break;
+            }
+        }
+        assert!(list_focused, "Tab reaches the cached message list");
+
+        press_window_key(context, "up");
+        context.run_until_parked();
+        assert_selected_message(context, &view, message_ids.last());
+        press_window_key(context, "down");
+        assert_selected_message(context, &view, message_ids.last());
+
+        press_window_key(context, "home");
+        assert_selected_message(context, &view, message_ids.first());
+        press_window_key(context, "up");
+        assert_selected_message(context, &view, message_ids.first());
+        press_window_key(context, "down");
+        assert_selected_message(context, &view, message_ids.get(1));
+        press_window_key(context, "end");
+        context.run_until_parked();
+        draw_mail_view(context);
+        assert_selected_message(context, &view, message_ids.last());
+        assert!(
+            context
+                .cx
+                .update(|cx| matches!(&view.read(cx).message_state, MessageState::Opened(_)))
+        );
+        let row = context
+            .debug_bounds("message-row-message-20")
+            .expect("End scrolls the selected message into view");
+        let scroll_offset = context
+            .cx
+            .update(|cx| view.read(cx).message_list_scroll.offset());
+        assert!(scroll_offset.y < px(0.));
+        context.simulate_click(row.center(), Modifiers::default());
+        context.run_until_parked();
+        assert!(
+            context.update(|window, cx| { view.read(cx).message_list_focus.is_focused(window) })
+        );
+
+        press_window_key(context, "shift-tab");
+        context.update(|window, cx| {
+            assert!(!view.read(cx).message_list_focus.is_focused(window));
+        });
+        press_window_key(context, "up");
+        assert_selected_message(context, &view, message_ids.last());
+        press_window_key(context, "tab");
+        assert!(
+            context.update(|window, cx| { view.read(cx).message_list_focus.is_focused(window) })
+        );
+        press_window_key(context, "tab");
+        context.update(|window, cx| {
+            assert!(!view.read(cx).message_list_focus.is_focused(window));
+        });
+        press_window_key(context, "up");
+        assert_selected_message(context, &view, message_ids.last());
     }
 
     #[gpui_kit::test]
