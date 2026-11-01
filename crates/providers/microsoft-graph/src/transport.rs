@@ -29,11 +29,16 @@ pub(super) enum GraphOperation {
     Profile,
     Folders,
     Messages,
+    MessageDelta,
+    MessageBody,
 }
 
 impl GraphOperation {
     fn uses_immutable_ids(self) -> bool {
-        matches!(self, Self::Messages)
+        matches!(
+            self,
+            Self::Messages | Self::MessageDelta | Self::MessageBody
+        )
     }
 }
 

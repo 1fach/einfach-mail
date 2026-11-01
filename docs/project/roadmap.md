@@ -16,7 +16,7 @@ M1 work is grouped under the [GitHub milestone](https://github.com/1fach/einfach
 
 [Issue #45](https://github.com/1fach/einfach-mail/issues/45) tracks accurate cancellation state across account connection and permission renewal. The local M1-only implementation is recorded in [ADR 0030](../decisions/0030-account-operation-cancellation-boundary.md); synthetic provider, workflow, worker, and headless GPUI tests cover cancellation before and during credential commit, retry, and restore. The documented Linux gate passed locally on 2026-11-01. Keep the issue open for publication and review. Live tenant behavior remains under issue #3.
 
-## M2: Read-only mail — not started
+## M2: Read-only mail — in progress
 
 Let the user browse folders, read synchronized messages from the offline cache, and view message content safely. M2 does not change mail on the server; mail and event actions belong to M4. The Graph transport and message renderer remain subject to ADRs [0006](../decisions/0006-graph-http-transport.md) and [0007](../decisions/0007-message-body-rendering.md).
 

@@ -13,6 +13,7 @@ path = "src/main.rs"
 gpui-kit.workspace = true
 einfach-mail-application = { path = "../../crates/application" }
 einfach-mail-domain = { path = "../../crates/domain" }
+einfach-mail-persistence = { path = "../../crates/persistence" }
 einfach-mail-microsoft-graph = { path = "../../crates/providers/microsoft-graph" }
 uuid.workspace = true
 

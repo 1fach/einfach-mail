@@ -1703,6 +1703,7 @@ dependencies = [
  "einfach-mail-application",
  "einfach-mail-domain",
  "einfach-mail-microsoft-graph",
+ "einfach-mail-persistence",
  "gpui-kit",
  "gpui-pre",
  "tokio",
@@ -1734,6 +1735,25 @@ dependencies = [
  "url",
  "uuid",
  "webbrowser",
+ "zeroize",
+]
+
+[[package]]
+name = "einfach-mail-persistence"
+version = "0.1.0"
+dependencies = [
+ "async-sqlite",
+ "einfach-mail-application",
+ "einfach-mail-domain",
+ "getrandom 0.4.3",
+ "hex",
+ "keyring",
+ "rusqlite_migration",
+ "sha2 0.11.1",
+ "smol",
+ "tempfile",
+ "thiserror 2.0.21",
+ "xdg",
  "zeroize",
 ]
 
@@ -9214,6 +9234,12 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
+
+[[package]]
+name = "xdg"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fb433233f2df9344722454bc7e96465c9d03bff9d77c248f9e7523fe79585b5"
 
 [[package]]
 name = "xim-ctext"

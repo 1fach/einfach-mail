@@ -2,7 +2,10 @@
 
 use std::{future::Future, time::Duration};
 
-use einfach_mail_domain::{AccountId, FolderReference, MailFolder, MailMessage};
+use einfach_mail_domain::{
+    AccountId, FolderReference, MailFolder, MailMessage, MessageBody, MessageDeltaLink,
+    MessageDeltaPage, MessageId,
+};
 use thiserror::Error;
 
 use crate::AccountOperationError;
@@ -40,6 +43,45 @@ pub enum MailOperationError {
     ResourceLimitExceeded,
 }
 
+/// Selects the initial request or the opaque provider link to resume.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MessageDeltaRequest {
+    /// Starts the folder's unfiltered initial delta round.
+    Initial,
+    /// Resumes from the exact next or completed delta link stored for the folder.
+    Continue(MessageDeltaLink),
+}
+
+/// One provider delta page and the number of bytes in its HTTP response body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MessageDeltaPageResponse {
+    page: MessageDeltaPage,
+    response_bytes: usize,
+}
+
+impl MessageDeltaPageResponse {
+    /// Creates a page response with its received body size.
+    #[must_use]
+    pub fn new(page: MessageDeltaPage, response_bytes: usize) -> Self {
+        Self {
+            page,
+            response_bytes,
+        }
+    }
+
+    /// Returns the number of response-body bytes received from the provider.
+    #[must_use]
+    pub fn response_bytes(&self) -> usize {
+        self.response_bytes
+    }
+
+    /// Returns the parsed page and its response size.
+    #[must_use]
+    pub fn into_parts(self) -> (MessageDeltaPage, usize) {
+        (self.page, self.response_bytes)
+    }
+}
+
 /// Mail operations the application needs from a connected-account provider.
 pub trait MailProvider: Send + Sync {
     /// Lists the provider's folders for `account_id`.
@@ -74,6 +116,39 @@ pub trait MailProvider: Send + Sync {
         &self,
         folder: &FolderReference,
     ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_;
+
+    /// Loads one page of changes for `folder` without traversing its links.
+    ///
+    /// `request` is either the initial query or an opaque link returned by a
+    /// previous page. The provider validates resumed links before it attaches
+    /// the signed-in user's token.
+    /// The response includes the raw body size so the application can bound a
+    /// multi-page sync attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-safe provider error when the session, network, response,
+    /// or resource limits prevent loading this page.
+    fn message_delta_page(
+        &self,
+        folder: &FolderReference,
+        request: MessageDeltaRequest,
+    ) -> impl Future<Output = Result<MessageDeltaPageResponse, MailOperationError>> + Send + '_;
+
+    /// Fetches a message body after the application confirms it is cached in `folder`.
+    ///
+    /// The returned content is untrusted and must be stored encrypted and
+    /// sanitized before HTML is rendered.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-safe provider error when the session, network, response,
+    /// or resource limits prevent loading the body.
+    fn fetch_message_body(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_;
 }
 
 impl From<AccountOperationError> for MailOperationError {

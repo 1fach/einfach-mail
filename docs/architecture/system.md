@@ -27,7 +27,7 @@ The Linux account path includes connection, identity display, and permission ren
 | `crates/providers/microsoft-graph/` | Linux Entra OAuth flow, Graph `/me` request and profile mapping, refresh-token storage, and the private HTTP client boundary | UI decisions, persistence policy, and token access in application code |
 | `crates/persistence/` (planned) | Local schema, migrations, transactions, durable sync state | Graph or GPUI types |
 
-Mail and calendar Graph operations, persistence, and synchronization remain planned. Update [project status](../project/status.md) when implementation changes.
+The Linux mail sync and offline cache workflows are implemented. Calendar Graph operations and synchronization remain planned. Update [project status](../project/status.md) when implementation changes.
 
 Add planned crates when a change needs them. Do not create forwarding-only layers.
 
@@ -55,7 +55,7 @@ Domain entity IDs are opaque provider values and are always scoped by account. P
 - Respect Graph throttling and retry guidance. Do not loop on authorization or validation failures.
 - Honor Graph's `Retry-After` header after HTTP 429. Use exponential backoff only when the response has no retry header. Do not retry a write until duplicate-request behavior is known.
 
-These are design constraints, not implemented behavior yet.
+The message-delta, account-cutoff, encrypted page-commit, checkpoint-resume, and offline-body workflows are implemented with synthetic fixtures. Calendar synchronization, provider writes, and tenant-only Graph verification remain open.
 
 ## Security boundaries
 
@@ -64,7 +64,7 @@ These are design constraints, not implemented behavior yet.
 - ADR 0007 accepts GPUI Kit `TextView::html` as the Linux first renderer. Keep scripts, styles, images, and other remote content blocked by default; override link routing and image resolution as defense in depth. Production integration waits for the cached-message workflow and issue #9's remaining evidence.
 - Keep the app UI in GPUI. A browser renderer for email HTML needs a separate security decision and must be limited to the message body. Give message content no application commands, tokens, IPC bridge, or access to mailbox data.
 - Store refresh credentials in the operating-system credential store. Do not persist access tokens in SQLite or UI state.
-- Decide local database encryption and key recovery before the app stores real mailbox content.
+- Store Linux cache files below the XDG data home with private file permissions. Keep the SQLCipher key in Secret Service. Missing-key recovery and portable cache recovery remain unresolved; do not replace a missing key automatically.
 
 ## Design risks
 

@@ -1,8 +1,153 @@
-//! Provider-independent mail concepts used by cached browsing.
+//! Provider-independent mail concepts used by cached browsing and synchronization.
 
 use std::{fmt, time::SystemTime};
 
 use crate::{AccountId, FolderId, MessageId};
+
+/// A body returned by a provider for storage and later display-time sanitization.
+///
+/// The content is untrusted. Callers must sanitize HTML before passing it to a view.
+#[derive(Clone, Eq, PartialEq)]
+pub struct MessageBody {
+    content_type: MessageBodyType,
+    content: String,
+}
+
+impl MessageBody {
+    /// Creates a body with its provider-declared content type and raw content.
+    #[must_use]
+    pub fn new(content_type: MessageBodyType, content: String) -> Self {
+        Self {
+            content_type,
+            content,
+        }
+    }
+
+    /// Returns whether the body contains HTML or plain text.
+    #[must_use]
+    pub fn content_type(&self) -> MessageBodyType {
+        self.content_type
+    }
+
+    /// Returns the raw body content.
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+}
+
+impl fmt::Debug for MessageBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageBody")
+            .field("content_type", &self.content_type)
+            .field("content", &"<redacted>")
+            .finish()
+    }
+}
+
+/// The format declared for a message body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageBodyType {
+    /// The body contains untrusted HTML.
+    Html,
+    /// The body contains plain text.
+    Text,
+}
+
+/// A message change returned by a folder's delta query.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MessageDeltaChange {
+    /// Updates a known message or creates it when the patch is complete.
+    Upsert {
+        /// The provider-issued message identifier.
+        id: MessageId,
+        /// The fields returned by the provider for this change.
+        patch: MessageMetadataPatch,
+    },
+    /// Removes a message from the folder's local view when it is cached.
+    Removed {
+        /// The provider-issued message identifier.
+        id: MessageId,
+    },
+}
+
+/// Opaque URL returned by a folder message delta response.
+///
+/// The value contains provider state and must only be sent back to the provider that created it.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct MessageDeltaLink(Box<str>);
+
+impl MessageDeltaLink {
+    /// Keeps a complete provider-issued link without inspecting or normalizing it.
+    #[must_use]
+    pub fn from_opaque(value: String) -> Self {
+        Self(value.into_boxed_str())
+    }
+
+    /// Returns the exact link for persistence or provider resumption.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for MessageDeltaLink {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MessageDeltaLink(<redacted>)")
+    }
+}
+
+/// Whether a delta response has another page or has completed the round.
+#[derive(Clone, Eq, PartialEq)]
+pub enum MessageDeltaProgress {
+    /// More changes remain in this sync round.
+    Next(MessageDeltaLink),
+    /// This round is complete and the link starts the next round.
+    Complete(MessageDeltaLink),
+}
+
+impl fmt::Debug for MessageDeltaProgress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Next(_) => formatter.write_str("Next(<redacted>)"),
+            Self::Complete(_) => formatter.write_str("Complete(<redacted>)"),
+        }
+    }
+}
+
+/// The provider changes and continuation state from one delta response page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MessageDeltaPage {
+    changes: Vec<MessageDeltaChange>,
+    progress: MessageDeltaProgress,
+}
+
+impl MessageDeltaPage {
+    /// Creates one validated provider page without interpreting its opaque link.
+    #[must_use]
+    pub fn new(changes: Vec<MessageDeltaChange>, progress: MessageDeltaProgress) -> Self {
+        Self { changes, progress }
+    }
+
+    /// Returns the changes from this page in provider order.
+    #[must_use]
+    pub fn changes(&self) -> &[MessageDeltaChange] {
+        &self.changes
+    }
+
+    /// Returns the link that must be checkpointed with this page.
+    #[must_use]
+    pub fn progress(&self) -> &MessageDeltaProgress {
+        &self.progress
+    }
+
+    /// Returns the page's changes and cursor after the caller commits the page.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<MessageDeltaChange>, MessageDeltaProgress) {
+        (self.changes, self.progress)
+    }
+}
 
 /// An account-scoped reference to a provider folder.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -299,6 +444,27 @@ impl MessageMetadataPatch {
     pub fn set_read_state(&mut self, read_state: ReadState) {
         self.read_state = FieldUpdate::Set(read_state);
     }
+
+    /// Builds a new message when this patch includes every selected metadata field.
+    #[must_use]
+    pub fn into_complete_message(
+        self,
+        folder: FolderReference,
+        id: MessageId,
+    ) -> Option<MailMessage> {
+        let subject = self.subject.into_value()?;
+        let from = self.from.into_value()?;
+        let sender = self.sender.into_value()?;
+        let received_at = self.received_at.into_value()?;
+        let read_state = self.read_state.into_value()?;
+        let metadata = MessageMetadata::new(
+            subject,
+            MessageOrigin::new(from, sender),
+            received_at,
+            read_state,
+        );
+        Some(MailMessage::new(folder, id, metadata))
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -312,6 +478,13 @@ impl<T> FieldUpdate<T> {
     fn apply_to(self, field: &mut T) {
         if let Self::Set(value) = self {
             *field = value;
+        }
+    }
+
+    fn into_value(self) -> Option<T> {
+        match self {
+            Self::Unchanged => None,
+            Self::Set(value) => Some(value),
         }
     }
 }
@@ -352,6 +525,11 @@ impl MailMessage {
     pub fn metadata(&self) -> &MessageMetadata {
         &self.metadata
     }
+
+    /// Applies the fields present in a provider delta patch to this message.
+    pub fn apply_patch(&mut self, patch: MessageMetadataPatch) {
+        self.metadata.apply_patch(patch);
+    }
 }
 
 #[cfg(test)]
@@ -361,8 +539,8 @@ mod tests {
     use crate::{AccountId, FolderId, FolderReference};
 
     use super::{
-        EmptyMailboxAddress, FolderParentError, MailFolder, Mailbox, MessageMetadata,
-        MessageMetadataPatch, MessageOrigin, ReadState,
+        EmptyMailboxAddress, FolderParentError, MailFolder, Mailbox, MessageBody, MessageBodyType,
+        MessageMetadata, MessageMetadataPatch, MessageOrigin, ReadState,
     };
 
     fn folder_reference(account_id: &str, folder_id: &str) -> FolderReference {
@@ -439,6 +617,52 @@ mod tests {
         assert_eq!(metadata.origin().sender(), Some(&replacement_sender));
         assert_eq!(metadata.received_at(), &replacement_time);
         assert_eq!(metadata.read_state(), ReadState::Unread);
+    }
+
+    #[test]
+    fn complete_delta_patch_creates_message_with_explicit_nullable_fields() {
+        let folder = folder_reference("account-1", "folder-1");
+        let id = crate::MessageId::try_from("message-1".to_owned())
+            .expect("synthetic message ID is non-empty");
+        let mut patch = MessageMetadataPatch::new();
+        patch.set_subject(None);
+        patch.set_from(None);
+        patch.set_sender(Some(synthetic_mailbox("sender@example.test")));
+        patch.set_received_at(SystemTime::UNIX_EPOCH);
+        patch.set_read_state(ReadState::Read);
+
+        let message = patch
+            .into_complete_message(folder.clone(), id)
+            .expect("all selected fields are present");
+
+        assert_eq!(message.folder(), &folder);
+        assert_eq!(message.metadata().subject(), None);
+        assert!(message.metadata().origin().from_mailbox().is_none());
+        assert_eq!(
+            message.metadata().origin().sender().map(Mailbox::address),
+            Some("sender@example.test")
+        );
+    }
+
+    #[test]
+    fn incomplete_delta_patch_cannot_create_a_message() {
+        let folder = folder_reference("account-1", "folder-1");
+        let id = crate::MessageId::try_from("message-1".to_owned())
+            .expect("synthetic message ID is non-empty");
+        let mut patch = MessageMetadataPatch::new();
+        patch.set_subject(Some("Synthetic subject".to_owned()));
+
+        assert!(patch.into_complete_message(folder, id).is_none());
+    }
+
+    #[test]
+    fn message_body_debug_output_redacts_content() {
+        let body = MessageBody::new(MessageBodyType::Html, "private synthetic body".to_owned());
+
+        let debug_output = format!("{body:?}");
+
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("private synthetic body"));
     }
 
     fn synthetic_metadata() -> MessageMetadata {

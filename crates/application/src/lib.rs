@@ -4,6 +4,8 @@
 
 mod account;
 mod mail;
+mod mail_cache;
+mod mail_workflow;
 
 pub use account::{
     AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,

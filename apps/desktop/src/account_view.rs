@@ -8,17 +8,29 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::AccountProfile;
 use einfach_mail_microsoft_graph::{CallbackPort, MicrosoftGraphProvider};
+use einfach_mail_persistence::SqliteMailCache;
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
 };
-use gpui_kit::{AsyncApp, Context, IntoElement, Render, Role, Task, Window, div, prelude::*};
+use gpui_kit::{
+    AsyncApp, Context, Entity, IntoElement, Render, Role, Subscription, Task, Window, div,
+    prelude::*,
+};
 use uuid::Uuid;
+
+use crate::mail_view::{MailView, MailViewEvent};
 
 const CLIENT_ID_ENV: &str = "EINFACH_MAIL_ENTRA_CLIENT_ID";
 const CALLBACK_PORT_ENV: &str = "EINFACH_MAIL_ENTRA_CALLBACK_PORT";
 
 type MicrosoftAccountWorkflow = Arc<AccountWorkflow<MicrosoftGraphProvider>>;
+type MicrosoftMailView = MailView<MicrosoftGraphProvider, SqliteMailCache>;
+
+pub(super) struct AccountServices {
+    pub(super) workflow: Result<MicrosoftAccountWorkflow, SetupIssue>,
+    pub(super) mail_provider: Option<MicrosoftGraphProvider>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SetupIssue {
@@ -47,7 +59,21 @@ impl SetupIssue {
     }
 }
 
-pub(super) fn account_workflow_from_environment() -> Result<MicrosoftAccountWorkflow, SetupIssue> {
+pub(super) fn account_workflow_from_environment() -> AccountServices {
+    match configured_account_services() {
+        Ok((workflow, mail_provider)) => AccountServices {
+            workflow: Ok(workflow),
+            mail_provider: Some(mail_provider),
+        },
+        Err(issue) => AccountServices {
+            workflow: Err(issue),
+            mail_provider: None,
+        },
+    }
+}
+
+fn configured_account_services()
+-> Result<(MicrosoftAccountWorkflow, MicrosoftGraphProvider), SetupIssue> {
     let client_id = match env::var(CLIENT_ID_ENV) {
         Ok(client_id_value) => {
             Uuid::parse_str(&client_id_value).map_err(|_| SetupIssue::InvalidClientId)?
@@ -62,10 +88,9 @@ pub(super) fn account_workflow_from_environment() -> Result<MicrosoftAccountWork
     };
     let callback_port = configured_callback_port(callback_port_value.as_deref())?;
 
-    Ok(Arc::new(AccountWorkflow::new(MicrosoftGraphProvider::new(
-        client_id,
-        callback_port,
-    ))))
+    let mail_provider = MicrosoftGraphProvider::new(client_id, callback_port);
+    let account_workflow = Arc::new(AccountWorkflow::new(mail_provider.clone()));
+    Ok((account_workflow, mail_provider))
 }
 
 fn configured_callback_port(port_text: Option<&str>) -> Result<CallbackPort, SetupIssue> {
@@ -190,14 +215,20 @@ impl AccountStatus {
 
 pub(super) struct AccountView<P: AccountProvider + 'static> {
     workflow: Option<Arc<AccountWorkflow<P>>>,
+    mail_provider: Option<MicrosoftGraphProvider>,
     setup_issue: Option<SetupIssue>,
     status: AccountStatus,
+    mail_opening: bool,
+    mail_open_error: Option<MailCacheError>,
+    mail_view: Option<Entity<MicrosoftMailView>>,
+    mail_view_subscription: Option<Subscription>,
     task: Option<Task<()>>,
 }
 
 impl<P: AccountProvider + 'static> AccountView<P> {
     pub(super) fn new(
         workflow: Result<Arc<AccountWorkflow<P>>, SetupIssue>,
+        mail_provider: Option<MicrosoftGraphProvider>,
         cx: &mut Context<Self>,
     ) -> Self {
         let (workflow, setup_issue, status) = match workflow {
@@ -206,8 +237,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         };
         let mut view = Self {
             workflow,
+            mail_provider,
             setup_issue,
             status,
+            mail_opening: false,
+            mail_open_error: None,
+            mail_view: None,
+            mail_view_subscription: None,
             task: None,
         };
         view.start_restore(cx);
@@ -367,13 +403,115 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         }
 
+        let connected_profile = match &self.status {
+            AccountStatus::Connected(profile) if self.mail_provider.is_some() => {
+                Some(profile.clone())
+            }
+            _ => None,
+        };
+        let mail_workflow = self.close_mail_view(cx);
+        self.mail_opening = false;
+        self.mail_open_error = None;
         self.status = AccountStatus::SigningOut;
-        self.task = Some(Self::sign_out_task(workflow, cx));
+        self.task = Some(Self::sign_out_task(
+            workflow,
+            connected_profile,
+            mail_workflow,
+            cx,
+        ));
         cx.notify();
     }
 
-    fn sign_out_task(workflow: Arc<AccountWorkflow<P>>, cx: &mut Context<Self>) -> Task<()> {
+    fn close_mail_view(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<MailWorkflow<MicrosoftGraphProvider, SqliteMailCache>>> {
+        let mail_view = self.mail_view.take()?;
+        drop(self.mail_view_subscription.take());
+        Some(mail_view.update(cx, |view, _| view.stop_pending_work()))
+    }
+
+    fn open_mail(&mut self, cx: &mut Context<Self>) {
+        if self.mail_opening || self.mail_view.is_some() {
+            return;
+        }
+        let AccountStatus::Connected(profile) = &self.status else {
+            return;
+        };
+        let Some(mail_provider) = self.mail_provider.clone() else {
+            return;
+        };
+        let profile = profile.clone();
+        self.mail_opening = true;
+        self.mail_open_error = None;
+        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let account_id = profile.id().clone();
+            let cache = cx
+                .background_executor()
+                .spawn(async move { SqliteMailCache::open_for_account(account_id).await })
+                .await;
+            match cache {
+                Ok(cache) => {
+                    let workflow = Arc::new(MailWorkflow::new(mail_provider, cache));
+                    let _ = this.update(cx, |view, cx| {
+                        view.mail_opening = false;
+                        let mail_view = cx.new(|cx| MailView::new(profile, workflow, cx));
+                        let subscription =
+                            cx.subscribe(&mail_view, |view, _, event: &MailViewEvent, cx| {
+                                match event {
+                                    MailViewEvent::BackToAccount => {
+                                        drop(view.close_mail_view(cx));
+                                        cx.notify();
+                                    }
+                                }
+                            });
+                        view.mail_view = Some(mail_view);
+                        view.mail_view_subscription = Some(subscription);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.mail_opening = false;
+                        view.mail_open_error = Some(error);
+                        cx.notify();
+                    });
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    fn sign_out_task(
+        workflow: Arc<AccountWorkflow<P>>,
+        connected_profile: Option<AccountProfile>,
+        mail_workflow: Option<Arc<MailWorkflow<MicrosoftGraphProvider, SqliteMailCache>>>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
+            if let Some(connected_profile) = connected_profile.as_ref() {
+                let account_id = connected_profile.id().clone();
+                let cache_removal = cx
+                    .background_executor()
+                    .spawn(async move {
+                        match mail_workflow {
+                            Some(mail_workflow) => {
+                                mail_workflow.remove_account_cache(&account_id).await
+                            }
+                            None => SqliteMailCache::remove_for_account(&account_id),
+                        }
+                    })
+                    .await;
+                if let Err(error) = cache_removal {
+                    let _ = this.update(cx, |view, cx| {
+                        view.status = AccountStatus::Connected(connected_profile.clone());
+                        view.mail_open_error = Some(error);
+                        view.task = None;
+                        cx.notify();
+                    });
+                    return;
+                }
+            }
             let sign_out_result = workflow.sign_out().await;
             let _ = this.update(cx, |view, cx| {
                 view.status = match sign_out_result {
@@ -520,7 +658,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     div()
                         .text_sm()
                         .text_color(colors.muted_foreground)
-                        .child("Signing out removes the saved sign-in from this device. Microsoft organization consent is unchanged."),
+                        .child("Signing out removes the saved sign-in and encrypted mail cache from this device. Microsoft organization consent is unchanged."),
                 ),
         )
     }
@@ -640,7 +778,16 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         if let Some(issue) = self.setup_issue {
             return content.child(self.render_setup_status(issue));
         }
-        let content = content.child(self.render_status());
+        let mut content = content.child(self.render_status());
+        if let Some(error) = self.mail_open_error {
+            content = content.child(
+                div()
+                    .id("mail-cache-error")
+                    .role(Role::Alert)
+                    .text_sm()
+                    .child(mail_cache_error_message(error)),
+            );
+        }
         self.render_account_actions(content, colors, cx)
     }
 
@@ -676,6 +823,12 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
 impl<P: AccountProvider + 'static> Render for AccountView<P> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(mail_view) = &self.mail_view {
+            return div()
+                .size_full()
+                .child(mail_view.clone())
+                .into_any_element();
+        }
         let colors = cx.theme().semantic_tokens().colors;
         div()
             .size_full()
@@ -685,6 +838,19 @@ impl<P: AccountProvider + 'static> Render for AccountView<P> {
             .p_8()
             .bg(colors.background)
             .child(self.render_account_content(colors, cx))
+            .into_any_element()
+    }
+}
+
+fn mail_cache_error_message(error: MailCacheError) -> &'static str {
+    match error {
+        MailCacheError::MissingEncryptionKey => {
+            "The encrypted mail cache key is missing. Remove the local cache before syncing again."
+        }
+        MailCacheError::Unavailable => {
+            "The encrypted mail cache is unavailable. Unlock your Linux keyring and try again."
+        }
+        _ => "The local mail cache could not be opened. Try again.",
     }
 }
 
@@ -889,7 +1055,7 @@ mod tests {
         let provider = TestProvider::default();
         let signed_out = provider.signed_out.clone();
         let workflow = Arc::new(AccountWorkflow::new(provider));
-        let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), cx));
+        let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), None, cx));
 
         context.run_until_parked();
         draw_account_view(context);
@@ -1055,7 +1221,7 @@ mod tests {
     fn missing_client_configuration_disables_account_actions(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (view, context) = cx.add_window_view(|_, cx| {
-            AccountView::<TestProvider>::new(Err(SetupIssue::MissingClientId), cx)
+            AccountView::<TestProvider>::new(Err(SetupIssue::MissingClientId), None, cx)
         });
 
         draw_account_view(context);

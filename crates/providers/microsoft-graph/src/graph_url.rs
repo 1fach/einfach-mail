@@ -6,7 +6,7 @@ use url::Url;
 use crate::error::GraphError;
 
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
-const FOLDER_SELECT: &str = "id,displayName";
+const FOLDER_SELECT: &str = "id,displayName,isHidden";
 const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead";
 
 #[derive(Clone)]
@@ -56,6 +56,31 @@ impl GraphAuthority {
     pub(super) fn folder_messages_path(&self, folder_id: &str) -> Result<GraphUrl, GraphError> {
         let mut url = self.folder_path(folder_id, "messages")?;
         url.query_pairs_mut().append_pair("$select", MESSAGE_SELECT);
+        self.validated_url(url)
+    }
+
+    pub(super) fn folder_message_delta_path(
+        &self,
+        folder_id: &str,
+    ) -> Result<GraphUrl, GraphError> {
+        let mut url = self.folder_path(folder_id, "messages")?;
+        url.path_segments_mut()
+            .map_err(|()| GraphError::UnsafeLink)?
+            .push("delta");
+        url.query_pairs_mut().append_pair("$select", MESSAGE_SELECT);
+        self.validated_url(url)
+    }
+
+    pub(super) fn message_body_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
+        if message_id.is_empty() {
+            return Err(GraphError::InvalidRecord);
+        }
+        let mut url = self.base_url.clone();
+        url.path_segments_mut()
+            .map_err(|()| GraphError::UnsafeLink)?
+            .pop_if_empty()
+            .extend(["me", "messages", message_id]);
+        url.query_pairs_mut().append_pair("$select", "body");
         self.validated_url(url)
     }
 
@@ -230,5 +255,29 @@ mod tests {
             .expect("folder ID forms an encoded Graph path");
 
         assert!(url.as_str().contains("folder%2Fid%20with%20space"));
+    }
+
+    #[test]
+    fn message_delta_and_body_ids_are_encoded_as_path_segments() {
+        let authority = authority();
+        let delta_url = authority
+            .folder_message_delta_path("folder/id with space")
+            .expect("folder ID forms an encoded Graph delta path");
+        let body_url = authority
+            .message_body_path("message/id with space")
+            .expect("message ID forms an encoded Graph body path");
+
+        assert!(
+            delta_url
+                .as_str()
+                .contains("folder%2Fid%20with%20space/messages/delta")
+        );
+        assert!(body_url.as_str().contains("message%2Fid%20with%20space"));
+        let body_query = Url::parse(body_url.as_str())
+            .expect("synthetic Graph body URL is valid")
+            .query_pairs()
+            .find(|(name, _)| name == "$select")
+            .map(|(_, value)| value.into_owned());
+        assert_eq!(body_query.as_deref(), Some("body"));
     }
 }

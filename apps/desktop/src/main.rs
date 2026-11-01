@@ -4,6 +4,7 @@ use gpui_kit::*;
 use std::sync::mpsc;
 
 mod account_view;
+mod mail_view;
 
 use account_view::{AccountView, account_workflow_from_environment};
 
@@ -13,10 +14,16 @@ fn main() -> Result<(), std::io::Error> {
 
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
-        let account_workflow = account_workflow_from_environment();
+        let account_services = account_workflow_from_environment();
 
         let window_open_attempt = open_window(WindowOptions::default(), cx, |_, cx| {
-            cx.new(|cx| AccountView::new(account_workflow, cx))
+            cx.new(|cx| {
+                AccountView::new(
+                    account_services.workflow,
+                    account_services.mail_provider,
+                    cx,
+                )
+            })
         })
         .map(|_| ())
         .map_err(|error| {

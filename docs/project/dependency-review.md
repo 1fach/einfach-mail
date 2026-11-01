@@ -1,6 +1,6 @@
 # Rust dependency review
 
-Last reviewed: 2026-11-01. These notes record candidates, not accepted dependencies. Recheck versions and project fit before adding a crate.
+Last reviewed: 2026-11-01. These notes record dependency evidence and adopted choices. Recheck versions and project fit before adding or upgrading a crate.
 
 ## Review rules
 
@@ -187,6 +187,9 @@ The Windows runner image lists Perl but does not list NASM or `Text::Template`, 
 - [`hex` 0.4.3 documentation and manifest](https://docs.rs/crate/hex/0.4.3)
 - [`smol` 2.0.2 documentation and manifest](https://docs.rs/crate/smol/2.0.2)
 - [`tempfile` 3.27.0 documentation and manifest](https://docs.rs/crate/tempfile/3.27.0)
+- [`xdg` 3.0.0 API documentation](https://docs.rs/xdg/3.0.0/xdg/struct.BaseDirectories.html)
+- [`directories` 6.0.0 documentation](https://docs.rs/crate/directories/6.0.0)
+- [`directories-rs` upstream move notice](https://github.com/dirs-dev/directories-rs)
 - [OpenSSL build prerequisites](https://github.com/openssl/openssl/blob/master/INSTALL.md)
 - [OpenSSL Windows build prerequisites](https://github.com/openssl/openssl/blob/master/NOTES-WINDOWS.md)
 - [Fedora 44 `perl-FindBin` package](https://packages.fedoraproject.org/pkgs/perl/perl-FindBin/)

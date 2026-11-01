@@ -46,7 +46,7 @@ CI runs the build, dependency, and test gates in [its Linux workflow](.github/wo
 - `docs/project/workflow.md` defines how issues, implementation, verification, and decisions are handled.
 - `docs/research/` records source material and integration findings.
 - `docs/research/microsoft-identity.md` records Microsoft Entra desktop sign-in and broker constraints.
-- `docs/project/dependency-review.md` records crate candidates and the evidence needed before adoption.
+- `docs/project/dependency-review.md` records dependency choices and their review evidence.
 - `docs/research/gpui-kit.md` records the UI toolkit version, platform requirements, and optional email renderer limits.
 - `.agents/skills/` contains pinned rust and GPUI Kit coding and design guidance; `skills-lock.json` records the upstream repository and content hashes.
 - `AGENTS.md` is the required workflow and code guidance for contributors and coding agents.

@@ -264,6 +264,7 @@ mod tests {
     };
     use einfach_mail_application::{
         AccountOperationError, AccountProvider, MailOperationError, MailProvider,
+        MessageDeltaRequest,
     };
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,

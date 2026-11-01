@@ -8,9 +8,9 @@
 
 M2 needs useful offline folder and message browsing without downloading every message body. Microsoft Graph's message delta query supports a `receivedDateTime` lower-bound filter. Graph encodes initial query options in the returned next and delta links. Filtered delta responses can still include removal and read-state events outside that filter. Message delta is not available in the China-operated-by-21Vianet cloud.
 
-The project has accepted an encrypted local cache, but the current Linux credential and cache-key proofs must pass before storing real mailbox content. The M2 read-only boundary also excludes server-side mail changes.
+The Linux Secret Service and cache-key lifecycle proof has passed. Issue #8 implements the Linux encrypted cache and sync workflow with synthetic data. Each sync attempt is bounded to 1,000 pages and 64 MiB of response bodies per folder; the page that would exceed the response budget is not committed, so the prior checkpoint remains resumable. The M2 read-only boundary excludes server-side mail changes. No test tenant is available, so the implementation has not been verified against a real mailbox.
 
-Microsoft Graph supports a `receivedDateTime` lower-bound filter on message delta queries, but a filtered delta query returns at most 5,000 messages. The Linux transport proof now exercises an unfiltered initial delta round across more than 5,000 synthetic messages. This proves pagination at the transport boundary; the production sync and persistence workflow is not implemented. See [message delta query parameter support](https://learn.microsoft.com/en-us/graph/delta-query-messages#use-query-parameters-in-a-delta-query-for-messages).
+Microsoft Graph supports a `receivedDateTime` lower-bound filter on message delta queries, but a filtered delta query returns at most 5,000 messages. The Linux transport and persistence workflows exercise an unfiltered initial delta round across 5,001 synthetic messages and apply the local cutoff. This is synthetic contract evidence, not a real mailbox proof. See [message delta query parameter support](https://learn.microsoft.com/en-us/graph/delta-query-messages#use-query-parameters-in-a-delta-query-for-messages).
 
 ## Decision
 
@@ -33,7 +33,7 @@ Treat Graph's next and delta links as opaque and follow the complete chain. A re
 
 Initialize each folder with an unfiltered message delta round. Request only the metadata fields needed by M2, follow every `@odata.nextLink` through the final `@odata.deltaLink`, and apply the fixed cutoff locally. Persist and display only messages on or after the cutoff. Do not store older messages, bodies, or attachments. Apply removals and sparse updates only to messages already in the local scope.
 
-This choice reads the selected metadata for each folder's full history once. It avoids the 5,000-message cap on filtered delta queries and gives the app a complete cursor. The production adapter and sync workflow must bound per-page memory and implement ADR 0004's restart-safe page checkpoints. Never mark a folder synchronized until all its changes and final delta link are durably committed. The proof's 64 MiB cumulative-response ceiling is a test bound, not a production mailbox limit.
+This choice reads the selected metadata for each folder's full history once. It avoids the 5,000-message cap on filtered delta queries and gives the app a complete cursor. The production adapter bounds response and traversal sizes, and the sync workflow commits each page with its restart-safe checkpoint under ADR 0004. Never mark a folder synchronized until all its changes and final delta link are durably committed. The provider's response-size limits are safety budgets, not a production mailbox-size limit.
 
 A filtered message list followed by a separate delta bootstrap could avoid reading older metadata, but the messages documentation does not describe a `latest` delta token. The sequence would also need to prove that concurrent changes cannot fall between the list and cursor. Do not use this alternative unless a test tenant proves a complete cursor handoff. If the one-time metadata scan is unacceptable, revise the product scope before implementation.
 
@@ -57,9 +57,9 @@ The Graph adapter could merge changes directly into cached records, but that wou
 - The first sync requests recent metadata for every visible folder. Each folder has its own delta cursor.
 - The first sync imports messages received in the prior 90 days. It also imports later messages as they arrive. Mail received before the cutoff is unavailable offline in M2.
 - Bodies become available offline only after a user opens them while online. Message HTML remains untrusted and is sanitized every time it is rendered; sanitized output is never persisted.
-- The cache starts with 90 days of message metadata and grows with later messages and bodies the user opens. Encryption, cache removal, and account-removal behavior remain release gates under ADR 0005 and issues #4 and #20.
+- The cache stores the account's initial 90-day cutoff, folder cursors, and encrypted metadata and bodies. The cutoff remains fixed until account removal. Connected-account sign-out removes the local SQLCipher files and key before deleting the saved sign-in; the workflow blocks sign-out if local cache removal fails.
 - The app's first mail sync uses the Global Graph authority. A Graph endpoint mapping alone does not establish support for every operation in a national cloud.
-- The Linux Graph transport proof verifies unfiltered initial delta pagination with 5,001 synthetic messages. The M2 workflow must still prove local cutoff filtering, restart-safe incremental persistence, final cursor commits, delta removals, read-state changes, and the opened-body cache path. Do not use real mailbox content in tests.
+- Synthetic transport and persistence tests verify unfiltered pagination with 5,001 messages, cutoff filtering, restart checkpoints, final cursor commits, delta removals, sparse read-state changes, and opened-body cache behavior. The GPUI test verifies offline cached-body access. Live Graph pagination and a full mailbox sync remain tenant-only criteria in issue #8; do not use real mailbox content in automated tests.
 
 ## Sources
 
