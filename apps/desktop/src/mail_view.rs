@@ -5,11 +5,10 @@ use std::{
 };
 
 use einfach_mail_application::{
-    MailCache, MailSyncState, MailWorkflow, MailWorkflowError, OpenedMessage,
+    MailCache, MailSyncState, MailWorkflow, MailWorkflowError, MessageBodyForDisplay,
+    OpenedMessage, SanitizedEmailHtml, allowed_external_message_url,
 };
-use einfach_mail_domain::{
-    AccountProfile, FolderReference, MailFolder, MailMessage, MessageBodyType, MessageId,
-};
+use einfach_mail_domain::{AccountProfile, FolderReference, MailFolder, MailMessage, MessageId};
 use gpui_kit::base::v_virtual_list;
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Selectable, StyledExt,
@@ -17,8 +16,9 @@ use gpui_kit::component::{
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    AsyncApp, Context, EventEmitter, IntoElement, Render, Role, Task, Window, div, prelude::*, px,
-    size,
+    AnyElement, AsyncApp, Context, EventEmitter, ImageSource, IntoElement, Render, Role,
+    SharedString, Task, Window, base::TextSelectionLayer, component::text::TextView, div,
+    prelude::*, px, size,
 };
 
 pub(crate) enum MailViewEvent {
@@ -226,8 +226,13 @@ where
         self.selected_message_id = Some(message_id.clone());
         self.message_state = MessageState::Loading;
         let workflow = Arc::clone(&self.workflow);
+        let request_message_id = message_id.clone();
         self.message_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let opened = workflow.open_message(&folder, &message_id).await;
+            // Keep HTML sanitization off GPUI's event-loop executor.
+            let opened = cx
+                .background_executor()
+                .spawn(async move { workflow.open_message(&folder, &request_message_id).await })
+                .await;
             let _ = this.update(cx, |view, cx| {
                 if view.selected_message_id.as_ref() != Some(&message_id) {
                     return;
@@ -513,23 +518,7 @@ where
                 .into_any_element(),
             MessageState::Opened(opened) => {
                 let metadata = opened.message().metadata();
-                let body = match opened.body().content_type() {
-                    MessageBodyType::Text => div()
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scrollbar()
-                        .p_6()
-                        .child(opened.body().content().to_owned())
-                        .into_any_element(),
-                    MessageBodyType::Html => div()
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scrollbar()
-                        .p_6()
-                        .text_color(colors.muted_foreground)
-                        .child("This HTML message is cached. Safe formatting is unavailable yet.")
-                        .into_any_element(),
-                };
+                let body = render_message_body(opened.body(), colors);
                 div()
                     .flex_1()
                     .min_w_0()
@@ -562,6 +551,61 @@ where
             }
         }
     }
+}
+
+fn render_message_body(body: &MessageBodyForDisplay, colors: ColorTokens) -> AnyElement {
+    match body {
+        MessageBodyForDisplay::PlainText(text) => render_plain_text_body(text),
+        MessageBodyForDisplay::SanitizedHtml(html) => render_sanitized_html_body(html),
+        MessageBodyForDisplay::HtmlTooLarge => render_oversized_html_fallback(colors),
+    }
+}
+
+fn render_plain_text_body(text: &Arc<str>) -> AnyElement {
+    div()
+        .id("mail-message-plain-body")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scrollbar()
+        .p_6()
+        .child(SharedString::from(Arc::clone(text)))
+        .into_any_element()
+}
+
+fn render_sanitized_html_body(html: &SanitizedEmailHtml) -> AnyElement {
+    div()
+        .id("mail-message-html-body")
+        .debug_selector(|| "mail-message-html-body".into())
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .overflow_y_scrollbar()
+        .p_6()
+        .child(TextSelectionLayer)
+        .child(
+            TextView::html("mail-message-html-content", html.shared_content())
+                .selectable(true)
+                .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
+                .on_link_click(|href, _, _, cx| {
+                    if let Some(url) = allowed_external_message_url(href.as_ref()) {
+                        cx.open_url(url.as_str());
+                    }
+                }),
+        )
+        .into_any_element()
+}
+
+fn render_oversized_html_fallback(colors: ColorTokens) -> AnyElement {
+    div()
+        .flex_1()
+        .min_h_0()
+        .p_6()
+        .text_color(colors.muted_foreground)
+        .id("mail-message-body-too-large")
+        .debug_selector(|| "mail-message-body-too-large".into())
+        .role(Role::Status)
+        .child("This message is too large to render safely.")
+        .into_any_element()
 }
 
 impl<P, C> EventEmitter<MailViewEvent> for MailView<P, C>
@@ -715,11 +759,12 @@ mod tests {
     };
     use einfach_mail_domain::{
         AccountId, AccountProfile, FolderId, FolderReference, MailFolder, MailMessage, Mailbox,
-        MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId,
+        MessageBody, MessageBodyType, MessageDeltaLink, MessageDeltaPage, MessageId,
     };
-    use gpui_kit::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui_kit::base::TextSelection;
+    use gpui_kit::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
-    use super::{MailView, MessageBodyType, MessageState, SyncStatus};
+    use super::{MailView, MessageBodyForDisplay, MessageState, SyncStatus};
 
     #[derive(Clone)]
     struct OfflineProvider {
@@ -999,11 +1044,166 @@ mod tests {
                 MessageState::Opened(opened)
                     if opened.message().id() == &message_id
                         && opened.loaded_from_cache()
-                        && opened.body().content() == "Synthetic offline body"
+                        && matches!(
+                            opened.body(),
+                            MessageBodyForDisplay::PlainText(text)
+                                if text.as_ref() == "Synthetic offline body"
+                        )
             )
         });
         assert!(opened_offline);
         assert_eq!(body_fetches.load(Ordering::Relaxed), 0);
+    }
+
+    #[gpui_kit::test]
+    fn cached_html_mail_view_sanitizes_content_and_opens_links_on_click(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, _) = fixture(account);
+        cache.0.lock().expect("fixture cache mutex is healthy").body = Some(MessageBody::new(
+            MessageBodyType::Html,
+            concat!(
+                "<p><a href=\"https://mail.example.test/thread\">Open safe link</a></p>",
+                "<p>Readable synthetic message content.</p>",
+                "<img src=\"https://tracker.example.test/pixel\">",
+                "<script>hidden script marker</script>"
+            )
+            .to_owned(),
+        ));
+        let workflow = Arc::new(MailWorkflow::new(
+            OfflineProvider {
+                body_fetches: Arc::new(AtomicUsize::new(0)),
+            },
+            cache,
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+
+        context.run_until_parked();
+        draw_mail_view(context);
+        let message_row = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached message row is rendered");
+        context.simulate_click(message_row.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+
+        let safe_html = context.cx.update(|cx| {
+            let state = &view.read(cx).message_state;
+            let MessageState::Opened(opened) = state else {
+                return false;
+            };
+            let MessageBodyForDisplay::SanitizedHtml(html) = opened.body() else {
+                return false;
+            };
+            html.as_str().contains("Open safe link")
+                && !html.as_str().contains("tracker.example.test")
+                && !html.as_str().contains("hidden script marker")
+        });
+        assert!(safe_html);
+
+        let body_bounds = context
+            .debug_bounds("mail-message-html-body")
+            .expect("sanitized HTML body has a layout");
+        context.simulate_click(
+            point(body_bounds.left() + px(36.), body_bounds.top() + px(36.)),
+            Modifiers::default(),
+        );
+        assert_eq!(
+            context.opened_url(),
+            Some("https://mail.example.test/thread".to_owned())
+        );
+    }
+
+    #[gpui_kit::test]
+    fn cached_html_mail_view_supports_selection_and_copy(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, _) = fixture(account);
+        cache.0.lock().expect("fixture cache mutex is healthy").body = Some(MessageBody::new(
+            MessageBodyType::Html,
+            "<p>Readable synthetic content for selection and copy.</p>".to_owned(),
+        ));
+        let workflow = Arc::new(MailWorkflow::new(
+            OfflineProvider {
+                body_fetches: Arc::new(AtomicUsize::new(0)),
+            },
+            cache,
+        ));
+        let (_, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+
+        context.run_until_parked();
+        draw_mail_view(context);
+        let message_row = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached message row is rendered");
+        context.simulate_click(message_row.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+
+        let body_bounds = context
+            .debug_bounds("mail-message-html-body")
+            .expect("sanitized HTML body has a layout");
+        let start = point(body_bounds.left() + px(25.), body_bounds.top() + px(34.));
+        let end = point(body_bounds.left() + px(285.), body_bounds.top() + px(34.));
+        context.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        draw_mail_view(context);
+        context.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        draw_mail_view(context);
+        context.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        draw_mail_view(context);
+
+        let selected_text = context.update(TextSelection::selected_text);
+        assert!(selected_text.contains("Readable synthetic content"));
+        context.simulate_keystrokes("ctrl-c");
+        let copied_text = context.update(|_, app| {
+            app.read_from_clipboard()
+                .and_then(|clipboard| clipboard.text())
+        });
+        assert_eq!(copied_text, Some(selected_text.trim_end().to_owned()));
+    }
+
+    #[gpui_kit::test]
+    fn oversized_cached_html_shows_a_safe_reader_fallback(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, _) = fixture(account);
+        cache.0.lock().expect("fixture cache mutex is healthy").body = Some(MessageBody::new(
+            MessageBodyType::Html,
+            "x".repeat(8 * 1024 * 1024 + 1),
+        ));
+        let workflow = Arc::new(MailWorkflow::new(
+            OfflineProvider {
+                body_fetches: Arc::new(AtomicUsize::new(0)),
+            },
+            cache,
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+
+        context.run_until_parked();
+        draw_mail_view(context);
+        let message_row = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached message row is rendered");
+        context.simulate_click(message_row.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+
+        let is_over_limit = context.cx.update(|cx| {
+            matches!(
+                view.read(cx).message_state,
+                MessageState::Opened(ref opened)
+                    if opened.body() == &MessageBodyForDisplay::HtmlTooLarge
+            )
+        });
+        assert!(is_over_limit);
+        assert!(
+            context
+                .debug_bounds("mail-message-body-too-large")
+                .is_some()
+        );
     }
 
     #[gpui_kit::test]

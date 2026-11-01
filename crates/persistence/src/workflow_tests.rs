@@ -9,8 +9,8 @@ use std::{
 };
 
 use einfach_mail_application::{
-    MailOperationError, MailProvider, MailWorkflow, MailWorkflowError, MessageDeltaPageResponse,
-    MessageDeltaRequest,
+    MailCache, MailOperationError, MailProvider, MailWorkflow, MailWorkflowError,
+    MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
 };
 use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, MailFolder, MailMessage, MessageBody, MessageBodyType,
@@ -225,7 +225,7 @@ fn interrupted_sync_resumes_its_checkpoint_and_body_reopens_from_encrypted_cache
             ],
             Ok(MessageBody::new(
                 MessageBodyType::Html,
-                "<p>Synthetic body</p>".to_owned(),
+                "<p onclick=\"run()\">Synthetic body</p><script>private marker</script>".to_owned(),
             )),
         );
         let initial_requests = Arc::clone(&initial_provider.requests);
@@ -274,7 +274,7 @@ fn interrupted_sync_resumes_its_checkpoint_and_body_reopens_from_encrypted_cache
             [Ok(page_response(final_page(final_link.clone())))],
             Ok(MessageBody::new(
                 MessageBodyType::Html,
-                "<p>Synthetic body</p>".to_owned(),
+                "<p onclick=\"run()\">Synthetic body</p><script>private marker</script>".to_owned(),
             )),
         );
         let resume_requests = Arc::clone(&resume_provider.requests);
@@ -308,7 +308,20 @@ fn interrupted_sync_resumes_its_checkpoint_and_body_reopens_from_encrypted_cache
             .await
             .expect("opening a message fetches and caches its body");
         assert!(!opened.loaded_from_cache());
-        assert_eq!(opened.body().content(), "<p>Synthetic body</p>");
+        assert!(matches!(
+            opened.body(),
+            MessageBodyForDisplay::SanitizedHtml(html)
+                if html.as_str() == "<p>Synthetic body</p>"
+        ));
+        let (_, cached_message) = cache
+            .read_message(&folder_reference, &message_id())
+            .await
+            .expect("raw cached body can be read")
+            .expect("message remains cached");
+        assert_eq!(
+            cached_message.expect("body was persisted").content(),
+            "<p onclick=\"run()\">Synthetic body</p><script>private marker</script>"
+        );
         assert_eq!(body_fetches.load(Ordering::Relaxed), 1);
         drop(resumed_workflow);
         cache.close_for_tests().await;
@@ -327,7 +340,22 @@ fn interrupted_sync_resumes_its_checkpoint_and_body_reopens_from_encrypted_cache
             .await
             .expect("cached body opens without a provider request");
         assert!(reopened_message.loaded_from_cache());
-        assert_eq!(reopened_message.body().content(), "<p>Synthetic body</p>");
+        assert!(matches!(
+            reopened_message.body(),
+            MessageBodyForDisplay::SanitizedHtml(html)
+                if html.as_str() == "<p>Synthetic body</p>"
+        ));
+        let (_, reopened_cached_body) = reopened_cache
+            .read_message(&folder_reference, &message_id())
+            .await
+            .expect("raw cached body can be read after restart")
+            .expect("message remains cached after restart");
+        assert_eq!(
+            reopened_cached_body
+                .expect("raw body remains in the encrypted cache")
+                .content(),
+            "<p onclick=\"run()\">Synthetic body</p><script>private marker</script>"
+        );
         assert_eq!(offline_fetches.load(Ordering::Relaxed), 0);
         drop(offline_workflow);
         reopened_cache.close_for_tests().await;

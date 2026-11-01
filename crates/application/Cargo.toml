@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ammonia = "4.2.4"
 einfach-mail-domain = { path = "../domain" }
 thiserror.workspace = true
 tokio-util.workspace = true

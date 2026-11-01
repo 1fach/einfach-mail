@@ -1,6 +1,6 @@
 # ADR 0007: Render sanitized message HTML in native GPUI
 
-- Status: Accepted for the Linux first renderer; application integration pending
+- Status: Accepted and implemented for Linux; manual graphical evidence pending
 - Date: 2026-10-31
 - Owners: Project maintainer
 
@@ -18,7 +18,7 @@ Propose Ammonia 4.2.4 for the application-owned message-body sanitization policy
 
 The application workflow will accept the untrusted domain body and produce an opaque `SanitizedEmailHtml` value. Keep this type and the Ammonia allowlist policy in `crates/application`; do not add GPUI or Ammonia types to `crates/domain`. Do not persist the sanitized output: sanitize when a body is prepared for display so an updated policy is applied to cached mail too.
 
-The desktop view will render only `SanitizedEmailHtml` through GPUI Kit `TextView::html`. Start with an explicit allowlist for common semantic message markup. Strip scripts, styles and style attributes, SVG, MathML, images, frames, forms, media, embeds, event attributes, and other active or remote-resource-bearing content. Allow only `http` and `https` link targets, and install a `TextView::on_link_click` handler that opens only those user-clicked links externally. Do not use TextView's default URL handler. If image support is added later, override `TextView::image_source` so remote URLs cannot fall through to GPUI's resource loader; resolve only approved app-owned content such as a validated inline attachment.
+The desktop view renders only `SanitizedEmailHtml` through GPUI Kit `TextView::html`. The explicit allowlist preserves common semantic message markup and removes scripts, styles and style attributes, SVG, MathML, images, frames, forms, media, embeds, event attributes, and other active or remote-resource-bearing content. The sanitizer limits both raw and sanitized HTML to 8 MiB, matching the Graph provider's per-response ceiling; larger HTML receives a reader fallback. Only absolute `http` and `https` links without user information can open externally, and only after a user click. The view overrides `TextView::image_source` with a source that resolves no image so GPUI's default loader cannot fetch document resources.
 
 Do not add `gpui-webview` for the first renderer. Revisit it in a separate security ADR only if native `TextView` fails the supported email-format acceptance checks and a cross-platform way to block scripts, downloads, and remote subresources is demonstrated. A WebView must remain a body-only leaf with no IPC bridge, app commands, tokens, or mailbox access.
 
@@ -32,7 +32,7 @@ Do not add `gpui-webview` for the first renderer. Revisit it in a separate secur
 
 ## Consequences
 
-- Ammonia is the selected parser/sanitizer for the first renderer, but remains test-only until production integration. Its 4.2.4 release uses HTML5 parsing, has MIT OR Apache-2.0 licensing, requires Rust 1.85, and depends on `html5ever`, `cssparser`, `maplit`, and `url`. This fits the workspace MSRV of Rust 1.95. RustSec has recorded multiple historical Ammonia vulnerabilities; 4.2.4 includes the fix for RUSTSEC-2026-0373. Recheck the advisory database and audit the resolved lockfile before adding Ammonia to production dependencies.
+- Ammonia is a production dependency of `crates/application`. Its 4.2.4 release uses HTML5 parsing, has MIT OR Apache-2.0 licensing, requires Rust 1.85, and depends on `html5ever`, `cssparser`, `maplit`, and `url`. This fits the workspace MSRV of Rust 1.95. RustSec has recorded multiple historical Ammonia vulnerabilities; 4.2.4 includes the fix for RUSTSEC-2026-0373. Keep the lockfile audit current.
 - The Ammonia configuration is Einfach Mail policy, not a replacement sanitizer. Keep its allowlist narrow and do not reimplement HTML parsing, URL parsing, or CSS sanitization.
 - Verify synthetic fixtures for malformed HTML, script/event payloads, SVG and MathML mutation-XSS cases, `javascript:` and non-web links, CSS `url()` variations, remote images, frames, and forms. Include a positive fixture for common paragraphs, emphasis, lists, links, and tables.
 - Verify the actual rendered body does not load remote images or other network resources, does not open unsafe URLs, and keeps copy and selection usable. Never use real mailbox content in fixtures.

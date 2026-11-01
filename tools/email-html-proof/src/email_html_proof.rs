@@ -1,13 +1,13 @@
-use std::collections::{HashMap, HashSet};
 #[cfg(target_os = "linux")]
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
-use ammonia::{Builder, UrlRelative};
-#[cfg(target_os = "linux")]
-use url::Url;
+use einfach_mail_application::{
+    MessageBodyForDisplay, allowed_external_message_url, prepare_message_body_for_display,
+};
+use einfach_mail_domain::{MessageBody, MessageBodyType};
 
 #[cfg(target_os = "linux")]
 use gpui_kit::{
@@ -17,82 +17,6 @@ use gpui_kit::{
     component::text::TextView,
     div, point, px,
 };
-
-const ALLOWED_TAGS: &[&str] = &[
-    "a",
-    "b",
-    "blockquote",
-    "br",
-    "caption",
-    "code",
-    "dd",
-    "del",
-    "div",
-    "dl",
-    "dt",
-    "em",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "hr",
-    "i",
-    "ins",
-    "kbd",
-    "li",
-    "ol",
-    "p",
-    "pre",
-    "q",
-    "s",
-    "small",
-    "span",
-    "strong",
-    "sub",
-    "sup",
-    "table",
-    "tbody",
-    "td",
-    "tfoot",
-    "th",
-    "thead",
-    "tr",
-    "u",
-    "ul",
-];
-
-const REMOVE_CONTENT_TAGS: &[&str] = &[
-    "applet",
-    "audio",
-    "button",
-    "canvas",
-    "embed",
-    "fieldset",
-    "form",
-    "frame",
-    "frameset",
-    "iframe",
-    "input",
-    "math",
-    "noembed",
-    "noframes",
-    "noscript",
-    "object",
-    "option",
-    "plaintext",
-    "script",
-    "select",
-    "source",
-    "style",
-    "svg",
-    "template",
-    "textarea",
-    "track",
-    "video",
-    "xmp",
-];
 
 const ACTIVE_CONTENT_FIXTURE: &str = r#"
     <p onclick="run()" onmouseover="run()" style="background:url(https://tracker.invalid/pixel)">readable</p>
@@ -163,17 +87,13 @@ const CSS_URL_FIXTURE: &str = r#"
     <style>p { background: URL(https://tracker.invalid/block) }</style>
 "#;
 
-fn sanitize(source: &str) -> String {
-    let mut builder = Builder::default();
-    builder
-        .tags(ALLOWED_TAGS.iter().copied().collect())
-        .tag_attributes(HashMap::from([("a", HashSet::from(["href"]))]))
-        .generic_attributes(HashSet::new())
-        .url_schemes(HashSet::from(["http", "https"]))
-        .url_relative(UrlRelative::Deny)
-        .clean_content_tags(REMOVE_CONTENT_TAGS.iter().copied().collect());
-
-    builder.clean(source).to_string()
+fn sanitize(raw_html: &str) -> String {
+    let body = MessageBody::new(MessageBodyType::Html, raw_html.to_owned());
+    match prepare_message_body_for_display(&body) {
+        MessageBodyForDisplay::SanitizedHtml(html) => html.as_str().to_owned(),
+        MessageBodyForDisplay::HtmlTooLarge => panic!("synthetic fixture is within the body limit"),
+        MessageBodyForDisplay::PlainText(_) => panic!("HTML fixture remains HTML"),
+    }
 }
 
 fn assert_absent(sanitized: &str, forbidden_fragments: &[&str]) {
@@ -267,19 +187,16 @@ struct EmailBodyTestView {
 }
 
 #[cfg(target_os = "linux")]
-fn allowed_web_url(href: &str) -> Option<Url> {
-    let url = Url::parse(href).ok()?;
-    matches!(url.scheme(), "http" | "https").then_some(url)
-}
-
-#[cfg(target_os = "linux")]
 #[test]
 fn only_http_and_https_urls_are_external_link_targets() {
     for href in [
         "http://mail.example.invalid",
         "https://mail.example.invalid",
     ] {
-        assert!(allowed_web_url(href).is_some(), "web URL rejected: {href}");
+        assert!(
+            allowed_external_message_url(href).is_some(),
+            "web URL rejected: {href}"
+        );
     }
 
     for href in [
@@ -291,7 +208,7 @@ fn only_http_and_https_urls_are_external_link_targets() {
         "//tracker.invalid/path",
     ] {
         assert!(
-            allowed_web_url(href).is_none(),
+            allowed_external_message_url(href).is_none(),
             "non-web URL accepted: {href}"
         );
     }
@@ -335,7 +252,7 @@ impl Render for EmailBodyTestView {
                         ImageSource::Custom(Arc::new(|_, _| None))
                     })
                     .on_link_click(move |url, _, _, cx| {
-                        let Some(parsed_url) = allowed_web_url(url.as_ref()) else {
+                        let Some(parsed_url) = allowed_external_message_url(url.as_ref()) else {
                             return;
                         };
                         link_clicks

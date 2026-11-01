@@ -7,12 +7,14 @@ use std::{
 };
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, MailFolder, MailMessage, MessageBody, MessageDeltaProgress,
-    MessageId,
+    AccountId, FolderReference, MailFolder, MailMessage, MessageDeltaProgress, MessageId,
 };
 use thiserror::Error;
 
-use crate::{MailCache, MailCacheError, MailOperationError, MailProvider};
+use crate::{
+    MailCache, MailCacheError, MailOperationError, MailProvider, MessageBodyForDisplay,
+    prepare_message_body_for_display,
+};
 
 const INITIAL_SYNC_WINDOW: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const MAX_PAGES_PER_FOLDER_ROUND: usize = 1_000;
@@ -47,11 +49,11 @@ pub enum MailWorkflowError {
     StateUnavailable,
 }
 
-/// A cached message and the raw body returned by the provider or cache.
-#[derive(Debug, Eq, PartialEq)]
+/// A cached message and a body prepared for safe native display.
+#[derive(Eq, PartialEq)]
 pub struct OpenedMessage {
     message: MailMessage,
-    body: MessageBody,
+    body: MessageBodyForDisplay,
     loaded_from_cache: bool,
 }
 
@@ -62,9 +64,9 @@ impl OpenedMessage {
         &self.message
     }
 
-    /// Returns the untrusted raw body for application-level sanitization.
+    /// Returns the body after the application applies its display policy.
     #[must_use]
-    pub fn body(&self) -> &MessageBody {
+    pub fn body(&self) -> &MessageBodyForDisplay {
         &self.body
     }
 
@@ -72,6 +74,17 @@ impl OpenedMessage {
     #[must_use]
     pub fn loaded_from_cache(&self) -> bool {
         self.loaded_from_cache
+    }
+}
+
+impl std::fmt::Debug for OpenedMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenedMessage")
+            .field("message", &"<redacted>")
+            .field("body", &self.body)
+            .field("loaded_from_cache", &self.loaded_from_cache)
+            .finish()
     }
 }
 
@@ -235,7 +248,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
 
     /// Opens a cached message and fetches its body only when it is not already cached.
     ///
-    /// The returned body is raw and untrusted. HTML must be sanitized before rendering.
+    /// The returned body is safe for the native reader. Raw content remains in the cache.
     ///
     /// # Errors
     ///
@@ -249,7 +262,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         else {
             return Err(MailCacheError::MessageNotCached.into());
         };
-        let (body, loaded_from_cache) = match cached_body {
+        let (raw_body, loaded_from_cache) = match cached_body {
             Some(body) => (body, true),
             None => {
                 let body = self.provider.fetch_message_body(folder, message_id).await?;
@@ -259,6 +272,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
                 (body, false)
             }
         };
+        let body = prepare_message_body_for_display(&raw_body);
         Ok(OpenedMessage {
             message,
             body,

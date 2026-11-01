@@ -61,7 +61,7 @@ The message-delta, account-cutoff, encrypted page-commit, checkpoint-resume, and
 
 - Parse Graph responses, configuration, and stored data at their boundaries.
 - Treat message HTML as untrusted input. The application must sanitize it with a maintained library before it reaches a view, and expose only `SanitizedEmailHtml` to the desktop. Never persist the sanitized result.
-- ADR 0007 accepts GPUI Kit `TextView::html` as the Linux first renderer. Keep scripts, styles, images, and other remote content blocked by default; override link routing and image resolution as defense in depth. Production integration waits for the cached-message workflow and issue #9's remaining evidence.
+- ADR 0007 accepts GPUI Kit `TextView::html` as the Linux first renderer. Keep scripts, styles, images, and other remote content blocked by default; override link routing and image resolution as defense in depth. The production integration has headless synthetic coverage; pixel fidelity, OS clipboard behavior, and system-browser launch remain unverified under issue #9.
 - Keep the app UI in GPUI. A browser renderer for email HTML needs a separate security decision and must be limited to the message body. Give message content no application commands, tokens, IPC bridge, or access to mailbox data.
 - Store refresh credentials in the operating-system credential store. Do not persist access tokens in SQLite or UI state.
 - Store Linux cache files below the XDG data home with private file permissions. Keep the SQLCipher key in Secret Service. Missing-key recovery and portable cache recovery remain unresolved; do not replace a missing key automatically.
