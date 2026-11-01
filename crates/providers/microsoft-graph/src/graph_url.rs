@@ -83,6 +83,14 @@ impl GraphAuthority {
         self.validated_url(self.message_path(message_id)?)
     }
 
+    pub(super) fn message_reply_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
+        let mut url = self.message_path(message_id)?;
+        url.path_segments_mut()
+            .map_err(|()| GraphError::UnsafeLink)?
+            .push("reply");
+        self.validated_url(url)
+    }
+
     pub(super) fn mail_send_path(&self) -> Result<GraphUrl, GraphError> {
         let url = self
             .base_url
@@ -332,6 +340,25 @@ mod tests {
                 .expect("opaque link has the configured authority")
                 .as_str(),
             link
+        );
+    }
+
+    #[test]
+    fn message_reply_path_encodes_source_id_as_one_segment() {
+        let request = authority()
+            .message_reply_path("message/id with space")
+            .expect("synthetic source ID forms a safe reply URL");
+
+        assert!(
+            request
+                .as_str()
+                .contains("/me/messages/message%2Fid%20with%20space/reply")
+        );
+        assert!(
+            Url::parse(request.as_str())
+                .expect("synthetic reply URL is valid")
+                .query()
+                .is_none()
         );
     }
 

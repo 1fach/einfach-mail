@@ -24,9 +24,9 @@ use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage,
     CalendarDeltaProgress, CalendarOccurrencePatch, CalendarOccurrenceTimePatch,
     CalendarViewReference, EventId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
-    MailFolder, MailMessage, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
-    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadata,
-    MessageMetadataPatch, MessageOrigin, ReadState,
+    MailFolder, MailMessage, MailReplyDraft, Mailbox, MessageBody, MessageBodyType,
+    MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+    MessageMetadata, MessageMetadataPatch, MessageOrigin, ReadState,
 };
 
 const MAX_PAGINATION_PAGES: usize = 1_000;
@@ -245,8 +245,20 @@ impl GraphApi {
         let body = serde_json::to_vec(&SendMailRequest::from(draft))
             .map_err(|_| GraphError::InvalidRecord)?;
         self.transport
-            .send_mail(self.authority.mail_send_path()?, token, body)
+            .post_mail(self.authority.mail_send_path()?, token, body)
             .await
+    }
+
+    pub(super) async fn reply_to_message(
+        &self,
+        draft: &MailReplyDraft,
+        token: Arc<AccessToken>,
+    ) -> Result<(), GraphError> {
+        let url = self
+            .authority
+            .message_reply_path(draft.source().message_id().as_str())?;
+        let body = mail_reply_body(draft)?;
+        self.transport.post_mail(url, token, body).await
     }
 
     fn delta_progress(
@@ -337,6 +349,28 @@ impl<'a> From<&'a MailDraft> for SendMailRequest<'a> {
             save_to_sent_items: true,
         }
     }
+}
+
+#[derive(Serialize)]
+struct ReplyRequest<'a> {
+    message: ReplyMessage<'a>,
+}
+
+#[derive(Serialize)]
+struct ReplyMessage<'a> {
+    body: SendMailBody<'a>,
+}
+
+fn mail_reply_body(draft: &MailReplyDraft) -> Result<Vec<u8>, GraphError> {
+    serde_json::to_vec(&ReplyRequest {
+        message: ReplyMessage {
+            body: SendMailBody {
+                content_type: "Text",
+                content: draft.body(),
+            },
+        },
+    })
+    .map_err(|_| GraphError::InvalidRecord)
 }
 
 struct PageTraversal<'a> {
@@ -1040,15 +1074,16 @@ mod tests {
     use einfach_mail_domain::{
         AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarOccurrence,
         CalendarOccurrenceTime, CalendarViewRange, CalendarViewReference, FolderId,
-        FolderReference, FollowUpFlagStatus, MailDraft, MailRecipient, MailSubject,
-        MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, ReadState,
+        FolderReference, FollowUpFlagStatus, MailDraft, MailRecipient, MailReplyDraft,
+        MailReplySource, MailSubject, MessageDeltaChange, MessageId, MessageMetadata,
+        MessageOrigin, ReadState,
     };
 
     use super::{
         GraphApi, MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget,
         WireCalendarEvent, WireFolder, WireMessage, WireMessageChange,
         confirmed_follow_up_flag_status, confirmed_read_state, follow_up_flag_patch_body,
-        read_state_patch_body,
+        mail_reply_body, read_state_patch_body,
     };
     use crate::{
         error::GraphError,
@@ -1079,6 +1114,33 @@ mod tests {
         )
         .expect("synthetic calendar range is valid");
         CalendarViewReference::new(account, range)
+    }
+
+    #[test]
+    fn mail_reply_body_contains_only_plain_text_message_body() {
+        let account =
+            AccountId::try_from("synthetic-account".to_owned()).expect("account ID is valid");
+        let folder = FolderReference::new(
+            account,
+            FolderId::try_from("inbox".to_owned()).expect("folder ID is valid"),
+        );
+        let source = MailReplySource::new(
+            folder,
+            MessageId::try_from("source-message".to_owned()).expect("message ID is valid"),
+        );
+        let draft = MailReplyDraft::new(source, "Synthetic reply\nSecond line".to_owned());
+        let serialized = mail_reply_body(&draft).expect("reply request serializes");
+        let request: serde_json::Value =
+            serde_json::from_slice(&serialized).expect("reply request is valid JSON");
+
+        assert_eq!(request["message"]["body"]["contentType"], "Text");
+        assert_eq!(
+            request["message"]["body"]["content"],
+            "Synthetic reply\nSecond line"
+        );
+        assert!(request["message"].get("toRecipients").is_none());
+        assert!(request["message"].get("subject").is_none());
+        assert!(request.get("comment").is_none());
     }
 
     fn synthetic_graph_api(server: &MockServer) -> (GraphApi, GraphTransport) {

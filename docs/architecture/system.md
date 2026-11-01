@@ -15,7 +15,7 @@ flowchart LR
     Graph -->|HTTPS with a private delegated token| MS[Microsoft Graph v1.0]
 ```
 
-PR #47 contains the M2 read-only mail candidate. The M3 branch `candidate/issue-22-calendar-sync` adds a Linux-only, read-only weekly agenda on the same account session and encrypted cache. M4 adds account-scoped read-state and follow-up flag workflows under [ADR 0015](../decisions/0015-idempotent-message-read-state-update.md) and [ADR 0019](../decisions/0019-follow-up-flags-on-cached-messages.md); calendar actions remain outside M3.
+PR #47 contains the M2 read-only mail candidate. The M3 branch `candidate/issue-22-calendar-sync` adds a Linux-only, read-only weekly agenda on the same account session and encrypted cache. M4 adds explicit read-state updates, follow-up flags, plain-text sends, and replies to one cached message. ADRs [0015](../decisions/0015-idempotent-message-read-state-update.md), [0017](../decisions/0017-safe-plain-text-mail-sending.md), [0018](../decisions/0018-native-plain-text-message-reply.md), and [0019](../decisions/0019-follow-up-flags-on-cached-messages.md) record these actions.
 
 ## Module ownership
 
@@ -24,8 +24,8 @@ PR #47 contains the M2 read-only mail candidate. The M3 branch `candidate/issue-
 | `apps/desktop/` | GPUI lifecycle, native views, keyboard actions, OS integration, and sanitized email rendering | Mail rules, Graph requests, database schema |
 | `crates/application/` | Account, mail, and calendar workflows, provider/cache ports, message actions, application errors, and email sanitization | GPUI, Graph JSON, concrete database types |
 | `crates/domain/` | Provider-independent account, folder, message, calendar occurrence, and sync invariants | Framework and provider details |
-| `crates/providers/microsoft-graph/` | Linux OAuth, Graph profile/folder/message/calendar-view requests, explicitly authorized read-state and follow-up flag PATCHes, response mapping, private HTTP transport, and refresh-token storage | UI decisions, persistence policy, token access in application code |
-| `crates/persistence/` | Linux XDG paths, Secret Service key references, SQLCipher schema and migrations, encrypted records, atomic mail/calendar sync and message updates, durable message-write recovery markers, and cache removal | Graph or GPUI types |
+| `crates/providers/microsoft-graph/` | Linux OAuth, Graph profile/folder/message/calendar-view requests, explicitly authorized mail writes, response mapping, private HTTP transport, and refresh-token storage | UI decisions, persistence policy, token access in application code |
+| `crates/persistence/` | Linux XDG paths, Secret Service key references, SQLCipher schema and migrations, encrypted records, atomic mail/calendar sync and message updates, durable send/reply recovery markers, and cache removal | Graph or GPUI types |
 
 The dependency direction is desktop UI → application → domain, with Graph and persistence adapters implementing application-owned ports. Views never call Graph or access the database directly.
 
@@ -40,6 +40,7 @@ The dependency direction is desktop UI → application → domain, with Graph an
 7. The desktop renders only that sanitized value through GPUI Kit `TextView::html`; oversized sanitized content becomes bounded, escaped plain text.
 8. The calendar workflow requests bounded Graph `calendarView/delta` pages for the fixed UTC bounds of the selected Linux week. Each page and range cursor commit together, while cached events remain available when a request fails. The agenda uses Jiff only to display timed instants in the Linux system zone; all-day dates remain unchanged.
 9. A read-state or follow-up flag action reserves the cached folder, stages a shared account-and-folder recovery marker in SQLCipher, sends one PATCH with only the requested property, and waits for Graph's `200 OK` response with the matching value before updating the cache. A complete folder delta round clears the marker after an unknown outcome or app exit. Permission renewal explains `Mail.ReadWrite`'s full scope, verifies the same account, and preserves the current session and cache if consent fails. These actions never queue offline or retry automatically; see [ADR 0015](../decisions/0015-idempotent-message-read-state-update.md) and [ADR 0019](../decisions/0019-follow-up-flags-on-cached-messages.md).
+10. A new-message send or reply reserves the account and saves one body-free SQLCipher marker before its Graph POST. A reply keeps the cached source folder and message IDs with an optional subject; Graph selects the reply recipients. The app does not retry an uncertain POST. It keeps the marker until the user checks Sent Items and resolves it. Account removal and another send remain blocked while the marker exists. See [ADR 0017](../decisions/0017-safe-plain-text-mail-sending.md) and [ADR 0018](../decisions/0018-native-plain-text-message-reply.md).
 
 ## Synchronization rules
 
@@ -55,7 +56,7 @@ The dependency direction is desktop UI → application → domain, with Graph an
 - If Graph returns `410 Gone` for a message delta request, validate its reset URL and start a durable replacement generation. Keep unseen rows and their bodies until the final replacement page commits. A replacement upsert clears that message's cached body in the page transaction; completion deletes unseen rows and clears bodies for all retained rows atomically with the final cursor. See [ADR 0032](../decisions/0032-recover-expired-message-delta-cursors.md) and [ADR 0034](../decisions/0034-invalidate-cached-message-bodies-after-delta-updates.md).
 - Apply removals and sparse metadata patches only to messages already in the local scope. Preserve fields omitted from a sparse patch and distinguish explicit nulls for nullable fields.
 - Fetch bodies only after the user opens a message. Do not download attachments in M2.
-- Keep the M2 mail candidate read-only. M4 adds explicit read-state and follow-up flag changes for cached messages. Move, archive, delete, and send actions remain separate.
+- Keep the M2 mail candidate read-only. M4 adds explicit read-state and follow-up flag changes, plain-text sends, and replies to cached messages. Move, archive, and delete actions remain separate.
 
 Synthetic Graph, workflow, persistence, and headless GPUI tests cover mail and calendar paging, cache checkpoints, offline reads, and renderer and agenda behavior. They do not prove live mailbox completeness or calendar recurrence and all-day semantics; see issues #3, #6, and #8. Issue #22 remains open for manual screen-reader, focus, scrolling, and layout review.
 
@@ -73,4 +74,5 @@ Synthetic Graph, workflow, persistence, and headless GPUI tests cover mail and c
 - No dedicated Microsoft 365 test tenant or public app registration is available. Live Entra behavior, complete Graph mailbox sync, Mail.ReadWrite consent, and read-state and follow-up flag PATCH behavior remain unverified under issues #3, #8, #24, and #32.
 - Issue #9 remains open for real-window layout, operating-system clipboard behavior, and system-browser launch. Headless GPUI tests do not establish those behaviors.
 - Calendar recurrence, daylight-saving boundaries, and all-day semantics have synthetic coverage only. Keep issue #6 open for tenant verification; keep issue #22 open for manual Linux accessibility and layout review.
+- Reply recipient routing and Sent Items reconciliation have synthetic coverage only. Keep issue #30 open for tenant verification.
 - GPUI Kit is pre-1.0. Windows and macOS builds and runtime checks are deferred until those platforms enter scope.

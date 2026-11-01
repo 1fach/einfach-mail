@@ -4,7 +4,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use crate::mail_composer::{MailComposer, MailComposerEvent, MailPermissionRequester};
+use crate::mail_composer::{
+    ComposerTarget, MailComposer, MailComposerContext, MailComposerEvent, MailPermissionRequester,
+};
 use einfach_mail_application::{
     FollowUpFlagUpdateOutcome, MailCacheError, MailOperationError, MailSession, MailSyncProgress,
     MailSyncReport, MailSyncState, MailWorkflowError, MessageBodyForDisplay, OpenedMessage,
@@ -12,7 +14,7 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage,
-    MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
+    MailReplySource, MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
 };
 use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::WindowExt;
@@ -80,6 +82,11 @@ pub(crate) struct MailView {
     follow_up_flag_update: FollowUpFlagUpdateStatus,
     follow_up_flag_task: Option<Task<()>>,
     selected_folder_write_sync_required: bool,
+}
+
+struct MailComposerPresentation {
+    title: &'static str,
+    context: MailComposerContext,
 }
 
 enum SyncStatus {
@@ -874,39 +881,119 @@ impl MailView {
         if self.sync_running {
             return;
         }
-        let pending = match self.pending_send_error {
-            Some(error) => Err(error),
-            None => Ok(self.pending_send.clone()),
-        };
         let title = if self.pending_send.is_some() {
             "Resolve pending send"
         } else {
             "New message"
         };
-        let composer = cx.new(|cx| {
-            MailComposer::new(
-                Arc::clone(&self.workflow),
-                self.permission_requester.clone(),
-                self.profile.id().clone(),
-                pending,
-                window,
-                cx,
-            )
-        });
-        let subscription =
-            cx.subscribe(
-                &composer,
-                |view, _, event: &MailComposerEvent, cx| match event {
-                    MailComposerEvent::PendingSendChanged(pending) => {
-                        view.pending_send = pending.clone();
-                        view.pending_send_error = None;
-                        cx.notify();
-                    }
-                },
-            );
+        let presentation = MailComposerPresentation {
+            title,
+            context: self.composer_context(ComposerTarget::NewMessage),
+        };
+        self.present_composer(presentation, window, cx);
+    }
+
+    fn open_reply_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_open_reply(window, cx) {
+            return;
+        }
+        let Some(target) = self.selected_reply_target() else {
+            return;
+        };
+        let presentation = MailComposerPresentation {
+            title: "Reply",
+            context: self.composer_context(target),
+        };
+        self.present_composer(presentation, window, cx);
+    }
+
+    fn can_open_reply(&self, window: &mut Window, cx: &mut App) -> bool {
+        !self.sync_running
+            && self.read_state_task.is_none()
+            && self.follow_up_flag_task.is_none()
+            && self.pending_send.is_none()
+            && self.pending_send_error.is_none()
+            && !window.has_active_sheet(cx)
+    }
+
+    fn selected_reply_target(&self) -> Option<ComposerTarget> {
+        let MessageState::Opened(opened) = &self.message_state else {
+            return None;
+        };
+        let message = opened.message();
+        if self.selected_message_id.as_ref() != Some(message.id())
+            || self.selected_folder.as_ref() != Some(message.folder())
+        {
+            return None;
+        }
+        Some(ComposerTarget::Reply {
+            source: MailReplySource::new(message.folder().clone(), message.id().clone()),
+            subject: message.metadata().subject().map(str::to_owned),
+        })
+    }
+
+    fn composer_context(&self, target: ComposerTarget) -> MailComposerContext {
+        let pending = match self.pending_send_error {
+            Some(error) => Err(error),
+            None => Ok(self.pending_send.clone()),
+        };
+        MailComposerContext {
+            workflow: Arc::clone(&self.workflow),
+            permission_requester: self.permission_requester.clone(),
+            account_id: self.profile.id().clone(),
+            pending,
+            target,
+        }
+    }
+
+    fn present_composer(
+        &mut self,
+        presentation: MailComposerPresentation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let MailComposerPresentation { title, context } = presentation;
+        let composer = cx.new(|cx| MailComposer::new(context, window, cx));
+        let subscription = self.subscribe_to_composer(&composer, cx);
         self.composer = Some(composer.clone());
         self.composer_subscription = Some(subscription);
         open_composer_sheet(window, cx, title, composer);
+    }
+
+    fn subscribe_to_composer(
+        &mut self,
+        composer: &Entity<MailComposer>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(
+            composer,
+            |view, _, event: &MailComposerEvent, cx| match event {
+                MailComposerEvent::PendingSendChanged(pending) => {
+                    view.pending_send = pending.clone();
+                    view.pending_send_error = None;
+                    cx.notify();
+                }
+            },
+        )
+    }
+
+    fn render_reply_action(&self, message_id: &MessageId, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("message-reply")
+            .debug_selector(|| "message-reply".to_owned())
+            .ghost()
+            .label("Reply")
+            .disabled(
+                self.sync_running
+                    || self.read_state_task.is_some()
+                    || self.follow_up_flag_task.is_some()
+                    || self.pending_send.is_some()
+                    || self.pending_send_error.is_some()
+                    || self.selected_message_id.as_ref() != Some(message_id),
+            )
+            .on_click(cx.listener(|view, _, window, cx| {
+                view.open_reply_composer(window, cx);
+            }))
+            .into_any_element()
     }
 
     fn render_header(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1306,7 +1393,8 @@ impl MailView {
                                             .child(self.render_read_state_action(message_id, cx))
                                             .child(
                                                 self.render_follow_up_flag_action(message_id, cx),
-                                            ),
+                                            )
+                                            .child(self.render_reply_action(message_id, cx)),
                                     ),
                             )
                             .child(
@@ -2007,9 +2095,9 @@ mod tests {
     };
     use einfach_mail_domain::{
         AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
-        MailFolder, MailMessage, MailSendOperationId, Mailbox, MessageBody, MessageBodyType,
-        MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
-        PendingMailSend, ReadState,
+        MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, Mailbox, MessageBody,
+        MessageBodyType, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+        MessageMetadataPatch, PendingMailSend, ReadState,
     };
     use gpui_kit::base::TextSelection;
     use gpui_kit::component::WindowExt as _;
@@ -2132,6 +2220,14 @@ mod tests {
             &self,
             _: &AccountId,
             _: MailDraft,
+        ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
+            ready(Err(MailSendProviderError::ServiceUnavailable))
+        }
+
+        fn reply_to_message(
+            &self,
+            _: &AccountId,
+            _: MailReplyDraft,
         ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
             ready(Err(MailSendProviderError::ServiceUnavailable))
         }
@@ -2305,6 +2401,14 @@ mod tests {
         ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
             ready(Err(MailSendProviderError::ServiceUnavailable))
         }
+
+        fn reply_to_message(
+            &self,
+            account_id: &AccountId,
+            draft: MailReplyDraft,
+        ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
+            self.offline.reply_to_message(account_id, draft)
+        }
     }
 
     struct SendGate {
@@ -2318,6 +2422,8 @@ mod tests {
         can_send: Arc<AtomicBool>,
         send_calls: Arc<AtomicUsize>,
         send_gate: Arc<Mutex<Option<SendGate>>>,
+        reply_sources: Arc<Mutex<Vec<(String, String, String)>>>,
+        reply_error: Arc<Mutex<Option<MailSendProviderError>>>,
     }
 
     impl PermissionProvider {
@@ -2417,6 +2523,53 @@ mod tests {
                     let _ = gate.release.await;
                 }
                 if can_send.load(Ordering::Relaxed) {
+                    Ok(())
+                } else {
+                    Err(MailSendProviderError::PermissionRequired)
+                }
+            }
+        }
+
+        fn reply_to_message(
+            &self,
+            account_id: &AccountId,
+            draft: MailReplyDraft,
+        ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
+            let matches_account = account_id.as_str() == "synthetic-account"
+                && draft.source().account_id() == account_id;
+            let can_send = Arc::clone(&self.can_send);
+            let send_calls = Arc::clone(&self.send_calls);
+            let reply_sources = Arc::clone(&self.reply_sources);
+            let reply_error = self
+                .reply_error
+                .lock()
+                .expect("fixture reply-error mutex is healthy")
+                .take();
+            let source = draft.source();
+            let account_id = account_id.as_str().to_owned();
+            let folder_id = source.folder().folder_id().as_str().to_owned();
+            let message_id = source.message_id().as_str().to_owned();
+            let send_gate = self
+                .send_gate
+                .lock()
+                .expect("fixture send-gate mutex is healthy")
+                .take();
+            async move {
+                if !matches_account {
+                    return Err(MailSendProviderError::AccountMismatch);
+                }
+                send_calls.fetch_add(1, Ordering::Relaxed);
+                reply_sources
+                    .lock()
+                    .expect("fixture reply-source mutex is healthy")
+                    .push((account_id, folder_id, message_id));
+                if let Some(gate) = send_gate {
+                    let _ = gate.started.send(());
+                    let _ = gate.release.await;
+                }
+                if let Some(error) = reply_error {
+                    Err(error)
+                } else if can_send.load(Ordering::Relaxed) {
                     Ok(())
                 } else {
                     Err(MailSendProviderError::PermissionRequired)
@@ -3970,6 +4123,267 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn reply_composer_uses_the_cached_source_and_requires_an_explicit_send(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            bind_mail_composer_keys(cx);
+        });
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, message_id) = fixture(account.clone());
+        let can_send = Arc::new(AtomicBool::new(false));
+        let send_calls = Arc::new(AtomicUsize::new(0));
+        let reply_sources = Arc::new(Mutex::new(Vec::new()));
+        let permission_requests = Arc::new(AtomicUsize::new(0));
+        let provider = PermissionProvider {
+            offline: OfflineProvider {
+                body_fetches: Arc::new(AtomicUsize::new(0)),
+            },
+            can_send: Arc::clone(&can_send),
+            send_calls: Arc::clone(&send_calls),
+            send_gate: Arc::default(),
+            reply_sources: Arc::clone(&reply_sources),
+            reply_error: Arc::default(),
+        };
+        let requester: Arc<dyn MailPermissionRequester> = Arc::new(FixturePermissionRequester {
+            account_id: account,
+            requests: Arc::clone(&permission_requests),
+            gate: Mutex::new(None),
+        });
+        let workflow = Arc::new(MailWorkflow::new(provider, cache));
+        let mut mail_view = None;
+        let (_, context) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| MailView::new(profile, workflow, Some(requester), cx));
+            mail_view = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = mail_view.expect("mail view is created with the test window");
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if !context.cx.update(|cx| view.read(cx).sync_running) {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        let row = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached source message is rendered");
+        context.simulate_click(row.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if context.debug_bounds("message-reply").is_some() {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        let reply_action = context
+            .debug_bounds("message-reply")
+            .expect("opened cached message exposes a native Reply action");
+        context.simulate_click(reply_action.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+
+        assert!(context.debug_bounds("mail-reply-context").is_some());
+        assert!(context.debug_bounds("mail-recipient-input").is_none());
+        assert!(context.debug_bounds("mail-subject-input").is_none());
+        let body = context
+            .debug_bounds("mail-body-input")
+            .expect("reply composer exposes a plain-text body");
+        context.simulate_click(body.center(), Modifiers::default());
+        context.simulate_input("Synthetic private reply body");
+        let send = context
+            .debug_bounds("mail-send-button")
+            .expect("reply composer exposes an explicit Send action");
+        context.simulate_click(send.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if context.debug_bounds("review-send-permission").is_some() {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+        let review = context
+            .debug_bounds("review-send-permission")
+            .expect("permission denial offers an explicit Mail.Send review");
+        context.simulate_click(review.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+        assert_eq!(permission_requests.load(Ordering::Relaxed), 1);
+        assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+
+        can_send.store(true, Ordering::Relaxed);
+        let send = context
+            .debug_bounds("mail-send-button")
+            .expect("permission review leaves the reply available");
+        context.simulate_click(send.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if send_calls.load(Ordering::Relaxed) == 2 {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(send_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            reply_sources
+                .lock()
+                .expect("fixture reply-source mutex is healthy")
+                .as_slice(),
+            [
+                (
+                    "synthetic-account".to_owned(),
+                    "inbox".to_owned(),
+                    message_id.as_str().to_owned(),
+                ),
+                (
+                    "synthetic-account".to_owned(),
+                    "inbox".to_owned(),
+                    message_id.as_str().to_owned(),
+                ),
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn unknown_reply_requires_sent_items_review_and_duplicate_confirmation(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            bind_mail_composer_keys(cx);
+        });
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, message_id) = fixture(account);
+        let send_calls = Arc::new(AtomicUsize::new(0));
+        let reply_sources = Arc::new(Mutex::new(Vec::new()));
+        let provider = PermissionProvider {
+            offline: OfflineProvider {
+                body_fetches: Arc::new(AtomicUsize::new(0)),
+            },
+            can_send: Arc::new(AtomicBool::new(true)),
+            send_calls: Arc::clone(&send_calls),
+            send_gate: Arc::default(),
+            reply_sources: Arc::clone(&reply_sources),
+            reply_error: Arc::new(Mutex::new(Some(MailSendProviderError::OutcomeUnknown))),
+        };
+        let workflow = Arc::new(MailWorkflow::new(provider, cache));
+        let mut mail_view = None;
+        let (_, context) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+            mail_view = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = mail_view.expect("mail view is created with the test window");
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if !context.cx.update(|cx| view.read(cx).sync_running) {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        let row = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached source message is rendered");
+        context.simulate_click(row.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if context.debug_bounds("message-reply").is_some() {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        let reply_action = context
+            .debug_bounds("message-reply")
+            .expect("opened cached message exposes a native Reply action");
+        context.simulate_click(reply_action.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+        let body = context
+            .debug_bounds("mail-body-input")
+            .expect("reply composer exposes its body");
+        context.simulate_click(body.center(), Modifiers::default());
+        context.simulate_input("Synthetic private reply body");
+        let send = context
+            .debug_bounds("mail-send-button")
+            .expect("reply composer exposes its Send action");
+        context.simulate_click(send.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if context.debug_bounds("mail-pending-send").is_some() {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+        assert!(context.debug_bounds("mail-pending-send").is_some());
+
+        let send = context
+            .debug_bounds("mail-send-button")
+            .expect("unresolved reply keeps Send visible");
+        context.simulate_click(send.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+        assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+        let resolve = context
+            .debug_bounds("resolve-pending-mail-send")
+            .expect("unknown reply requires explicit Sent Items review");
+        context.simulate_click(resolve.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if context.debug_bounds("confirm-duplicate-risk").is_some() {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        assert!(context.debug_bounds("mail-pending-send").is_none());
+        assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+        let confirm = context
+            .debug_bounds("confirm-duplicate-risk")
+            .expect("resolved unknown outcome requires duplicate-risk acknowledgement");
+        context.simulate_click(confirm.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+        let send = context
+            .debug_bounds("mail-send-button")
+            .expect("confirmed duplicate risk allows a separate reply");
+        context.simulate_click(send.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if send_calls.load(Ordering::Relaxed) == 2 {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(send_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            reply_sources
+                .lock()
+                .expect("fixture reply-source mutex is healthy")
+                .iter()
+                .map(|source| source.2.as_str())
+                .collect::<Vec<_>>(),
+            [message_id.as_str(), message_id.as_str()]
+        );
+    }
+
+    #[gpui_kit::test]
     async fn permission_review_requires_a_separate_send_action(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
@@ -3987,6 +4401,8 @@ mod tests {
             can_send: Arc::clone(&can_send),
             send_calls: Arc::clone(&send_calls),
             send_gate: Arc::default(),
+            reply_sources: Arc::default(),
+            reply_error: Arc::default(),
         };
         let permission_requests = Arc::new(AtomicUsize::new(0));
         let (permission_started, permission_started_receiver) = tokio::sync::oneshot::channel();
@@ -4115,6 +4531,8 @@ mod tests {
             can_send: Arc::new(AtomicBool::new(true)),
             send_calls: Arc::new(AtomicUsize::new(0)),
             send_gate: Arc::default(),
+            reply_sources: Arc::default(),
+            reply_error: Arc::default(),
         };
         let (send_started, release_send) = provider.hold_next_send();
         let workflow = Arc::new(MailWorkflow::new(provider.clone(), cache));
@@ -4203,6 +4621,8 @@ mod tests {
             can_send: Arc::new(AtomicBool::new(true)),
             send_calls: Arc::clone(&send_calls),
             send_gate: Arc::default(),
+            reply_sources: Arc::default(),
+            reply_error: Arc::default(),
         };
         let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
         let mut mail_view = None;

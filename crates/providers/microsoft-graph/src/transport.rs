@@ -121,7 +121,7 @@ impl GraphTransportHandle {
             .into_body()
     }
 
-    pub(super) async fn send_mail(
+    pub(super) async fn post_mail(
         &self,
         url: GraphUrl,
         token: Arc<AccessToken>,
@@ -1156,7 +1156,7 @@ mod tests {
 
             let result = transport
                 .handle()
-                .send_mail(
+                .post_mail(
                     graph_url(&server.url("/send")),
                     synthetic_access_token(),
                     b"{}".to_vec(),
@@ -1195,7 +1195,7 @@ mod tests {
 
             let result = transport
                 .handle()
-                .send_mail(
+                .post_mail(
                     graph_url(&server.url("/send")),
                     synthetic_access_token(),
                     b"{}".to_vec(),
@@ -1229,7 +1229,7 @@ mod tests {
 
         let result = transport
             .handle()
-            .send_mail(
+            .post_mail(
                 graph_url(&server.url("/send")),
                 synthetic_access_token(),
                 b"{}".to_vec(),
@@ -1266,7 +1266,7 @@ mod tests {
 
         let result = transport
             .handle()
-            .send_mail(
+            .post_mail(
                 graph_url(&format!("http://{address}/send")),
                 synthetic_access_token(),
                 b"{}".to_vec(),

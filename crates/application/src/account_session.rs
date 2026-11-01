@@ -4,7 +4,7 @@ use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
 
 use einfach_mail_domain::{
     AccountId, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MailMessage, MailSendOperationId, MessageId, PendingMailSend, ReadState,
+    MailMessage, MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend, ReadState,
 };
 
 use crate::{
@@ -124,6 +124,20 @@ pub trait MailSession: Send + Sync {
         &'a self,
         account_id: &'a AccountId,
         draft: MailDraft,
+        created_at: SystemTime,
+    ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>>;
+
+    /// Replies to a cached message and saves a body-free marker before dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the source belongs to another account or
+    /// Graph rejects the reply, a cache error before dispatch, or an unresolved
+    /// operation error when another send needs explicit resolution.
+    fn reply_to_message<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        draft: MailReplyDraft,
         created_at: SystemTime,
     ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>>;
 
@@ -354,6 +368,17 @@ where
         created_at: SystemTime,
     ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>> {
         Box::pin(MailWorkflow::send_message(
+            self, account_id, draft, created_at,
+        ))
+    }
+
+    fn reply_to_message<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        draft: MailReplyDraft,
+        created_at: SystemTime,
+    ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>> {
+        Box::pin(MailWorkflow::reply_to_message(
             self, account_id, draft, created_at,
         ))
     }

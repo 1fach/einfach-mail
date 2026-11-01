@@ -30,7 +30,7 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarViewReference, FolderReference, FollowUpFlagStatus,
-    MailDraft, MailFolder, MailMessage, MessageBody, MessageId, ReadState,
+    MailDraft, MailFolder, MailMessage, MailReplyDraft, MessageBody, MessageId, ReadState,
 };
 
 const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
@@ -351,10 +351,27 @@ impl MailProvider for MicrosoftGraphProvider {
                 .map_err(map_mail_operation_to_send)?;
             let graph_api = config.graph_api().map_err(map_send_graph_error)?;
             let result = graph_api.send_mail(&draft, Arc::clone(&token)).await;
-            if matches!(&result, Err(GraphError::AccessTokenRejected)) {
-                invalidate_access_token(&config, &account_id, &token).await;
+            map_send_submission_result(&config, &account_id, &token, result).await
+        })
+    }
+
+    fn reply_to_message(
+        &self,
+        account_id: &AccountId,
+        draft: MailReplyDraft,
+    ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let account_id = account_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            if draft.source().account_id() != &account_id {
+                return Err(MailSendProviderError::AccountMismatch);
             }
-            result.map_err(map_send_graph_error)
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_send)?;
+            let graph_api = config.graph_api().map_err(map_send_graph_error)?;
+            let result = graph_api.reply_to_message(&draft, Arc::clone(&token)).await;
+            map_send_submission_result(&config, &account_id, &token, result).await
         })
     }
 }
@@ -512,6 +529,18 @@ async fn invalidate_access_token(
     }
 }
 
+async fn map_send_submission_result(
+    config: &ProviderConfig,
+    account_id: &AccountId,
+    access_token: &Arc<AccessToken>,
+    result: Result<(), GraphError>,
+) -> Result<(), MailSendProviderError> {
+    if matches!(&result, Err(GraphError::AccessTokenRejected)) {
+        invalidate_access_token(config, account_id, access_token).await;
+    }
+    result.map_err(map_send_graph_error)
+}
+
 fn map_graph_error(error: GraphError) -> MailOperationError {
     match error {
         GraphError::AccessTokenRejected => MailOperationError::SignInRequired,
@@ -632,14 +661,17 @@ mod tests {
             Arc, Barrier, Mutex, OnceLock,
             atomic::{AtomicBool, Ordering},
         },
-        time::Duration,
+        time::{Duration, SystemTime},
     };
 
     use httpmock::{
         Method::{GET, POST},
         MockServer,
     };
-    use huskarl::token::RefreshToken;
+    use huskarl::{
+        core::secrets::SecretString,
+        token::{AccessToken, BearerAccessToken, RefreshToken},
+    };
     use tokio::net::TcpListener;
     use tokio::sync::{mpsc, oneshot};
     use url::Url;
@@ -654,14 +686,15 @@ mod tests {
     };
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
-        AccountProvider, AccountWorkflow, MailOperationError, MailProvider, MessageDeltaRequest,
-        MessageDeltaResponse,
+        AccountProvider, AccountWorkflow, MailOperationError, MailProvider, MailSendProviderError,
+        MessageDeltaRequest, MessageDeltaResponse,
     };
     use einfach_mail_domain::{
-        AccountId, FolderReference, MessageBodyType, MessageDeltaLink, MessageDeltaProgress,
+        AccountId, FolderId, FolderReference, MailReplyDraft, MailReplySource, MessageBodyType,
+        MessageDeltaLink, MessageDeltaProgress, MessageId,
     };
 
-    use super::{MicrosoftGraphProvider, ProviderConfig};
+    use super::{MicrosoftGraphProvider, ProviderConfig, ProviderSession};
 
     struct MemoryRefreshTokenStore {
         token: Mutex<Option<RefreshToken>>,
@@ -758,6 +791,14 @@ mod tests {
             .expect("synthetic refresh token is valid")
     }
 
+    fn access_token(token_text: &str) -> Arc<AccessToken> {
+        Arc::new(AccessToken::Bearer(BearerAccessToken::new(
+            SecretString::new(token_text),
+            SystemTime::now(),
+            Some(Duration::from_secs(3_600)),
+        )))
+    }
+
     fn synthetic_provider(
         server: &MockServer,
         sender: mpsc::UnboundedSender<Url>,
@@ -844,6 +885,108 @@ mod tests {
             .await
             .expect("loopback callback reaches the test listener");
         assert!(response.status().is_success());
+    }
+
+    #[tokio::test]
+    async fn reply_to_message_preserves_accepted_and_unknown_post_outcomes() {
+        let server = MockServer::start_async().await;
+        let accepted_reply = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/messages/source%2Fmessage/reply")
+                    .header("authorization", "Bearer synthetic-send-access")
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"message":{"body":{"contentType":"Text","content":"Synthetic reply body"}}}"#,
+                    );
+                then.status(202);
+            })
+            .await;
+        let ambiguous_reply = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/messages/source%2Fmessage/reply")
+                    .body(
+                        r#"{"message":{"body":{"contentType":"Text","content":"Synthetic uncertain reply body"}}}"#,
+                    );
+                then.status(500);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(None));
+        let provider = synthetic_provider(&server, browser_sender, credentials);
+        let account =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: account.clone(),
+            access_token: Some(access_token("synthetic-send-access")),
+        });
+        let folder = FolderReference::new(
+            account.clone(),
+            FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let source = MailReplySource::new(
+            folder,
+            MessageId::try_from("source/message".to_owned())
+                .expect("synthetic message ID is valid"),
+        );
+        let draft = MailReplyDraft::new(source.clone(), "Synthetic reply body".to_owned());
+
+        assert_eq!(provider.reply_to_message(&account, draft).await, Ok(()));
+        assert_eq!(
+            provider
+                .reply_to_message(
+                    &account,
+                    MailReplyDraft::new(source, "Synthetic uncertain reply body".to_owned(),),
+                )
+                .await,
+            Err(MailSendProviderError::OutcomeUnknown)
+        );
+        accepted_reply.assert_calls_async(1).await;
+        ambiguous_reply.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn reply_to_message_rejects_another_account_before_request() {
+        let server = MockServer::start_async().await;
+        let unexpected_reply = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/messages/source-message/reply");
+                then.status(202);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let provider = synthetic_provider(
+            &server,
+            browser_sender,
+            Arc::new(MemoryRefreshTokenStore::new(None)),
+        );
+        let account =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: account.clone(),
+            access_token: Some(access_token("synthetic-send-access")),
+        });
+        let other_account =
+            AccountId::try_from("account-456".to_owned()).expect("synthetic account ID is valid");
+        let folder = FolderReference::new(
+            other_account,
+            FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let source = MailReplySource::new(
+            folder,
+            MessageId::try_from("source-message".to_owned())
+                .expect("synthetic message ID is valid"),
+        );
+
+        assert_eq!(
+            provider
+                .reply_to_message(&account, MailReplyDraft::new(source, "reply".to_owned()))
+                .await,
+            Err(MailSendProviderError::AccountMismatch)
+        );
+        unexpected_reply.assert_calls_async(0).await;
     }
 
     #[test]

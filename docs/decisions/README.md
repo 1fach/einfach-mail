@@ -25,6 +25,8 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0013](0013-graph-account-identity.md) | Use the Graph profile for initial account identity | Accepted for Linux; live Entra verification open |
 | [0014](0014-linux-read-only-calendar-workflow.md) | Implement a cached Linux read-only primary calendar | Accepted for Linux; live Graph and manual UI verification remain open |
 | [0015](0015-idempotent-message-read-state-update.md) | Add idempotent message read-state updates | Accepted |
+| [0017](0017-safe-plain-text-mail-sending.md) | Send one plain-text message through Microsoft Graph | Accepted; live verification remains open |
+| [0018](0018-native-plain-text-message-reply.md) | Reply to one cached message through Microsoft Graph | Accepted; tenant verification remains open |
 | [0019](0019-follow-up-flags-on-cached-messages.md) | Set follow-up flags on cached messages | Accepted; live verification remains open |
 | [0024](0024-keyboard-navigation-for-cached-messages.md) | Provide keyboard navigation for cached messages | Accepted |
 | [0029](0029-retry-cache-removal-after-sidecar-failure.md) | Keep cache removal retryable after a sidecar failure | Accepted |

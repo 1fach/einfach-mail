@@ -34,6 +34,8 @@ Support explicit mail and event changes with clear pending, confirmed, and faile
 
 [Issue #27](https://github.com/1fach/einfach-mail/issues/27) implements the first M4 action: composing and sending one plain-text message through Graph with delegated `Mail.Send`. The Linux candidate is ready for stacked draft review on the Issue #44 branch. Live consent and Graph verification remain separate under [issue #28](https://github.com/1fach/einfach-mail/issues/28); event actions remain future M4 work.
 
+[Issue #29](https://github.com/1fach/einfach-mail/issues/29) adds a native plain-text reply to one cached message. The reply uses Graph's source-message routing and shares the send marker and no-retry recovery path in [ADR 0018](../decisions/0018-native-plain-text-message-reply.md). Tenant verification remains in [issue #30](https://github.com/1fach/einfach-mail/issues/30).
+
 ## M5: Windows support and daily-use integration — not started
 
 Add and verify Windows shell launch, authentication and credential storage, accessibility, installation, account removal, and operating-system integrations for mail and calendar use.

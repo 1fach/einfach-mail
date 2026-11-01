@@ -14,7 +14,9 @@ Issue #23's read-state implementation is isolated on `candidate/issue-23-read-st
 
 Issue #27's M4 plain-text send implementation is in draft PR #53. Its head is `candidate/issue-27-plain-text-send`. Its base is PR #52's `candidate/issue-44-retryable-cache-removal` branch. The local Linux gate passed, including Rust 1.95 all-target compilation, Clippy, rustdoc, dependency policy, RustSec audit, formatting, and workspace tests. Three environment-dependent Secret Service tests remain ignored. Cache staging and removal serialize across app processes. Stale cache handles reject sends after database removal, and lock waits run off the async executor. No live Graph request, real mailbox, or desktop window was used. Tenant verification remains under issue #28. Keep issue #27 open until review and merge.
 
-Issue #23's read-state action is in draft PR #54 on `candidate/issue-23-read-state-pr`, based on PR #53's head. The full Linux gate passed locally on 2026-11-05 after source review. The implementation uses synthetic tests only. No live Graph request, real mailbox, or desktop window was used. Keep issue #23 open through review and keep issue #24 open for tenant verification.
+Issue #23's read-state action is in draft PR #54, stacked on PR #53. Its Linux checks passed before this restack; final-stack verification is pending. The implementation uses synthetic tests only. No live Graph request, real mailbox, or desktop window was used. Keep issue #23 open through review and issue #24 open for tenant verification.
+
+Issue #29's reply implementation is in draft PR #56, stacked on PR #55. It covers the native composer, cached-source checks, Graph POST mapping, and body-free restart recovery. The branch is being restacked to remove an older duplicate flags commit. Final Linux verification remains pending. Keep issue #30 open for tenant-only consent, `Reply-To`, and Sent Items evidence.
 
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
@@ -38,18 +40,20 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 - Issue #9 remains open for real-window layout, operating-system clipboard behavior, and system-browser launch. Do not launch a GUI during this work.
 - The Issue #22 candidate is ready for stacked review on `candidate/issue-22-calendar-sync`, based on PR #47. Keep issue #22 open for manual Linux review of screen-reader announcements, focus, scrolling, and layout. Keep issue #6 open for live recurrence, time-zone, and all-day verification.
 - Draft PR #53 implements Issue #27 and is stacked on PR #52. Keep issue #27 open until review and merge, and keep issue #28 open for tenant-only consent and Graph verification.
+- Issue #29 has local synthetic coverage but no review branch yet. Keep issue #30 open for tenant-only reply verification.
 - Fedora GNOME Keyring evidence does not establish behavior for every Secret Service implementation.
 - Windows and macOS build, runtime, credential storage, installation, and operating-system integration remain deferred.
 
 ## Next actions
 
-1. Keep PR #47 in draft until issue #8's Microsoft 365 initial-sync check and issue #9's real-window checks pass.
-2. Keep issue #8 open until initial-sync completeness is verified against a Microsoft 365 test tenant.
-3. Keep issue #9 open until layout, clipboard behavior, and browser launch are verified in a safe Linux session.
-4. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
-5. Review draft PR #53 after PR #52; tenant-only evidence remains under issue #28.
-6. After PR #50 merges, review the independent M3 follow-ups in PRs #51 and #52 for merge.
-7. Review PR #54 as the child of PR #53 after its required checks pass. Keep issue #23 open through review and issue #24 open for tenant consent and Graph verification.
+1. Finish local Linux verification of the reconciled M4 send, read-state, flags, reply, move, and account-removal stack before publishing branch updates.
+2. Update issue and PR evidence after the restacked branch heads are stable; keep draft states unchanged and do not merge.
+3. Keep PR #47 in draft until issue #8's Microsoft 365 initial-sync check and issue #9's real-window checks pass.
+4. Keep issue #8 open until initial-sync completeness is verified against a Microsoft 365 test tenant.
+5. Keep issue #9 open until layout, clipboard behavior, and browser launch are verified in a safe Linux session.
+6. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
+7. Keep issues #24, #28, #30, and #32 open for tenant-only consent and Graph verification.
+8. After PR #50 merges, review the independent M3 follow-ups in PRs #51 and #52 for merge.
 
 ## Update rule
 

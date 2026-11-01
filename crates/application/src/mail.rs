@@ -4,7 +4,7 @@ use std::{future::Future, time::Duration};
 
 use einfach_mail_domain::{
     AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
-    MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId, ReadState,
+    MailReplyDraft, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId, ReadState,
 };
 use thiserror::Error;
 
@@ -264,6 +264,29 @@ pub trait MailProvider: Send + Sync {
         &self,
         account_id: &AccountId,
         draft: MailDraft,
+    ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_;
+
+    /// Replies to a message in the signed-in account using the source's reply recipients.
+    ///
+    /// Implementations must reject a source scoped to another account and must
+    /// not retry a request with an unknown outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailSendProviderError::SignInRequired`] when no valid session
+    /// exists, [`MailSendProviderError::AccountMismatch`] when either account
+    /// does not own the source, [`MailSendProviderError::PermissionRequired`]
+    /// when Microsoft denies `Mail.Send`, or [`MailSendProviderError::RateLimited`]
+    /// when Microsoft throttles the request. Returns
+    /// [`MailSendProviderError::Rejected`] when Graph confirms it did not accept
+    /// the reply, [`MailSendProviderError::OutcomeUnknown`] when Graph may have
+    /// accepted it without confirmation, or
+    /// [`MailSendProviderError::ServiceUnavailable`] when local provider setup
+    /// prevents the request.
+    fn reply_to_message(
+        &self,
+        account_id: &AccountId,
+        draft: MailReplyDraft,
     ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_;
 }
 

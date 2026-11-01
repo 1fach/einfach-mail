@@ -6,6 +6,9 @@ use rusqlite_migration::{M, Migrations};
 use crate::store::{CacheFailure, CacheResult};
 
 pub(super) const MESSAGE_QUERY_VERSION: i64 = 2;
+const FLAG_SCHEMA_VERSION: usize = 5;
+const REPLY_SCHEMA_BASE_VERSION: usize = 7;
+const LATEST_SCHEMA_VERSION: usize = 8;
 
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -242,13 +245,51 @@ fn migrations() -> Migrations<'static> {
                     CHECK (created_nanoseconds BETWEEN 0 AND 999999999)
             );",
         ),
+        M::up(
+            "ALTER TABLE mail_pending_send RENAME TO mail_pending_send_v1;
+
+            CREATE TABLE mail_pending_send (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                operation_id TEXT NOT NULL UNIQUE,
+                target_kind TEXT NOT NULL CHECK (target_kind IN ('new_message', 'reply')),
+                recipient TEXT,
+                subject TEXT,
+                source_folder_id TEXT,
+                source_message_id TEXT,
+                created_seconds INTEGER NOT NULL,
+                created_nanoseconds INTEGER NOT NULL
+                    CHECK (created_nanoseconds BETWEEN 0 AND 999999999),
+                CHECK (
+                    (target_kind = 'new_message'
+                     AND recipient IS NOT NULL AND length(recipient) > 0
+                     AND subject IS NOT NULL AND length(subject) > 0
+                     AND source_folder_id IS NULL AND source_message_id IS NULL)
+                    OR
+                    (target_kind = 'reply'
+                     AND recipient IS NULL
+                     AND source_folder_id IS NOT NULL AND length(source_folder_id) > 0
+                     AND source_message_id IS NOT NULL AND length(source_message_id) > 0)
+                )
+            );
+
+            INSERT INTO mail_pending_send (
+                account_id, operation_id, target_kind, recipient, subject,
+                source_folder_id, source_message_id,
+                created_seconds, created_nanoseconds
+            )
+            SELECT account_id, operation_id, 'new_message', recipient, subject,
+                   NULL, NULL, created_seconds, created_nanoseconds
+            FROM mail_pending_send_v1;
+
+            DROP TABLE mail_pending_send_v1;",
+        ),
     ])
 }
 
 pub(super) async fn apply(client: &Client) -> CacheResult<()> {
     client
         .conn_mut_and_then(|connection| {
-            apply_parallel_v5_compatibility(connection)?;
+            apply_parallel_schema_compatibility(connection)?;
             migrations()
                 .to_latest(connection)
                 .map_err(|_| CacheFailure::Unavailable)
@@ -258,25 +299,45 @@ pub(super) async fn apply(client: &Client) -> CacheResult<()> {
     Ok(())
 }
 
-fn apply_parallel_v5_compatibility(connection: &mut Connection) -> Result<(), CacheFailure> {
-    let migration_set = migrations();
-    let version = migration_set
+fn apply_parallel_schema_compatibility(connection: &mut Connection) -> Result<(), CacheFailure> {
+    let version = migrations()
         .current_version(connection)
         .map_err(|_| CacheFailure::Unavailable)?;
-    if usize::from(version) != 5 {
-        return Ok(());
+
+    if usize::from(version) == REPLY_SCHEMA_BASE_VERSION
+        && has_column(connection, "mail_pending_send", "target_kind")?
+    {
+        return repair_reply_schema(connection);
     }
 
-    let has_flag_status = connection
-        .query_row(
-            "SELECT EXISTS (
-                SELECT 1 FROM pragma_table_info('mail_messages') WHERE name = 'flag_status'
-            )",
-            [],
-            |row| row.get::<_, bool>(0),
-        )
+    if usize::from(version) == FLAG_SCHEMA_VERSION {
+        repair_flag_schema(connection)?;
+    }
+    Ok(())
+}
+
+fn repair_reply_schema(connection: &mut Connection) -> Result<(), CacheFailure> {
+    let transaction = connection
+        .transaction()
         .map_err(|_| CacheFailure::Unavailable)?;
-    if has_flag_status {
+    transaction
+        .execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS mail_folder_write_sync_requirement (
+                account_id TEXT NOT NULL,
+                folder_id TEXT NOT NULL,
+                PRIMARY KEY (account_id, folder_id),
+                FOREIGN KEY (account_id, folder_id)
+                    REFERENCES mail_folders (account_id, folder_id)
+                    ON DELETE CASCADE
+            );
+            PRAGMA user_version = {LATEST_SCHEMA_VERSION};"
+        ))
+        .map_err(|_| CacheFailure::Unavailable)?;
+    transaction.commit().map_err(|_| CacheFailure::Unavailable)
+}
+
+fn repair_flag_schema(connection: &mut Connection) -> Result<(), CacheFailure> {
+    if has_column(connection, "mail_messages", "flag_status")? {
         return Ok(());
     }
 
@@ -284,33 +345,45 @@ fn apply_parallel_v5_compatibility(connection: &mut Connection) -> Result<(), Ca
         .transaction()
         .map_err(|_| CacheFailure::Unavailable)?;
     transaction
-        .execute_batch(
-            "ALTER TABLE mail_messages ADD COLUMN flag_status TEXT
-                CHECK (flag_status IS NULL OR flag_status IN (
-                    'not_flagged', 'flagged', 'complete'
-                ));
-
-            UPDATE mail_account_sync_scope SET query_version = 2;
-
-            UPDATE mail_sync_state
-            SET delta_link = NULL,
-                next_link = NULL,
-                last_sync_seconds = NULL,
-                last_sync_nanoseconds = NULL,
-                full_sync_generation = 0,
-                full_sync_active = 0;
-
-            UPDATE mail_messages SET full_sync_generation = NULL;",
-        )
+        .execute_batch(FLAG_SCHEMA_REPAIR_SQL)
         .map_err(|_| CacheFailure::Unavailable)?;
     transaction.commit().map_err(|_| CacheFailure::Unavailable)
 }
 
+const FLAG_SCHEMA_REPAIR_SQL: &str = "ALTER TABLE mail_messages ADD COLUMN flag_status TEXT
+    CHECK (flag_status IS NULL OR flag_status IN (
+        'not_flagged', 'flagged', 'complete'
+    ));
+
+    UPDATE mail_account_sync_scope SET query_version = 2;
+
+    UPDATE mail_sync_state
+    SET delta_link = NULL,
+        next_link = NULL,
+        last_sync_seconds = NULL,
+        last_sync_nanoseconds = NULL,
+        full_sync_generation = 0,
+        full_sync_active = 0;
+
+    UPDATE mail_messages SET full_sync_generation = NULL;";
+
+fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, CacheFailure> {
+    connection
+        .query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
+            )",
+            async_sqlite::rusqlite::params![table, column],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| CacheFailure::Unavailable)
+}
+
 #[cfg(test)]
 mod tests {
-    use async_sqlite::rusqlite::Connection;
+    use async_sqlite::rusqlite::{Connection, params};
 
-    use super::{apply_parallel_v5_compatibility, migrations};
+    use super::{apply_parallel_schema_compatibility, migrations};
 
     #[test]
     fn replacement_generation_migration_preserves_an_existing_snapshot() {
@@ -496,13 +569,164 @@ mod tests {
             [
                 "account_id",
                 "operation_id",
+                "target_kind",
                 "recipient",
                 "subject",
+                "source_folder_id",
+                "source_message_id",
                 "created_seconds",
                 "created_nanoseconds",
             ]
         );
         assert!(!columns.iter().any(|column| column.contains("body")));
+    }
+
+    #[test]
+    fn reply_marker_migration_preserves_existing_new_message_markers() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database opens");
+        let migrations = migrations();
+        migrations
+            .to_version(&mut connection, 7)
+            .expect("legacy send schema is created");
+        connection
+            .execute(
+                "INSERT INTO mail_pending_send (
+                    account_id, operation_id, recipient, subject,
+                    created_seconds, created_nanoseconds
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    "synthetic-account",
+                    "8d719f02-64d5-4c4b-905e-0d8ca42c21a8",
+                    "ada@example.test",
+                    "Synthetic subject",
+                    1_800_000_000_i64,
+                    123_456_789_i64,
+                ],
+            )
+            .expect("legacy pending marker is stored");
+
+        migrations
+            .to_latest(&mut connection)
+            .expect("tagged marker migration applies");
+        let migrated = connection
+            .query_row(
+                "SELECT target_kind, recipient, subject, source_folder_id,
+                        source_message_id, created_seconds, created_nanoseconds
+                 FROM mail_pending_send WHERE account_id = ?1",
+                ["synthetic-account"],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .expect("migrated pending marker is readable");
+
+        assert_eq!(
+            migrated,
+            (
+                "new_message".to_owned(),
+                Some("ada@example.test".to_owned()),
+                Some("Synthetic subject".to_owned()),
+                None,
+                None,
+                1_800_000_000,
+                123_456_789,
+            )
+        );
+    }
+
+    #[test]
+    fn reply_aware_parallel_schema_keeps_unresolved_reply_marker() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database opens");
+        migrations()
+            .to_version(&mut connection, 5)
+            .expect("common schema reaches version five");
+        connection
+            .execute_batch(
+                "CREATE TABLE mail_pending_send (
+                    account_id TEXT PRIMARY KEY NOT NULL,
+                    operation_id TEXT NOT NULL UNIQUE,
+                    target_kind TEXT NOT NULL CHECK (target_kind IN ('new_message', 'reply')),
+                    recipient TEXT,
+                    subject TEXT,
+                    source_folder_id TEXT,
+                    source_message_id TEXT,
+                    created_seconds INTEGER NOT NULL,
+                    created_nanoseconds INTEGER NOT NULL
+                        CHECK (created_nanoseconds BETWEEN 0 AND 999999999),
+                    CHECK (
+                        (target_kind = 'new_message' AND recipient IS NOT NULL
+                         AND subject IS NOT NULL AND source_folder_id IS NULL
+                         AND source_message_id IS NULL)
+                        OR
+                        (target_kind = 'reply' AND recipient IS NULL
+                         AND source_folder_id IS NOT NULL AND source_message_id IS NOT NULL)
+                    )
+                );
+                INSERT INTO mail_pending_send (
+                    account_id, operation_id, target_kind, recipient, subject,
+                    source_folder_id, source_message_id,
+                    created_seconds, created_nanoseconds
+                ) VALUES (
+                    'synthetic-account', '8d719f02-64d5-4c4b-905e-0d8ca42c21a8',
+                    'reply', NULL, 'Synthetic subject', 'inbox', 'source-message',
+                    1_800_000_000, 123456789
+                );
+                PRAGMA user_version = 7;",
+            )
+            .expect("reply-aware parallel schema is simulated");
+
+        apply_parallel_schema_compatibility(&mut connection)
+            .expect("parallel schema is normalized without rewriting the marker");
+        migrations()
+            .to_latest(&mut connection)
+            .expect("normalized schema is already current");
+        let marker = connection
+            .query_row(
+                "SELECT target_kind, source_folder_id, source_message_id,
+                        created_seconds, created_nanoseconds
+                 FROM mail_pending_send WHERE account_id = 'synthetic-account'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .expect("unresolved reply marker remains readable");
+        let folder_write_table_exists = connection
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'mail_folder_write_sync_requirement'
+                )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("folder-write marker schema is inspectable");
+
+        assert_eq!(
+            marker,
+            (
+                "reply".to_owned(),
+                "inbox".to_owned(),
+                "source-message".to_owned(),
+                1_800_000_000,
+                123_456_789,
+            )
+        );
+        assert!(folder_write_table_exists);
     }
 
     #[test]
@@ -527,7 +751,7 @@ mod tests {
             )
             .expect("parallel send branch version five is simulated");
 
-        apply_parallel_v5_compatibility(&mut connection)
+        apply_parallel_schema_compatibility(&mut connection)
             .expect("missing flag migration is applied transactionally");
         migrations
             .to_latest(&mut connection)

@@ -9,7 +9,7 @@ use std::{
 
 use einfach_mail_domain::{
     AccountId, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MailMessage, MailSendOperationId, MessageBody, MessageDeltaProgress, MessageId,
+    MailMessage, MailReplyDraft, MailSendOperationId, MessageBody, MessageDeltaProgress, MessageId,
     PendingMailSend, ReadState,
 };
 use thiserror::Error;
@@ -65,12 +65,17 @@ pub enum MailWorkflowError {
 /// A send result that needs no further provider request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MailSendOutcome {
-    /// Graph accepted the message and the local marker was removed.
+    /// Graph accepted the submission and the local marker was removed.
     Accepted,
-    /// Graph accepted the message, but the local marker remains for resolution.
+    /// Graph accepted the submission, but the local marker remains for resolution.
     AcceptedNeedsResolution(PendingMailSend),
-    /// Graph may have accepted the message; the marker remains and must not be replayed.
+    /// Graph may have accepted the submission; the marker remains and must not be replayed.
     OutcomeUnknown(PendingMailSend),
+}
+
+enum MailSubmission {
+    NewMessage(MailDraft),
+    Reply(MailReplyDraft),
 }
 
 /// A user-safe error from staging, submitting, or explicitly resolving a send.
@@ -79,14 +84,17 @@ pub enum MailSendWorkflowError {
     /// The encrypted local cache could not read or update the operation marker.
     #[error("the local mail cache could not update the send operation")]
     Cache(#[from] MailCacheError),
-    /// The provider explicitly rejected the message before accepting it.
+    /// The provider rejected the operation or its account did not match.
     #[error("the mail provider rejected the send operation")]
     Provider(#[from] MailSendProviderError),
-    /// The provider rejected the message, but its local marker could not be cleared.
-    #[error("the provider rejected the message but the local send marker remains")]
+    /// The source message has been removed from the encrypted account cache.
+    #[error("the reply source is no longer available in the local mail cache")]
+    ReplySourceNotCached,
+    /// The provider rejected the operation, but its local marker could not be cleared.
+    #[error("the provider rejected the operation but the local send marker remains")]
     RejectedNeedsResolution {
         /// The rejected operation that remains in the cache.
-        pending: PendingMailSend,
+        pending: Box<PendingMailSend>,
         /// The provider's definitive rejection.
         provider: MailSendProviderError,
         /// The failure that prevented clearing the marker.
@@ -303,7 +311,57 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         let pending =
             draft.pending_send(account_id.clone(), MailSendOperationId::new(), created_at);
         self.stage_send_marker(&pending).await?;
-        self.submit_staged_send(account_id, draft, pending).await
+        self.submit_staged_send(account_id, MailSubmission::NewMessage(draft), pending)
+            .await
+    }
+
+    /// Stages and submits one plain-text reply to a still-cached message.
+    ///
+    /// The reply body remains in memory. The encrypted marker records only the
+    /// source message metadata; a reply request is never automatically retried.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailSendWorkflowError::ReplySourceNotCached`] when the source
+    /// has left the cache, [`MailSendWorkflowError::Provider`] for an account
+    /// mismatch or definitive provider rejection, a cache error before dispatch,
+    /// or the same unresolved-operation errors as [`Self::send_message`].
+    pub async fn reply_to_message(
+        &self,
+        account_id: &AccountId,
+        draft: MailReplyDraft,
+        created_at: SystemTime,
+    ) -> Result<MailSendOutcome, MailSendWorkflowError> {
+        let _reservation = self.reserve_send(account_id)?;
+        if draft.source().account_id() != account_id {
+            return Err(MailSendProviderError::AccountMismatch.into());
+        }
+        self.ensure_no_pending_send(account_id).await?;
+        let pending = self.stage_reply_send(&draft, created_at).await?;
+        self.submit_staged_send(account_id, MailSubmission::Reply(draft), pending)
+            .await
+    }
+
+    /// Stores source metadata after confirming the reply source remains cached.
+    async fn stage_reply_send(
+        &self,
+        draft: &MailReplyDraft,
+        created_at: SystemTime,
+    ) -> Result<PendingMailSend, MailSendWorkflowError> {
+        let Some((source, _)) = self
+            .cache
+            .read_message(draft.source().folder(), draft.source().message_id())
+            .await?
+        else {
+            return Err(MailSendWorkflowError::ReplySourceNotCached);
+        };
+        let pending = draft.pending_send(
+            MailSendOperationId::new(),
+            source.metadata().subject(),
+            created_at,
+        );
+        self.stage_send_marker(&pending).await?;
+        Ok(pending)
     }
 
     async fn ensure_no_pending_send(
@@ -335,28 +393,39 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     async fn submit_staged_send(
         &self,
         account_id: &AccountId,
-        draft: MailDraft,
+        submission: MailSubmission,
         pending: PendingMailSend,
     ) -> Result<MailSendOutcome, MailSendWorkflowError> {
-        match self.provider.send_mail(account_id, draft).await {
+        let provider_result = match submission {
+            MailSubmission::NewMessage(draft) => self.provider.send_mail(account_id, draft).await,
+            MailSubmission::Reply(draft) => self.provider.reply_to_message(account_id, draft).await,
+        };
+        match provider_result {
             Ok(()) => self.finish_accepted_send(account_id, pending).await,
             Err(MailSendProviderError::OutcomeUnknown) => {
                 Ok(MailSendOutcome::OutcomeUnknown(pending))
             }
-            Err(error) => {
-                match self
-                    .cache
-                    .clear_pending_send(account_id, pending.operation_id())
-                    .await
-                {
-                    Ok(()) => Err(MailSendWorkflowError::Provider(error)),
-                    Err(cache) => Err(MailSendWorkflowError::RejectedNeedsResolution {
-                        pending,
-                        provider: error,
-                        cache,
-                    }),
-                }
-            }
+            Err(error) => self.finish_rejected_send(account_id, pending, error).await,
+        }
+    }
+
+    async fn finish_rejected_send(
+        &self,
+        account_id: &AccountId,
+        pending: PendingMailSend,
+        error: MailSendProviderError,
+    ) -> Result<MailSendOutcome, MailSendWorkflowError> {
+        match self
+            .cache
+            .clear_pending_send(account_id, pending.operation_id())
+            .await
+        {
+            Ok(()) => Err(MailSendWorkflowError::Provider(error)),
+            Err(cache) => Err(MailSendWorkflowError::RejectedNeedsResolution {
+                pending: Box::new(pending),
+                provider: error,
+                cache,
+            }),
         }
     }
 

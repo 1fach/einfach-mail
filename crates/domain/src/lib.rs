@@ -18,9 +18,9 @@ pub use calendar::{
 pub use identifiers::{AccountId, CalendarId, EmptyIdentifier, EventId, FolderId, MessageId};
 pub use mail::{
     FolderParentError, FolderReference, FollowUpFlagStatus, InvalidMailRecipient,
-    InvalidMailSubject, MailDraft, MailFolder, MailMessage, MailRecipient, MailSendOperationId,
-    MailSubject, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink,
-    MessageDeltaPage, MessageDeltaProgress, MessageMetadata, MessageMetadataPatch, MessageOrigin,
-    PendingMailSend, ReadState,
+    InvalidMailSubject, MailDraft, MailFolder, MailMessage, MailRecipient, MailReplyDraft,
+    MailReplySource, MailSendOperationId, MailSendTarget, MailSubject, MessageBody,
+    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
+    MessageMetadata, MessageMetadataPatch, MessageOrigin, PendingMailSend, ReadState,
 };
 pub use mailbox::{EmptyMailboxAddress, Mailbox};
