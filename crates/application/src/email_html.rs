@@ -12,7 +12,7 @@ use url::Url;
 
 const MAX_HTML_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_HTML_FALLBACK_INPUT_BYTES: usize = MAX_HTML_BODY_BYTES / 8;
-// Eightfold headroom contains Ammonia's maximum sevenfold text-escape expansion.
+// Ammonia can replace one-byte NUL characters with the eight-byte entity `&#65533;`.
 const MAX_HTML_FALLBACK_TEXT_BYTES: usize = MAX_HTML_BODY_BYTES / 128;
 const HTML_FALLBACK_WRAP_WIDTH: usize = 80;
 
@@ -194,7 +194,7 @@ fn prepare_html_for_display(raw_html: &str) -> MessageBodyForDisplay {
 /// Parses and validates a message link before the desktop opens it externally.
 ///
 /// Returns a link only when it is absolute HTTP or HTTPS and contains no user
-/// information, which prevents links from disguising their destination.
+/// information, so a username cannot appear before the actual host.
 #[must_use]
 pub fn allowed_external_message_url(href: &str) -> Option<ExternalMessageLink> {
     let url = Url::parse(href).ok()?;

@@ -637,7 +637,10 @@ fn render_sanitized_html_body(html: &SanitizedEmailHtml) -> AnyElement {
             TextView::html("mail-message-html-content", html.shared_content())
                 .selectable(true)
                 .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
-                .on_link_click(|href, _, _, cx| {
+                .on_link_click(|href, event, _, cx| {
+                    if event.is_secondary() {
+                        return;
+                    }
                     if let Some(url) = allowed_external_message_url(href.as_ref()) {
                         cx.open_url(url.as_str());
                     }
@@ -1156,10 +1159,11 @@ mod tests {
         let body_bounds = context
             .debug_bounds("mail-message-html-body")
             .expect("sanitized HTML body has a layout");
-        context.simulate_click(
-            point(body_bounds.left() + px(36.), body_bounds.top() + px(36.)),
-            Modifiers::default(),
-        );
+        let link_position = point(body_bounds.left() + px(36.), body_bounds.top() + px(36.));
+        context.simulate_mouse_down(link_position, MouseButton::Right, Modifiers::default());
+        context.simulate_mouse_up(link_position, MouseButton::Right, Modifiers::default());
+        assert_eq!(context.opened_url(), None);
+        context.simulate_click(link_position, Modifiers::default());
         assert_eq!(
             context.opened_url(),
             Some("https://mail.example.test/thread".to_owned())

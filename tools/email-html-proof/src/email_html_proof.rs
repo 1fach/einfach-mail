@@ -254,7 +254,10 @@ impl Render for EmailBodyTestView {
                         image_resolutions.fetch_add(1, Ordering::SeqCst);
                         ImageSource::Custom(Arc::new(|_, _| None))
                     })
-                    .on_link_click(move |url, _, _, cx| {
+                    .on_link_click(move |url, event, _, cx| {
+                        if event.is_secondary() {
+                            return;
+                        }
                         let Some(parsed_url) = allowed_external_message_url(url.as_ref()) else {
                             return;
                         };
@@ -291,6 +294,17 @@ fn native_html_renderer_routes_safe_links_only_after_a_click_and_does_not_resolv
 
     assert_eq!(cx.opened_url(), None);
     assert_eq!(image_resolutions.load(Ordering::SeqCst), 0);
+
+    let position = point(px(10.), px(10.));
+    cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+    cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+    assert_eq!(cx.opened_url(), None);
+    assert!(
+        link_clicks
+            .lock()
+            .expect("test link recorder lock is healthy")
+            .is_empty()
+    );
 
     cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
 
