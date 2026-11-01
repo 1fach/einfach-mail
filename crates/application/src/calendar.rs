@@ -1,4 +1,4 @@
-//! Calendar provider and cache contracts used by read-only workflows.
+//! Calendar provider and cache contracts used by account-scoped workflows.
 
 use std::{
     future::Future,
@@ -7,7 +7,8 @@ use std::{
 };
 
 use einfach_mail_domain::{
-    AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarOccurrence, CalendarViewReference,
+    AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation, CalendarOccurrence,
+    CalendarViewReference,
 };
 use thiserror::Error;
 
@@ -26,7 +27,7 @@ pub enum CalendarOperationError {
     /// The requested view belongs to another connected account.
     #[error("the calendar view belongs to another account")]
     AccountMismatch,
-    /// The provider denied read access to the calendar.
+    /// The provider denied access to the calendar operation.
     #[error("calendar access was denied")]
     AccessDenied,
     /// The service asked the application to wait before retrying.
@@ -113,6 +114,20 @@ pub trait CalendarProvider: Send + Sync {
         view: &CalendarViewReference,
         request: CalendarDeltaRequest,
     ) -> impl Future<Output = Result<CalendarDeltaPageResponse, CalendarOperationError>> + Send + '_;
+
+    /// Creates one event for the operation's account and exact primary-calendar view.
+    ///
+    /// The provider uses the operation's stable identifier as the Graph retry
+    /// key and never sends attendees or recurrence data.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-safe provider error when sign-in, access, transport, or
+    /// response validation prevents the operation from being confirmed.
+    fn create_event(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_;
 }
 
 /// A user-safe category for a local calendar cache failure.
@@ -130,6 +145,9 @@ pub enum CalendarCacheError {
     /// An unresolved send marker prevents removal of the shared account cache.
     #[error("a pending mail send must be resolved before removing the account cache")]
     PendingMailSend,
+    /// Another uncertain event creation must be resolved for this account first.
+    #[error("another calendar event creation is already pending")]
+    CreationAlreadyPending,
 }
 
 /// An account and view's completed delta cursor and resumable page checkpoint.
@@ -259,12 +277,54 @@ pub trait CalendarCache: Send + Sync {
         view: &CalendarViewReference,
     ) -> impl Future<Output = Result<Vec<CalendarOccurrence>, CalendarCacheError>> + Send + '_;
 
+    /// Saves or confirms the account's one unresolved event-creation operation.
+    ///
+    /// Repeating the same operation is idempotent. A different operation is
+    /// rejected until the current one is confirmed and removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::CreationAlreadyPending`] for a different
+    /// unresolved operation, an account or data error for invalid values, or
+    /// [`CalendarCacheError::Unavailable`] when the encrypted store cannot be
+    /// changed.
+    fn stage_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
+
+    /// Returns the account's unresolved event-creation operation, if present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an account or stored-data error when the record cannot be
+    /// validated, or [`CalendarCacheError::Unavailable`] when the store cannot
+    /// be read.
+    fn pending_event_creation(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<Option<CalendarEventCreation>, CalendarCacheError>> + Send + '_;
+
+    /// Stores a Graph-confirmed event and removes its matching pending operation atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::InvalidData`] when the event does not
+    /// confirm the staged draft, an account error for a mismatched view, or
+    /// [`CalendarCacheError::Unavailable`] when the transaction fails.
+    fn commit_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+        event: &CalendarOccurrence,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
+
     /// Removes all account data owned by this cache and its local encryption key.
     ///
     /// # Errors
     ///
     /// Returns [`CalendarCacheError::AccountMismatch`] for another account,
     /// [`CalendarCacheError::PendingMailSend`] while a send outcome is unresolved,
+    /// [`CalendarCacheError::CreationAlreadyPending`] while an event creation is unresolved,
     /// or [`CalendarCacheError::Unavailable`] when cache removal fails.
     fn remove_account(
         &self,
@@ -272,7 +332,7 @@ pub trait CalendarCache: Send + Sync {
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
 }
 
-/// A user-safe category for a read-only calendar workflow failure.
+/// A user-safe category for a calendar workflow failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum CalendarWorkflowError {
     /// The provider could not load a delta page.
@@ -284,6 +344,9 @@ pub enum CalendarWorkflowError {
     /// Another mail or calendar operation already owns this account.
     #[error("another mail or calendar operation is active for this account")]
     OperationInProgress,
+    /// Graph did not return the event that was staged for creation.
+    #[error("the calendar service returned an unexpected created event")]
+    InvalidConfirmation,
     /// The provider repeated a cursor before completing the current round.
     #[error("the calendar service repeated a synchronization cursor")]
     RepeatedCursor,
@@ -317,6 +380,7 @@ impl CalendarSyncReport {
 pub struct CalendarSnapshot {
     events: Vec<CalendarOccurrence>,
     sync_state: CalendarSyncState,
+    pending_creation: Option<CalendarEventCreation>,
 }
 
 impl CalendarSnapshot {
@@ -331,6 +395,26 @@ impl CalendarSnapshot {
     pub fn sync_state(&self) -> &CalendarSyncState {
         &self.sync_state
     }
+
+    /// Returns the account's unresolved event-creation operation, if present.
+    #[must_use]
+    pub fn pending_creation(&self) -> Option<&CalendarEventCreation> {
+        self.pending_creation.as_ref()
+    }
+}
+
+/// The Graph event was confirmed and whether the encrypted cache committed it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CalendarEventCreationOutcome {
+    /// Graph confirmed the event and the encrypted cache committed it.
+    Cached(CalendarOccurrence),
+    /// Graph confirmed the event, but the encrypted cache still needs recovery.
+    ConfirmedButNotCached {
+        /// The event returned by Graph.
+        event: CalendarOccurrence,
+        /// The user-safe category returned by the cache boundary.
+        cache_error: CalendarCacheError,
+    },
 }
 
 const MAX_PAGES_PER_VIEW_ROUND: usize = 1_000;
@@ -393,7 +477,7 @@ impl CalendarSyncRound {
     }
 }
 
-/// Coordinates calendar delta synchronization and encrypted cached browsing.
+/// Coordinates calendar synchronization, event creation, and encrypted caching.
 pub struct CalendarWorkflow<P, C>
 where
     P: CalendarProvider,
@@ -442,7 +526,12 @@ where
     ) -> Result<CalendarSnapshot, CalendarWorkflowError> {
         let sync_state = self.cache.ensure_view(view).await?;
         let events = self.cache.list_events(view).await?;
-        Ok(CalendarSnapshot { events, sync_state })
+        let pending_creation = self.cache.pending_event_creation(view.account_id()).await?;
+        Ok(CalendarSnapshot {
+            events,
+            sync_state,
+            pending_creation,
+        })
     }
 
     /// Synchronizes all pages for one fixed primary-calendar view.
@@ -472,6 +561,47 @@ where
             })?;
         let state = self.cache.ensure_view(view).await?;
         self.sync_round(view, state).await
+    }
+
+    /// Creates one staged event and caches it only after Graph confirms it.
+    ///
+    /// The exact draft and retry identifier are stored before the network
+    /// request. Provider failures leave that operation available for replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider or cache error when the operation cannot be staged,
+    /// a user-safe error when another calendar operation owns the view, or
+    /// [`CalendarWorkflowError::InvalidConfirmation`] when Graph returns an
+    /// event that does not match the staged draft. A cache failure after Graph
+    /// confirmation is returned as
+    /// [`CalendarEventCreationOutcome::ConfirmedButNotCached`] so the view can
+    /// report the remote result accurately.
+    pub async fn create_event(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> Result<CalendarEventCreationOutcome, CalendarWorkflowError> {
+        let _reservation = reserve_calendar_view(&self.reservations, creation.view()).map_err(
+            |error| match error {
+                AccountReservationError::OperationInProgress => {
+                    CalendarWorkflowError::OperationInProgress
+                }
+                AccountReservationError::StateUnavailable => {
+                    CalendarWorkflowError::StateUnavailable
+                }
+            },
+        )?;
+        self.cache.stage_event_creation(creation).await?;
+        let event = self.provider.create_event(creation).await?;
+        if !confirms_creation(creation, &event) {
+            return Err(CalendarWorkflowError::InvalidConfirmation);
+        }
+        match self.cache.commit_event_creation(creation, &event).await {
+            Ok(()) => Ok(CalendarEventCreationOutcome::Cached(event)),
+            Err(cache_error) => {
+                Ok(CalendarEventCreationOutcome::ConfirmedButNotCached { event, cache_error })
+            }
+        }
     }
 
     async fn sync_round(
@@ -508,6 +638,13 @@ where
         round.commit(state);
         Ok(round.is_complete())
     }
+}
+
+fn confirms_creation(creation: &CalendarEventCreation, event: &CalendarOccurrence) -> bool {
+    event.reference() == creation.view()
+        && event.subject() == Some(creation.draft().subject())
+        && event.time() == creation.draft().time()
+        && event.overlaps_view()
 }
 
 fn request_cursor(request: &CalendarDeltaRequest) -> Option<CalendarDeltaLink> {

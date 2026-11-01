@@ -5,23 +5,26 @@ use std::{
 
 use einfach_mail_application::{CalendarOperationError, CalendarSession, CalendarWorkflowError};
 use einfach_mail_domain::{
-    AccountProfile, CalendarOccurrence, CalendarOccurrenceTime, CalendarViewRange,
-    CalendarViewReference,
+    AccountProfile, CalendarEventCreation, CalendarOccurrence, CalendarOccurrenceTime,
+    CalendarViewRange, CalendarViewReference,
 };
 use gpui_kit::component::{
-    ActiveTheme, ColorTokens, Disableable, StyledExt,
+    ActiveTheme, ColorTokens, Disableable, StyledExt, WindowExt,
     button::{Button, ButtonVariants},
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    AnyElement, AsyncApp, Context, EventEmitter, IntoElement, Render, Role, Task, WeakEntity,
-    Window, div, prelude::*,
+    AnyElement, AsyncApp, Context, Entity, EventEmitter, IntoElement, Render, Role, Subscription,
+    Task, WeakEntity, Window, div, prelude::*,
 };
 use jiff::{Span, Timestamp, civil, tz::TimeZone};
 use time::{Date, Month, OffsetDateTime};
 
+use crate::event_composer::{EventComposer, EventComposerEvent, EventComposerSetup};
+
 pub(crate) enum CalendarViewEvent {
     BackToAccount,
+    ReviewCalendarWritePermission,
 }
 
 pub(crate) struct CalendarView<S: CalendarSession + ?Sized = dyn CalendarSession> {
@@ -32,11 +35,13 @@ pub(crate) struct CalendarView<S: CalendarSession + ?Sized = dyn CalendarSession
     week_start: civil::Date,
     view: CalendarViewReference,
     events: Vec<CalendarOccurrence>,
+    pending_creation: Option<CalendarEventCreation>,
     sync_state: Option<einfach_mail_application::CalendarSyncState>,
     status: CalendarStatus,
     sync_running: bool,
     request_id: u64,
     task: Option<Task<()>>,
+    composer_subscription: Option<Subscription>,
 }
 
 #[derive(Clone, Copy)]
@@ -81,8 +86,9 @@ struct CalendarRefreshOutcome {
 impl CalendarWeekSelection {
     fn for_system() -> Self {
         let (mut time_zone, mut utc_fallback) = match TimeZone::try_system() {
-            Ok(time_zone) => (time_zone, false),
+            Ok(time_zone) if time_zone.iana_name().is_some() => (time_zone, false),
             Err(_) => (TimeZone::UTC, true),
+            Ok(_) => (TimeZone::UTC, true),
         };
         let week_start = match current_week_start(&time_zone) {
             Some(week_start) => week_start,
@@ -158,11 +164,13 @@ where
             week_start: selection.week_start,
             view,
             events: Vec::new(),
+            pending_creation: None,
             sync_state: None,
             status: CalendarStatus::LoadingCache,
             sync_running: false,
             request_id: 0,
             task: None,
+            composer_subscription: None,
         }
     }
 
@@ -286,7 +294,93 @@ where
 
     fn apply_snapshot(&mut self, snapshot: einfach_mail_application::CalendarSnapshot) {
         self.events = snapshot.events().to_vec();
+        self.pending_creation = snapshot.pending_creation().cloned();
         self.sync_state = Some(snapshot.sync_state().clone());
+    }
+
+    fn reload_cached_view(&mut self, cx: &mut Context<Self>) {
+        if self.sync_running {
+            return;
+        }
+        self.request_id = self.request_id.saturating_add(1);
+        let request_id = self.request_id;
+        let workflow = Arc::clone(&self.workflow);
+        let view = self.view.clone();
+        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let snapshot = workflow.load_cached_view(&view).await;
+            Self::finish_cache_reload(&this, cx, request_id, snapshot);
+        }));
+    }
+
+    fn finish_cache_reload(
+        this: &WeakEntity<Self>,
+        cx: &mut AsyncApp,
+        request_id: u64,
+        snapshot: Result<einfach_mail_application::CalendarSnapshot, CalendarWorkflowError>,
+    ) {
+        let _ = this.update(cx, |view, cx| {
+            if view.request_id != request_id {
+                return;
+            }
+            view.task = None;
+            match snapshot {
+                Ok(snapshot) => view.apply_snapshot(snapshot),
+                Err(error) => view.status = CalendarStatus::Failed(error),
+            }
+            cx.notify();
+        });
+    }
+
+    fn open_event_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sync_running || window.has_active_sheet(cx) {
+            return;
+        }
+        let setup = self.event_composer_setup();
+        let composer = cx.new(|cx| EventComposer::new(setup, window, cx));
+        self.composer_subscription = Some(cx.subscribe(
+            &composer,
+            |view, _, event: &EventComposerEvent, cx| match event {
+                EventComposerEvent::PendingOperationUpdated => view.reload_cached_view(cx),
+                EventComposerEvent::ReviewCalendarWritePermission => {
+                    cx.emit(CalendarViewEvent::ReviewCalendarWritePermission);
+                }
+            },
+        ));
+        self.open_event_composer_sheet(composer, window, cx);
+    }
+
+    fn event_composer_setup(&self) -> EventComposerSetup<P, C> {
+        let time_zone_label = if self.utc_fallback {
+            "UTC".to_owned()
+        } else {
+            self.time_zone.iana_name().unwrap_or("UTC").to_owned()
+        };
+        EventComposerSetup {
+            workflow: Arc::clone(&self.workflow),
+            view: self.view.clone(),
+            time_zone: self.time_zone.clone(),
+            time_zone_label,
+            pending_creation: self.pending_creation.clone(),
+            week_start: self.week_start,
+        }
+    }
+
+    fn open_event_composer_sheet(
+        &self,
+        composer: Entity<EventComposer<P, C>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = if self.pending_creation.is_some() {
+            "Resolve pending event"
+        } else {
+            "New calendar event"
+        };
+        window.open_sheet(cx, move |sheet, _, _| {
+            sheet
+                .title(div().text_base().font_bold().child(title))
+                .child(composer.clone())
+        });
     }
 
     fn change_week(&mut self, weeks: i64, cx: &mut Context<Self>) {
@@ -313,6 +407,7 @@ where
         self.request_id = self.request_id.saturating_add(1);
         self.sync_running = false;
         self.events.clear();
+        self.pending_creation = None;
         self.sync_state = None;
     }
 
@@ -340,6 +435,7 @@ where
             .gap_3()
             .child(Self::render_back_button(cx))
             .child(self.render_calendar_title())
+            .child(self.render_event_button(cx))
             .child(self.render_sync_button(cx))
     }
 
@@ -367,6 +463,24 @@ where
             .loading(self.sync_running)
             .disabled(self.sync_running)
             .on_click(cx.listener(|view, _, _, cx| view.refresh(cx)))
+    }
+
+    fn render_event_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .debug_selector(|| "calendar-new-event".to_owned())
+            .child(
+                Button::new("calendar-new-event")
+                    .label(if self.pending_creation.is_some() {
+                        "Resolve pending event…"
+                    } else {
+                        "New event…"
+                    })
+                    .disabled(self.sync_running)
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.open_event_composer(window, cx);
+                    })),
+            )
     }
 
     fn render_week_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -905,8 +1019,12 @@ fn calendar_error_text(error: CalendarWorkflowError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         future::{Future, ready},
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     use einfach_mail_application::{
@@ -914,19 +1032,53 @@ mod tests {
         CalendarOperationError, CalendarProvider, CalendarSyncState, CalendarWorkflow,
     };
     use einfach_mail_domain::{
-        AccountId, AccountProfile, CalendarDeltaPage, CalendarOccurrence, CalendarOccurrencePatch,
-        CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarViewRange,
-        CalendarViewReference, EventId,
+        AccountId, AccountProfile, CalendarDeltaPage, CalendarEventCreation, CalendarOccurrence,
+        CalendarOccurrencePatch, CalendarOccurrenceTime, CalendarOccurrenceTimePatch,
+        CalendarViewRange, CalendarViewReference, EventId,
     };
-    use gpui_kit::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};
     use jiff::{Span, civil, tz::TimeZone};
     use time::{Date, Month, OffsetDateTime};
+    use tokio::sync::oneshot;
 
     use super::{CalendarView, current_week_start, view_for_week};
 
     #[derive(Clone, Default)]
     struct TestProvider {
         requests: Arc<Mutex<Vec<(i64, i64)>>>,
+        event_creation_gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        event_creation_failure: Arc<Mutex<Option<CalendarOperationError>>>,
+    }
+
+    impl TestProvider {
+        fn hold_event_creation_until(&self, gate: oneshot::Receiver<()>) {
+            *self
+                .event_creation_gate
+                .lock()
+                .expect("synthetic creation gate mutex is not poisoned") = Some(gate);
+        }
+
+        fn fail_next_event_creation(&self, failure: CalendarOperationError) {
+            *self
+                .event_creation_failure
+                .lock()
+                .expect("synthetic creation failure mutex is not poisoned") = Some(failure);
+        }
+
+        fn take_event_creation_gate(&self) -> Option<oneshot::Receiver<()>> {
+            self.event_creation_gate
+                .lock()
+                .expect("synthetic creation gate mutex is not poisoned")
+                .take()
+        }
+
+        fn take_event_creation_failure(&self) -> Option<CalendarOperationError> {
+            self.event_creation_failure
+                .lock()
+                .expect("synthetic creation failure mutex is not poisoned")
+                .take()
+        }
     }
 
     impl CalendarProvider for TestProvider {
@@ -945,10 +1097,63 @@ mod tests {
                 ));
             ready(Err(CalendarOperationError::AccessDenied))
         }
+
+        fn create_event(
+            &self,
+            creation: &CalendarEventCreation,
+        ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_
+        {
+            let gate = self.take_event_creation_gate();
+            let failure = self.take_event_creation_failure();
+            let creation = creation.clone();
+            async move { create_event_after_wait(creation, gate, failure).await }
+        }
     }
 
-    #[derive(Clone, Copy, Default)]
-    struct TestCache;
+    /// Waits for the optional request gate before returning the configured result.
+    async fn create_event_after_wait(
+        creation: CalendarEventCreation,
+        gate: Option<oneshot::Receiver<()>>,
+        failure: Option<CalendarOperationError>,
+    ) -> Result<CalendarOccurrence, CalendarOperationError> {
+        if let Some(gate) = gate {
+            gate.await
+                .map_err(|_| CalendarOperationError::ServiceUnavailable)?;
+        }
+        match failure {
+            Some(failure) => Err(failure),
+            None => created_event(&creation),
+        }
+    }
+
+    fn created_event(
+        creation: &CalendarEventCreation,
+    ) -> Result<CalendarOccurrence, CalendarOperationError> {
+        let CalendarOccurrenceTime::Timed { start, end } = creation.draft().time() else {
+            return Err(CalendarOperationError::InvalidResponse);
+        };
+        let mut patch = CalendarOccurrencePatch::new();
+        patch.set_subject(Some(creation.draft().subject().to_owned()));
+        let mut time = CalendarOccurrenceTimePatch::new();
+        time.set_start(*start);
+        time.set_end(*end);
+        time.set_is_all_day(false);
+        patch.set_time(time);
+        let id = EventId::try_from(format!(
+            "synthetic-created-event-{}",
+            creation.id().as_uuid()
+        ))
+        .map_err(|_| CalendarOperationError::InvalidResponse)?;
+        patch
+            .into_new(creation.view().clone(), id)
+            .map_err(|_| CalendarOperationError::InvalidResponse)
+    }
+
+    #[derive(Clone, Default)]
+    struct TestCache {
+        created_events:
+            Arc<Mutex<HashMap<CalendarViewReference, HashMap<String, CalendarOccurrence>>>>,
+    }
 
     impl CalendarCache for TestCache {
         fn ensure_view(
@@ -974,6 +1179,13 @@ mod tests {
             view: &CalendarViewReference,
         ) -> impl Future<Output = Result<Vec<CalendarOccurrence>, CalendarCacheError>> + Send + '_
         {
+            let created_events = self
+                .created_events
+                .lock()
+                .expect("synthetic event cache mutex is not poisoned")
+                .get(view)
+                .map(|events| events.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
             let mut patch = CalendarOccurrencePatch::new();
             patch.set_subject(Some("Synthetic offline event".to_owned()));
             patch.set_location(Some("Synthetic room".to_owned()));
@@ -994,7 +1206,49 @@ mod tests {
                         .expect("synthetic event ID is valid"),
                 )
                 .expect("synthetic cached event has a complete time range");
-            ready(Ok(vec![event]))
+            let mut events = vec![event];
+            events.extend(created_events);
+            ready(Ok(events))
+        }
+
+        fn stage_event_creation(
+            &self,
+            _: &CalendarEventCreation,
+        ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+            ready(Ok(()))
+        }
+
+        fn pending_event_creation(
+            &self,
+            _: &AccountId,
+        ) -> impl Future<Output = Result<Option<CalendarEventCreation>, CalendarCacheError>> + Send + '_
+        {
+            ready(Ok(None))
+        }
+
+        fn commit_event_creation(
+            &self,
+            creation: &CalendarEventCreation,
+            event: &CalendarOccurrence,
+        ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+            let created_events = Arc::clone(&self.created_events);
+            let creation = creation.clone();
+            let event = event.clone();
+            async move {
+                if event.reference() != creation.view()
+                    || event.subject() != Some(creation.draft().subject())
+                    || event.time() != creation.draft().time()
+                {
+                    return Err(CalendarCacheError::InvalidData);
+                }
+                created_events
+                    .lock()
+                    .expect("synthetic event cache mutex is not poisoned")
+                    .entry(creation.view().clone())
+                    .or_default()
+                    .insert(event.id().as_str().to_owned(), event);
+                Ok(())
+            }
         }
 
         fn remove_account(
@@ -1121,7 +1375,7 @@ mod tests {
         let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
         let provider = TestProvider::default();
         let requests = Arc::clone(&provider.requests);
-        let workflow = Arc::new(CalendarWorkflow::new(provider, TestCache));
+        let workflow = Arc::new(CalendarWorkflow::new(provider, TestCache::default()));
         let (view, context) = cx.add_window_view(|_, cx| {
             CalendarView::new_for_week(
                 profile(),
@@ -1192,5 +1446,237 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[gpui_kit::test]
+    async fn native_event_composer_shows_progress_failure_and_retry_confirmation(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        let workflow = Arc::new(CalendarWorkflow::new(
+            provider.clone(),
+            TestCache::default(),
+        ));
+        let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
+        let (_, context) = cx.add_window_view(|window, cx| {
+            let calendar = cx.new(|cx| {
+                CalendarView::new_for_week(
+                    profile(),
+                    workflow,
+                    super::CalendarWeekSelection {
+                        week_start,
+                        time_zone: TimeZone::UTC,
+                        utc_fallback: true,
+                    },
+                    cx,
+                )
+            });
+            gpui_kit::base::Root::new(calendar, window, cx)
+        });
+        let mut sync_finished = false;
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if context.debug_bounds("calendar-sync-error").is_some() {
+                sync_finished = true;
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(sync_finished, "calendar sync reaches a visible error state");
+
+        let new_event = context
+            .debug_bounds("calendar-new-event")
+            .expect("calendar offers event creation");
+        context.simulate_click(new_event.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_calendar_view(context);
+        assert!(context.update(|window, cx| window.has_active_sheet(cx)));
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if context.debug_bounds("event-composer-fields").is_some() {
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(context.debug_bounds("event-composer-fields").is_some());
+        let create_event = context
+            .debug_bounds("event-composer-submit")
+            .expect("composer offers create action");
+        context.simulate_click(create_event.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_calendar_view(context);
+        assert!(context.debug_bounds("event-composer-validation").is_some());
+        assert!(context.debug_bounds("event-creation-pending").is_none());
+
+        let title = context
+            .debug_bounds("event-composer-subject-input")
+            .expect("composer exposes the title input");
+        context.simulate_click(title.center(), Modifiers::default());
+        context.simulate_input("Synthetic event");
+        let (release, gate) = oneshot::channel();
+        provider.hold_event_creation_until(gate);
+        provider.fail_next_event_creation(CalendarOperationError::ServiceUnavailable);
+        let create_event = context
+            .debug_bounds("event-composer-submit")
+            .expect("composer can submit the completed draft");
+        context.simulate_click(create_event.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_calendar_view(context);
+        assert!(context.debug_bounds("event-creation-submitting").is_some());
+        release
+            .send(())
+            .expect("synthetic provider request is waiting on this test");
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if context.debug_bounds("event-creation-status").is_some() {
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(context.debug_bounds("event-creation-pending").is_some());
+        assert!(context.debug_bounds("event-creation-status").is_some());
+
+        let retry = context
+            .debug_bounds("event-composer-submit")
+            .expect("the saved operation remains retryable");
+        context.simulate_click(retry.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if context.debug_bounds("event-composer-close").is_some() {
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(context.debug_bounds("event-creation-pending").is_none());
+        assert!(context.debug_bounds("event-creation-status").is_some());
+        assert!(context.debug_bounds("event-composer-close").is_some());
+    }
+
+    #[gpui_kit::test]
+    async fn denied_calendar_write_emits_permission_review_request(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        provider.fail_next_event_creation(CalendarOperationError::AccessDenied);
+        let workflow = Arc::new(CalendarWorkflow::new(
+            provider.clone(),
+            TestCache::default(),
+        ));
+        let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
+        let permission_review_requested = Arc::new(AtomicBool::new(false));
+        let requested = Arc::clone(&permission_review_requested);
+        let mut subscription = None;
+        let (_, context) = cx.add_window_view(|window, cx| {
+            let calendar = cx.new(|cx| {
+                CalendarView::new_for_week(
+                    profile(),
+                    workflow,
+                    super::CalendarWeekSelection {
+                        week_start,
+                        time_zone: TimeZone::UTC,
+                        utc_fallback: true,
+                    },
+                    cx,
+                )
+            });
+            subscription = Some(cx.subscribe(
+                &calendar,
+                move |_, _, event: &super::CalendarViewEvent, _| {
+                    if matches!(
+                        event,
+                        super::CalendarViewEvent::ReviewCalendarWritePermission
+                    ) {
+                        requested.store(true, Ordering::SeqCst);
+                    }
+                },
+            ));
+            gpui_kit::base::Root::new(calendar, window, cx)
+        });
+        let _subscription = subscription;
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if context.debug_bounds("calendar-sync-error").is_some() {
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        let new_event = context
+            .debug_bounds("calendar-new-event")
+            .expect("calendar offers event creation");
+        context.simulate_click(new_event.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_calendar_view(context);
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if context.debug_bounds("event-composer-fields").is_some() {
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        let title = context
+            .debug_bounds("event-composer-subject-input")
+            .expect("composer exposes the title input");
+        context.simulate_click(title.center(), Modifiers::default());
+        context.simulate_input("Synthetic event");
+        let submit = context
+            .debug_bounds("event-composer-submit")
+            .expect("composer offers create action");
+        context.simulate_click(submit.center(), Modifiers::default());
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if context
+                .debug_bounds("review-calendar-write-permission")
+                .is_some()
+            {
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        let review = context
+            .debug_bounds("review-calendar-write-permission")
+            .expect("denied write exposes an explicit permission review");
+        context.simulate_click(review.center(), Modifiers::default());
+        context.run_until_parked();
+
+        assert!(permission_review_requested.load(Ordering::SeqCst));
     }
 }

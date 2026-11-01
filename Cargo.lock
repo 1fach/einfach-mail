@@ -1716,6 +1716,7 @@ dependencies = [
 name = "einfach-mail-desktop"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "einfach-mail-application",
  "einfach-mail-domain",
  "einfach-mail-microsoft-graph",

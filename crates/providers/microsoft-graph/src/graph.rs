@@ -8,7 +8,7 @@ use std::{
 
 use huskarl::token::AccessToken;
 use serde::{Deserialize, Serialize};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use url::Url;
 
 use crate::{
@@ -22,11 +22,12 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage,
-    CalendarDeltaProgress, CalendarOccurrencePatch, CalendarOccurrenceTimePatch,
-    CalendarViewReference, EventId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
-    MailFolder, MailMessage, MailReplyDraft, Mailbox, MessageBody, MessageBodyType,
-    MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
-    MessageMetadata, MessageMetadataPatch, MessageOrigin, ReadState,
+    CalendarDeltaProgress, CalendarEventCreation, CalendarOccurrence, CalendarOccurrencePatch,
+    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarViewReference, EventId, FolderId,
+    FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage, MailReplyDraft,
+    Mailbox, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+    MessageDeltaProgress, MessageId, MessageMetadata, MessageMetadataPatch, MessageOrigin,
+    ReadState,
 };
 
 const MAX_PAGINATION_PAGES: usize = 1_000;
@@ -167,6 +168,22 @@ impl GraphApi {
         let response_bytes = response.len();
         let page = self.parse_calendar_delta_page(&response)?;
         Ok(CalendarDeltaPageResponse::new(page, response_bytes))
+    }
+
+    pub(super) async fn create_calendar_event(
+        &self,
+        creation: &CalendarEventCreation,
+        token: Arc<AccessToken>,
+    ) -> Result<CalendarOccurrence, GraphError> {
+        let url = self.authority.primary_calendar_events_path()?;
+        let body = create_calendar_event_body(creation)?;
+        let response = self
+            .transport
+            .post_json(GraphOperation::CalendarEventCreate, url, token, body)
+            .await?;
+        let event = serde_json::from_slice::<WireCalendarEvent>(&response)
+            .map_err(|_| GraphError::InvalidResponse)?;
+        event.into_new(creation.view().clone())
     }
 
     fn parse_calendar_delta_page(&self, response: &[u8]) -> Result<CalendarDeltaPage, GraphError> {
@@ -717,6 +734,62 @@ impl WireCalendarEvent {
         }
         Ok(CalendarDeltaChange::Upsert { id, patch })
     }
+
+    fn into_new(self, view: CalendarViewReference) -> Result<CalendarOccurrence, GraphError> {
+        match self.into_change()? {
+            CalendarDeltaChange::Upsert { id, patch } => patch
+                .into_new(view, id)
+                .map_err(|_| GraphError::InvalidRecord),
+            CalendarDeltaChange::Removed { .. } => Err(GraphError::InvalidRecord),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateCalendarEventRequest<'a> {
+    subject: &'a str,
+    start: CreateEventDateTimeTimeZone,
+    end: CreateEventDateTimeTimeZone,
+    transaction_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateEventDateTimeTimeZone {
+    date_time: String,
+    time_zone: &'static str,
+}
+
+fn create_calendar_event_body(creation: &CalendarEventCreation) -> Result<Vec<u8>, GraphError> {
+    let CalendarOccurrenceTime::Timed { start, end } = creation.draft().time() else {
+        return Err(GraphError::InvalidRecord);
+    };
+    let request = CreateCalendarEventRequest {
+        subject: creation.draft().subject(),
+        start: CreateEventDateTimeTimeZone {
+            date_time: graph_utc_datetime(*start)?,
+            time_zone: "UTC",
+        },
+        end: CreateEventDateTimeTimeZone {
+            date_time: graph_utc_datetime(*end)?,
+            time_zone: "UTC",
+        },
+        transaction_id: creation.id().as_uuid().to_string(),
+    };
+    serde_json::to_vec(&request).map_err(|_| GraphError::InvalidRecord)
+}
+
+fn graph_utc_datetime(value: OffsetDateTime) -> Result<String, GraphError> {
+    if value.offset() != UtcOffset::UTC {
+        return Err(GraphError::InvalidRecord);
+    }
+    value
+        .format(&Rfc3339)
+        .map_err(|_| GraphError::InvalidRecord)?
+        .strip_suffix('Z')
+        .map(str::to_owned)
+        .ok_or(GraphError::InvalidRecord)
 }
 
 fn apply_calendar_content_fields(
@@ -1126,23 +1199,24 @@ mod tests {
         token::{AccessToken, BearerAccessToken},
     };
     use serde_json::json;
-    use time::{Date, Month};
+    use time::{Date, Month, PrimitiveDateTime, Time};
     use url::Url;
 
     use einfach_mail_application::CalendarDeltaRequest;
     use einfach_mail_domain::{
-        AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarOccurrence,
-        CalendarOccurrenceTime, CalendarViewRange, CalendarViewReference, FolderId,
-        FolderReference, FollowUpFlagStatus, MailDraft, MailRecipient, MailReplyDraft,
-        MailReplySource, MailSubject, MessageDeltaChange, MessageId, MessageMetadata,
-        MessageOrigin, ReadState,
+        AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarEventCreation,
+        CalendarEventDraft, CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId,
+        CalendarViewRange, CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus,
+        MailDraft, MailRecipient, MailReplyDraft, MailReplySource, MailSubject, MessageDeltaChange,
+        MessageId, MessageMetadata, MessageOrigin, ReadState,
     };
 
     use super::{
         GraphApi, MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget,
         WireCalendarEvent, WireFolder, WireMessage, WireMessageChange,
         confirmed_follow_up_flag_status, confirmed_message_move, confirmed_read_state,
-        follow_up_flag_patch_body, mail_reply_body, message_move_body, read_state_patch_body,
+        create_calendar_event_body, follow_up_flag_patch_body, mail_reply_body, message_move_body,
+        read_state_patch_body,
     };
     use crate::{
         error::GraphError,
@@ -1479,6 +1553,53 @@ mod tests {
         accepted.assert_async().await;
     }
 
+    #[test]
+    fn create_event_request_contains_only_timed_primary_calendar_fields() {
+        let view = synthetic_view();
+        let date = Date::from_calendar_date(2030, Month::January, 8)
+            .expect("synthetic event date is valid");
+        let local_start = PrimitiveDateTime::new(
+            date,
+            Time::from_hms(9, 30, 0).expect("synthetic start time is valid"),
+        );
+        let local_end = PrimitiveDateTime::new(
+            date,
+            Time::from_hms(10, 0, 0).expect("synthetic end time is valid"),
+        );
+        let draft = CalendarEventDraft::timed(
+            "Synthetic planning meeting".to_owned(),
+            local_start,
+            local_end,
+            CalendarTimeZoneId::try_from("Etc/UTC".to_owned())
+                .expect("synthetic time zone is valid"),
+            date.with_hms(9, 30, 0)
+                .expect("synthetic UTC start is valid")
+                .assume_utc(),
+            date.with_hms(10, 0, 0)
+                .expect("synthetic UTC end is valid")
+                .assume_utc(),
+        )
+        .expect("synthetic event draft is valid");
+        let creation = CalendarEventCreation::new(view, draft);
+
+        let body = create_calendar_event_body(&creation).expect("synthetic event body serializes");
+        let body: serde_json::Value =
+            serde_json::from_slice(&body).expect("synthetic event body is JSON");
+        let object = body
+            .as_object()
+            .expect("synthetic event body is a JSON object");
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+
+        assert_eq!(keys, ["end", "start", "subject", "transactionId"]);
+        assert_eq!(body["subject"], "Synthetic planning meeting");
+        assert_eq!(body["start"]["dateTime"], "2030-01-08T09:30:00");
+        assert_eq!(body["start"]["timeZone"], "UTC");
+        assert_eq!(body["end"]["dateTime"], "2030-01-08T10:00:00");
+        assert_eq!(body["end"]["timeZone"], "UTC");
+        assert_eq!(body["transactionId"], creation.id().as_uuid().to_string());
+    }
+
     #[tokio::test]
     async fn calendar_delta_uses_exact_week_bounds_and_maps_sparse_followup_changes() {
         let server = MockServer::start_async().await;
@@ -1609,6 +1730,21 @@ mod tests {
             .expect("synthetic event wire fields are valid JSON");
             assert_eq!(event.into_change(), Err(GraphError::InvalidRecord));
         }
+    }
+
+    #[test]
+    fn created_event_response_requires_a_complete_timed_range() {
+        let event: WireCalendarEvent = serde_json::from_value(json!({
+            "id": "synthetic-event",
+            "subject": "Synthetic planning meeting",
+            "isAllDay": false
+        }))
+        .expect("synthetic incomplete event is valid JSON");
+
+        assert_eq!(
+            event.into_new(synthetic_view()),
+            Err(GraphError::InvalidRecord)
+        );
     }
 
     #[test]

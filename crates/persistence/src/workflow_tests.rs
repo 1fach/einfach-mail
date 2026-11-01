@@ -17,11 +17,11 @@ use einfach_mail_application::{
     MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, CalendarViewRange, CalendarViewReference, FolderId, FolderReference,
-    FollowUpFlagStatus, MailDraft, MailFolder, MailMessage, MailRecipient, MailReplyDraft,
-    MailReplySource, MailSubject, MessageBody, MessageBodyType, MessageDeltaChange,
-    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
-    ReadState,
+    AccountId, CalendarEventCreation, CalendarOccurrence, CalendarViewRange, CalendarViewReference,
+    FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
+    MailRecipient, MailReplyDraft, MailReplySource, MailSubject, MessageBody, MessageBodyType,
+    MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+    MessageMetadataPatch, ReadState,
 };
 use tempfile::TempDir;
 use time::{Date, Month};
@@ -480,6 +480,13 @@ impl MailProvider for FixtureProvider {
 }
 
 impl CalendarProvider for FixtureProvider {
+    fn create_event(
+        &self,
+        _: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_ {
+        ready(Err(CalendarOperationError::ServiceUnavailable))
+    }
+
     fn calendar_delta_page(
         &self,
         view: &CalendarViewReference,

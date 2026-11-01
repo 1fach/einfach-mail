@@ -8,7 +8,7 @@ use crate::store::{CacheFailure, CacheResult};
 pub(super) const MESSAGE_QUERY_VERSION: i64 = 2;
 const FLAG_SCHEMA_VERSION: usize = 5;
 const REPLY_SCHEMA_BASE_VERSION: usize = 7;
-const LATEST_SCHEMA_VERSION: usize = 8;
+const REPLY_SCHEMA_REPAIRED_VERSION: usize = 8;
 
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -283,6 +283,62 @@ fn migrations() -> Migrations<'static> {
 
             DROP TABLE mail_pending_send_v1;",
         ),
+        M::up(
+            "CREATE TABLE calendar_pending_event_creation (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                range_start_seconds INTEGER NOT NULL,
+                range_start_nanoseconds INTEGER NOT NULL
+                    CHECK (range_start_nanoseconds BETWEEN 0 AND 999999999),
+                range_end_seconds INTEGER NOT NULL,
+                range_end_nanoseconds INTEGER NOT NULL
+                    CHECK (range_end_nanoseconds BETWEEN 0 AND 999999999),
+                local_start_julian_day INTEGER NOT NULL,
+                local_end_julian_day INTEGER NOT NULL,
+                creation_id TEXT NOT NULL UNIQUE,
+                subject TEXT NOT NULL,
+                local_start_seconds INTEGER NOT NULL,
+                local_start_nanoseconds INTEGER NOT NULL
+                    CHECK (local_start_nanoseconds BETWEEN 0 AND 999999999),
+                local_end_seconds INTEGER NOT NULL,
+                local_end_nanoseconds INTEGER NOT NULL
+                    CHECK (local_end_nanoseconds BETWEEN 0 AND 999999999),
+                time_zone TEXT NOT NULL,
+                start_seconds INTEGER NOT NULL,
+                start_nanoseconds INTEGER NOT NULL
+                    CHECK (start_nanoseconds BETWEEN 0 AND 999999999),
+                end_seconds INTEGER NOT NULL,
+                end_nanoseconds INTEGER NOT NULL
+                    CHECK (end_nanoseconds BETWEEN 0 AND 999999999),
+                FOREIGN KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) REFERENCES calendar_view_sync_state (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) ON DELETE CASCADE,
+                CHECK (local_start_julian_day < local_end_julian_day),
+                CHECK (
+                    local_start_seconds < local_end_seconds
+                    OR (local_start_seconds = local_end_seconds
+                        AND local_start_nanoseconds < local_end_nanoseconds)
+                ),
+                CHECK (
+                    start_seconds < end_seconds
+                    OR (start_seconds = end_seconds
+                        AND start_nanoseconds < end_nanoseconds)
+                )
+            );",
+        ),
     ])
 }
 
@@ -330,7 +386,7 @@ fn repair_reply_schema(connection: &mut Connection) -> Result<(), CacheFailure> 
                     REFERENCES mail_folders (account_id, folder_id)
                     ON DELETE CASCADE
             );
-            PRAGMA user_version = {LATEST_SCHEMA_VERSION};"
+            PRAGMA user_version = {REPLY_SCHEMA_REPAIRED_VERSION};"
         ))
         .map_err(|_| CacheFailure::Unavailable)?;
     transaction.commit().map_err(|_| CacheFailure::Unavailable)

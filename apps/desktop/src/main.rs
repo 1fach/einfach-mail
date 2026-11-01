@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 mod account_view;
 mod calendar_view;
+mod event_composer;
 mod mail_composer;
 mod mail_view;
 mod single_instance;

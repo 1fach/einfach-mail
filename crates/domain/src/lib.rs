@@ -4,6 +4,7 @@
 
 mod account;
 mod calendar;
+mod calendar_creation;
 mod identifiers;
 mod mail;
 mod mailbox;
@@ -14,6 +15,10 @@ pub use calendar::{
     CalendarField, CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
     CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference,
     InvalidCalendarOccurrenceTime, InvalidCalendarViewRange, NewCalendarOccurrenceError,
+};
+pub use calendar_creation::{
+    CalendarEventCreation, CalendarEventCreationId, CalendarEventDraft, CalendarTimeZoneId,
+    InvalidCalendarEventCreationId, InvalidCalendarEventDraft, InvalidCalendarEventTimeZone,
 };
 pub use identifiers::{AccountId, CalendarId, EmptyIdentifier, EventId, FolderId, MessageId};
 pub use mail::{

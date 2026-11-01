@@ -184,6 +184,9 @@ fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static s
         AccountPermissionRequest::MailReadWrite => {
             "Microsoft grants Mail.ReadWrite, which can create, read, update, and delete mail in this account. Einfach Mail requests it when Microsoft denies a read-state change, follow-up flag change, or message move. It uses the permission to set read state, update or clear follow-up flags, and move messages between folders. This permission review does not perform the action or send mail, and it does not request Mail.Send. Continue opens Microsoft in your system browser."
         }
+        AccountPermissionRequest::CalendarReadWrite => {
+            "Microsoft grants Calendars.ReadWrite the ability to create, read, update, and delete calendar events. Einfach Mail requests it for supported one-off timed appointments after Microsoft denies an event change. This review does not repeat the failed action. Continue opens Microsoft in your system browser. Reopen Calendar and retry the event after review."
+        }
         AccountPermissionRequest::SendMail => {
             "Microsoft grants Mail.Send so Einfach Mail can send mail as this account. It does not grant permission to read or change mail. Continue opens Microsoft in your system browser."
         }
@@ -571,6 +574,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                                     drop(view.close_calendar_view(cx));
                                     cx.notify();
                                 }
+                                CalendarViewEvent::ReviewCalendarWritePermission => {
+                                    drop(view.close_calendar_view(cx));
+                                    view.prepare_permission_review(
+                                        AccountPermissionRequest::CalendarReadWrite,
+                                        cx,
+                                    );
+                                }
                             },
                         );
                         view.calendar_view = Some(calendar_view);
@@ -622,6 +632,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                             error,
                             MailCacheError::OperationInProgress
                                 | MailCacheError::SendAlreadyPending
+                                | MailCacheError::CalendarEventCreationPending
                         ) {
                             view.account_session = None;
                         }
@@ -1078,6 +1089,9 @@ fn mail_cache_error_message(error: MailCacheError) -> &'static str {
         }
         MailCacheError::SendAlreadyPending => {
             "A previous send needs review. Open Mail, check Sent Items, and resolve it before signing out."
+        }
+        MailCacheError::CalendarEventCreationPending => {
+            "A calendar event may already exist in Microsoft. Open Calendar and retry the saved operation before signing out."
         }
         MailCacheError::MissingEncryptionKey => {
             "The encrypted account cache key is missing. Remove the local cache before syncing again."

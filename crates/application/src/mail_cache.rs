@@ -34,6 +34,9 @@ pub enum MailCacheError {
     /// Another unresolved send already exists for this account.
     #[error("a previous mail send needs to be resolved")]
     SendAlreadyPending,
+    /// An unresolved calendar event creation must remain with its encrypted cache.
+    #[error("a previous calendar event creation needs to be resolved")]
+    CalendarEventCreationPending,
     /// The operation ID does not match the account's pending send marker.
     #[error("the pending mail send does not match the requested operation")]
     PendingSendMismatch,
@@ -450,7 +453,8 @@ pub trait MailCache: Send + Sync {
     /// # Errors
     ///
     /// Returns [`MailCacheError::AccountMismatch`] for another account,
-    /// [`MailCacheError::SendAlreadyPending`] while an outcome is unresolved,
+    /// [`MailCacheError::SendAlreadyPending`] while a mail send is unresolved,
+    /// [`MailCacheError::CalendarEventCreationPending`] while an event creation is unresolved,
     /// [`MailCacheError::OperationInProgress`] while a send is active, or
     /// [`MailCacheError::Unavailable`] when the cache cannot be inspected or removed.
     fn remove_account(

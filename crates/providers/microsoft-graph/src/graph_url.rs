@@ -129,6 +129,14 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
+    pub(super) fn primary_calendar_events_path(&self) -> Result<GraphUrl, GraphError> {
+        let url = self
+            .base_url
+            .join("me/calendar/events")
+            .map_err(|_| GraphError::UnsafeLink)?;
+        self.validated_url(url)
+    }
+
     pub(super) fn opaque_link(&self, link: &str) -> Result<GraphUrl, GraphError> {
         if has_user_info_separator(link) {
             return Err(GraphError::UnsafeLink);
@@ -336,6 +344,17 @@ mod tests {
                 ("endDateTime".into(), "2030-01-14T00:00:00Z".into()),
             ]
         );
+    }
+
+    #[test]
+    fn primary_calendar_event_path_targets_only_the_signed_in_users_default_calendar() {
+        let request = authority()
+            .primary_calendar_events_path()
+            .expect("synthetic primary calendar event URL is valid");
+        let url = Url::parse(request.as_str()).expect("synthetic Graph URL is valid");
+
+        assert_eq!(url.path(), "/v1.0/me/calendar/events");
+        assert!(url.query().is_none());
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub(super) enum GraphOperation {
     MessageMove,
     MailSend,
     CalendarViewDelta,
+    CalendarEventCreate,
 }
 
 impl GraphOperation {
@@ -54,6 +55,7 @@ impl GraphOperation {
                 | Self::MessageUpdate
                 | Self::MessageMove
                 | Self::CalendarViewDelta
+                | Self::CalendarEventCreate
         )
     }
 }
@@ -73,8 +75,8 @@ struct GraphRequest {
 
 enum GraphRequestMethod {
     Get,
-    PostJson(Vec<u8>),
     PatchJson(Arc<[u8]>),
+    PostJson(Arc<[u8]>),
 }
 
 struct GraphCommand {
@@ -132,7 +134,7 @@ impl GraphTransportHandle {
         match self
             .request(
                 GraphOperation::MailSend,
-                GraphRequestMethod::PostJson(body),
+                GraphRequestMethod::PostJson(body.into()),
                 url,
                 token,
             )
@@ -141,18 +143,6 @@ impl GraphTransportHandle {
             GraphResponse::Body(body) if body.is_empty() => Ok(()),
             _ => Err(GraphError::InvalidResponse),
         }
-    }
-
-    pub(super) async fn post_json(
-        &self,
-        operation: GraphOperation,
-        url: GraphUrl,
-        token: Arc<AccessToken>,
-        body: Vec<u8>,
-    ) -> Result<Vec<u8>, GraphError> {
-        self.request(operation, GraphRequestMethod::PostJson(body), url, token)
-            .await?
-            .into_body()
     }
 
     pub(super) async fn get_message_delta(
@@ -207,6 +197,23 @@ impl GraphTransportHandle {
             GraphOperation::MessageMove => GraphError::MessageMoveOutcomeUnknown,
             _ => GraphError::WorkerClosed,
         })?
+    }
+
+    pub(super) async fn post_json(
+        &self,
+        operation: GraphOperation,
+        url: GraphUrl,
+        token: Arc<AccessToken>,
+        body: impl Into<Arc<[u8]>>,
+    ) -> Result<Vec<u8>, GraphError> {
+        self.request(
+            operation,
+            GraphRequestMethod::PostJson(body.into()),
+            url,
+            token,
+        )
+        .await?
+        .into_body()
     }
 }
 
@@ -433,23 +440,37 @@ async fn request_with_retry(
             return message_update_response_result(response, reply).await;
         }
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            if matches!(&request.method, GraphRequestMethod::PatchJson(_)) {
-                return Some(Err(rate_limit_error(&response)));
-            }
             if matches!(request.operation, GraphOperation::MailSend) {
                 return response_result(request.operation, response, reply).await;
             }
-            match retry_decision(&response, retry_index) {
-                RetryDecision::Retry(delay) => {
-                    drop(response);
-                    wait_before_retry(reply, delay).await?;
-                    retry_index += 1;
+            match &request.method {
+                GraphRequestMethod::Get => match retry_decision(&response, retry_index) {
+                    RetryDecision::Retry(delay) => {
+                        drop(response);
+                        wait_before_retry(reply, delay).await?;
+                        retry_index += 1;
+                    }
+                    RetryDecision::Stop(error) => return Some(Err(error)),
+                },
+                GraphRequestMethod::PatchJson(_) | GraphRequestMethod::PostJson(_) => {
+                    return Some(Err(rate_limit_error(&response)));
                 }
-                RetryDecision::Stop(error) => return Some(Err(error)),
             }
+        } else if !has_expected_success_status(request.operation, response.status()) {
+            return Some(Err(GraphError::InvalidResponse));
         } else {
             return response_result(request.operation, response, reply).await;
         }
+    }
+}
+
+fn has_expected_success_status(operation: GraphOperation, status: StatusCode) -> bool {
+    if !status.is_success() {
+        return true;
+    }
+    match operation {
+        GraphOperation::CalendarEventCreate => status == StatusCode::CREATED,
+        _ => true,
     }
 }
 
@@ -634,18 +655,31 @@ async fn send_once(
         (GraphRequestMethod::Get, operation)
             if !matches!(
                 operation,
-                GraphOperation::MailSend | GraphOperation::MessageUpdate
+                GraphOperation::MailSend
+                    | GraphOperation::MessageUpdate
+                    | GraphOperation::MessageMove
+                    | GraphOperation::CalendarEventCreate
             ) =>
         {
             client.get(request.url.as_str())
         }
-        (GraphRequestMethod::PostJson(body), GraphOperation::MailSend) => {
-            client.post(request.url.as_str()).body(body.clone())
+        (GraphRequestMethod::PostJson(body), operation)
+            if matches!(
+                operation,
+                GraphOperation::MailSend
+                    | GraphOperation::MessageMove
+                    | GraphOperation::CalendarEventCreate
+            ) =>
+        {
+            client
+                .post(request.url.as_str())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Arc::clone(body).to_vec())
         }
         (GraphRequestMethod::PatchJson(body), GraphOperation::MessageUpdate) => client
             .patch(request.url.as_str())
             .header(CONTENT_TYPE, "application/json")
-            .body(body.as_ref().to_vec()),
+            .body(Arc::clone(body).to_vec()),
         _ => return Some(Err(GraphError::InvalidResponse)),
     }
     .header(AUTHORIZATION, authorization);
@@ -1393,6 +1427,97 @@ mod tests {
         accept_and_close
             .await
             .expect("synthetic server closes after receiving the request");
+    }
+
+    #[tokio::test]
+    async fn post_sends_json_and_uses_immutable_calendar_event_ids() {
+        let server = MockServer::start_async().await;
+        let post = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/calendar/events")
+                    .header("authorization", "Bearer synthetic-access-token")
+                    .header("content-type", "application/json")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .body(r#"{"subject":"Planning","transactionId":"synthetic-id"}"#);
+                then.status(201).body("synthetic created event");
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+        let response = transport
+            .handle()
+            .post_json(
+                GraphOperation::CalendarEventCreate,
+                graph_url(&server.url("/v1.0/me/calendar/events")),
+                synthetic_access_token(),
+                b"{\"subject\":\"Planning\",\"transactionId\":\"synthetic-id\"}".to_vec(),
+            )
+            .await
+            .expect("synthetic event POST succeeds");
+
+        assert_eq!(response, b"synthetic created event");
+        post.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn post_rejects_a_success_status_that_does_not_confirm_creation() {
+        let server = MockServer::start_async().await;
+        let post = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/v1.0/me/calendar/events");
+                then.status(200).body("synthetic non-creation response");
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+        let result = transport
+            .handle()
+            .post_json(
+                GraphOperation::CalendarEventCreate,
+                graph_url(&server.url("/v1.0/me/calendar/events")),
+                synthetic_access_token(),
+                b"{}".to_vec(),
+            )
+            .await;
+
+        assert_eq!(result, Err(GraphError::InvalidResponse));
+        post.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn post_throttle_response_is_not_retried() {
+        let server = MockServer::start_async().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let responder_calls = Arc::clone(&calls);
+        let post = server
+            .mock_async(move |when, then| {
+                when.method(POST).path("/v1.0/me/calendar/events");
+                then.respond_with(move |_request: &HttpMockRequest| {
+                    responder_calls.fetch_add(1, Ordering::SeqCst);
+                    HttpMockResponse::builder()
+                        .status(429)
+                        .header("Retry-After", "0")
+                        .body("synthetic throttle response")
+                        .build()
+                });
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+        let result = transport
+            .handle()
+            .post_json(
+                GraphOperation::CalendarEventCreate,
+                graph_url(&server.url("/v1.0/me/calendar/events")),
+                synthetic_access_token(),
+                b"{}".to_vec(),
+            )
+            .await;
+
+        assert!(matches!(result, Err(GraphError::RateLimited { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        post.assert_calls_async(1).await;
     }
 
     #[tokio::test]
