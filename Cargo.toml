@@ -5,6 +5,9 @@ members = [
     "crates/application",
     "crates/domain",
     "crates/providers/microsoft-graph",
+    "tools/authentication-proof",
+    "tools/email-html-proof",
+    "tools/graph-transport-proof",
     "tools/storage-proof",
 ]
 
