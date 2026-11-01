@@ -3,7 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use einfach_mail_application::{AccountOperationError, AccountProvider, AccountWorkflow};
+use einfach_mail_application::{
+    AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
+};
 use einfach_mail_domain::AccountProfile;
 use einfach_mail_microsoft_graph::{CallbackPort, MicrosoftGraphProvider};
 use gpui_kit::component::{
@@ -83,9 +85,24 @@ enum AccountStatus {
     Disconnected,
     Connecting {
         saved_credential_may_exist: bool,
+        cancellation: AccountOperationCancellation,
+    },
+    CancellingConnect {
+        saved_credential_may_exist: bool,
     },
     SigningOut,
     Connected(AccountProfile),
+    Reauthorizing {
+        profile: AccountProfile,
+        cancellation: AccountOperationCancellation,
+    },
+    CancellingReauthorization {
+        profile: AccountProfile,
+    },
+    ReauthorizationFailed {
+        profile: AccountProfile,
+        error: AccountOperationError,
+    },
     Failed {
         error: AccountOperationError,
         saved_credential_may_exist: bool,
@@ -97,13 +114,32 @@ impl AccountStatus {
         match self {
             Self::Connecting {
                 saved_credential_may_exist,
+                ..
+            }
+            | Self::CancellingConnect {
+                saved_credential_may_exist,
             }
             | Self::Failed {
                 saved_credential_may_exist,
                 ..
             } => *saved_credential_may_exist,
-            Self::SigningOut | Self::Connected(_) | Self::Restoring => true,
+            Self::SigningOut
+            | Self::Connected(_)
+            | Self::Reauthorizing { .. }
+            | Self::CancellingReauthorization { .. }
+            | Self::ReauthorizationFailed { .. }
+            | Self::Restoring => true,
             Self::Disconnected => false,
+        }
+    }
+
+    fn connected_profile(&self) -> Option<&AccountProfile> {
+        match self {
+            Self::Connected(profile)
+            | Self::Reauthorizing { profile, .. }
+            | Self::CancellingReauthorization { profile }
+            | Self::ReauthorizationFailed { profile, .. } => Some(profile),
+            _ => None,
         }
     }
 
@@ -130,6 +166,10 @@ impl AccountStatus {
             }
             AccountOperationError::SignInFailed => "Sign-in could not be completed. Try again.",
             AccountOperationError::AccountAlreadyConnected => "An account is already connected.",
+            AccountOperationError::AccountNotConnected => "No account is connected.",
+            AccountOperationError::AccountMismatch => {
+                "Microsoft returned a different account. Your saved sign-in was not changed."
+            }
             AccountOperationError::AccountOperationInProgress => {
                 "An account operation is already running. Wait for it to finish and try again."
             }
@@ -137,6 +177,13 @@ impl AccountStatus {
                 "The account workflow is unavailable. Restart Einfach Mail and try again."
             }
             _ => "The account operation failed. Try again.",
+        }
+    }
+
+    fn reauthorization_error_message(error: AccountOperationError) -> &'static str {
+        match error {
+            AccountOperationError::SignInCancelled => "Permission review was cancelled.",
+            _ => Self::error_message(error),
         }
     }
 }
@@ -198,21 +245,32 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         }
         let saved_credential_may_exist = self.status.saved_credential_may_exist();
+        let cancellation = AccountOperationCancellation::new();
         self.status = AccountStatus::Connecting {
             saved_credential_may_exist,
+            cancellation: cancellation.clone(),
         };
-        self.task = Some(Self::connect_task(workflow, saved_credential_may_exist, cx));
+        self.task = Some(Self::connect_task(
+            workflow,
+            saved_credential_may_exist,
+            cancellation,
+            cx,
+        ));
         cx.notify();
     }
 
     fn connect_task(
         workflow: Arc<AccountWorkflow<P>>,
         saved_credential_may_exist: bool,
+        cancellation: AccountOperationCancellation,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let connection_result = workflow.connect_account().await;
+            let connection_result = workflow
+                .connect_account_with_cancellation(cancellation)
+                .await;
             let _ = this.update(cx, |view, cx| {
+                view.task = None;
                 view.status = match connection_result {
                     Ok(profile) => AccountStatus::Connected(profile),
                     Err(error) => AccountStatus::Failed {
@@ -228,16 +286,66 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     fn cancel_connect(&mut self, cx: &mut Context<Self>) {
         let AccountStatus::Connecting {
             saved_credential_may_exist,
+            cancellation,
         } = &self.status
         else {
             return;
         };
-        let saved_credential_may_exist = *saved_credential_may_exist;
+        cancellation.cancel();
+        self.status = AccountStatus::CancellingConnect {
+            saved_credential_may_exist: *saved_credential_may_exist,
+        };
+        cx.notify();
+    }
 
-        self.task.take();
-        self.status = AccountStatus::Failed {
-            error: AccountOperationError::SignInCancelled,
-            saved_credential_may_exist,
+    fn reauthorize(&mut self, cx: &mut Context<Self>) {
+        let Some(workflow) = self.workflow.clone() else {
+            return;
+        };
+        let Some(profile) = self.status.connected_profile().cloned() else {
+            return;
+        };
+        let cancellation = AccountOperationCancellation::new();
+        self.status = AccountStatus::Reauthorizing {
+            profile: profile.clone(),
+            cancellation: cancellation.clone(),
+        };
+        self.task = Some(Self::reauthorize_task(workflow, profile, cancellation, cx));
+        cx.notify();
+    }
+
+    fn reauthorize_task(
+        workflow: Arc<AccountWorkflow<P>>,
+        profile: AccountProfile,
+        cancellation: AccountOperationCancellation,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let reauthorization_result = workflow
+                .reauthorize_account_with_cancellation(profile.id(), cancellation)
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.task = None;
+                view.status = match reauthorization_result {
+                    Ok(profile) => AccountStatus::Connected(profile),
+                    Err(error) => AccountStatus::ReauthorizationFailed { profile, error },
+                };
+                cx.notify();
+            });
+        })
+    }
+
+    fn cancel_reauthorization(&mut self, cx: &mut Context<Self>) {
+        let AccountStatus::Reauthorizing {
+            profile,
+            cancellation,
+        } = &self.status
+        else {
+            return;
+        };
+        cancellation.cancel();
+        self.status = AccountStatus::CancellingReauthorization {
+            profile: profile.clone(),
         };
         cx.notify();
     }
@@ -249,7 +357,11 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         if !self.status.saved_credential_may_exist()
             || matches!(
                 &self.status,
-                AccountStatus::Connecting { .. } | AccountStatus::SigningOut
+                AccountStatus::Connecting { .. }
+                    | AccountStatus::CancellingConnect { .. }
+                    | AccountStatus::Reauthorizing { .. }
+                    | AccountStatus::CancellingReauthorization { .. }
+                    | AccountStatus::SigningOut
             )
         {
             return;
@@ -351,10 +463,30 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 "Waiting for Microsoft sign-in in your browser…",
                 Role::Status,
             ),
+            AccountStatus::CancellingConnect { .. } => (
+                "Finishing Microsoft sign-in",
+                "Finishing sign-in…",
+                Role::Status,
+            ),
             AccountStatus::SigningOut => (
                 "Removing saved sign-in",
                 "Removing saved sign-in…",
                 Role::Status,
+            ),
+            AccountStatus::Reauthorizing { .. } => (
+                "Reviewing Microsoft permissions",
+                "Waiting for Microsoft permission review in your browser…",
+                Role::Status,
+            ),
+            AccountStatus::CancellingReauthorization { .. } => (
+                "Finishing Microsoft permission review",
+                "Finishing permission review…",
+                Role::Status,
+            ),
+            AccountStatus::ReauthorizationFailed { error, .. } => (
+                AccountStatus::reauthorization_error_message(*error),
+                AccountStatus::reauthorization_error_message(*error),
+                Role::Alert,
             ),
             AccountStatus::Connected(_) => ("Connected", "Connected", Role::Status),
             AccountStatus::Failed { error, .. } => (
@@ -377,9 +509,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn render_account_details(&self, colors: ColorTokens) -> Option<impl IntoElement> {
-        let AccountStatus::Connected(profile) = &self.status else {
-            return None;
-        };
+        let profile = self.status.connected_profile()?;
         Some(
             div()
                 .flex()
@@ -412,9 +542,22 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             )
     }
 
+    fn render_permission_review(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .justify_center()
+            .debug_selector(|| "review-app-permissions".to_owned())
+            .child(
+                Button::new("review-app-permissions")
+                    .label("Review sign-in permissions")
+                    .on_click(cx.listener(|view, _, _, cx| view.reauthorize(cx))),
+            )
+    }
+
     fn render_progress_action(label: &'static str) -> gpui_kit::Div {
         div().flex().justify_center().child(
             Button::new("account-operation-progress")
+                .debug_selector(|| "account-operation-progress".to_owned())
                 .label(label)
                 .loading(true)
                 .disabled(true),
@@ -425,6 +568,22 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         match &self.status {
             AccountStatus::Restoring => Self::render_progress_action("Checking account…"),
             AccountStatus::SigningOut => Self::render_progress_action("Signing out…"),
+            AccountStatus::CancellingConnect { .. } => {
+                Self::render_progress_action("Finishing sign-in…")
+            }
+            AccountStatus::Reauthorizing { .. } => div()
+                .flex()
+                .justify_center()
+                .debug_selector(|| "cancel-permission-update".to_owned())
+                .child(
+                    Button::new("cancel-permission-update")
+                        .ghost()
+                        .label("Cancel permission review")
+                        .on_click(cx.listener(|view, _, _, cx| view.cancel_reauthorization(cx))),
+                ),
+            AccountStatus::CancellingReauthorization { .. } => {
+                Self::render_progress_action("Finishing permission review…")
+            }
             AccountStatus::Connecting { .. } => div()
                 .flex()
                 .justify_center()
@@ -445,7 +604,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                         .label("Connect Microsoft 365 account")
                         .on_click(cx.listener(|view, _, _, cx| view.connect(cx))),
                 ),
-            AccountStatus::Connected(_) => div(),
+            AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. } => div(),
         }
     }
 
@@ -492,8 +651,14 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
         if let Some(details) = self.render_account_details(colors) {
+            content = content.child(details);
+        }
+        if matches!(
+            &self.status,
+            AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. }
+        ) {
             content = content
-                .child(details)
+                .child(self.render_permission_review(cx))
                 .child(self.render_saved_sign_out(cx, "Sign out"));
         }
         if matches!(
@@ -528,21 +693,60 @@ mod tests {
     use std::{
         future::{Future, ready},
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, Ordering},
+            mpsc,
         },
+        time::Duration,
     };
 
-    use gpui_kit::{Modifiers, TestAppContext, VisualTestContext};
+    use tokio::sync::oneshot;
 
-    use super::{AccountView, SetupIssue, configured_callback_port};
-    use einfach_mail_application::{AccountOperationError, AccountProvider, AccountWorkflow};
+    use gpui_kit::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};
+
+    use super::{AccountStatus, AccountView, SetupIssue, configured_callback_port};
+    use einfach_mail_application::{
+        AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
+    };
     use einfach_mail_domain::{AccountId, AccountProfile};
     use einfach_mail_microsoft_graph::CallbackPort;
 
     #[derive(Clone, Default)]
     struct TestProvider {
         signed_out: Arc<AtomicBool>,
+        pause_connection: Arc<AtomicBool>,
+        pause_permission_update: Arc<AtomicBool>,
+        connection_commit: Arc<Mutex<Option<CommitGate>>>,
+        permission_commit: Arc<Mutex<Option<CommitGate>>>,
+    }
+
+    struct CommitGate {
+        started: mpsc::Sender<()>,
+        finish: oneshot::Receiver<()>,
+    }
+
+    impl TestProvider {
+        fn pause_next_connection_commit(&self) -> (mpsc::Receiver<()>, oneshot::Sender<()>) {
+            Self::pause_next_commit(&self.connection_commit)
+        }
+
+        fn pause_next_permission_commit(&self) -> (mpsc::Receiver<()>, oneshot::Sender<()>) {
+            Self::pause_next_commit(&self.permission_commit)
+        }
+
+        fn pause_next_commit(
+            slot: &Mutex<Option<CommitGate>>,
+        ) -> (mpsc::Receiver<()>, oneshot::Sender<()>) {
+            let (started_sender, started_receiver) = mpsc::channel();
+            let (finish_sender, finish_receiver) = oneshot::channel();
+            *slot
+                .lock()
+                .expect("synthetic commit gate mutex is not poisoned") = Some(CommitGate {
+                started: started_sender,
+                finish: finish_receiver,
+            });
+            (started_receiver, finish_sender)
+        }
     }
 
     impl AccountProvider for TestProvider {
@@ -555,16 +759,79 @@ mod tests {
 
         fn connect_account(
             &self,
+            cancellation: AccountOperationCancellation,
         ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
         {
-            ready(Ok(AccountProfile::try_new(
+            let pause_connection = Arc::clone(&self.pause_connection);
+            let commit_gate = self
+                .connection_commit
+                .lock()
+                .expect("synthetic commit gate mutex is not poisoned")
+                .take();
+            let profile = AccountProfile::try_new(
                 AccountId::try_from("synthetic-account".to_owned())
                     .expect("synthetic account ID is non-empty"),
                 Some("Ada Example".to_owned()),
                 Some("ada@example.test".to_owned()),
                 Some("ada@tenant.example.test".to_owned()),
             )
-            .expect("synthetic account profile has an identity")))
+            .expect("synthetic account profile has an identity");
+            async move {
+                if pause_connection.load(Ordering::SeqCst) {
+                    cancellation.cancelled().await;
+                    return Err(AccountOperationError::SignInCancelled);
+                }
+                cancellation.begin_credential_commit()?;
+                if let Some(commit_gate) = commit_gate {
+                    let _ = commit_gate.started.send(());
+                    commit_gate
+                        .finish
+                        .await
+                        .map_err(|_| AccountOperationError::ServiceUnavailable)?;
+                }
+                Ok(profile)
+            }
+        }
+
+        fn reauthorize_account(
+            &self,
+            expected_account_id: &AccountId,
+            cancellation: AccountOperationCancellation,
+        ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
+        {
+            let pause_permission_update = Arc::clone(&self.pause_permission_update);
+            let commit_gate = self
+                .permission_commit
+                .lock()
+                .expect("synthetic commit gate mutex is not poisoned")
+                .take();
+            let expected_account_id = expected_account_id.clone();
+            let profile = AccountProfile::try_new(
+                AccountId::try_from("synthetic-account".to_owned())
+                    .expect("synthetic account ID is non-empty"),
+                Some("Ada Example".to_owned()),
+                Some("ada@example.test".to_owned()),
+                Some("ada@tenant.example.test".to_owned()),
+            )
+            .expect("synthetic account profile has an identity");
+            async move {
+                if pause_permission_update.load(Ordering::SeqCst) {
+                    cancellation.cancelled().await;
+                    return Err(AccountOperationError::SignInCancelled);
+                }
+                if expected_account_id != *profile.id() {
+                    return Err(AccountOperationError::AccountMismatch);
+                }
+                cancellation.begin_credential_commit()?;
+                if let Some(commit_gate) = commit_gate {
+                    let _ = commit_gate.started.send(());
+                    commit_gate
+                        .finish
+                        .await
+                        .map_err(|_| AccountOperationError::ServiceUnavailable)?;
+                }
+                Ok(profile)
+            }
         }
 
         fn sign_out(&self) -> impl Future<Output = Result<(), AccountOperationError>> + Send + '_ {
@@ -577,6 +844,15 @@ mod tests {
         context.update(|window, app| {
             let _ = window.draw(app);
         });
+    }
+
+    fn click(context: &mut VisualTestContext, selector: &'static str) {
+        let bounds = context
+            .debug_bounds(selector)
+            .expect("requested account action is rendered");
+        context.simulate_click(bounds.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_account_view(context);
     }
 
     #[test]
@@ -597,6 +873,14 @@ mod tests {
             configured_callback_port(Some("43123")),
             Ok(CallbackPort::Fixed(port)) if port.get() == 43123
         ));
+    }
+
+    #[test]
+    fn cancelled_permission_review_has_permission_specific_copy() {
+        assert_eq!(
+            AccountStatus::reauthorization_error_message(AccountOperationError::SignInCancelled),
+            "Permission review was cancelled."
+        );
     }
 
     #[gpui::test]
@@ -635,6 +919,136 @@ mod tests {
             .update(|cx| matches!(&view.read(cx).status, super::AccountStatus::Disconnected));
         assert!(disconnected);
         assert!(signed_out.load(Ordering::SeqCst));
+    }
+
+    #[gpui::test]
+    fn connection_cancel_resolves_before_and_during_credential_commit(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        provider.pause_connection.store(true, Ordering::SeqCst);
+        let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
+        let mut account_view = None;
+        let (_, context) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| AccountView::new(Ok(workflow), cx));
+            account_view = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = account_view.expect("account view is created in its window");
+
+        context.run_until_parked();
+        draw_account_view(context);
+        click(context, "connect-account");
+        click(context, "cancel-sign-in");
+
+        let cancelled = context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).status,
+                super::AccountStatus::Failed {
+                    error: AccountOperationError::SignInCancelled,
+                    ..
+                }
+            )
+        });
+        assert!(cancelled);
+
+        provider.pause_connection.store(false, Ordering::SeqCst);
+        let (commit_started, finish_commit) = provider.pause_next_connection_commit();
+        click(context, "connect-account");
+        commit_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retry reaches the credential commit");
+        click(context, "cancel-sign-in");
+
+        let cancelling = context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).status,
+                super::AccountStatus::CancellingConnect { .. }
+            )
+        });
+        assert!(cancelling);
+        assert!(context.debug_bounds("account-operation-progress").is_some());
+
+        finish_commit
+            .send(())
+            .expect("synthetic credential commit is released");
+        context.run_until_parked();
+        draw_account_view(context);
+
+        let connected = context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).status,
+                super::AccountStatus::Connected(profile) if profile.label() == "Ada Example"
+            )
+        });
+        assert!(connected);
+    }
+
+    #[gpui::test]
+    fn permission_cancel_resolves_before_and_during_credential_commit(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        provider
+            .pause_permission_update
+            .store(true, Ordering::SeqCst);
+        let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
+        let mut account_view = None;
+        let (_, context) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| AccountView::new(Ok(workflow), cx));
+            account_view = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = account_view.expect("account view is created in its window");
+
+        context.run_until_parked();
+        draw_account_view(context);
+        click(context, "connect-account");
+        click(context, "review-app-permissions");
+        click(context, "cancel-permission-update");
+
+        let cancelled_with_profile = context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).status,
+                super::AccountStatus::ReauthorizationFailed {
+                    profile,
+                    error: AccountOperationError::SignInCancelled,
+                } if profile.label() == "Ada Example"
+            )
+        });
+        assert!(cancelled_with_profile);
+
+        provider
+            .pause_permission_update
+            .store(false, Ordering::SeqCst);
+        let (commit_started, finish_commit) = provider.pause_next_permission_commit();
+        click(context, "review-app-permissions");
+        commit_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("permission retry reaches the credential commit");
+        click(context, "cancel-permission-update");
+
+        let cancelling_with_profile = context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).status,
+                super::AccountStatus::CancellingReauthorization { profile }
+                    if profile.label() == "Ada Example"
+            )
+        });
+        assert!(cancelling_with_profile);
+        assert!(context.debug_bounds("account-operation-progress").is_some());
+
+        finish_commit
+            .send(())
+            .expect("synthetic credential commit is released");
+        context.run_until_parked();
+        draw_account_view(context);
+
+        let connected = context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).status,
+                super::AccountStatus::Connected(profile) if profile.label() == "Ada Example"
+            )
+        });
+        assert!(connected);
     }
 
     #[gpui::test]

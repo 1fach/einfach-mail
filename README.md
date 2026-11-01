@@ -1,6 +1,6 @@
 # Einfach Mail
 
-Einfach Mail is a Rust desktop mail and calendar client with Microsoft 365 integration. The native UI uses GPUI Kit. Linux is the sole development and validation target for the current milestones. Windows and macOS support follow later. Linux account connection and identity display are implemented with synthetic provider tests. Live Entra behavior remains unverified under [issue #3](https://github.com/1fach/einfach-mail/issues/3). Mail, calendar, and synchronization are not implemented yet.
+Einfach Mail is a Rust desktop mail and calendar client with Microsoft 365 integration. The native UI uses GPUI Kit. Linux is the sole development and validation target for the current milestones. Windows and macOS support follow later. Linux account connection, identity display, permission renewal, and cancellation ordering are implemented with synthetic provider, workflow, and headless UI tests. Live Entra behavior remains unverified under [issue #3](https://github.com/1fach/einfach-mail/issues/3). Mail, calendar, and synchronization are not implemented in the M1 candidate.
 
 The first provider target is Exchange Online through Microsoft Graph. Exchange Server installed on premises is outside the first release scope. See the [product brief](docs/product/brief.md) and [Microsoft Graph research](docs/research/microsoft-graph.md).
 
@@ -36,8 +36,8 @@ CI runs the build, dependency, and test gates in [its Linux workflow](.github/wo
 
 - `apps/desktop/` contains the GPUI application and native views.
 - `crates/domain/` contains provider-independent account profiles and account-scoped opaque identifiers. Mail and calendar entities are not implemented yet.
-- `crates/application/` contains the single-account workflow and provider port. Mail and calendar workflows are not implemented yet.
-- `crates/providers/microsoft-graph/` contains Linux OAuth sign-in, Graph `/me` profile mapping, and Secret Service refresh-token storage. Mail and calendar Graph operations are not implemented yet.
+- `crates/application/` contains the single-account workflow, provider port, and cancellation ordering across account credential commits. Mail and calendar workflows are not implemented yet.
+- `crates/providers/microsoft-graph/` contains Linux OAuth sign-in and permission renewal, Graph `/me` profile mapping, and Secret Service refresh-token storage. Mail and calendar Graph operations are not implemented yet.
 - `tools/storage-proof/` contains test-only SQLCipher and Linux Secret Service proofs; it exposes no application API.
 - `docs/product/` contains product scope.
 - `docs/architecture/` describes module ownership and data flow.

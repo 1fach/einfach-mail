@@ -2,6 +2,7 @@
 
 use std::{future::Future, sync::Arc, time::Duration};
 
+use huskarl::token::RefreshToken;
 use reqwest::{Client, redirect::Policy};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -13,7 +14,10 @@ use crate::{
     identity::{BrowserLauncher, Endpoints, SystemBrowser},
     worker,
 };
-use einfach_mail_application::{AccountOperationError, AccountProvider};
+use einfach_mail_application::{
+    AccountOperationCancellation, AccountOperationError, AccountProvider,
+};
+use einfach_mail_domain::AccountProfile;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -98,31 +102,43 @@ impl AccountProvider for MicrosoftGraphProvider {
     /// error when sign-in cannot complete.
     fn connect_account(
         &self,
-    ) -> impl Future<Output = Result<einfach_mail_domain::AccountProfile, AccountOperationError>>
-    + Send
-    + '_ {
+        cancellation: AccountOperationCancellation,
+    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
+        let commit_cancellation = cancellation.clone();
 
-        worker::run(move |_cancellation: CancellationToken| async move {
-            let client = build_http_client()?;
-            let response = identity::authorize(
-                config.client_id,
-                config.callback_port,
-                &config.endpoints,
-                client.clone(),
-                config.browser.as_ref(),
-            )
-            .await?;
-            let refresh_token = response
-                .refresh_token()
-                .cloned()
-                .ok_or(AccountOperationError::SignInFailed)?;
-            let profile =
-                graph::load_profile(&client, &config.endpoints.graph_me, response.access_token())
-                    .await?;
-            config.credentials.save(&refresh_token)?;
-            Ok(profile)
-        })
+        worker::run_with_account_cancellation(
+            move |_cancellation: CancellationToken| async move {
+                let (profile, refresh_token) = authorize_profile(&config).await?;
+                commit_cancellation.begin_credential_commit()?;
+                config.credentials.save(&refresh_token)?;
+                Ok(profile)
+            },
+            cancellation,
+        )
+    }
+
+    fn reauthorize_account(
+        &self,
+        expected_account_id: &einfach_mail_domain::AccountId,
+        cancellation: AccountOperationCancellation,
+    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let expected_account_id = expected_account_id.clone();
+        let commit_cancellation = cancellation.clone();
+
+        worker::run_with_account_cancellation(
+            move |_cancellation: CancellationToken| async move {
+                let (profile, refresh_token) = authorize_profile(&config).await?;
+                if profile.id() != &expected_account_id {
+                    return Err(AccountOperationError::AccountMismatch);
+                }
+                commit_cancellation.begin_credential_commit()?;
+                config.credentials.save(&refresh_token)?;
+                Ok(profile)
+            },
+            cancellation,
+        )
     }
 
     /// Removes the saved refresh token from Linux Secret Service.
@@ -139,6 +155,27 @@ impl AccountProvider for MicrosoftGraphProvider {
     }
 }
 
+async fn authorize_profile(
+    config: &ProviderConfig,
+) -> Result<(AccountProfile, RefreshToken), AccountOperationError> {
+    let client = build_http_client()?;
+    let response = identity::authorize(
+        config.client_id,
+        config.callback_port,
+        &config.endpoints,
+        client.clone(),
+        config.browser.as_ref(),
+    )
+    .await?;
+    let refresh_token = response
+        .refresh_token()
+        .cloned()
+        .ok_or(AccountOperationError::SignInFailed)?;
+    let profile =
+        graph::load_profile(&client, &config.endpoints.graph_me, response.access_token()).await?;
+    Ok((profile, refresh_token))
+}
+
 fn build_http_client() -> Result<Client, AccountOperationError> {
     Client::builder()
         .redirect(Policy::none())
@@ -153,7 +190,7 @@ fn build_http_client() -> Result<Client, AccountOperationError> {
 mod tests {
     use std::{
         net::{Ipv4Addr, SocketAddrV4},
-        sync::{Arc, Mutex},
+        sync::{Arc, Barrier, Mutex},
         time::Duration,
     };
 
@@ -163,7 +200,7 @@ mod tests {
     };
     use huskarl::token::RefreshToken;
     use tokio::net::TcpListener;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
     use url::Url;
 
     use crate::{
@@ -171,19 +208,34 @@ mod tests {
         credential::RefreshTokenStore,
         identity::{BrowserLauncher, Endpoints},
     };
-    use einfach_mail_application::{AccountOperationError, AccountProvider};
+    use einfach_mail_application::{
+        AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
+    };
 
     use super::{MicrosoftGraphProvider, ProviderConfig};
 
     struct MemoryRefreshTokenStore {
         token: Mutex<Option<RefreshToken>>,
+        save_pause: Mutex<Option<(Arc<Barrier>, oneshot::Sender<()>)>>,
     }
 
     impl MemoryRefreshTokenStore {
         fn new(token: Option<RefreshToken>) -> Self {
             Self {
                 token: Mutex::new(token),
+                save_pause: Mutex::new(None),
             }
+        }
+
+        fn pause_next_save_after_write(&self) -> (oneshot::Receiver<()>, Arc<Barrier>) {
+            let barrier = Arc::new(Barrier::new(2));
+            let (started_sender, started_receiver) = oneshot::channel();
+            *self
+                .save_pause
+                .lock()
+                .expect("synthetic credential mutex is not poisoned") =
+                Some((Arc::clone(&barrier), started_sender));
+            (started_receiver, barrier)
         }
 
         fn token_value(&self) -> Option<String> {
@@ -204,10 +256,23 @@ mod tests {
         }
 
         fn save(&self, token: &RefreshToken) -> Result<(), AccountOperationError> {
-            self.token
+            {
+                let mut saved = self
+                    .token
+                    .lock()
+                    .map_err(|_| AccountOperationError::CredentialStoreUnavailable)?;
+                *saved = Some(token.clone());
+            }
+            let save_pause = self
+                .save_pause
                 .lock()
-                .map(|mut saved| *saved = Some(token.clone()))
-                .map_err(|_| AccountOperationError::CredentialStoreUnavailable)
+                .map_err(|_| AccountOperationError::CredentialStoreUnavailable)?
+                .take();
+            if let Some((barrier, started_sender)) = save_pause {
+                let _ = started_sender.send(());
+                barrier.wait();
+            }
+            Ok(())
         }
 
         fn delete(&self) -> Result<(), AccountOperationError> {
@@ -293,6 +358,25 @@ mod tests {
         callback_url
     }
 
+    async fn complete_test_authorization(
+        browser_receiver: &mut mpsc::UnboundedReceiver<Url>,
+        code: &str,
+    ) {
+        let authorization_url = browser_receiver
+            .recv()
+            .await
+            .expect("synthetic authorization opens the test browser");
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client is valid")
+            .get(callback_url_for_response(&authorization_url, "code", code))
+            .send()
+            .await
+            .expect("loopback callback reaches the test listener");
+        assert!(response.status().is_success());
+    }
+
     #[test]
     fn callback_port_defaults_to_ephemeral_and_rejects_invalid_values() {
         assert_eq!(
@@ -346,7 +430,11 @@ mod tests {
         let credentials = Arc::new(MemoryRefreshTokenStore::new(None));
         let provider = synthetic_provider(&server, browser_sender, credentials.clone());
         let connect_provider = provider.clone();
-        let connect_task = tokio::spawn(async move { connect_provider.connect_account().await });
+        let connect_task = tokio::spawn(async move {
+            connect_provider
+                .connect_account(AccountOperationCancellation::new())
+                .await
+        });
         let authorization_url = browser_receiver
             .recv()
             .await
@@ -422,7 +510,11 @@ mod tests {
         let credentials = Arc::new(MemoryRefreshTokenStore::new(None));
         let provider = synthetic_provider(&server, browser_sender, credentials.clone());
         let connect_provider = provider.clone();
-        let connect_task = tokio::spawn(async move { connect_provider.connect_account().await });
+        let connect_task = tokio::spawn(async move {
+            connect_provider
+                .connect_account(AccountOperationCancellation::new())
+                .await
+        });
         let authorization_url = browser_receiver
             .recv()
             .await
@@ -452,10 +544,15 @@ mod tests {
     async fn cancelling_sign_in_releases_the_loopback_callback_listener() {
         let server = MockServer::start_async().await;
         let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
-        let credentials = Arc::new(MemoryRefreshTokenStore::new(None));
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
+            "synthetic-existing-refresh",
+        ))));
         let provider = synthetic_provider(&server, browser_sender, credentials.clone());
+        let cancellation = AccountOperationCancellation::new();
+        let task_cancellation = cancellation.clone();
         let connect_provider = provider.clone();
-        let connect_task = tokio::spawn(async move { connect_provider.connect_account().await });
+        let connect_task =
+            tokio::spawn(async move { connect_provider.connect_account(task_cancellation).await });
         let authorization_url = browser_receiver
             .recv()
             .await
@@ -470,8 +567,15 @@ mod tests {
         .port()
         .expect("callback URI has a port");
 
-        connect_task.abort();
-        assert!(connect_task.await.is_err(), "cancelled provider task stops");
+        cancellation.cancel();
+        assert_eq!(
+            connect_task.await.expect("cancelled sign-in completes"),
+            Err(AccountOperationError::SignInCancelled)
+        );
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-existing-refresh")
+        );
         let callback_listener = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if let Ok(listener) =
@@ -486,7 +590,10 @@ mod tests {
         .expect("cancellation releases the callback port");
 
         assert!(callback_listener.local_addr().is_ok());
-        assert_eq!(credentials.token_value(), None);
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-existing-refresh")
+        );
     }
 
     #[tokio::test]
@@ -607,5 +714,264 @@ mod tests {
             Some("synthetic-rejected-refresh")
         );
         token_refresh.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn connection_cancellation_during_commit_returns_and_restores_the_profile() {
+        let server = MockServer::start_async().await;
+        let token_exchange = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=authorization_code");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-connect-access","expires_in":3600,"refresh_token":"synthetic-connect-refresh","scope":"User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let profile_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-connect-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"account-123","displayName":"Ada Example"}"#);
+            })
+            .await;
+        let restored_token = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=refresh_token")
+                    .body_includes("refresh_token=synthetic-connect-refresh");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-restored-access","expires_in":3600,"refresh_token":"synthetic-recovered-refresh","scope":"User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let restored_profile_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-restored-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"account-123","displayName":"Ada Example"}"#);
+            })
+            .await;
+        let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(None));
+        let (save_started, finish_save) = credentials.pause_next_save_after_write();
+        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
+        let workflow = Arc::new(AccountWorkflow::new(provider));
+        let cancellation = AccountOperationCancellation::new();
+        let task_cancellation = cancellation.clone();
+        let task_workflow = Arc::clone(&workflow);
+        let connection = tokio::spawn(async move {
+            task_workflow
+                .connect_account_with_cancellation(task_cancellation)
+                .await
+        });
+
+        complete_test_authorization(&mut browser_receiver, "synthetic-connect-code").await;
+        tokio::time::timeout(Duration::from_secs(2), save_started)
+            .await
+            .expect("credential commit begins")
+            .expect("synthetic store signals its pending write");
+        cancellation.cancel();
+        finish_save.wait();
+
+        let connected_profile = connection
+            .await
+            .expect("connection workflow completes")
+            .expect("commit wins the cancellation race");
+        assert_eq!(connected_profile.id().as_str(), "account-123");
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-connect-refresh")
+        );
+
+        let (restored_browser_sender, _) = mpsc::unbounded_channel();
+        let restored_provider =
+            synthetic_provider(&server, restored_browser_sender, credentials.clone());
+        let restored_workflow = AccountWorkflow::new(restored_provider);
+        let restored_profile = restored_workflow
+            .restore_account()
+            .await
+            .expect("new workflow restores the committed account")
+            .expect("committed account is present");
+        assert_eq!(restored_profile.id(), connected_profile.id());
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-recovered-refresh")
+        );
+        token_exchange.assert_async().await;
+        profile_request.assert_async().await;
+        restored_token.assert_async().await;
+        restored_profile_request.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn permission_renewal_cancels_before_commit_and_commits_after_cancellation() {
+        let server = MockServer::start_async().await;
+        let initial_refresh = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=refresh_token")
+                    .body_includes("refresh_token=synthetic-old-refresh");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-initial-access","expires_in":3600,"refresh_token":"synthetic-current-refresh","scope":"User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let initial_profile_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-initial-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"account-123","displayName":"Ada Example"}"#);
+            })
+            .await;
+        let token_exchange = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=authorization_code");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-renewed-refresh","scope":"User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let renewed_profile_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-renewed-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"account-123","displayName":"Ada Example"}"#);
+            })
+            .await;
+        let restored_token = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=refresh_token")
+                    .body_includes("refresh_token=synthetic-renewed-refresh");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-restored-access","expires_in":3600,"refresh_token":"synthetic-final-refresh","scope":"User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let restored_profile_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-restored-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"account-123","displayName":"Ada Example"}"#);
+            })
+            .await;
+        let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
+            "synthetic-old-refresh",
+        ))));
+        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
+        let workflow = Arc::new(AccountWorkflow::new(provider));
+        let active_profile = workflow
+            .restore_account()
+            .await
+            .expect("initial account restores")
+            .expect("synthetic account is present");
+        let expected_account_id = active_profile.id().clone();
+
+        let cancelled_operation = AccountOperationCancellation::new();
+        let task_cancellation = cancelled_operation.clone();
+        let task_workflow = Arc::clone(&workflow);
+        let cancelled_account_id = expected_account_id.clone();
+        let cancelled_renewal = tokio::spawn(async move {
+            task_workflow
+                .reauthorize_account_with_cancellation(&cancelled_account_id, task_cancellation)
+                .await
+        });
+        let _authorization_url = browser_receiver
+            .recv()
+            .await
+            .expect("permission review opens the test browser");
+        cancelled_operation.cancel();
+        assert_eq!(
+            cancelled_renewal
+                .await
+                .expect("cancelled permission review completes"),
+            Err(AccountOperationError::SignInCancelled)
+        );
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-current-refresh")
+        );
+
+        let (save_started, finish_save) = credentials.pause_next_save_after_write();
+        let cancellation = AccountOperationCancellation::new();
+        let task_cancellation = cancellation.clone();
+        let task_workflow = Arc::clone(&workflow);
+        let renewal_account_id = expected_account_id.clone();
+        let renewal = tokio::spawn(async move {
+            task_workflow
+                .reauthorize_account_with_cancellation(&renewal_account_id, task_cancellation)
+                .await
+        });
+        complete_test_authorization(&mut browser_receiver, "synthetic-renewal-code").await;
+        tokio::time::timeout(Duration::from_secs(2), save_started)
+            .await
+            .expect("replacement credential commit begins")
+            .expect("synthetic store signals its pending write");
+        cancellation.cancel();
+        finish_save.wait();
+
+        let renewed_profile = renewal
+            .await
+            .expect("permission workflow completes")
+            .expect("commit wins the cancellation race");
+        assert_eq!(renewed_profile.id(), active_profile.id());
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-renewed-refresh")
+        );
+
+        let (restored_browser_sender, _) = mpsc::unbounded_channel();
+        let restored_provider =
+            synthetic_provider(&server, restored_browser_sender, credentials.clone());
+        let restored_workflow = AccountWorkflow::new(restored_provider);
+        let restored_profile = restored_workflow
+            .restore_account()
+            .await
+            .expect("new workflow restores the renewed account")
+            .expect("renewed account remains present");
+        assert_eq!(restored_profile.id(), renewed_profile.id());
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-final-refresh")
+        );
+        initial_refresh.assert_async().await;
+        initial_profile_request.assert_async().await;
+        token_exchange.assert_async().await;
+        renewed_profile_request.assert_async().await;
+        restored_token.assert_async().await;
+        restored_profile_request.assert_async().await;
     }
 }

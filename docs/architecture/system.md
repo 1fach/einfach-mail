@@ -15,14 +15,14 @@ flowchart LR
     Graph -->|HTTPS with a private delegated token| MS[Microsoft Graph v1.0]
 ```
 
-The account-connection path is implemented for Linux. The workspace has a native GPUI account view, a single-account application workflow, provider-independent account profiles, and a Microsoft Graph provider for OAuth sign-in, profile lookup, and refresh-token storage. Mail, calendar, and production persistence workflows remain planned.
+The Linux account path includes connection, identity display, and permission renewal. The GPUI account view calls a single-account application workflow, which coordinates cancellation against credential commits through an application-owned operation handle. The Microsoft Graph provider performs OAuth authorization, Graph profile lookup, and Linux Secret Service refresh-token storage. Permission renewal requests only the M1 `User.Read` and `offline_access` scopes and verifies that the returned profile matches the active account. Mail, calendar, and production persistence workflows remain outside this candidate.
 
 ## Module ownership
 
 | Path | Owns | Must not own |
 | --- | --- | --- |
 | `apps/desktop/` | GPUI lifecycle, native views, keyboard actions, OS integration, and native rendering of `SanitizedEmailHtml` | Mail rules, Graph request construction, database schema |
-| `crates/application/` | The single-account workflow, provider ports, and application errors | GPUI, Graph JSON, concrete database types |
+| `crates/application/` | The single-account workflow, provider ports, application errors, and cancellation ordering across credential persistence | GPUI, Graph JSON, concrete database types |
 | `crates/domain/` | Provider-independent account profile and identifier types | Framework and provider details |
 | `crates/providers/microsoft-graph/` | Linux Entra OAuth flow, Graph `/me` request and profile mapping, refresh-token storage, and the private HTTP client boundary | UI decisions, persistence policy, and token access in application code |
 | `crates/persistence/` (planned) | Local schema, migrations, transactions, durable sync state | Graph or GPUI types |
@@ -33,11 +33,12 @@ Add planned crates when a change needs them. Do not create forwarding-only layer
 
 ## Data flow
 
-1. The GPUI account view calls the application workflow.
-2. The workflow calls the provider-neutral account port.
-3. The provider opens the system browser and handles the OAuth callback, token exchange, and credential storage.
-4. The provider requests Graph `/me`, validates the response, and maps it to an account profile.
-5. The view displays the profile and user-safe errors.
+1. The GPUI account view calls the application workflow and owns the visible progress and cancellation states.
+2. The workflow reserves the account operation and passes an application-owned cancellation handle through the provider port.
+3. The provider opens the system browser and handles the OAuth callback and token exchange.
+4. The provider requests Graph `/me`, validates the response, and maps it to an account profile. Permission renewal also checks that the returned account matches the active account.
+5. The application handle atomically orders cancellation against refresh-credential persistence. Cancellation before commit leaves the prior credential unchanged; a commit that starts first returns its actual result to the view.
+6. The provider stores the refresh token in Linux Secret Service, and the view displays the profile and user-safe errors.
 
 OAuth tokens do not cross application ports. Views never receive tokens, call Graph, access identity state, or open the local database. The provider keeps OAuth and Graph code inside `crates/providers/microsoft-graph/`; see [ADR 0008](../decisions/0008-identity-token-boundary.md).
 

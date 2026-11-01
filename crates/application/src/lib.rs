@@ -4,4 +4,6 @@
 
 mod account;
 
-pub use account::{AccountOperationError, AccountProvider, AccountWorkflow};
+pub use account::{
+    AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
+};

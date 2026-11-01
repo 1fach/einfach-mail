@@ -21,4 +21,5 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0009](0009-account-scoped-domain-identifiers.md) | Use account-scoped opaque domain identifiers | Accepted |
 | [0010](0010-linux-first-development.md) | Focus current development on Linux | Accepted |
 | [0013](0013-graph-account-identity.md) | Use the Graph profile for initial account identity | Accepted for Linux; live Entra verification open |
+| [0030](0030-account-operation-cancellation-boundary.md) | Order account cancellation against credential commits | Accepted for the Linux M1 account flow |
 | [0031](0031-registered-loopback-port-for-entra.md) | Require a registered loopback port for Entra | Accepted for Linux; tenant verification open |

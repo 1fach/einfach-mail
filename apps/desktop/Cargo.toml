@@ -17,6 +17,7 @@ einfach-mail-microsoft-graph = { path = "../../crates/providers/microsoft-graph"
 uuid.workspace = true
 
 [dev-dependencies]
+tokio.workspace = true
 gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false, features = ["test-support"] }
 
 [lints]

@@ -1639,6 +1639,7 @@ dependencies = [
  "einfach-mail-domain",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1650,6 +1651,7 @@ dependencies = [
  "einfach-mail-microsoft-graph",
  "gpui-kit",
  "gpui-pre",
+ "tokio",
  "uuid",
 ]
 
