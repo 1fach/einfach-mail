@@ -57,6 +57,7 @@ const ACTIVE_CONTENT_FORBIDDEN_FRAGMENTS: &[&str] = &[
 const COMMON_FORMATTING_FIXTURE: &str = r#"
     <p>Hello <strong>bold</strong> and <em>italic</em>;
         <a href="https://mail.example.invalid/thread">open thread</a>.</p>
+    <a href="http://mail.example.invalid/legacy">legacy link</a>
     <ul><li>first</li><li>second</li></ul>
     <table><tbody><tr><th>key</th><td>value</td></tr></tbody></table>
 "#;
@@ -87,6 +88,34 @@ const CSS_URL_FIXTURE: &str = r#"
     <style>p { background: URL(https://tracker.invalid/block) }</style>
 "#;
 
+const UNAPPROVED_ATTRIBUTE_POLICY_FIXTURE: &str = r#"
+    <p class="mail" id="content" lang="en" title="Paragraph"
+       style="color:red" onclick="event marker" onmouseover="hover marker">Text</p>
+    <a href="https://mail.example.invalid" target="_blank" onfocus="focus marker">Link</a>
+    <link rel="stylesheet" href="https://tracker.invalid/style.css">
+    <meta http-equiv="refresh" content="0;url=https://tracker.invalid/refresh">
+    <base href="https://tracker.invalid/">
+"#;
+
+const UNAPPROVED_ATTRIBUTE_FORBIDDEN_FRAGMENTS: &[&str] = &[
+    "class=",
+    "id=",
+    "lang=",
+    "title=",
+    "style=",
+    "onclick",
+    "onmouseover",
+    "onfocus",
+    "target=",
+    "event marker",
+    "hover marker",
+    "focus marker",
+    "tracker.invalid",
+    "<link",
+    "<meta",
+    "<base",
+];
+
 fn sanitize(raw_html: &str) -> String {
     let body = MessageBody::new(MessageBodyType::Html, raw_html.to_owned());
     match prepare_message_body_for_display(&body) {
@@ -115,6 +144,7 @@ fn preserves_common_message_formatting_and_web_links() {
     assert!(sanitized.contains("<strong>bold</strong>"));
     assert!(sanitized.contains("<em>italic</em>"));
     assert!(sanitized.contains("href=\"https://mail.example.invalid/thread\""));
+    assert!(sanitized.contains("href=\"http://mail.example.invalid/legacy\""));
     assert!(sanitized.contains("<ul><li>first</li><li>second</li></ul>"));
     assert!(sanitized.contains("<table>"));
     assert!(sanitized.contains("<th>key</th>"));
@@ -127,6 +157,15 @@ fn strips_active_and_remote_resource_content() {
     assert_absent(&sanitized, ACTIVE_CONTENT_FORBIDDEN_FRAGMENTS);
     assert!(sanitized.contains("readable"));
     assert!(sanitized.contains("after"));
+}
+
+#[test]
+fn strips_unapproved_attributes_and_document_navigation_tags() {
+    let sanitized = sanitize(UNAPPROVED_ATTRIBUTE_POLICY_FIXTURE);
+
+    assert!(sanitized.contains("Text"));
+    assert!(sanitized.contains("Link"));
+    assert_absent(&sanitized, UNAPPROVED_ATTRIBUTE_FORBIDDEN_FRAGMENTS);
 }
 
 #[test]
