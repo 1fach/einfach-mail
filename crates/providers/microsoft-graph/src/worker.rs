@@ -29,14 +29,15 @@ where
     run_inner(operation, Some(account_cancellation)).await
 }
 
-async fn run_inner<T, F, Fut>(
+async fn run_inner<T, E, F, Fut>(
     operation: F,
     account_cancellation: Option<AccountOperationCancellation>,
-) -> Result<T, AccountOperationError>
+) -> Result<T, E>
 where
     T: Send + 'static,
+    E: From<AccountOperationError> + Send + 'static,
     F: FnOnce(CancellationToken) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, AccountOperationError>> + Send + 'static,
+    Fut: Future<Output = Result<T, E>> + Send + 'static,
 {
     let cancellation = CancellationToken::new();
     let _cancel_when_dropped = CancelWhenDropped(cancellation.clone());
@@ -59,8 +60,8 @@ fn spawn_worker<T, E, F, Fut>(
     operation: F,
     cancellation: CancellationToken,
     account_cancellation: Option<AccountOperationCancellation>,
-    response_sender: oneshot::Sender<Result<T, AccountOperationError>>,
-) -> Result<(), AccountOperationError>
+    response_sender: oneshot::Sender<Result<T, E>>,
+) -> Result<(), E>
 where
     T: Send + 'static,
     E: From<AccountOperationError> + Send + 'static,
@@ -85,7 +86,7 @@ fn send_operation_result<T, E, F, Fut>(
     operation: F,
     cancellation: CancellationToken,
     account_cancellation: Option<AccountOperationCancellation>,
-    response_sender: oneshot::Sender<Result<T, AccountOperationError>>,
+    response_sender: oneshot::Sender<Result<T, E>>,
 ) where
     T: Send + 'static,
     E: From<AccountOperationError> + Send + 'static,
@@ -96,11 +97,11 @@ fn send_operation_result<T, E, F, Fut>(
     let _ = response_sender.send(operation_result);
 }
 
-fn run_operation<T, F, Fut>(
+fn run_operation<T, E, F, Fut>(
     operation: F,
     cancellation: CancellationToken,
     account_cancellation: Option<AccountOperationCancellation>,
-) -> Result<T, AccountOperationError>
+) -> Result<T, E>
 where
     T: Send + 'static,
     E: From<AccountOperationError> + Send + 'static,
@@ -118,14 +119,18 @@ where
                 biased;
                 () = account_cancellation.cancelled() => {
                     cancellation.cancel();
-                    Err(AccountOperationError::SignInCancelled)
+                    Err(E::from(AccountOperationError::SignInCancelled))
                 }
-                () = cancellation.cancelled() => Err(AccountOperationError::SignInCancelled),
+                () = cancellation.cancelled() => {
+                    Err(E::from(AccountOperationError::SignInCancelled))
+                },
                 operation_result = operation(cancellation.clone()) => operation_result,
             },
             None => tokio::select! {
                 biased;
-                () = cancellation.cancelled() => Err(AccountOperationError::SignInCancelled),
+                () = cancellation.cancelled() => {
+                    Err(E::from(AccountOperationError::SignInCancelled))
+                },
                 operation_result = operation(cancellation.clone()) => operation_result,
             },
         }

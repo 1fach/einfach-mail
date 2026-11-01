@@ -11,3 +11,13 @@ mod mail_workflow;
 pub use account::{
     AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
 };
+pub use email_html::{
+    ExternalMessageLink, MessageBodyForDisplay, SanitizedEmailHtml, allowed_external_message_url,
+    prepare_message_body_for_display,
+};
+pub use mail::{MailOperationError, MailProvider, MessageDeltaPageResponse, MessageDeltaRequest};
+pub use mail_cache::{MailCache, MailCacheError, MailCacheFactory, MailSyncState};
+pub use mail_workflow::{
+    MailSession, MailSessionFactory, MailSessionFuture, MailSyncReport, MailWorkflow,
+    MailWorkflowError, MailWorkflowFactory, OpenedMessage,
+};

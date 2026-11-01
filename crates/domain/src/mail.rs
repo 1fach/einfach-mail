@@ -2,7 +2,7 @@
 
 use std::{fmt, time::SystemTime};
 
-use crate::{AccountId, FolderId, MessageId};
+use crate::{AccountId, FolderId, Mailbox, MessageId};
 
 /// A body returned by a provider for storage and later display-time sanitization.
 ///
@@ -200,19 +200,6 @@ impl fmt::Display for FolderParentError {
 
 impl std::error::Error for FolderParentError {}
 
-/// The mailbox address contains no non-whitespace characters.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[must_use]
-pub struct EmptyMailboxAddress;
-
-impl fmt::Display for EmptyMailboxAddress {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("mailbox address must not be empty")
-    }
-}
-
-impl std::error::Error for EmptyMailboxAddress {}
-
 /// A mail folder and its account-scoped location in the folder tree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MailFolder {
@@ -264,46 +251,6 @@ impl MailFolder {
     #[must_use]
     pub fn display_name(&self) -> &str {
         &self.display_name
-    }
-}
-
-/// A mailbox identity associated with a message.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Mailbox {
-    display_name: Option<String>,
-    address: String,
-}
-
-impl Mailbox {
-    /// Creates a mailbox identity from a non-empty address and optional display name.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EmptyMailboxAddress`] if the address is empty or contains only whitespace.
-    pub fn try_new(
-        address: String,
-        display_name: Option<String>,
-    ) -> Result<Self, EmptyMailboxAddress> {
-        if address.trim().is_empty() {
-            return Err(EmptyMailboxAddress);
-        }
-
-        Ok(Self {
-            display_name,
-            address,
-        })
-    }
-
-    /// Returns the display name, when one is available.
-    #[must_use]
-    pub fn display_name(&self) -> Option<&str> {
-        self.display_name.as_deref()
-    }
-
-    /// Returns the mailbox address.
-    #[must_use]
-    pub fn address(&self) -> &str {
-        &self.address
     }
 }
 
@@ -536,11 +483,11 @@ impl MailMessage {
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use crate::{AccountId, FolderId, FolderReference};
+    use crate::{AccountId, EmptyMailboxAddress, FolderId, FolderReference, Mailbox};
 
     use super::{
-        EmptyMailboxAddress, FolderParentError, MailFolder, Mailbox, MessageBody, MessageBodyType,
-        MessageMetadata, MessageMetadataPatch, MessageOrigin, ReadState,
+        FolderParentError, MailFolder, MessageBody, MessageBodyType, MessageMetadata,
+        MessageMetadataPatch, MessageOrigin, ReadState,
     };
 
     fn folder_reference(account_id: &str, folder_id: &str) -> FolderReference {

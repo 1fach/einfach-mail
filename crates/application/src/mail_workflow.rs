@@ -2,6 +2,8 @@
 
 use std::{
     collections::HashSet,
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -12,8 +14,8 @@ use einfach_mail_domain::{
 use thiserror::Error;
 
 use crate::{
-    MailCache, MailCacheError, MailOperationError, MailProvider, MessageBodyForDisplay,
-    prepare_message_body_for_display,
+    MailCache, MailCacheError, MailCacheFactory, MailOperationError, MailProvider, MailSyncState,
+    MessageBodyForDisplay, prepare_message_body_for_display,
 };
 
 const INITIAL_SYNC_WINDOW: Duration = Duration::from_secs(90 * 24 * 60 * 60);
@@ -95,6 +97,99 @@ pub struct MailSyncReport {
     page_count: usize,
 }
 
+/// A boxed future returned by a type-erased mail session.
+pub type MailSessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Provides mail workflows to consumers that do not own provider or cache types.
+pub trait MailSession: Send + Sync {
+    /// Synchronizes visible folders and commits each page with its checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns provider, cache, synchronization-state, or resource-limit errors.
+    fn synchronize_account<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        sync_started_at: SystemTime,
+    ) -> MailSessionFuture<'a, Result<MailSyncReport, MailWorkflowError>>;
+
+    /// Returns the visible folders saved for `account_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the account cache is unavailable or invalid.
+    fn list_cached_folders<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> MailSessionFuture<'a, Result<Vec<MailFolder>, MailWorkflowError>>;
+
+    /// Returns cached message metadata in newest-first order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the folder is outside the account or stored data is invalid.
+    fn list_cached_messages<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+    ) -> MailSessionFuture<'a, Result<Vec<MailMessage>, MailWorkflowError>>;
+
+    /// Returns the saved cutoff and cursor state for one folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the folder is outside the account or stored state is invalid.
+    fn cached_sync_state<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+    ) -> MailSessionFuture<'a, Result<Option<MailSyncState>, MailWorkflowError>>;
+
+    /// Opens a cached message and fetches its body only when it is not cached.
+    ///
+    /// The returned body has passed the application's display policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns provider or cache errors when metadata, body, or durable storage is unavailable.
+    fn open_message<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+    ) -> MailSessionFuture<'a, Result<OpenedMessage, MailWorkflowError>>;
+
+    /// Removes this session's account cache and its local encryption key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the account does not own the cache or removal fails.
+    fn remove_account_cache<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> MailSessionFuture<'a, Result<(), MailCacheError>>;
+}
+
+/// Opens mail sessions and removes account caches when no session is open.
+pub trait MailSessionFactory: Send + Sync {
+    /// Opens an account-scoped mail session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the account cache or its credential is unavailable.
+    fn open_session(
+        &self,
+        account_id: AccountId,
+    ) -> MailSessionFuture<'_, Result<Arc<dyn MailSession>, MailCacheError>>;
+
+    /// Removes an account cache when no open session is available to remove it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the account files or credential cannot be removed.
+    fn remove_account_cache<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> MailSessionFuture<'a, Result<(), MailCacheError>>;
+}
+
 impl MailSyncReport {
     /// Returns the number of visible folders visited.
     #[must_use]
@@ -114,6 +209,23 @@ pub struct MailWorkflow<P, C> {
     provider: P,
     cache: C,
     active_folders: Arc<Mutex<HashSet<FolderReference>>>,
+}
+
+/// Creates type-erased application sessions from a provider and a cache factory.
+pub struct MailWorkflowFactory<P, F> {
+    provider: P,
+    cache_factory: F,
+}
+
+impl<P, F> MailWorkflowFactory<P, F> {
+    /// Combines a provider with the factory that opens account caches.
+    #[must_use]
+    pub fn new(provider: P, cache_factory: F) -> Self {
+        Self {
+            provider,
+            cache_factory,
+        }
+    }
 }
 
 impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
@@ -305,6 +417,79 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             active_folders: Arc::clone(&self.active_folders),
             folder: folder.clone(),
         })
+    }
+}
+
+impl<P: MailProvider, C: MailCache> MailSession for MailWorkflow<P, C> {
+    fn synchronize_account<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        sync_started_at: SystemTime,
+    ) -> MailSessionFuture<'a, Result<MailSyncReport, MailWorkflowError>> {
+        Box::pin(MailWorkflow::synchronize_account(
+            self,
+            account_id,
+            sync_started_at,
+        ))
+    }
+
+    fn list_cached_folders<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> MailSessionFuture<'a, Result<Vec<MailFolder>, MailWorkflowError>> {
+        Box::pin(MailWorkflow::list_cached_folders(self, account_id))
+    }
+
+    fn list_cached_messages<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+    ) -> MailSessionFuture<'a, Result<Vec<MailMessage>, MailWorkflowError>> {
+        Box::pin(MailWorkflow::list_cached_messages(self, folder))
+    }
+
+    fn cached_sync_state<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+    ) -> MailSessionFuture<'a, Result<Option<MailSyncState>, MailWorkflowError>> {
+        Box::pin(MailWorkflow::cached_sync_state(self, folder))
+    }
+
+    fn open_message<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+    ) -> MailSessionFuture<'a, Result<OpenedMessage, MailWorkflowError>> {
+        Box::pin(MailWorkflow::open_message(self, folder, message_id))
+    }
+
+    fn remove_account_cache<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> MailSessionFuture<'a, Result<(), MailCacheError>> {
+        Box::pin(MailWorkflow::remove_account_cache(self, account_id))
+    }
+}
+
+impl<P, F> MailSessionFactory for MailWorkflowFactory<P, F>
+where
+    P: MailProvider + Clone + 'static,
+    F: MailCacheFactory + 'static,
+{
+    fn open_session(
+        &self,
+        account_id: AccountId,
+    ) -> MailSessionFuture<'_, Result<Arc<dyn MailSession>, MailCacheError>> {
+        Box::pin(async move {
+            let cache = self.cache_factory.open_for_account(account_id).await?;
+            Ok(Arc::new(MailWorkflow::new(self.provider.clone(), cache)) as Arc<dyn MailSession>)
+        })
+    }
+
+    fn remove_account_cache<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> MailSessionFuture<'a, Result<(), MailCacheError>> {
+        Box::pin(self.cache_factory.remove_for_account(account_id))
     }
 }
 

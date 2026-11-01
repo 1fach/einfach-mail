@@ -1,6 +1,6 @@
 # ADR 0004: Keep a local cache and synchronize it with Graph
 
-- Status: Accepted; encryption design open
+- Status: Accepted; encryption detailed in ADR 0005
 - Date: 2026-10-30
 
 ## Context

@@ -10,7 +10,7 @@ use async_sqlite::{
     Client,
     rusqlite::{Connection, OptionalExtension, Result as SqlResult, Transaction, params},
 };
-use einfach_mail_application::{MailCache, MailCacheError, MailSyncState};
+use einfach_mail_application::{MailCache, MailCacheError, MailCacheFactory, MailSyncState};
 use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, MailFolder, MailMessage, Mailbox, MessageBody,
     MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
@@ -62,6 +62,22 @@ pub struct SqliteMailCache {
     database_path: std::path::PathBuf,
     lock_path: std::path::PathBuf,
     credential_account: String,
+}
+
+/// Opens and removes account-scoped [`SqliteMailCache`] values.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SqliteMailCacheFactory;
+
+impl MailCacheFactory for SqliteMailCacheFactory {
+    type Cache = SqliteMailCache;
+
+    async fn open_for_account(&self, account_id: AccountId) -> Result<Self::Cache, MailCacheError> {
+        SqliteMailCache::open_for_account(account_id).await
+    }
+
+    async fn remove_for_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
+        SqliteMailCache::remove_for_account(account_id)
+    }
 }
 
 impl SqliteMailCache {

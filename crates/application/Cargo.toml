@@ -10,6 +10,7 @@ html2text.workspace = true
 einfach-mail-domain = { path = "../domain" }
 thiserror.workspace = true
 tokio-util.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

@@ -13,4 +13,4 @@ mod store;
 mod workflow_tests;
 
 #[cfg(target_os = "linux")]
-pub use store::SqliteMailCache;
+pub use store::{SqliteMailCache, SqliteMailCacheFactory};

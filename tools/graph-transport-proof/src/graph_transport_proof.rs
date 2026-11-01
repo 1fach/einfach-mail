@@ -1,6 +1,6 @@
 use async_channel::{Receiver, Sender, bounded};
 use einfach_mail_domain::{
-    AccountId, EventId, FolderId, FolderReference, MailFolder, MailMessage, Mailbox, MessageId,
+    AccountId, FolderId, FolderReference, MailFolder, MailMessage, Mailbox, MessageId,
     MessageMetadata, MessageMetadataPatch, MessageOrigin, ReadState,
 };
 use reqwest::{
@@ -13,7 +13,6 @@ use std::{
     collections::{HashSet, VecDeque},
     future::Future,
     net::IpAddr,
-    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -35,27 +34,6 @@ const MAX_PAGINATION_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
 const FOLDER_SELECT: &str = "id,displayName";
 const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct MailSyncCutoff(OffsetDateTime);
-
-impl FromStr for MailSyncCutoff {
-    type Err = ProviderError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        OffsetDateTime::parse(value, &Rfc3339)
-            .map(Self)
-            .map_err(|_| ProviderError::InvalidRecord)
-    }
-}
-
-impl MailSyncCutoff {
-    fn format_rfc3339(self) -> Result<String, ProviderError> {
-        self.0
-            .format(&Rfc3339)
-            .map_err(|_| ProviderError::InvalidRecord)
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RetryAfter {
@@ -181,17 +159,9 @@ impl GraphAuthority {
         Ok(GraphUrl(url.to_string()))
     }
 
-    fn initial_message_delta_path(
-        &self,
-        folder_id: &FolderId,
-        received_since: MailSyncCutoff,
-    ) -> Result<GraphUrl, ProviderError> {
+    fn initial_message_delta_path(&self, folder_id: &FolderId) -> Result<GraphUrl, ProviderError> {
         let mut url = self.folder_path(folder_id.as_str(), &["messages", "delta"])?;
-        let received_since = received_since.format_rfc3339()?;
-        let filter = format!("receivedDateTime ge {received_since}");
-        url.query_pairs_mut()
-            .append_pair("$select", MESSAGE_SELECT)
-            .append_pair("$filter", &filter);
+        url.query_pairs_mut().append_pair("$select", MESSAGE_SELECT);
         Ok(GraphUrl(url.to_string()))
     }
 
@@ -280,15 +250,11 @@ enum GraphOperation {
     Folders,
     Messages,
     MessageDelta,
-    CalendarViewDelta,
 }
 
 impl GraphOperation {
     fn uses_immutable_ids(self) -> bool {
-        matches!(
-            self,
-            Self::Messages | Self::MessageDelta | Self::CalendarViewDelta
-        )
+        matches!(self, Self::Messages | Self::MessageDelta)
     }
 }
 
@@ -583,16 +549,6 @@ impl GraphProvider {
         self.delta_pages::<WireMessageChange>(GraphOperation::MessageDelta, start, token)
             .await?
             .map_records(MessageChange::try_from)
-    }
-
-    async fn calendar_view_delta(
-        &self,
-        start: GraphUrl,
-        token: &BearerToken,
-    ) -> Result<DeltaRound<CalendarChange>, ProviderError> {
-        self.delta_pages::<WireCalendarEvent>(GraphOperation::CalendarViewDelta, start, token)
-            .await?
-            .map_records(CalendarChange::try_from)
     }
 
     async fn get_page<T: for<'de> Deserialize<'de>>(
@@ -960,48 +916,8 @@ impl TryFrom<WireMessageChange> for MessageChange {
 }
 
 #[derive(Deserialize)]
-struct WireCalendarEvent {
-    id: String,
-    subject: Option<String>,
-    #[serde(rename = "@removed")]
-    removed: Option<WireRemoved>,
-}
-
-#[derive(Deserialize)]
 struct WireRemoved {
     reason: Option<String>,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum CalendarChange {
-    Upsert {
-        id: EventId,
-        subject: Option<String>,
-    },
-    Removed {
-        id: EventId,
-        reason: Option<String>,
-    },
-}
-
-impl TryFrom<WireCalendarEvent> for CalendarChange {
-    type Error = ProviderError;
-
-    fn try_from(event: WireCalendarEvent) -> Result<Self, Self::Error> {
-        let WireCalendarEvent {
-            id,
-            subject,
-            removed,
-        } = event;
-        let id = EventId::try_from(id).map_err(|_| ProviderError::InvalidRecord)?;
-        match removed {
-            Some(removed) => Ok(Self::Removed {
-                id,
-                reason: removed.reason,
-            }),
-            None => Ok(Self::Upsert { id, subject }),
-        }
-    }
 }
 
 struct DeltaRound<T> {
@@ -1284,10 +1200,6 @@ mod tests {
         MessageId::try_from(id.to_owned()).expect("synthetic message ID is non-empty")
     }
 
-    fn synthetic_event_id(id: &str) -> EventId {
-        EventId::try_from(id.to_owned()).expect("synthetic event ID is non-empty")
-    }
-
     fn synthetic_folder_reference(folder_id: &str) -> FolderReference {
         FolderReference::new(synthetic_account_id(), synthetic_folder_id(folder_id))
     }
@@ -1300,12 +1212,6 @@ mod tests {
         OffsetDateTime::parse("2026-10-30T12:00:00Z", &Rfc3339)
             .expect("synthetic timestamp is RFC 3339")
             .into()
-    }
-
-    fn synthetic_mail_sync_cutoff() -> MailSyncCutoff {
-        "2026-08-02T00:00:00Z"
-            .parse()
-            .expect("synthetic cutoff is RFC 3339")
     }
 
     fn synthetic_mailbox(address: &str, display_name: Option<&str>) -> Mailbox {
@@ -1521,31 +1427,6 @@ mod tests {
         );
     }
 
-    fn assert_calendar_delta_records(
-        first: &[CalendarChange],
-        next: &[CalendarChange],
-        actual_cursor: &str,
-        expected_cursor: &str,
-    ) {
-        assert_eq!(first.len(), 2);
-        assert_eq!(next.len(), 2);
-        assert_eq!(
-            first[0],
-            CalendarChange::Upsert {
-                id: synthetic_event_id("event-1"),
-                subject: Some("Synthetic meeting".to_owned()),
-            }
-        );
-        assert_eq!(
-            next[1],
-            CalendarChange::Removed {
-                id: synthetic_event_id("event-4"),
-                reason: Some("deleted".to_owned()),
-            }
-        );
-        assert_eq!(actual_cursor, expected_cursor);
-    }
-
     fn assert_message_delta_records(
         first: &[MessageChange],
         next: &[MessageChange],
@@ -1666,21 +1547,6 @@ mod tests {
                 serde_json::from_value(payload).expect("empty ID is valid wire text");
             assert_eq!(
                 MessageChange::try_from(wire),
-                Err(ProviderError::InvalidRecord)
-            );
-        }
-    }
-
-    #[test]
-    fn calendar_delta_rejects_empty_ids_for_upserts_and_removals() {
-        for payload in [
-            serde_json::json!({ "id": "" }),
-            serde_json::json!({ "id": "", "@removed": {} }),
-        ] {
-            let wire: WireCalendarEvent =
-                serde_json::from_value(payload).expect("empty ID is valid wire text");
-            assert_eq!(
-                CalendarChange::try_from(wire),
                 Err(ProviderError::InvalidRecord)
             );
         }
@@ -2107,10 +1973,9 @@ mod tests {
         let authority = GraphAuthority::for_deployment(GraphDeployment::Global)
             .expect("global Graph deployment is valid");
         let folder_id = synthetic_folder_id("folder/one");
-        let received_since = synthetic_mail_sync_cutoff();
         let path = authority
-            .initial_message_delta_path(&folder_id, received_since)
-            .expect("valid folder ID and sync cutoff produce a Graph URL");
+            .initial_message_delta_path(&folder_id)
+            .expect("valid folder ID produces a Graph URL");
         let url = Url::parse(path.as_str()).expect("constructed Graph URL is valid");
         let query = url.query_pairs().collect::<Vec<_>>();
 
@@ -2119,19 +1984,7 @@ mod tests {
             "/v1.0/me/mailFolders/folder%2Fone/messages/delta"
         );
         assert!(query.contains(&("$select".into(), MESSAGE_SELECT.into(),)));
-        assert!(query.contains(&(
-            "$filter".into(),
-            "receivedDateTime ge 2026-08-02T00:00:00Z".into(),
-        )));
-    }
-
-    #[test]
-    fn mail_sync_cutoff_rejects_values_outside_rfc3339() {
-        assert!(
-            "2026-08-02T00:00:00Z or isRead eq true"
-                .parse::<MailSyncCutoff>()
-                .is_err()
-        );
+        assert_eq!(query.len(), 1);
     }
 
     #[test]
@@ -2344,10 +2197,7 @@ mod tests {
                 .await
                 .expect("provider worker starts");
             let first_start = authority
-                .initial_message_delta_path(
-                    &synthetic_folder_id("folder-1"),
-                    synthetic_mail_sync_cutoff(),
-                )
+                .initial_message_delta_path(&synthetic_folder_id("folder-1"))
                 .expect("synthetic folder delta path is valid");
             let first = provider
                 .message_delta(first_start, &BearerToken::synthetic())
@@ -2422,10 +2272,7 @@ mod tests {
                 .await
                 .expect("provider worker starts");
             let start = authority
-                .initial_message_delta_path(
-                    &synthetic_folder_id("folder-1"),
-                    synthetic_mail_sync_cutoff(),
-                )
+                .initial_message_delta_path(&synthetic_folder_id("folder-1"))
                 .expect("synthetic folder delta path is valid");
             let changes = provider
                 .message_delta(start, &BearerToken::synthetic())
@@ -2449,109 +2296,6 @@ mod tests {
             );
             assert_eq!(changes.delta_link.as_str(), delta_link);
             response.assert_async().await;
-            provider.shutdown().await.expect("provider shuts down");
-        });
-    }
-
-    #[test]
-    fn calendar_view_delta_preserves_event_ids_and_deletions() {
-        smol::block_on(async {
-            let server = MockServer::start_async().await;
-            let query =
-                "startDateTime=2026-10-31T00%3A00%3A00Z&endDateTime=2026-11-01T00%3A00%3A00Z";
-            let next_link = format!(
-                "{}/v1.0/me/calendarView/delta?{query}&page=2&$skiptoken=opaque%2Fcalendar",
-                server.base_url()
-            );
-            let first_cursor = format!(
-                "{}/v1.0/me/calendarView/delta?{query}&$deltatoken=opaque%2Ffirst",
-                server.base_url()
-            );
-            let next_cursor = format!(
-                "{}/v1.0/me/calendarView/delta?{query}&$deltatoken=opaque%2Fnext",
-                server.base_url()
-            );
-            let first_body = serde_json::json!({
-                "value": [{ "id": "event-1", "subject": "Synthetic meeting" }],
-                "@odata.nextLink": next_link,
-            })
-            .to_string();
-            let second_body = serde_json::json!({
-                "value": [{ "id": "event-2", "subject": "Another meeting" }],
-                "@odata.deltaLink": first_cursor.clone(),
-            })
-            .to_string();
-            let next_round_body = serde_json::json!({
-                "value": [
-                    { "id": "event-3", "subject": "Updated meeting" },
-                    { "id": "event-4", "@removed": { "reason": "deleted" } },
-                ],
-                "@odata.deltaLink": next_cursor.clone(),
-            })
-            .to_string();
-
-            let first_page = server
-                .mock_async(move |when, then| {
-                    when.method("GET")
-                        .path("/v1.0/me/calendarView/delta")
-                        .query_param("startDateTime", "2026-10-31T00:00:00Z")
-                        .query_param("endDateTime", "2026-11-01T00:00:00Z")
-                        .header("Prefer", "IdType=\"ImmutableId\"")
-                        .is_true(|request| request.query_params().len() == 2);
-                    then.status(200)
-                        .header("content-type", "application/json")
-                        .body(first_body);
-                })
-                .await;
-            let second_page = server
-                .mock_async(move |when, then| {
-                    when.method("GET")
-                        .path("/v1.0/me/calendarView/delta")
-                        .query_param("page", "2")
-                        .query_param("$skiptoken", "opaque/calendar")
-                        .header("Prefer", "IdType=\"ImmutableId\"");
-                    then.status(200)
-                        .header("content-type", "application/json")
-                        .body(second_body);
-                })
-                .await;
-            let next_round = server
-                .mock_async(move |when, then| {
-                    when.method("GET")
-                        .path("/v1.0/me/calendarView/delta")
-                        .query_param("$deltatoken", "opaque/first")
-                        .header("Prefer", "IdType=\"ImmutableId\"");
-                    then.status(200)
-                        .header("content-type", "application/json")
-                        .body(next_round_body);
-                })
-                .await;
-
-            let authority = loopback_authority(&server);
-            let provider = GraphProvider::start(authority.clone())
-                .await
-                .expect("provider worker starts");
-            let start = authority
-                .initial_path(&format!("me/calendarView/delta?{query}"))
-                .expect("synthetic calendar delta path is valid");
-            let first = provider
-                .calendar_view_delta(start, &BearerToken::synthetic())
-                .await
-                .expect("calendar delta pages parse");
-            let second = provider
-                .calendar_view_delta(first.delta_link, &BearerToken::synthetic())
-                .await
-                .expect("next calendar delta round parses");
-
-            assert_calendar_delta_records(
-                &first.records,
-                &second.records,
-                second.delta_link.as_str(),
-                &next_cursor,
-            );
-            first_page.assert_async().await;
-            second_page.assert_async().await;
-            next_round.assert_async().await;
             provider.shutdown().await.expect("provider shuts down");
         });
     }

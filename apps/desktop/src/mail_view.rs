@@ -5,20 +5,20 @@ use std::{
 };
 
 use einfach_mail_application::{
-    MailCache, MailSyncState, MailWorkflow, MailWorkflowError, MessageBodyForDisplay,
-    OpenedMessage, SanitizedEmailHtml, allowed_external_message_url,
+    MailSession, MailSyncState, MailWorkflowError, MessageBodyForDisplay, OpenedMessage,
+    SanitizedEmailHtml, allowed_external_message_url,
 };
 use einfach_mail_domain::{AccountProfile, FolderReference, MailFolder, MailMessage, MessageId};
-use gpui_kit::base::v_virtual_list;
+use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Selectable, StyledExt,
     button::{Button, ButtonVariants},
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    AnyElement, AsyncApp, Context, EventEmitter, ImageSource, IntoElement, Render, Role,
-    SharedString, Task, Window, base::TextSelectionLayer, component::text::TextView, div,
-    prelude::*, px, size,
+    AnyElement, App, AsyncApp, Context, EventEmitter, FocusHandle, ImageSource, IntoElement,
+    KeyBinding, Render, Role, ScrollStrategy, SharedString, Task, Window, base::TextSelectionLayer,
+    component::text::TextView, div, prelude::*, px, size,
 };
 
 gpui_kit::actions!(
@@ -47,13 +47,9 @@ pub(crate) enum MailViewEvent {
     BackToAccount,
 }
 
-pub(crate) struct MailView<P, C>
-where
-    P: einfach_mail_application::MailProvider + 'static,
-    C: MailCache + 'static,
-{
+pub(crate) struct MailView {
     profile: AccountProfile,
-    workflow: Arc<MailWorkflow<P, C>>,
+    workflow: Arc<dyn MailSession>,
     folders: Vec<MailFolder>,
     selected_folder: Option<FolderReference>,
     messages: Vec<MailMessage>,
@@ -76,6 +72,34 @@ enum SyncStatus {
     Failed(MailWorkflowError),
 }
 
+#[derive(Clone, Copy)]
+enum MessageNavigation {
+    Previous,
+    Next,
+    First,
+    Last,
+}
+
+impl MessageNavigation {
+    fn target_index(self, selected_index: Option<usize>, message_count: usize) -> Option<usize> {
+        if message_count == 0 {
+            return None;
+        }
+
+        let last_index = message_count - 1;
+        match self {
+            Self::Previous => Some(
+                selected_index.map_or(last_index, |index| index.min(last_index).saturating_sub(1)),
+            ),
+            Self::Next => Some(selected_index.map_or(0, |index| {
+                index.min(last_index).saturating_add(1).min(last_index)
+            })),
+            Self::First => Some(0),
+            Self::Last => Some(last_index),
+        }
+    }
+}
+
 enum MessageState {
     Empty,
     Loading,
@@ -90,14 +114,10 @@ struct MailSnapshot {
     sync_state: Option<MailSyncState>,
 }
 
-impl<P, C> MailView<P, C>
-where
-    P: einfach_mail_application::MailProvider + 'static,
-    C: MailCache + 'static,
-{
+impl MailView {
     pub(crate) fn new(
         profile: AccountProfile,
-        workflow: Arc<MailWorkflow<P, C>>,
+        workflow: Arc<dyn MailSession>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self {
@@ -125,7 +145,7 @@ where
         let workflow = Arc::clone(&self.workflow);
         let account_id = self.profile.id().clone();
         self.sync_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let initial_snapshot = load_snapshot(&workflow, &account_id, None).await;
+            let initial_snapshot = load_snapshot(workflow.as_ref(), &account_id, None).await;
             let has_snapshot = initial_snapshot.is_ok();
             let _ = this.update(cx, |view, cx| match initial_snapshot {
                 Ok(snapshot) => {
@@ -150,7 +170,8 @@ where
             else {
                 return;
             };
-            let snapshot = load_snapshot(&workflow, &account_id, selected_folder.as_ref()).await;
+            let snapshot =
+                load_snapshot(workflow.as_ref(), &account_id, selected_folder.as_ref()).await;
             let _ = this.update(cx, |view, cx| {
                 view.sync_running = false;
                 view.sync_task = None;
@@ -193,7 +214,7 @@ where
         self.sync_status = status;
     }
 
-    pub(crate) fn stop_pending_work(&mut self) -> Arc<MailWorkflow<P, C>> {
+    pub(crate) fn stop_pending_work(&mut self) -> Arc<dyn MailSession> {
         drop(self.sync_task.take());
         drop(self.message_task.take());
         self.sync_running = false;
@@ -277,7 +298,7 @@ where
     }
 
     fn navigate_message(&mut self, navigation: MessageNavigation, cx: &mut Context<Self>) {
-        if self.sync_running || self.message_update_in_progress() {
+        if self.sync_running {
             return;
         }
         let selected_index = self.selected_message_id.as_ref().and_then(|selected| {
@@ -365,7 +386,8 @@ where
             let sync_result = workflow
                 .synchronize_account(&account_id, SystemTime::now())
                 .await;
-            let snapshot = load_snapshot(&workflow, &account_id, selected_folder.as_ref()).await;
+            let snapshot =
+                load_snapshot(workflow.as_ref(), &account_id, selected_folder.as_ref()).await;
             let _ = this.update(cx, |view, cx| {
                 view.sync_running = false;
                 view.sync_task = None;
@@ -539,53 +561,109 @@ where
             .border_r_1()
             .border_color(colors.border)
             .child(div().px_4().py_3().text_sm().font_bold().child("Messages"))
-            .child(v_virtual_list(
-                cx.entity(),
-                "cached-message-list",
-                sizes,
-                move |view, range, _, cx| {
-                    range
-                        .filter_map(|index| {
-                            let message = view.messages.get(index)?;
-                            let message_id = message.id().clone();
-                            let selected = view.selected_message_id.as_ref() == Some(&message_id);
-                            let sender = message_sender(message);
-                            let subject = message
-                                .metadata()
-                                .subject()
-                                .unwrap_or("(No subject)")
-                                .to_owned();
-                            let accessible_label = format!("{sender}. {subject}");
-                            let expected_folder = folder_reference.clone();
-                            Some(
-                                Button::new(format!("message:{}", message_id.as_str()))
-                                    .ghost()
-                                    .selected(selected)
-                                    .accessibility_label(accessible_label)
-                                    .debug_selector(|| {
-                                        format!("message-row-{}", message_id.as_str())
+            .child(
+                div()
+                    .id("cached-message-list")
+                    .flex_1()
+                    .min_h_0()
+                    .track_focus(&self.message_list_focus)
+                    .key_context(MESSAGE_LIST_CONTEXT)
+                    .role(Role::ListBox)
+                    .aria_label("Messages")
+                    .on_action(cx.listener(Self::on_select_previous_message))
+                    .on_action(cx.listener(Self::on_select_next_message))
+                    .on_action(cx.listener(Self::on_select_first_message))
+                    .on_action(cx.listener(Self::on_select_last_message))
+                    .child(
+                        v_virtual_list(
+                            cx.entity(),
+                            "cached-message-options",
+                            sizes,
+                            move |view, range, _, cx| {
+                                let list_size = view.messages.len();
+                                range
+                                    .filter_map(|index| {
+                                        let message = view.messages.get(index)?;
+                                        let message_id = message.id().clone();
+                                        let selected =
+                                            view.selected_message_id.as_ref() == Some(&message_id);
+                                        let sender = message_sender(message);
+                                        let subject = message
+                                            .metadata()
+                                            .subject()
+                                            .unwrap_or("(No subject)")
+                                            .to_owned();
+                                        let accessible_label = format!("{sender}. {subject}");
+                                        let expected_folder = folder_reference.clone();
+                                        Some(
+                                            div()
+                                                .id(format!(
+                                                    "message-option-{}",
+                                                    message_id.as_str()
+                                                ))
+                                                .debug_selector(|| {
+                                                    format!("message-row-{}", message_id.as_str())
+                                                })
+                                                .w_full()
+                                                .h(px(72.))
+                                                .px_3()
+                                                .py_3()
+                                                .rounded_md()
+                                                .text_color(colors.foreground)
+                                                .role(Role::ListBoxOption)
+                                                .aria_label(accessible_label)
+                                                .aria_position_in_set(index + 1)
+                                                .aria_size_of_set(list_size)
+                                                .aria_selected(selected)
+                                                .when(selected, |option| {
+                                                    option
+                                                        .aria_active_descendant()
+                                                        .bg(colors.accent)
+                                                        .text_color(colors.accent_foreground)
+                                                })
+                                                .hover(|option| {
+                                                    option.bg(if selected {
+                                                        colors.accent
+                                                    } else {
+                                                        colors.muted
+                                                    })
+                                                })
+                                                .child(
+                                                    div()
+                                                        .w_full()
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap_1()
+                                                        .child(
+                                                            div()
+                                                                .w_full()
+                                                                .text_sm()
+                                                                .font_bold()
+                                                                .child(sender),
+                                                        )
+                                                        .child(
+                                                            div().w_full().text_sm().child(subject),
+                                                        ),
+                                                )
+                                                .on_click(cx.listener(
+                                                    move |view, _, window, cx| {
+                                                        view.select_message_from_option(
+                                                            message_id.clone(),
+                                                            &expected_folder,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        )
                                     })
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(
-                                                div().w_full().text_sm().font_bold().child(sender),
-                                            )
-                                            .child(div().w_full().text_sm().child(subject)),
-                                    )
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        if view.selected_folder.as_ref() == Some(&expected_folder) {
-                                            view.select_message(message_id.clone(), cx);
-                                        }
-                                    })),
-                            )
-                        })
-                        .collect()
-                },
-            ))
+                                    .collect()
+                            },
+                        )
+                        .track_scroll(&self.message_list_scroll),
+                    )
+                    .focus_visible(|style| style.border_1().border_color(colors.ring)),
+            )
             .into_any_element()
     }
 
@@ -764,18 +842,9 @@ fn render_oversized_html_fallback(colors: ColorTokens) -> AnyElement {
         .into_any_element()
 }
 
-impl<P, C> EventEmitter<MailViewEvent> for MailView<P, C>
-where
-    P: einfach_mail_application::MailProvider + 'static,
-    C: MailCache + 'static,
-{
-}
+impl EventEmitter<MailViewEvent> for MailView {}
 
-impl<P, C> Render for MailView<P, C>
-where
-    P: einfach_mail_application::MailProvider + 'static,
-    C: MailCache + 'static,
-{
+impl Render for MailView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().semantic_tokens().colors;
         div()
@@ -797,15 +866,11 @@ where
     }
 }
 
-async fn load_snapshot<P, C>(
-    workflow: &MailWorkflow<P, C>,
+async fn load_snapshot(
+    workflow: &dyn MailSession,
     account_id: &einfach_mail_domain::AccountId,
     preferred: Option<&FolderReference>,
-) -> Result<MailSnapshot, MailWorkflowError>
-where
-    P: einfach_mail_application::MailProvider,
-    C: MailCache,
-{
+) -> Result<MailSnapshot, MailWorkflowError> {
     let folders = workflow.list_cached_folders(account_id).await?;
     let selected_folder = preferred
         .filter(|preferred| {
@@ -852,55 +917,6 @@ fn message_sender(message: &MailMessage) -> String {
                 name => format!("{name} <{}>", mailbox.address()),
             },
         )
-}
-
-fn message_option_element(
-    presentation: &MessageOptionPresentation,
-    colors: MessageRowColors,
-) -> gpui_kit::Stateful<gpui_kit::Div> {
-    let message_id = &presentation.message_id;
-    let selected = presentation.selected;
-    div()
-        .id(format!("message-option-{}", message_id.as_str()))
-        .debug_selector(|| format!("message-row-{}", message_id.as_str()))
-        .w_full()
-        .h(px(72.))
-        .px_3()
-        .py_3()
-        .rounded_md()
-        .text_color(colors.foreground)
-        .role(Role::ListBoxOption)
-        .aria_label(presentation.accessible_label.clone())
-        .aria_position_in_set(presentation.position)
-        .aria_size_of_set(presentation.list_size)
-        .aria_selected(selected)
-        .when(selected, |option| {
-            option
-                .aria_active_descendant()
-                .bg(colors.selected_background)
-        })
-        .hover(|option| {
-            option.bg(if selected {
-                colors.selected_background
-            } else {
-                colors.hover_background
-            })
-        })
-        .when(presentation.disabled, |option| option.opacity(0.6))
-        .child(message_option_content(
-            presentation.sender.clone(),
-            presentation.subject.clone(),
-        ))
-}
-
-fn message_option_content(sender: SharedString, subject: SharedString) -> impl IntoElement {
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(div().w_full().text_sm().font_bold().child(sender))
-        .child(div().w_full().text_sm().child(subject))
 }
 
 fn elapsed_label(last_sync: SystemTime) -> String {
@@ -967,9 +983,14 @@ mod tests {
         MessageBody, MessageBodyType, MessageDeltaLink, MessageDeltaPage, MessageId,
     };
     use gpui_kit::base::TextSelection;
-    use gpui_kit::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
+    use gpui_kit::{
+        AppContext, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px,
+    };
 
-    use super::{MailView, MessageBodyForDisplay, MessageState, SyncStatus};
+    use super::{
+        MailView, MessageBodyForDisplay, MessageNavigation, MessageState, SyncStatus,
+        bind_message_navigation_keys,
+    };
 
     #[derive(Clone)]
     struct OfflineProvider {
@@ -1246,7 +1267,7 @@ mod tests {
 
     fn assert_selected_message(
         context: &mut VisualTestContext,
-        view: &gpui_kit::Entity<MailView<OfflineProvider, FixtureCache>>,
+        view: &gpui_kit::Entity<MailView>,
         expected: Option<&MessageId>,
     ) {
         let selected = context
@@ -1275,7 +1296,7 @@ mod tests {
         ));
         let mut mail_view = None;
         let (_, context) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+            let view = cx.new(|cx| MailView::new(profile, workflow, cx));
             mail_view = Some(view.clone());
             gpui_kit::base::Root::new(view, window, cx)
         });
@@ -1352,6 +1373,29 @@ mod tests {
         });
         press_window_key(context, "up");
         assert_selected_message(context, &view, message_ids.last());
+    }
+
+    #[test]
+    fn message_navigation_handles_empty_lists_and_stops_at_boundaries() {
+        let cases = [
+            (MessageNavigation::Previous, None, 0, None),
+            (MessageNavigation::Next, None, 0, None),
+            (MessageNavigation::First, None, 0, None),
+            (MessageNavigation::Last, None, 0, None),
+            (MessageNavigation::Previous, None, 3, Some(2)),
+            (MessageNavigation::Next, None, 3, Some(0)),
+            (MessageNavigation::Previous, Some(0), 3, Some(0)),
+            (MessageNavigation::Next, Some(2), 3, Some(2)),
+            (MessageNavigation::First, Some(1), 3, Some(0)),
+            (MessageNavigation::Last, Some(1), 3, Some(2)),
+        ];
+
+        for (navigation, selected_index, message_count, expected_index) in cases {
+            assert_eq!(
+                navigation.target_index(selected_index, message_count),
+                expected_index
+            );
+        }
     }
 
     #[gpui_kit::test]
@@ -1523,8 +1567,7 @@ mod tests {
             },
             cache,
         ));
-        let (view, context) =
-            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
 
         context.run_until_parked();
         draw_mail_view(context);

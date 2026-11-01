@@ -6,9 +6,9 @@
 
 ## Context
 
-The provider must support Graph v1.0 mail and calendar calls, follow opaque pagination and delta links, and honor Graph throttling. Microsoft does not publish an official Rust Graph SDK.
+The provider must support Graph v1.0 mail calls, follow opaque pagination and delta links, and honor Graph throttling. Microsoft does not publish an official Rust Graph SDK.
 
-The current SDK candidates do not meet all project constraints. `io-msgraph` 0.6.0 added calendar and event calls, including calendar-view delta, but its error type drops response headers. That prevents the adapter from reading Graph's `Retry-After` value. Its source also logs request URLs at `trace` level. Its published README still says calendar support is planned. `graph-rs-sdk` 3.0.1 has broad API and paging support, but its latest stable release is dated 2025-04-20. It depends on `reqwest` 0.12 and Tokio. Its optional interactive authentication feature adds Wry and Tao. The full pagination and retry-header path has not been proven.
+The current SDK candidates do not meet all project constraints. `io-msgraph` 0.6.0 added calendar and event calls, including calendar-view delta, but its error type drops response headers. That prevents the adapter from reading Graph's `Retry-After` value. Its source also logs request URLs at `trace` level. Its published README still says calendar support is planned. `graph-rs-sdk` 3.0.1 has broad API and paging support, but its latest stable release is dated 2025-04-20. It depends on `reqwest` 0.12 and Tokio. Its optional interactive authentication feature adds Wry and Tao. The production Linux mail transport and retry-header path now have synthetic fixture coverage; live Graph behavior remains unverified.
 
 The desktop currently uses GPUI Kit. The active Linux dependency graph uses `smol`; asynchronous `reqwest` requires Tokio. Any Tokio runtime must stay inside the Graph provider and must not leak into GPUI or application interfaces.
 
@@ -16,13 +16,13 @@ The desktop currently uses GPUI Kit. The active Linux dependency graph uses `smo
 
 Use `reqwest` and `serde` for HTTP and JSON in `crates/providers/microsoft-graph/`. Keep Einfach Mail's Graph endpoint calls, API-to-domain mapping, pagination, error mapping, and throttling policy in that adapter. Do not write a general HTTP client, JSON parser, or OAuth protocol.
 
-The application-facing provider port will expose provider-independent values and errors. It will not expose `reqwest`, Tokio, Graph JSON, or response-header types. The provider will obtain credentials through the approved identity boundary. Views will not receive tokens.
+The application-facing provider port exposes provider-independent values and errors. It does not expose `reqwest`, Tokio, Graph JSON, or response-header types. The provider obtains credentials through the approved identity boundary. Views do not receive tokens.
 
 The adapter must preserve response headers so it can honor Graph's `Retry-After` value. Retry only operations whose semantics permit another request. Do not automatically retry a write until the operation's duplicate-request behavior is proven. If Graph omits `Retry-After`, use the documented exponential-backoff behavior.
 
 Treat `@odata.nextLink` and `@odata.deltaLink` as opaque provider values. Before attaching a bearer token, verify that each link uses HTTPS and the configured Graph authority. Disable redirects so a response cannot redirect an authorized request to another host. Mark authorization headers sensitive and keep tokens, response bodies, and full Graph URLs out of logs.
 
-Use the smallest `reqwest` feature set that supports the chosen TLS backend, JSON, HTTP/2, and supported system proxy behavior. Do not enable experimental HTTP/3. Keep the Tokio runtime private to the provider adapter. Accept this ADR and add the dependencies only after the spike below passes. If the runtime bridge fails, compare an executor-agnostic client such as `isahc` and update this ADR.
+Use the smallest `reqwest` feature set that supports the chosen TLS backend, JSON, HTTP/2, and supported system proxy behavior. Do not enable experimental HTTP/3. Keep the Tokio runtime private to the provider adapter. The production Linux implementation and synthetic transport proof satisfy the local runtime and provider-boundary checks. Keep live Graph behavior unverified until a test tenant is available.
 
 ## Alternatives
 
@@ -39,12 +39,10 @@ For runtime ownership, a per-operation worker and a provider-owned worker were c
 
 - The Graph provider owns HTTP transport, response parsing, Graph API types, next-link validation, and Graph throttling. It maps valid results into domain values before returning them to application workflows.
 - The GPUI shell and application crate do not depend on Tokio or `reqwest` types.
-- This is a proposed direction, not an accepted dependency. Do not add the crates until the integration spike proves the runtime and provider boundaries.
-- The spike must prove that GPUI can await provider calls without blocking the UI, that shutdown and cancellation release requests, and that Tokio types remain private to the provider.
-- Sanitized fixtures must cover mail-folder pagination, message delta, calendar-view delta, Graph error responses, `Retry-After` as seconds and HTTP date, and the missing-header backoff path.
-- Verify that the client does not retry 401 or 403 responses, does not repeat a non-idempotent write, rejects a next link outside the configured Graph authority, and does not log tokens, message bodies, or full URLs.
-- Before accepting the ADR, build and verify the transport on Linux, run RustSec against the resolved lockfile, and verify that Rustls is at least 0.23.46. Defer Windows and macOS validation to their support milestones. RustSec advisories for earlier Rustls releases were published in October 2026.
-- Use a test tenant only for behavior that fixtures cannot prove. Do not use personal mailbox data.
+- The local Linux production provider and proof use read-only Graph operations. Synthetic fixtures cover folder and message responses, message delta paging and removals, opaque-link validation, immutable IDs, redirects, HTTP 429 `Retry-After`, cancellation, shutdown, proxy routing, response limits, and provider error redaction.
+- The proof keeps Tokio and HTTP types private to the Graph adapter. It uses no logging dependency and stores no credentials or real mailbox content.
+- Issue #7's local transport criteria are complete. Do not claim live pagination, throttling, consent, or mailbox behavior without test-tenant evidence. Do not use personal mailbox data.
+- Run RustSec against the production lockfile before any real Graph request. Defer Windows and macOS validation to their support milestones.
 
 ## Sources
 

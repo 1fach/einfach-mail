@@ -14,7 +14,7 @@ The separate `gpui-webview` crate wraps Wry and uses WKWebView on macOS, WebView
 
 ## Decision
 
-Propose Ammonia 4.2.4 for the application-owned message-body sanitization policy and GPUI Kit `TextView::html` for native rendering. Do not add Ammonia or renderer integration until the proof below passes; GPUI Kit is already part of the workspace.
+Use Ammonia 4.2.4 for the application-owned message-body sanitization policy and GPUI Kit `TextView::html` for native rendering. Synthetic application, persistence, mailbox-view, and headless renderer tests cover the production path. GPUI Kit is already part of the workspace.
 
 The application workflow will accept the untrusted domain body and produce an opaque `SanitizedEmailHtml` value. Keep this type and the Ammonia allowlist policy in `crates/application`; do not add GPUI or Ammonia types to `crates/domain`. Do not persist the sanitized output: sanitize when a body is prepared for display so an updated policy is applied to cached mail too.
 
@@ -26,7 +26,7 @@ Do not add `gpui-webview` for the first renderer. Revisit it in a separate secur
 
 | Option | Benefits | Costs and risks |
 | --- | --- | --- |
-| Ammonia plus native GPUI `TextView` (proposed) | Reuses GPUI Kit's maintained HTML5-backed text renderer and keeps the message body in the native UI process without browser privileges. Ammonia provides a configurable allowlist and HTML5 parsing. | `TextView` supports common HTML, not full browser CSS layout. Its default links and image handling need explicit overrides. The allowlist and synthetic-fixture results are not yet proven. |
+| Ammonia plus native GPUI `TextView` (accepted for Linux) | Reuses GPUI Kit's maintained HTML5-backed text renderer and keeps the message body in the native UI process without browser privileges. Ammonia provides a configurable allowlist and HTML5 parsing. | `TextView` supports common HTML, not full browser CSS layout. Pixel fidelity, operating-system clipboard behavior, and system-browser launch remain unverified. |
 | Ammonia plus `gpui-webview` | More browser HTML and CSS fidelity while keeping the rest of the application native. | Experimental platform integration, Linux Wayland unsupported, Windows overlay/clipping limits, and no reviewed cross-platform subresource-blocking proof. A missed sanitizer case runs in a browser engine. |
 | Status-only fallback | Avoids another production dependency and adds no parsing step. | Leaves an HTML-only message unreadable when its sanitized markup exceeds the rich-render limit. |
 | `htmd` HTML-to-Markdown conversion | Produces readable content from HTML and uses HTML5 parsing. | Markdown syntax is not plain text and GPUI's Markdown parser can interpret links, images, and formatting. It does not meet the fallback's noninteractive text contract. |
