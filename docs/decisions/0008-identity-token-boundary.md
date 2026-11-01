@@ -8,11 +8,11 @@
 
 Einfach Mail's first provider is Microsoft Graph for Exchange Online. The app needs both an account connection flow and Graph calls. OAuth access and refresh tokens are secrets. They must not enter GPUI views, application workflow results, the local mail database, logs, or message content.
 
-The workspace already separates the native desktop app, application workflows, domain concepts, and infrastructure adapters. The current authentication library choice remains open in [ADR 0003](0003-desktop-authentication.md). The Graph HTTP client choice remains open in [ADR 0006](0006-graph-http-transport.md).
+The workspace separates the native desktop app, application workflows, domain concepts, and infrastructure adapters. [ADR 0003](0003-desktop-authentication.md) selects the Linux authorization-code flow and its libraries. ADR 0006 accepts Reqwest for the Linux Graph provider.
 
 ## Decision
 
-Keep Microsoft identity and Graph HTTP code in the planned `crates/providers/microsoft-graph/` adapter. Start with private `identity` and `graph` modules in that crate. Do not add a separate identity crate until a second provider or a platform broker needs an independent build boundary.
+Keep Microsoft identity and Graph HTTP code in `crates/providers/microsoft-graph/`. Its private `identity` and `graph` modules implement Linux account connection and profile lookup. Do not add a separate identity crate until a second provider or a platform broker needs an independent build boundary.
 
 The application owns provider-neutral account, mail, and calendar workflows and ports. The Microsoft provider implements those ports. Application contracts carry domain values and application errors only. They do not carry OAuth tokens, OAuth protocol types, or Graph response types.
 
@@ -20,7 +20,7 @@ The provider's private identity module owns browser sign-in, PKCE, token exchang
 
 The desktop composition root wires the application workflows to one Microsoft provider instance. GPUI views receive account state, domain data, and user-safe errors. They never receive tokens or call identity, Graph, or credential-store code.
 
-This decision accepts ownership boundaries only. ADR 0003 still controls the OAuth implementation choice. Do not implement sign-in until its Linux system-browser, test-tenant, Conditional Access, cancellation, refresh, sign-out, and Linux credential-store checks pass. Defer broker-specific and other-platform checks to their support milestones.
+Linux implementation and synthetic provider fixtures are in place. Do not claim tenant support or close issue #3 until callback registration, default-browser behavior, MFA, Conditional Access, refresh, consent revocation, and sign-out pass in a dedicated test tenant. Defer Windows-specific broker and credential-store checks until M5, and macOS checks until M6, under [ADR 0010](0010-linux-first-development.md).
 
 ## Usage sketch
 
@@ -64,11 +64,11 @@ The provider's identity and Graph modules may share private token state. Only th
 
 - The application exposes provider-neutral account, mail, and calendar ports. It does not expose an access-token port to views or workflows.
 - The Microsoft Graph provider owns internal identity state and Graph request authorization. Its access token type stays private to that adapter.
-- The system browser remains the proposed sign-in surface. The app will not embed the Microsoft sign-in page in a WebView.
-- The credential-store crate and OAuth flow remain unselected. Recheck maintenance, platforms, licensing, MSRV, features, security history, and dependency cost before adoption.
+- The system browser is the sign-in surface. The app does not embed the Microsoft sign-in page in a WebView.
+- ADR 0003 selects Huskarl, `webbrowser`, Reqwest, and `keyring` for Linux account connection. Recheck maintenance, platforms, licensing, MSRV, features, security history, and dependency cost before changing those choices.
 - If a test tenant requires WAM or another native broker, add a narrow Windows implementation behind the provider's private identity boundary. Review its FFI and Windows window lifecycle in a separate ADR before implementation.
 - Split identity into another crate only when a second provider or a broker with distinct platform requirements needs that boundary.
-- Verify the boundary by reviewing application port signatures and provider call paths. When the authentication spike begins, also prove cancellation and shutdown do not leave callback listeners or GPUI tasks alive.
+- Synthetic tests verify that dropping the sign-in task releases its loopback listener. Repeat the browser and provider checks against Entra before claiming live support.
 
 ## Sources
 

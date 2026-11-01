@@ -3,21 +3,9 @@
 use gpui_kit::*;
 use std::sync::mpsc;
 
-struct EinfachMail;
+mod account_view;
 
-impl Render for EinfachMail {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .child("Einfach Mail")
-            .child("Native desktop shell. Mail access is not connected yet.")
-    }
-}
+use account_view::{AccountView, account_workflow_from_environment};
 
 fn main() -> Result<(), std::io::Error> {
     let (window_open_attempt_sender, window_open_attempt_receiver) =
@@ -25,9 +13,10 @@ fn main() -> Result<(), std::io::Error> {
 
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
+        let account_workflow = account_workflow_from_environment();
 
         let window_open_attempt = open_window(WindowOptions::default(), cx, |_, cx| {
-            cx.new(|_| EinfachMail)
+            cx.new(|cx| AccountView::new(account_workflow, cx))
         })
         .map(|_| ())
         .map_err(|error| {

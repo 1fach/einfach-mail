@@ -1,0 +1,655 @@
+use std::{
+    env::{self, VarError},
+    sync::Arc,
+};
+
+use einfach_mail_application::{AccountOperationError, AccountProvider, AccountWorkflow};
+use einfach_mail_domain::AccountProfile;
+use einfach_mail_microsoft_graph::{CallbackPort, MicrosoftGraphProvider};
+use gpui_kit::component::{
+    ActiveTheme, ColorTokens, Disableable, StyledExt,
+    button::{Button, ButtonVariants},
+};
+use gpui_kit::{AsyncApp, Context, IntoElement, Render, Role, Task, Window, div, prelude::*};
+use uuid::Uuid;
+
+const CLIENT_ID_ENV: &str = "EINFACH_MAIL_ENTRA_CLIENT_ID";
+const CALLBACK_PORT_ENV: &str = "EINFACH_MAIL_ENTRA_CALLBACK_PORT";
+
+type MicrosoftAccountWorkflow = Arc<AccountWorkflow<MicrosoftGraphProvider>>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SetupIssue {
+    MissingClientId,
+    InvalidClientId,
+    MissingCallbackPort,
+    InvalidCallbackPort,
+}
+
+impl SetupIssue {
+    fn message(self) -> &'static str {
+        match self {
+            Self::MissingClientId => {
+                "Account sign-in is not configured. Set EINFACH_MAIL_ENTRA_CLIENT_ID to a Microsoft public client app ID."
+            }
+            Self::InvalidClientId => {
+                "The Microsoft public client app ID is invalid. Check EINFACH_MAIL_ENTRA_CLIENT_ID."
+            }
+            Self::MissingCallbackPort => {
+                "Sign-in needs a registered loopback port. Set EINFACH_MAIL_ENTRA_CALLBACK_PORT to the port registered for http://127.0.0.1."
+            }
+            Self::InvalidCallbackPort => {
+                "The OAuth callback port must be a nonzero TCP port registered for http://127.0.0.1."
+            }
+        }
+    }
+}
+
+pub(super) fn account_workflow_from_environment() -> Result<MicrosoftAccountWorkflow, SetupIssue> {
+    let client_id = match env::var(CLIENT_ID_ENV) {
+        Ok(client_id_value) => {
+            Uuid::parse_str(&client_id_value).map_err(|_| SetupIssue::InvalidClientId)?
+        }
+        Err(VarError::NotPresent) => return Err(SetupIssue::MissingClientId),
+        Err(VarError::NotUnicode(_)) => return Err(SetupIssue::InvalidClientId),
+    };
+    let callback_port_value = match env::var(CALLBACK_PORT_ENV) {
+        Ok(port_value) => Some(port_value),
+        Err(VarError::NotPresent) => None,
+        Err(VarError::NotUnicode(_)) => return Err(SetupIssue::InvalidCallbackPort),
+    };
+    let callback_port = configured_callback_port(callback_port_value.as_deref())?;
+
+    Ok(Arc::new(AccountWorkflow::new(MicrosoftGraphProvider::new(
+        client_id,
+        callback_port,
+    ))))
+}
+
+fn configured_callback_port(port_text: Option<&str>) -> Result<CallbackPort, SetupIssue> {
+    let Some(port_text) = port_text else {
+        return Err(SetupIssue::MissingCallbackPort);
+    };
+    let callback_port = CallbackPort::parse_environment_value(Some(port_text))
+        .map_err(|_| SetupIssue::InvalidCallbackPort)?;
+    match callback_port {
+        CallbackPort::Ephemeral => Err(SetupIssue::InvalidCallbackPort),
+        CallbackPort::Fixed(_) => Ok(callback_port),
+    }
+}
+
+enum AccountStatus {
+    Restoring,
+    Disconnected,
+    Connecting {
+        saved_credential_may_exist: bool,
+    },
+    SigningOut,
+    Connected(AccountProfile),
+    Failed {
+        error: AccountOperationError,
+        saved_credential_may_exist: bool,
+    },
+}
+
+impl AccountStatus {
+    fn saved_credential_may_exist(&self) -> bool {
+        match self {
+            Self::Connecting {
+                saved_credential_may_exist,
+            }
+            | Self::Failed {
+                saved_credential_may_exist,
+                ..
+            } => *saved_credential_may_exist,
+            Self::SigningOut | Self::Connected(_) | Self::Restoring => true,
+            Self::Disconnected => false,
+        }
+    }
+
+    fn error_message(error: AccountOperationError) -> &'static str {
+        match error {
+            AccountOperationError::SignInCancelled => "Sign-in was cancelled.",
+            AccountOperationError::AccessDenied => {
+                "Microsoft did not grant access. Check your organization's consent policies."
+            }
+            AccountOperationError::AccessTokenRejected => {
+                "Microsoft rejected the sign-in. Connect your account again."
+            }
+            AccountOperationError::SignInExpired => {
+                "The saved sign-in has expired. Connect your account again."
+            }
+            AccountOperationError::CredentialStoreUnavailable => {
+                "Linux Secret Service is unavailable. Unlock your keyring and try again."
+            }
+            AccountOperationError::ProfileUnavailable => {
+                "Microsoft did not return the account details needed to identify this account."
+            }
+            AccountOperationError::ServiceUnavailable => {
+                "The account service is unavailable. Check your connection and try again."
+            }
+            AccountOperationError::SignInFailed => "Sign-in could not be completed. Try again.",
+            AccountOperationError::AccountAlreadyConnected => "An account is already connected.",
+            AccountOperationError::AccountOperationInProgress => {
+                "An account operation is already running. Wait for it to finish and try again."
+            }
+            AccountOperationError::AccountStateUnavailable => {
+                "The account workflow is unavailable. Restart Einfach Mail and try again."
+            }
+            _ => "The account operation failed. Try again.",
+        }
+    }
+}
+
+pub(super) struct AccountView<P: AccountProvider + 'static> {
+    workflow: Option<Arc<AccountWorkflow<P>>>,
+    setup_issue: Option<SetupIssue>,
+    status: AccountStatus,
+    task: Option<Task<()>>,
+}
+
+impl<P: AccountProvider + 'static> AccountView<P> {
+    pub(super) fn new(
+        workflow: Result<Arc<AccountWorkflow<P>>, SetupIssue>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (workflow, setup_issue, status) = match workflow {
+            Ok(workflow) => (Some(workflow), None, AccountStatus::Restoring),
+            Err(issue) => (None, Some(issue), AccountStatus::Disconnected),
+        };
+        let mut view = Self {
+            workflow,
+            setup_issue,
+            status,
+            task: None,
+        };
+        view.start_restore(cx);
+        view
+    }
+
+    fn start_restore(&mut self, cx: &mut Context<Self>) {
+        let Some(workflow) = self.workflow.clone() else {
+            return;
+        };
+        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let restore_result = workflow.restore_account().await;
+            let _ = this.update(cx, |view, cx| {
+                view.status = match restore_result {
+                    Ok(Some(profile)) => AccountStatus::Connected(profile),
+                    Ok(None) => AccountStatus::Disconnected,
+                    Err(error) => AccountStatus::Failed {
+                        error,
+                        saved_credential_may_exist: true,
+                    },
+                };
+                cx.notify();
+            });
+        }));
+    }
+
+    fn connect(&mut self, cx: &mut Context<Self>) {
+        let Some(workflow) = self.workflow.clone() else {
+            return;
+        };
+        if !matches!(
+            &self.status,
+            AccountStatus::Disconnected | AccountStatus::Failed { .. }
+        ) {
+            return;
+        }
+        let saved_credential_may_exist = self.status.saved_credential_may_exist();
+        self.status = AccountStatus::Connecting {
+            saved_credential_may_exist,
+        };
+        self.task = Some(Self::connect_task(workflow, saved_credential_may_exist, cx));
+        cx.notify();
+    }
+
+    fn connect_task(
+        workflow: Arc<AccountWorkflow<P>>,
+        saved_credential_may_exist: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let connection_result = workflow.connect_account().await;
+            let _ = this.update(cx, |view, cx| {
+                view.status = match connection_result {
+                    Ok(profile) => AccountStatus::Connected(profile),
+                    Err(error) => AccountStatus::Failed {
+                        error,
+                        saved_credential_may_exist,
+                    },
+                };
+                cx.notify();
+            });
+        })
+    }
+
+    fn cancel_connect(&mut self, cx: &mut Context<Self>) {
+        let AccountStatus::Connecting {
+            saved_credential_may_exist,
+        } = &self.status
+        else {
+            return;
+        };
+        let saved_credential_may_exist = *saved_credential_may_exist;
+
+        self.task.take();
+        self.status = AccountStatus::Failed {
+            error: AccountOperationError::SignInCancelled,
+            saved_credential_may_exist,
+        };
+        cx.notify();
+    }
+
+    fn sign_out(&mut self, cx: &mut Context<Self>) {
+        let Some(workflow) = self.workflow.clone() else {
+            return;
+        };
+        if !self.status.saved_credential_may_exist()
+            || matches!(
+                &self.status,
+                AccountStatus::Connecting { .. } | AccountStatus::SigningOut
+            )
+        {
+            return;
+        }
+
+        self.status = AccountStatus::SigningOut;
+        self.task = Some(Self::sign_out_task(workflow, cx));
+        cx.notify();
+    }
+
+    fn sign_out_task(workflow: Arc<AccountWorkflow<P>>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let sign_out_result = workflow.sign_out().await;
+            let _ = this.update(cx, |view, cx| {
+                view.status = match sign_out_result {
+                    Ok(()) => AccountStatus::Disconnected,
+                    Err(error) => AccountStatus::Failed {
+                        error,
+                        saved_credential_may_exist: true,
+                    },
+                };
+                cx.notify();
+            });
+        })
+    }
+
+    fn account_identity(&self, profile: &AccountProfile, colors: ColorTokens) -> impl IntoElement {
+        let mut identity = div()
+            .id("connected-account")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_4()
+            .bg(colors.surface)
+            .border_1()
+            .border_color(colors.border)
+            .rounded_lg()
+            .child(
+                div()
+                    .text_base()
+                    .font_bold()
+                    .child(profile.label().to_owned()),
+            );
+
+        if let Some(mailbox) = profile.mailbox() {
+            identity = identity.child(
+                div()
+                    .text_sm()
+                    .text_color(colors.muted_foreground)
+                    .child(format!("Mailbox: {}", mailbox.address())),
+            );
+        }
+        if let Some(user_principal_name) = profile
+            .user_principal_name()
+            .filter(|upn| !profile.label().eq_ignore_ascii_case(upn))
+        {
+            identity = identity.child(
+                div()
+                    .text_sm()
+                    .text_color(colors.muted_foreground)
+                    .child(format!("Sign-in: {user_principal_name}")),
+            );
+        }
+
+        identity
+    }
+
+    fn render_permissions(&self, colors: ColorTokens) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_4()
+            .bg(colors.surface)
+            .border_1()
+            .border_color(colors.border)
+            .rounded_lg()
+            .child(div().text_base().font_bold().child("Requested access"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(colors.muted_foreground)
+                    .child("User.Read lets Einfach Mail display your account identity. offline_access lets it refresh your sign-in. Mail access is not requested here."),
+            )
+    }
+
+    fn render_status(&self) -> impl IntoElement {
+        let (label, message, role) = match &self.status {
+            AccountStatus::Restoring => (
+                "Checking for a saved account",
+                "Checking for a saved account…",
+                Role::Status,
+            ),
+            AccountStatus::Disconnected => {
+                ("Not connected", "No account is connected.", Role::Status)
+            }
+            AccountStatus::Connecting { .. } => (
+                "Waiting for Microsoft sign-in",
+                "Waiting for Microsoft sign-in in your browser…",
+                Role::Status,
+            ),
+            AccountStatus::SigningOut => (
+                "Removing saved sign-in",
+                "Removing saved sign-in…",
+                Role::Status,
+            ),
+            AccountStatus::Connected(_) => ("Connected", "Connected", Role::Status),
+            AccountStatus::Failed { error, .. } => (
+                AccountStatus::error_message(*error),
+                AccountStatus::error_message(*error),
+                Role::Alert,
+            ),
+        };
+        let label = match &self.status {
+            AccountStatus::Connected(profile) => format!("Connected to {}", profile.label()),
+            _ => label.to_owned(),
+        };
+
+        div()
+            .id("account-status")
+            .role(role)
+            .aria_label(label)
+            .text_sm()
+            .child(message)
+    }
+
+    fn render_account_details(&self, colors: ColorTokens) -> Option<impl IntoElement> {
+        let AccountStatus::Connected(profile) = &self.status else {
+            return None;
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(self.account_identity(profile, colors))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(colors.muted_foreground)
+                        .child("Signing out removes the saved sign-in from this device. Microsoft organization consent is unchanged."),
+                ),
+        )
+    }
+
+    fn render_saved_sign_out(
+        &self,
+        cx: &mut Context<Self>,
+        label: &'static str,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .justify_center()
+            .debug_selector(|| "sign-out".to_owned())
+            .child(
+                Button::new("sign-out")
+                    .danger()
+                    .label(label)
+                    .on_click(cx.listener(|view, _, _, cx| view.sign_out(cx))),
+            )
+    }
+
+    fn render_progress_action(label: &'static str) -> gpui_kit::Div {
+        div().flex().justify_center().child(
+            Button::new("account-operation-progress")
+                .label(label)
+                .loading(true)
+                .disabled(true),
+        )
+    }
+
+    fn render_primary_action(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        match &self.status {
+            AccountStatus::Restoring => Self::render_progress_action("Checking account…"),
+            AccountStatus::SigningOut => Self::render_progress_action("Signing out…"),
+            AccountStatus::Connecting { .. } => div()
+                .flex()
+                .justify_center()
+                .debug_selector(|| "cancel-sign-in".to_owned())
+                .child(
+                    Button::new("cancel-sign-in")
+                        .ghost()
+                        .label("Cancel sign-in")
+                        .on_click(cx.listener(|view, _, _, cx| view.cancel_connect(cx))),
+                ),
+            AccountStatus::Disconnected | AccountStatus::Failed { .. } => div()
+                .flex()
+                .justify_center()
+                .debug_selector(|| "connect-account".to_owned())
+                .child(
+                    Button::new("connect-account")
+                        .primary()
+                        .label("Connect Microsoft 365 account")
+                        .on_click(cx.listener(|view, _, _, cx| view.connect(cx))),
+                ),
+            AccountStatus::Connected(_) => div(),
+        }
+    }
+
+    fn render_header(&self, colors: ColorTokens) -> gpui_kit::Div {
+        div()
+            .w_full()
+            .max_w_48()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(div().text_lg().font_bold().child("Accounts"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(colors.muted_foreground)
+                    .child("Connect a Microsoft 365 work account to Einfach Mail."),
+            )
+            .child(self.render_permissions(colors))
+    }
+
+    fn render_setup_status(&self, issue: SetupIssue) -> impl IntoElement {
+        let message = issue.message();
+        div()
+            .id("account-status")
+            .role(Role::Status)
+            .aria_label(message)
+            .text_sm()
+            .child(message)
+    }
+
+    fn render_account_content(&self, colors: ColorTokens, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let content = self.render_header(colors);
+        if let Some(issue) = self.setup_issue {
+            return content.child(self.render_setup_status(issue));
+        }
+        let content = content.child(self.render_status());
+        self.render_account_actions(content, colors, cx)
+    }
+
+    fn render_account_actions(
+        &self,
+        mut content: gpui_kit::Div,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        if let Some(details) = self.render_account_details(colors) {
+            content = content
+                .child(details)
+                .child(self.render_saved_sign_out(cx, "Sign out"));
+        }
+        if matches!(
+            &self.status,
+            AccountStatus::Failed {
+                saved_credential_may_exist: true,
+                ..
+            }
+        ) {
+            content = content.child(self.render_saved_sign_out(cx, "Remove saved sign-in"));
+        }
+        content.child(self.render_primary_action(cx))
+    }
+}
+
+impl<P: AccountProvider + 'static> Render for AccountView<P> {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().semantic_tokens().colors;
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_8()
+            .bg(colors.background)
+            .child(self.render_account_content(colors, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        future::{Future, ready},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    use gpui_kit::{Modifiers, TestAppContext, VisualTestContext};
+
+    use super::{AccountView, SetupIssue, configured_callback_port};
+    use einfach_mail_application::{AccountOperationError, AccountProvider, AccountWorkflow};
+    use einfach_mail_domain::{AccountId, AccountProfile};
+    use einfach_mail_microsoft_graph::CallbackPort;
+
+    #[derive(Clone, Default)]
+    struct TestProvider {
+        signed_out: Arc<AtomicBool>,
+    }
+
+    impl AccountProvider for TestProvider {
+        fn restore_account(
+            &self,
+        ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_
+        {
+            ready(Ok(None))
+        }
+
+        fn connect_account(
+            &self,
+        ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
+        {
+            ready(Ok(AccountProfile::try_new(
+                AccountId::try_from("synthetic-account".to_owned())
+                    .expect("synthetic account ID is non-empty"),
+                Some("Ada Example".to_owned()),
+                Some("ada@example.test".to_owned()),
+                Some("ada@tenant.example.test".to_owned()),
+            )
+            .expect("synthetic account profile has an identity")))
+        }
+
+        fn sign_out(&self) -> impl Future<Output = Result<(), AccountOperationError>> + Send + '_ {
+            self.signed_out.store(true, Ordering::SeqCst);
+            ready(Ok(()))
+        }
+    }
+
+    fn draw_account_view(context: &mut VisualTestContext) {
+        context.update(|window, app| {
+            let _ = window.draw(app);
+        });
+    }
+
+    #[test]
+    fn desktop_auth_requires_a_registered_fixed_loopback_port() {
+        assert_eq!(
+            configured_callback_port(None),
+            Err(SetupIssue::MissingCallbackPort)
+        );
+        assert_eq!(
+            configured_callback_port(Some("0")),
+            Err(SetupIssue::InvalidCallbackPort)
+        );
+        assert_eq!(
+            configured_callback_port(Some("invalid")),
+            Err(SetupIssue::InvalidCallbackPort)
+        );
+        assert!(matches!(
+            configured_callback_port(Some("43123")),
+            Ok(CallbackPort::Fixed(port)) if port.get() == 43123
+        ));
+    }
+
+    #[gpui::test]
+    fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        let signed_out = provider.signed_out.clone();
+        let workflow = Arc::new(AccountWorkflow::new(provider));
+        let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), cx));
+
+        context.run_until_parked();
+        draw_account_view(context);
+        assert!(context.debug_bounds("connect-account").is_some());
+        let connect_bounds = context
+            .debug_bounds("connect-account")
+            .expect("connect button is rendered");
+        context.simulate_click(connect_bounds.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_account_view(context);
+        let connected = context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).status,
+                super::AccountStatus::Connected(profile) if profile.label() == "Ada Example"
+            )
+        });
+        assert!(connected);
+
+        let sign_out_bounds = context
+            .debug_bounds("sign-out")
+            .expect("sign-out button is rendered");
+        context.simulate_click(sign_out_bounds.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_account_view(context);
+        let disconnected = context
+            .cx
+            .update(|cx| matches!(&view.read(cx).status, super::AccountStatus::Disconnected));
+        assert!(disconnected);
+        assert!(signed_out.load(Ordering::SeqCst));
+    }
+
+    #[gpui::test]
+    fn missing_client_configuration_disables_account_actions(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (view, context) = cx.add_window_view(|_, cx| {
+            AccountView::<TestProvider>::new(Err(SetupIssue::MissingClientId), cx)
+        });
+
+        draw_account_view(context);
+
+        assert!(context.debug_bounds("connect-account").is_none());
+        assert_eq!(
+            context.cx.update(|cx| view.read(cx).setup_issue),
+            Some(SetupIssue::MissingClientId)
+        );
+    }
+}

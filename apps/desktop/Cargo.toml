@@ -11,6 +11,13 @@ path = "src/main.rs"
 
 [dependencies]
 gpui-kit.workspace = true
+einfach-mail-application = { path = "../../crates/application" }
+einfach-mail-domain = { path = "../../crates/domain" }
+einfach-mail-microsoft-graph = { path = "../../crates/providers/microsoft-graph" }
+uuid.workspace = true
+
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false, features = ["test-support"] }
 
 [lints]
 workspace = true

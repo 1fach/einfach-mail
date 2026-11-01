@@ -59,15 +59,21 @@ git status --short --branch
 
 The private repository plan does not support required branch protection. Run the Linux project gate locally and review pull request checks before merging. Current CI checks are `Rust checks (Linux)`, `Rust MSRV check 1.95.0 (Linux)`, `Workspace dependency policy`, and `RustSec audit`.
 
-## Start the desktop shell
+## Run the Linux desktop app
 
-From the repository root, run:
+To enable the account view's sign-in action, set `EINFACH_MAIL_ENTRA_CLIENT_ID` to the client ID of a public Microsoft Entra app registration. Set `EINFACH_MAIL_ENTRA_CALLBACK_PORT` to the nonzero port registered for `http://127.0.0.1/<port>/callback`. The app does not use a client secret. It requests delegated `User.Read` and `offline_access`, reads the signed-in profile through Graph `/me`, and stores the refresh token in Linux Secret Service.
+
+Run the app from the repository root:
 
 ```sh
+export EINFACH_MAIL_ENTRA_CLIENT_ID='<public-app-client-guid>'
+export EINFACH_MAIL_ENTRA_CALLBACK_PORT='<registered-loopback-port>'
 cargo run --locked --package einfach-mail-desktop --bin einfach-mail
 ```
 
-The window is a native GPUI shell. It does not sign in or access mailbox data yet.
+If the client ID or callback port is missing or invalid, the account view explains how to configure sign-in and keeps account actions unavailable. The callback binds only to `127.0.0.1` and uses the registered port exactly. Microsoft documents that only `localhost` ignores port differences. RFC 8252 requires arbitrary ports for loopback IP redirects. This conflict needs tenant confirmation; see [ADR 0031](../decisions/0031-registered-loopback-port-for-entra.md).
+
+The account flow has synthetic provider and headless UI tests. No dedicated test tenant or public app registration is available, so do not use a personal or production account. Issue #3 tracks live callback, browser, MFA, Conditional Access, refresh, consent-revocation, and sign-out evidence. The app does not sync mail or calendar yet.
 
 ## Resolve and review dependencies
 
