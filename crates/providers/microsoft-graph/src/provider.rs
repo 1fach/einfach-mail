@@ -1,6 +1,10 @@
 //! Public Microsoft Graph provider and account workflow implementation.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use huskarl::token::RefreshToken;
 use reqwest::{Client, redirect::Policy};
@@ -10,8 +14,12 @@ use uuid::Uuid;
 use crate::{
     CallbackPort,
     credential::{RefreshTokenStore, SecretServiceRefreshTokenStore},
-    graph, identity,
+    error::GraphError,
+    graph::GraphApi,
+    graph_url::GraphAuthority,
+    http_client, identity,
     identity::{BrowserLauncher, Endpoints, SystemBrowser},
+    transport::GraphTransport,
     worker,
 };
 use einfach_mail_application::{
@@ -19,22 +27,29 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::AccountProfile;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
+const ACCESS_TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(300);
 
-/// Microsoft Graph account provider for the Linux desktop application.
+/// Microsoft Graph account and mail provider for the Linux desktop application.
 #[derive(Clone)]
 pub struct MicrosoftGraphProvider {
     config: Arc<ProviderConfig>,
 }
 
-#[derive(Clone)]
 struct ProviderConfig {
     client_id: Uuid,
     callback_port: CallbackPort,
     endpoints: Endpoints,
     browser: Arc<dyn BrowserLauncher>,
     credentials: Arc<dyn RefreshTokenStore>,
+    graph_authority: GraphAuthority,
+    graph_transport: OnceLock<Result<GraphTransport, GraphError>>,
+    session: tokio::sync::Mutex<Option<ProviderSession>>,
+}
+
+struct ProviderSession {
+    account_id: AccountId,
+    access_token: Option<Arc<AccessToken>>,
 }
 
 impl MicrosoftGraphProvider {
@@ -44,15 +59,35 @@ impl MicrosoftGraphProvider {
     /// never accepts or stores a client secret.
     #[must_use]
     pub fn new(client_id: Uuid, callback_port: CallbackPort) -> Self {
+        let endpoints = Endpoints::microsoft();
+        let graph_authority = GraphAuthority::from_profile_endpoint(&endpoints.graph_me)
+            .expect("the static Microsoft Graph profile URL is valid");
         Self {
             config: Arc::new(ProviderConfig {
                 client_id,
                 callback_port,
-                endpoints: Endpoints::microsoft(),
+                endpoints,
                 browser: Arc::new(SystemBrowser),
                 credentials: Arc::new(SecretServiceRefreshTokenStore::new()),
+                graph_authority,
+                graph_transport: OnceLock::new(),
+                session: tokio::sync::Mutex::new(None),
             }),
         }
+    }
+}
+
+impl ProviderConfig {
+    fn graph_api(&self) -> Result<GraphApi, GraphError> {
+        let transport = self
+            .graph_transport
+            .get_or_init(GraphTransport::start)
+            .as_ref()
+            .map_err(|error| *error)?;
+        Ok(GraphApi::new(
+            self.graph_authority.clone(),
+            transport.handle(),
+        ))
     }
 }
 
@@ -73,10 +108,13 @@ impl AccountProvider for MicrosoftGraphProvider {
         let config = Arc::clone(&self.config);
 
         worker::run(move |_cancellation: CancellationToken| async move {
+            let mut session = config.session.lock().await;
             let Some(refresh_token) = config.credentials.load()? else {
+                *session = None;
                 return Ok(None);
             };
-            let client = build_http_client()?;
+            let client = http_client::build_client()
+                .map_err(|_| AccountOperationError::ServiceUnavailable)?;
             let response = identity::refresh(
                 config.client_id,
                 &config.endpoints,
@@ -87,9 +125,17 @@ impl AccountProvider for MicrosoftGraphProvider {
 
             let replacement_token = response.refresh_token().cloned().unwrap_or(refresh_token);
             config.credentials.save(&replacement_token)?;
-            let profile =
-                graph::load_profile(&client, &config.endpoints.graph_me, response.access_token())
-                    .await?;
+            let access_token = Arc::new(response.access_token().clone());
+            let profile = config
+                .graph_api()
+                .map_err(map_profile_graph_error)?
+                .load_profile(&config.endpoints.graph_me, Arc::clone(&access_token))
+                .await
+                .map_err(map_profile_graph_error)?;
+            *session = Some(ProviderSession {
+                account_id: profile.id().clone(),
+                access_token: Some(access_token),
+            });
             Ok(Some(profile))
         })
     }
@@ -150,8 +196,13 @@ impl AccountProvider for MicrosoftGraphProvider {
     /// Returns a credential-store error when Secret Service cannot remove the
     /// token.
     fn sign_out(&self) -> impl Future<Output = Result<(), AccountOperationError>> + Send + '_ {
-        let credentials = Arc::clone(&self.config.credentials);
-        worker::run(move |_cancellation: CancellationToken| async move { credentials.delete() })
+        let config = Arc::clone(&self.config);
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let mut session = config.session.lock().await;
+            config.credentials.delete()?;
+            *session = None;
+            Ok(())
+        })
     }
 }
 
@@ -206,7 +257,13 @@ mod tests {
     use crate::{
         CallbackPort,
         credential::RefreshTokenStore,
+        error::GraphError,
+        graph_url::GraphAuthority,
         identity::{BrowserLauncher, Endpoints},
+        transport::GraphTransport,
+    };
+    use einfach_mail_application::{
+        AccountOperationError, AccountProvider, MailOperationError, MailProvider,
     };
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
@@ -319,14 +376,25 @@ mod tests {
             client_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
                 .expect("synthetic client ID is valid"),
             callback_port: CallbackPort::Ephemeral,
+            graph_authority: GraphAuthority::from_profile_endpoint(&endpoints.graph_me)
+                .expect("synthetic Graph authority is valid"),
             endpoints,
             browser: Arc::new(TestBrowser { sender }),
             credentials,
+            graph_transport: fixture_transport(),
+            session: tokio::sync::Mutex::new(None),
         };
 
         MicrosoftGraphProvider {
             config: Arc::new(config),
         }
+    }
+
+    fn fixture_transport() -> OnceLock<Result<GraphTransport, GraphError>> {
+        let transport = GraphTransport::start_for_fixtures().expect("fixture transport starts");
+        let cell = OnceLock::new();
+        assert!(cell.set(Ok(transport)).is_ok());
+        cell
     }
 
     fn has_scope(parameters: &std::collections::HashMap<String, String>, expected: &str) -> bool {
@@ -409,7 +477,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-access","expires_in":3600,"refresh_token":"synthetic-refresh","scope":"User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-access","expires_in":3600,"refresh_token":"synthetic-refresh","scope":"Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -449,6 +517,7 @@ mod tests {
             Some("code")
         );
         assert!(has_scope(&parameters, "User.Read"));
+        assert!(has_scope(&parameters, "Mail.Read"));
         assert!(has_scope(&parameters, "offline_access"));
         assert_eq!(
             parameters.get("code_challenge_method").map(String::as_str),
@@ -608,7 +677,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -656,7 +725,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-rejected-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-rejected-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;

@@ -1719,6 +1719,7 @@ version = "0.1.0"
 dependencies = [
  "einfach-mail-application",
  "einfach-mail-domain",
+ "httpdate",
  "httpmock",
  "huskarl",
  "huskarl-reqwest",
@@ -1727,6 +1728,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-util",
  "url",

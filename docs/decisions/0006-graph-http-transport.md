@@ -14,7 +14,7 @@ The desktop currently uses GPUI Kit. The active Linux dependency graph uses `smo
 
 ## Decision
 
-Use `reqwest` and `serde` for HTTP and JSON in the planned `crates/providers/microsoft-graph/` adapter. Keep Einfach Mail's Graph endpoint calls, API-to-domain mapping, pagination, error mapping, and throttling policy in that adapter. Do not write a general HTTP client, JSON parser, or OAuth protocol.
+Use `reqwest` and `serde` for HTTP and JSON in `crates/providers/microsoft-graph/`. Keep Einfach Mail's Graph endpoint calls, API-to-domain mapping, pagination, error mapping, and throttling policy in that adapter. Do not write a general HTTP client, JSON parser, or OAuth protocol.
 
 The application-facing provider port will expose provider-independent values and errors. It will not expose `reqwest`, Tokio, Graph JSON, or response-header types. The provider will obtain credentials through the approved identity boundary. Views will not receive tokens.
 
@@ -32,6 +32,8 @@ Use the smallest `reqwest` feature set that supports the chosen TLS backend, JSO
 | `graph-rs-sdk` 3.0.1 | Broad Graph v1 and beta APIs, typed operations, and paging helpers. A direct `send` returns a `reqwest::Response`. | No stable release since 2025-04-20. It depends on `reqwest` 0.12 and Tokio. Its pagination retry hook, maintenance fit, and locked dependency security need proof. The `interactive-auth` feature adds Wry and Tao and must stay disabled. |
 | `io-msgraph` 0.6.0 | Recent releases, an I/O-free Graph core, Rustls support, and mail and calendar operations. Its MSRV is below the workspace MSRV. | The Graph error type drops `Retry-After`, and request URLs appear in trace logs. The published README conflicts with the changelog about calendar support. Using it would require changes or a workaround that bypasses the library boundary. |
 | `isahc` 2.0.2 or `ureq` 3.5.0 | `isahc` offers runtime-agnostic async I/O. `ureq` is a pure-Rust blocking client. Both expose ordinary HTTP responses. | `isahc` uses libcurl and its project marks itself passively maintained. `ureq` uses blocking I/O and would need a separate worker boundary. Neither supplies the Graph operations or Graph throttling policy. |
+
+For runtime ownership, a per-operation worker and a provider-owned worker were compared. A per-operation worker would rebuild the client and runtime for each folder or message request and would not provide shared backpressure or a provider-level shutdown point. The provider-owned worker matches the transport proof and makes request cancellation, concurrency limits, proxy behavior, and shutdown one owned lifecycle. Tokio MPSC is sufficient because the worker is the sole command receiver; the test-only proof may continue using `async-channel` for its cross-executor harness. No production channel dependency is added.
 
 ## Consequences
 

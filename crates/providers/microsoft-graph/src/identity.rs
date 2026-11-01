@@ -24,7 +24,7 @@ use einfach_mail_application::AccountOperationError;
 
 const CALLBACK_PATH: &str = "/callback";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(600);
-const AUTHORIZATION_SCOPES: [&str; 2] = ["User.Read", "offline_access"];
+const AUTHORIZATION_SCOPES: [&str; 3] = ["Mail.Read", "User.Read", "offline_access"];
 
 #[derive(Clone)]
 pub(super) struct Endpoints {
@@ -316,7 +316,7 @@ mod tests {
             "https://login.microsoftonline.com/organizations/authorize?",
             "client_id=00000000-0000-0000-0000-000000000001&response_type=code&",
             "redirect_uri=http%3A%2F%2F127.0.0.1%3A1234%2Fcallback&state=test-state&",
-            "scope=User.Read%20offline_access&code_challenge_method=S256&",
+            "scope=Mail.Read%20User.Read%20offline_access&code_challenge_method=S256&",
             "code_challenge=synthetic-challenge"
         ))
         .expect("synthetic authorization URL is valid");
@@ -361,7 +361,7 @@ mod tests {
         let authorization_url = Url::parse(concat!(
             "https://login.microsoftonline.com/organizations/authorize?",
             "response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A1234%2Fcallback&",
-            "state=test-state&scope=openid%20User.Read%20offline_access&nonce=nonce&",
+            "state=test-state&scope=openid%20Mail.Read%20User.Read%20offline_access&nonce=nonce&",
             "code_challenge_method=S256&code_challenge=synthetic-challenge"
         ))
         .expect("synthetic authorization URL is valid");
