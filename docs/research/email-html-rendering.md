@@ -31,7 +31,7 @@ This is a useful alternative for low-cost streaming sanitization, but Ammonia is
 | --- | --- | --- |
 | GPUI Kit `TextView::html` | Native GPUI renderer already included by the pinned `gpui-kit` dependency. It parses common HTML into GPUI content and supports selection, links, images, lists, and tables. It does not create a browser context. | It is not a full HTML/CSS browser. Its default link action calls `App::open_url`; its default image handling can resolve HTTP resources and embedded `data:` images. Override link handling and image resolution, and remove remote image markup from the initial sanitizer profile. |
 | `gpui-webview` plus Ammonia | Better browser HTML and CSS fidelity while leaving the rest of the app native. | Experimental, separate dependency. Linux requires X11/XWayland; Windows native bounds can cover GPUI overlays and escape clipping. Navigation callbacks do not by themselves establish subresource blocking. Downloads also need an explicit policy. Do not use until those controls are proven on each supported OS. |
-| Plain text | Smallest active-content surface; no HTML renderer or sanitizer dependency for the body itself. | Loses formatting, links, and tables when the message has no useful text alternative. The reader preserves provider text bodies directly and shows a status fallback when HTML exceeds its size limit. |
+| `html2text` 0.17.4 fallback | Maintained HTML5-based converter that emits plain text. Its plain non-decorating configuration adds no link footnotes. The application feeds it only Ammonia-sanitized content and the UI treats the result as escaped selectable text. | Removes rich formatting and is bounded to the first 1 MiB of sanitized markup and 64 KiB of plain text. A failed conversion or an over-limit raw body gets a status message. |
 
 GPUI Kit's native `TextView` behavior was checked in the 0.8.1 source. The HTML parser uses `html5ever`; `<a>` nodes become link marks and `<img>` nodes become image nodes. Without a custom link handler, links open through `App::open_url`. Without a custom image resolver, image nodes use GPUI's URI/data URL behavior; the image resolver API is authoritative and does not fall back to the document URL when overridden. Therefore, native rendering still needs the sanitizer and a link/image policy.
 
@@ -40,10 +40,11 @@ The current GPUI Kit WebView guide documents WKWebView on macOS, WebView2 on Win
 ## Accepted Linux first-renderer pipeline
 
 1. Keep raw provider and cached body values untrusted.
-2. In `crates/application`, sanitize each HTML body prepared for display with Ammonia 4.2.4 and the product allowlist, producing an opaque `SanitizedEmailHtml` value. Do not persist the sanitized output. Limit both raw input and sanitized output to 8 MiB, matching the Graph provider's per-response ceiling.
+2. In `crates/application`, sanitize each HTML body prepared for display with Ammonia 4.2.4 and the product allowlist, producing an opaque `SanitizedEmailHtml` value. Do not persist the sanitized output. Reject raw input over 8 MiB, matching the Graph provider's per-response ceiling, and limit rich-render HTML to 8 MiB.
 3. Allow common semantic tags supported by TextView. Strip scripts, style tags and style attributes, SVG, MathML, images, frames, forms, media, embedded content, event attributes, and unsupported active markup. Restrict links to `http` and `https`.
-4. In the desktop view, render only `SanitizedEmailHtml` with `TextView::html`. Supply an `on_link_click` handler that validates the URL again and opens only a user-clicked HTTP or HTTPS link without user information. Override `image_source` with a source that resolves no images.
-5. Keep `gpui-webview` out of the first renderer. Reconsider it in a separate security ADR only if the native view fails supported mail-format checks and remote subresource blocking is proven across the supported platforms.
+4. If sanitized output exceeds the rich-render limit, pass at most its first 1 MiB to `html2text` 0.17.4. Cap the plain result at 64 KiB. Ammonia escaping expands text at most sevenfold, keeping the `pre` fragment below 512 KiB. Feed the converter only sanitized input. Enable no CSS or Markdown decoration. If conversion fails, keep a clear reader status.
+5. Render `SanitizedEmailHtml` with `TextView::html`. Validate clicked URLs again. Open only HTTP or HTTPS links without user information. Override `image_source` so it resolves no images. Render the fallback as escaped text in a selectable native `TextView`. Show when formatting or trailing content was removed.
+6. Keep `gpui-webview` out of the first renderer. Reconsider it in a separate security ADR only if the native view fails supported mail-format checks and remote subresource blocking is proven across the supported platforms.
 
 ## Remaining evidence
 
@@ -61,6 +62,9 @@ The current GPUI Kit WebView guide documents WKWebView on macOS, WebView2 on Win
 - [RustSec's Ammonia advisory list](https://rustsec.org/packages/ammonia.html)
 - [RUSTSEC-2026-0373](https://rustsec.org/advisories/RUSTSEC-2026-0373.html)
 - [`htmlsanitizer` 0.2.0 package metadata and docs](https://docs.rs/crate/htmlsanitizer/0.2.0)
+- [`html2text` 0.17.4 documentation and package metadata](https://docs.rs/crate/html2text/0.17.4)
+- [`html2text` 0.17.4 manifest](https://docs.rs/crate/html2text/0.17.4/source/Cargo.toml)
+- [`html2text` 0.17.4 changelog](https://docs.rs/crate/html2text/0.17.4/source/CHANGELOG.md)
 - [GPUI Kit TextView docs](https://gpui-kit.com/base/text-view/)
 - [GPUI Kit v0.8.1 TextView source](https://github.com/longbridge/gpui-kit/blob/v0.8.1/crates/base/src/text/text_view.rs)
 - [GPUI Kit v0.8.1 HTML parser source](https://github.com/longbridge/gpui-kit/blob/v0.8.1/crates/base/src/text/format/html.rs)

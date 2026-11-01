@@ -557,6 +557,9 @@ fn render_message_body(body: &MessageBodyForDisplay, colors: ColorTokens) -> Any
     match body {
         MessageBodyForDisplay::PlainText(text) => render_plain_text_body(text),
         MessageBodyForDisplay::SanitizedHtml(html) => render_sanitized_html_body(html),
+        MessageBodyForDisplay::PlainTextFallback(content) => {
+            render_plain_text_fallback(content, colors)
+        }
         MessageBodyForDisplay::HtmlTooLarge => render_oversized_html_fallback(colors),
     }
 }
@@ -569,6 +572,54 @@ fn render_plain_text_body(text: &Arc<str>) -> AnyElement {
         .overflow_y_scrollbar()
         .p_6()
         .child(SharedString::from(Arc::clone(text)))
+        .into_any_element()
+}
+
+fn render_plain_text_fallback(content: &SanitizedEmailHtml, colors: ColorTokens) -> AnyElement {
+    div()
+        .id("mail-message-html-fallback")
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_6()
+        .child(render_plain_text_fallback_status(colors))
+        .child(render_plain_text_fallback_content(content))
+        .into_any_element()
+}
+
+fn render_plain_text_fallback_status(colors: ColorTokens) -> AnyElement {
+    div()
+        .id("mail-message-html-fallback-status")
+        .debug_selector(|| "mail-message-html-fallback-status".into())
+        .text_color(colors.muted_foreground)
+        .role(Role::Status)
+        .child(
+            "Rich formatting was removed. Only the beginning of this message is shown as plain text.",
+        )
+        .into_any_element()
+}
+
+fn render_plain_text_fallback_content(content: &SanitizedEmailHtml) -> AnyElement {
+    div()
+        .id("mail-message-html-fallback-body")
+        .debug_selector(|| "mail-message-html-fallback-body".into())
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .overflow_y_scrollbar()
+        .child(TextSelectionLayer)
+        .child(
+            TextView::html(
+                "mail-message-html-fallback-content",
+                content.shared_content(),
+            )
+            .selectable(true)
+            .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
+            .on_link_click(|_, _, _, _| {}),
+        )
         .into_any_element()
 }
 
@@ -604,7 +655,7 @@ fn render_oversized_html_fallback(colors: ColorTokens) -> AnyElement {
         .id("mail-message-body-too-large")
         .debug_selector(|| "mail-message-body-too-large".into())
         .role(Role::Status)
-        .child("This message is too large to render safely.")
+        .child("This message is too large to display safely.")
         .into_any_element()
 }
 
@@ -1156,6 +1207,75 @@ mod tests {
 
         let selected_text = context.update(TextSelection::selected_text);
         assert!(selected_text.contains("Readable synthetic content"));
+        context.simulate_keystrokes("ctrl-c");
+        let copied_text = context.update(|_, app| {
+            app.read_from_clipboard()
+                .and_then(|clipboard| clipboard.text())
+        });
+        assert_eq!(copied_text, Some(selected_text.trim_end().to_owned()));
+    }
+
+    #[gpui_kit::test]
+    fn oversized_sanitized_html_shows_selectable_noninteractive_text(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, _) = fixture(account);
+        let body_content = format!(
+            "<p>Readable fallback content. <a href=\"https://mail.example.test/path\">link destination</a> {}</p>",
+            ">".repeat(8 * 1024 * 1024 / 4)
+        );
+        cache.0.lock().expect("fixture cache mutex is healthy").body =
+            Some(MessageBody::new(MessageBodyType::Html, body_content));
+        let workflow = Arc::new(MailWorkflow::new(
+            OfflineProvider {
+                body_fetches: Arc::new(AtomicUsize::new(0)),
+            },
+            cache,
+        ));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+
+        context.run_until_parked();
+        draw_mail_view(context);
+        let message_row = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached message row is rendered");
+        context.simulate_click(message_row.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+
+        let status = context
+            .debug_bounds("mail-message-html-fallback-status")
+            .expect("plain-text fallback explains why formatting was removed");
+        assert!(status.size.width > px(0.));
+        let body_bounds = context
+            .debug_bounds("mail-message-html-fallback-body")
+            .expect("plain-text fallback has a selectable content region");
+
+        let contains_fallback_text = context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).message_state,
+                MessageState::Opened(opened)
+                    if matches!(
+                        opened.body(),
+                        MessageBodyForDisplay::PlainTextFallback(content)
+                            if content.as_str().contains("Readable&#32;fallback&#32;content")
+                                && content.as_str().contains("link&#32;destination")
+                    )
+            )
+        });
+        assert!(contains_fallback_text);
+
+        context.simulate_click(
+            point(body_bounds.left() + px(280.), body_bounds.top() + px(10.)),
+            Modifiers::default(),
+        );
+        assert_eq!(context.opened_url(), None);
+        context.simulate_keystrokes("ctrl-a");
+
+        let selected_text = context.update(TextSelection::selected_text);
+        assert!(selected_text.contains("Readable fallback content"));
         context.simulate_keystrokes("ctrl-c");
         let copied_text = context.update(|_, app| {
             app.read_from_clipboard()

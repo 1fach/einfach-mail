@@ -11,6 +11,10 @@ use einfach_mail_domain::{MessageBody, MessageBodyType};
 use url::Url;
 
 const MAX_HTML_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_HTML_FALLBACK_INPUT_BYTES: usize = MAX_HTML_BODY_BYTES / 8;
+// Eightfold headroom contains Ammonia's maximum sevenfold text-escape expansion.
+const MAX_HTML_FALLBACK_TEXT_BYTES: usize = MAX_HTML_BODY_BYTES / 128;
+const HTML_FALLBACK_WRAP_WIDTH: usize = 80;
 
 const ALLOWED_TAGS: &[&str] = &[
     "a",
@@ -90,14 +94,16 @@ const REMOVE_CONTENT_TAGS: &[&str] = &[
 
 /// A message body after the application applies its native-display policy.
 ///
-/// HTML bodies are either sanitized or replaced with a size-limit message.
-/// This value has no variant that exposes unsanitized HTML to a view.
+/// HTML bodies are sanitized, converted to escaped plain text, or replaced
+/// with a size-limit message. No variant exposes unsanitized HTML to a view.
 #[derive(Clone, Eq, PartialEq)]
 pub enum MessageBodyForDisplay {
     /// Plain text content retained from the provider body.
     PlainText(Arc<str>),
     /// HTML that passed the application's allowlist sanitizer.
     SanitizedHtml(SanitizedEmailHtml),
+    /// An escaped plain-text excerpt from sanitized HTML above the rich-render limit.
+    PlainTextFallback(SanitizedEmailHtml),
     /// HTML that exceeded the limit accepted by the sanitizer.
     HtmlTooLarge,
 }
@@ -107,6 +113,7 @@ impl fmt::Debug for MessageBodyForDisplay {
         match self {
             Self::PlainText(_) => formatter.write_str("PlainText(<redacted>)"),
             Self::SanitizedHtml(_) => formatter.write_str("SanitizedHtml(<redacted>)"),
+            Self::PlainTextFallback(_) => formatter.write_str("PlainTextFallback(<redacted>)"),
             Self::HtmlTooLarge => formatter.write_str("HtmlTooLarge"),
         }
     }
@@ -168,11 +175,20 @@ pub fn prepare_message_body_for_display(body: &MessageBody) -> MessageBodyForDis
         MessageBodyType::Html if body.content().len() > MAX_HTML_BODY_BYTES => {
             MessageBodyForDisplay::HtmlTooLarge
         }
-        MessageBodyType::Html => sanitize_html(body.content()).map_or(
-            MessageBodyForDisplay::HtmlTooLarge,
-            MessageBodyForDisplay::SanitizedHtml,
-        ),
+        MessageBodyType::Html => prepare_html_for_display(body.content()),
     }
+}
+
+fn prepare_html_for_display(raw_html: &str) -> MessageBodyForDisplay {
+    let sanitized_html = sanitize_html(raw_html);
+    if sanitized_html.len() <= MAX_HTML_BODY_BYTES {
+        return MessageBodyForDisplay::SanitizedHtml(SanitizedEmailHtml(Arc::from(sanitized_html)));
+    }
+
+    plain_text_fallback(&sanitized_html).map_or(
+        MessageBodyForDisplay::HtmlTooLarge,
+        MessageBodyForDisplay::PlainTextFallback,
+    )
 }
 
 /// Parses and validates a message link before the desktop opens it externally.
@@ -187,7 +203,7 @@ pub fn allowed_external_message_url(href: &str) -> Option<ExternalMessageLink> {
     (is_web_url && has_no_user_info).then(|| ExternalMessageLink(url.as_str().into()))
 }
 
-fn sanitize_html(raw_html: &str) -> Option<SanitizedEmailHtml> {
+fn sanitize_html(raw_html: &str) -> String {
     let mut builder = Builder::default();
     builder
         .tags(ALLOWED_TAGS.iter().copied().collect())
@@ -196,8 +212,31 @@ fn sanitize_html(raw_html: &str) -> Option<SanitizedEmailHtml> {
         .url_schemes(HashSet::from(["http", "https"]))
         .url_relative(UrlRelative::Deny)
         .clean_content_tags(REMOVE_CONTENT_TAGS.iter().copied().collect());
-    let sanitized = builder.clean(raw_html).to_string();
-    (sanitized.len() <= MAX_HTML_BODY_BYTES).then(|| SanitizedEmailHtml(Arc::from(sanitized)))
+    builder.clean(raw_html).to_string()
+}
+
+fn plain_text_fallback(sanitized_html: &str) -> Option<SanitizedEmailHtml> {
+    let bounded_html = bounded_prefix(sanitized_html, MAX_HTML_FALLBACK_INPUT_BYTES);
+    let plain_text = html2text::config::plain_no_decorate()
+        .allow_width_overflow()
+        .string_from_read(bounded_html.as_bytes(), HTML_FALLBACK_WRAP_WIDTH)
+        .ok()?;
+    let plain_text = bounded_prefix(&plain_text, MAX_HTML_FALLBACK_TEXT_BYTES);
+    if plain_text.trim().is_empty() {
+        return None;
+    }
+
+    let escaped_text = ammonia::clean_text(plain_text);
+    let safe_html = format!("<pre>{escaped_text}</pre>");
+    Some(SanitizedEmailHtml(Arc::from(safe_html)))
+}
+
+fn bounded_prefix(content: &str, max_bytes: usize) -> &str {
+    let mut end = content.len().min(max_bytes);
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    &content[..end]
 }
 
 #[cfg(test)]
@@ -205,8 +244,8 @@ mod tests {
     use einfach_mail_domain::{MessageBody, MessageBodyType};
 
     use super::{
-        MAX_HTML_BODY_BYTES, MessageBodyForDisplay, allowed_external_message_url,
-        prepare_message_body_for_display,
+        MAX_HTML_BODY_BYTES, MAX_HTML_FALLBACK_TEXT_BYTES, MessageBodyForDisplay,
+        allowed_external_message_url, prepare_message_body_for_display,
     };
 
     #[test]
@@ -250,6 +289,43 @@ mod tests {
         };
 
         assert_eq!(html.as_str().len(), 1024 * 1024 + "<p></p>".len());
+    }
+
+    #[test]
+    fn converts_oversized_sanitized_html_to_bounded_escaped_plain_text() {
+        let expanded_text = ">".repeat(MAX_HTML_BODY_BYTES / 4);
+        let raw_html = format!(
+            "<p>Readable fallback text <a href=\"https://links.example.test\">link label</a> {expanded_text}</p><script>hidden script marker</script>"
+        );
+        assert!(raw_html.len() <= MAX_HTML_BODY_BYTES);
+        let body = MessageBody::new(MessageBodyType::Html, raw_html);
+        let display_body = prepare_message_body_for_display(&body);
+        assert!(!format!("{display_body:?}").contains("Readable fallback text"));
+
+        let MessageBodyForDisplay::PlainTextFallback(content) = display_body else {
+            panic!("expanded sanitized HTML uses a plain-text fallback");
+        };
+
+        assert!(content.as_str().starts_with("<pre>"));
+        assert!(!content.as_str().contains("<a "));
+        assert!(!content.as_str().contains("links.example.test"));
+        assert!(!content.as_str().contains("hidden script marker"));
+        assert!(content.as_str().len() <= MAX_HTML_BODY_BYTES / 16);
+
+        let rendered = html2text::config::plain_no_decorate()
+            .allow_width_overflow()
+            .string_from_read(content.as_str().as_bytes(), 80)
+            .expect("escaped fallback HTML is readable");
+        assert!(rendered.contains("Readable fallback text [link label]"));
+        assert!(!rendered.contains("hidden script marker"));
+        assert!(rendered.len() <= MAX_HTML_FALLBACK_TEXT_BYTES + 8 * 1024);
+    }
+
+    #[test]
+    fn bounds_utf8_fallback_prefixes_at_character_boundaries() {
+        let prefix = super::bounded_prefix("abc€", 5);
+
+        assert_eq!(prefix, "abc");
     }
 
     #[test]

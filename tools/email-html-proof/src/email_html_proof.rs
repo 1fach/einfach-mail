@@ -91,6 +91,9 @@ fn sanitize(raw_html: &str) -> String {
     let body = MessageBody::new(MessageBodyType::Html, raw_html.to_owned());
     match prepare_message_body_for_display(&body) {
         MessageBodyForDisplay::SanitizedHtml(html) => html.as_str().to_owned(),
+        MessageBodyForDisplay::PlainTextFallback(_) => {
+            panic!("synthetic fixture remains within the rich-render limit")
+        }
         MessageBodyForDisplay::HtmlTooLarge => panic!("synthetic fixture is within the body limit"),
         MessageBodyForDisplay::PlainText(_) => panic!("HTML fixture remains HTML"),
     }

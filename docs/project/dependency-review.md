@@ -91,6 +91,18 @@ Local Linux proof passed with `OPENSSL_NO_VENDOR=1` because this Fedora image la
 
 The Windows runner image lists Perl but does not list NASM or `Text::Template`, so CI installs these explicitly. `shogo82148/actions-setup-perl` 1.44.2 supports Windows Server 2025, uses Strawberry Perl, and installs the required CPAN module. `ilammy/setup-nasm` 1.5.2 installs the official NASM binary; CI pins NASM 2.16.01. Both actions are MIT-licensed build tools and are not application dependencies. The hosted Windows setup passed in PR #15.
 
+### Native HTML-to-text fallback — 2026-11-01
+
+Use `html2text` 0.17.4 for the native reader's bounded plain-text fallback. Its upstream repository is [`jugglerchris/rust-html2text`](https://github.com/jugglerchris/rust-html2text). Releases 0.17.2 through 0.17.4 fix malformed tables, a nested-render-tree stack overflow, and an infinite loop on malformed CSS. The selected build enables no optional features, so it does not enable document CSS or syntax extensions. The crate is MIT licensed and requires Rust 1.85, below the workspace's 1.95 MSRV. It uses `html5ever` 0.40.1, which Ammonia 4.2.4 already brings in. It adds no second version. Its plain non-decorating configuration does not emit link footnotes. The application feeds it only Ammonia-sanitized markup. It reads at most 1 MiB and keeps at most 64 KiB of converted text before escaping it for native rendering. The 2026-11-01 Linux gate scanned 918 locked crates with no vulnerable or yanked versions. It reported the same eight unmaintained transitive crates already tracked above. No crate-specific RustSec advisory appeared in the reviewed package search. The lockfile audit remains authoritative.
+
+| Candidate | Evidence | Decision |
+| --- | --- | --- |
+| `html2text` 0.17.4 | [`MIT` package metadata](https://docs.rs/crate/html2text/0.17.4), [manifest](https://docs.rs/crate/html2text/0.17.4/source/Cargo.toml), and [changelog](https://docs.rs/crate/html2text/0.17.4/source/CHANGELOG.md). Rust 1.85; HTML5 parsing; portable Rust implementation; empty default feature set. Current Ammonia dependency already resolves the same `html5ever` 0.40.1 version. | Use in `crates/application` for plain-text conversion of Ammonia output. Enable no optional features. Cap sanitized input at 1 MiB and plain text at 64 KiB so Ammonia-escaped native HTML stays below 512 KiB. |
+| `htmd` 0.5.6 | [Package metadata](https://docs.rs/crate/htmd/0.5.6) and [upstream source](https://github.com/letmutex/htmd). Apache-2.0 licensed. Its MSRV is not declared. It converts HTML to Markdown. | Reject for this output contract: Markdown decorations and link syntax are not plaintext and could be reinterpreted as active formatting by a Markdown view. |
+| Custom tag stripping | No dependency cost. | Reject: reliable HTML text extraction needs HTML parsing and recovery; a handwritten stripper would mishandle malformed markup and entity decoding. |
+
+The full 2026-11-01 Linux gate passed with the new lockfile. No parser is added to the desktop crate, and no WebView is added.
+
 ## Current constraints
 
 - The Microsoft provider uses Graph, OAuth, browser, HTTP, and Secret Service libraries. The application keeps provider-neutral account workflows. Production local storage, MIME parsing, and HTML sanitization are not part of this M1 candidate.
