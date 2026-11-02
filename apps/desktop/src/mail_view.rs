@@ -5,10 +5,12 @@ use std::{
 };
 
 use einfach_mail_application::{
-    MailSession, MailSyncState, MailWorkflowError, MessageBodyForDisplay, OpenedMessage,
-    SanitizedEmailHtml, allowed_external_message_url,
+    MailSession, MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflowError,
+    MessageBodyForDisplay, OpenedMessage, SanitizedEmailHtml, allowed_external_message_url,
 };
-use einfach_mail_domain::{AccountProfile, FolderReference, MailFolder, MailMessage, MessageId};
+use einfach_mail_domain::{
+    AccountId, AccountProfile, FolderReference, MailFolder, MailMessage, MessageId,
+};
 use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Selectable, StyledExt,
@@ -68,6 +70,7 @@ pub(crate) struct MailView {
 enum SyncStatus {
     LoadingCache,
     Syncing,
+    Rebuilding,
     UpToDate,
     Failed(MailWorkflowError),
 }
@@ -163,9 +166,18 @@ impl MailView {
                 return;
             }
 
-            let sync_result = workflow
-                .synchronize_account(&account_id, SystemTime::now())
-                .await;
+            let sync_result = synchronize_with_progress(
+                workflow.as_ref(),
+                &account_id,
+                SystemTime::now(),
+                |progress| {
+                    let _ = this.update(cx, |view, cx| {
+                        view.apply_sync_progress(progress);
+                        cx.notify();
+                    });
+                },
+            )
+            .await;
             let Ok(selected_folder) = this.read_with(cx, |view, _| view.selected_folder.clone())
             else {
                 return;
@@ -196,6 +208,12 @@ impl MailView {
             .scroll_to_item(0, ScrollStrategy::Top);
         self.message_row_sizes = Rc::new(vec![size(px(1.), px(72.)); messages.len()]);
         self.messages = messages;
+    }
+
+    fn apply_sync_progress(&mut self, progress: MailSyncProgress) {
+        match progress {
+            MailSyncProgress::Rebuilding => self.sync_status = SyncStatus::Rebuilding,
+        }
     }
 
     fn finish_sync(
@@ -383,9 +401,18 @@ impl MailView {
         let account_id = self.profile.id().clone();
         let selected_folder = self.selected_folder.clone();
         self.sync_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let sync_result = workflow
-                .synchronize_account(&account_id, SystemTime::now())
-                .await;
+            let sync_result = synchronize_with_progress(
+                workflow.as_ref(),
+                &account_id,
+                SystemTime::now(),
+                |progress| {
+                    let _ = this.update(cx, |view, cx| {
+                        view.apply_sync_progress(progress);
+                        cx.notify();
+                    });
+                },
+            )
+            .await;
             let snapshot =
                 load_snapshot(workflow.as_ref(), &account_id, selected_folder.as_ref()).await;
             let _ = this.update(cx, |view, cx| {
@@ -459,18 +486,40 @@ impl MailView {
     fn sync_status_label(&self) -> String {
         match &self.sync_status {
             SyncStatus::LoadingCache => "Opening encrypted cache…".to_owned(),
-            SyncStatus::Syncing => self.sync_age_label("Syncing"),
+            SyncStatus::Syncing => {
+                let label = if self
+                    .sync_state
+                    .as_ref()
+                    .is_some_and(MailSyncState::is_rebuilding)
+                {
+                    "Rebuilding mail"
+                } else {
+                    "Syncing"
+                };
+                self.sync_age_label(label)
+            }
+            SyncStatus::Rebuilding => self.sync_age_label("Rebuilding mail"),
             SyncStatus::UpToDate => self.sync_age_label("Up to date"),
             SyncStatus::Failed(error) => {
+                let rebuild_resume = self
+                    .sync_state
+                    .as_ref()
+                    .is_some_and(MailSyncState::is_rebuilding)
+                    && *error != MailWorkflowError::RepeatedDeltaReset;
                 let cached_age = self.sync_state.as_ref().and_then(|state| {
                     state
                         .last_synchronized_at()
                         .map(|last_sync| format!(" Cached mail from {}.", elapsed_label(last_sync)))
                 });
                 format!(
-                    "{}{}",
+                    "{}{}{}",
                     mail_error_message(*error),
-                    cached_age.unwrap_or_default()
+                    cached_age.unwrap_or_default(),
+                    if rebuild_resume {
+                        " The saved mail rebuild is incomplete. Choose Sync to resume it."
+                    } else {
+                        ""
+                    }
                 )
             }
         }
@@ -931,6 +980,41 @@ fn elapsed_label(last_sync: SystemTime) -> String {
     }
 }
 
+fn mail_sync_progress_channel() -> (
+    impl Fn(MailSyncProgress) + Send + Sync + 'static,
+    tokio::sync::watch::Receiver<Option<MailSyncProgress>>,
+) {
+    let (sender, receiver) = tokio::sync::watch::channel(None);
+    let progress_handler = move |progress| {
+        sender.send_replace(Some(progress));
+    };
+    (progress_handler, receiver)
+}
+
+async fn synchronize_with_progress(
+    workflow: &dyn MailSession,
+    account_id: &AccountId,
+    sync_started_at: SystemTime,
+    mut on_progress: impl FnMut(MailSyncProgress),
+) -> Result<MailSyncReport, MailWorkflowError> {
+    let (progress_handler, mut progress_receiver) = mail_sync_progress_channel();
+    let mut sync_future =
+        Box::pin(workflow.synchronize_account(account_id, sync_started_at, &progress_handler));
+    loop {
+        let changed = tokio::select! {
+            biased;
+            changed = progress_receiver.changed() => changed,
+            result = &mut sync_future => return result,
+        };
+        if changed.is_err() {
+            return sync_future.await;
+        }
+        if let Some(progress) = *progress_receiver.borrow_and_update() {
+            on_progress(progress);
+        }
+    }
+}
+
 fn mail_error_message(error: MailWorkflowError) -> &'static str {
     use einfach_mail_application::{MailCacheError, MailOperationError};
 
@@ -952,6 +1036,9 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
         }
         MailWorkflowError::RepeatedCursor => {
             "Sync stopped because the service repeated a page. Try syncing again."
+        }
+        MailWorkflowError::RepeatedDeltaReset => {
+            "The mail service reset the rebuild again. Choose Sync to resume from its saved checkpoint."
         }
         MailWorkflowError::PageLimitExceeded => {
             "Sync paused after many pages. Choose Sync to continue from its saved checkpoint."
@@ -976,7 +1063,7 @@ mod tests {
 
     use einfach_mail_application::{
         MailCache, MailCacheError, MailOperationError, MailProvider, MailSyncState, MailWorkflow,
-        MailWorkflowError, MessageDeltaRequest,
+        MailWorkflowError, MessageDeltaRequest, MessageDeltaResponse,
     };
     use einfach_mail_domain::{
         AccountId, AccountProfile, FolderId, FolderReference, MailFolder, MailMessage, Mailbox,
@@ -988,8 +1075,8 @@ mod tests {
     };
 
     use super::{
-        MailView, MessageBodyForDisplay, MessageNavigation, MessageState, SyncStatus,
-        bind_message_navigation_keys,
+        MailSyncProgress, MailView, MessageBodyForDisplay, MessageNavigation, MessageState,
+        SyncStatus, bind_message_navigation_keys,
     };
 
     #[derive(Clone)]
@@ -1017,10 +1104,8 @@ mod tests {
             &self,
             _: &FolderReference,
             _: MessageDeltaRequest,
-        ) -> impl Future<
-            Output = Result<einfach_mail_application::MessageDeltaPageResponse, MailOperationError>,
-        > + Send
-        + '_ {
+        ) -> impl Future<Output = Result<MessageDeltaResponse, MailOperationError>> + Send + '_
+        {
             ready(Err(MailOperationError::ServiceUnavailable))
         }
 
@@ -1108,6 +1193,35 @@ mod tests {
             _: SystemTime,
         ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_ {
             ready(Err(MailCacheError::InvalidData))
+        }
+
+        fn begin_full_resync(
+            &self,
+            _: &FolderReference,
+            reset_link: MessageDeltaLink,
+        ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_ {
+            let mut data = self.0.lock().expect("fixture cache mutex is healthy");
+            let Some(current) = data.sync_state.as_ref() else {
+                return ready(Err(MailCacheError::InvalidData));
+            };
+            let Some(generation) = current.full_sync_generation().unwrap_or(0).checked_add(1)
+            else {
+                return ready(Err(MailCacheError::InvalidData));
+            };
+            let state = MailSyncState::from_checkpoint(
+                current.cutoff(),
+                current.delta_link().cloned(),
+                Some(reset_link),
+                current.last_synchronized_at(),
+                Some(generation),
+            );
+            match state {
+                Ok(state) => {
+                    data.sync_state = Some(state.clone());
+                    ready(Ok(state))
+                }
+                Err(error) => ready(Err(error)),
+            }
         }
 
         fn list_folders(
@@ -1220,6 +1334,7 @@ mod tests {
                     )),
                     None,
                     Some(UNIX_EPOCH + Duration::from_secs(1_800_000_000)),
+                    None,
                 )
                 .expect("synthetic sync checkpoint is valid"),
             );
@@ -1690,5 +1805,67 @@ mod tests {
         });
 
         assert!(preserved_error);
+    }
+
+    #[gpui_kit::test]
+    fn reset_progress_is_announced_in_the_mail_status(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, _) = fixture(account);
+        let workflow = Arc::new(MailWorkflow::new(
+            OfflineProvider {
+                body_fetches: Arc::new(AtomicUsize::new(0)),
+            },
+            cache,
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        context.run_until_parked();
+
+        context.cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.apply_sync_progress(MailSyncProgress::Rebuilding);
+            });
+        });
+        let status = context.cx.update(|cx| view.read(cx).sync_status_label());
+
+        assert!(status.starts_with("Rebuilding mail"));
+    }
+
+    #[gpui_kit::test]
+    fn failed_rebuild_status_explains_how_to_resume(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, _) = fixture(account);
+        {
+            let mut data = cache.0.lock().expect("fixture cache mutex is healthy");
+            let current = data.sync_state.as_ref().expect("fixture sync state exists");
+            data.sync_state = Some(
+                MailSyncState::from_checkpoint(
+                    current.cutoff(),
+                    current.delta_link().cloned(),
+                    Some(MessageDeltaLink::from_opaque(
+                        "https://graph.microsoft.com/v1.0/delta?token=synthetic-reset".to_owned(),
+                    )),
+                    current.last_synchronized_at(),
+                    Some(1),
+                )
+                .expect("synthetic rebuild checkpoint is valid"),
+            );
+        }
+        let workflow = Arc::new(MailWorkflow::new(
+            OfflineProvider {
+                body_fetches: Arc::new(AtomicUsize::new(0)),
+            },
+            cache,
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        context.run_until_parked();
+
+        let status = context.cx.update(|cx| view.read(cx).sync_status_label());
+
+        assert!(status.contains("saved mail rebuild is incomplete"));
+        assert!(status.contains("Choose Sync to resume it."));
     }
 }

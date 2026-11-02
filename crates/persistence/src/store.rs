@@ -291,12 +291,43 @@ impl MailCache for SqliteMailCache {
                     let transaction = connection.transaction()?;
                     let state =
                         read_sync_state(&transaction, &folder)?.ok_or(CacheFailure::InvalidData)?;
+                    let full_sync_generation = state
+                        .full_sync_generation()
+                        .map(i64::try_from)
+                        .transpose()
+                        .map_err(|_| CacheFailure::InvalidData)?;
                     for change in changes {
-                        apply_delta_change(&transaction, &folder, state.cutoff(), change)?;
+                        apply_delta_change(
+                            &transaction,
+                            &folder,
+                            state.cutoff(),
+                            full_sync_generation,
+                            change,
+                        )?;
                     }
                     update_sync_progress(&transaction, &folder, progress, completed_at)?;
                     transaction.commit()?;
                     read_sync_state(connection, &folder)?.ok_or(CacheFailure::InvalidData)
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn begin_full_resync(
+        &self,
+        folder: &FolderReference,
+        reset_link: MessageDeltaLink,
+    ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let reset_link = reset_link.as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    begin_full_resync_transaction(connection, &folder, &reset_link)
                 })
                 .await
                 .map_err(CacheFailure::public)
@@ -664,7 +695,8 @@ fn read_sync_state(
     let raw = connection
         .query_row(
             "SELECT a.query_version, a.cutoff_seconds, a.cutoff_nanoseconds,
-                    s.delta_link, s.next_link, s.last_sync_seconds, s.last_sync_nanoseconds
+                    s.delta_link, s.next_link, s.last_sync_seconds, s.last_sync_nanoseconds,
+                    s.full_sync_generation, s.full_sync_active
              FROM mail_sync_state s
              JOIN mail_account_sync_scope a USING (account_id)
              WHERE s.account_id = ?1 AND s.folder_id = ?2",
@@ -678,6 +710,8 @@ fn read_sync_state(
                     next_link: row.get(4)?,
                     sync_seconds: row.get(5)?,
                     sync_nanoseconds: row.get(6)?,
+                    full_sync_generation: row.get(7)?,
+                    full_sync_active: row.get(8)?,
                 })
             },
         )
@@ -693,6 +727,8 @@ struct RawSyncState {
     next_link: Option<String>,
     sync_seconds: Option<i64>,
     sync_nanoseconds: Option<i64>,
+    full_sync_generation: i64,
+    full_sync_active: i64,
 }
 
 fn decode_sync_state(raw: RawSyncState) -> CacheResult<MailSyncState> {
@@ -705,11 +741,22 @@ fn decode_sync_state(raw: RawSyncState) -> CacheResult<MailSyncState> {
         (None, None) => None,
         _ => return Err(CacheFailure::InvalidData),
     };
+    if raw.full_sync_generation < 0 {
+        return Err(CacheFailure::InvalidData);
+    }
+    let full_sync_generation = match raw.full_sync_active {
+        0 => None,
+        1 if raw.full_sync_generation > 0 => {
+            Some(u64::try_from(raw.full_sync_generation).map_err(|_| CacheFailure::InvalidData)?)
+        }
+        _ => return Err(CacheFailure::InvalidData),
+    };
     MailSyncState::from_checkpoint(
         cutoff,
         raw.delta_link.map(MessageDeltaLink::from_opaque),
         raw.next_link.map(MessageDeltaLink::from_opaque),
         last_synchronized_at,
+        full_sync_generation,
     )
     .map_err(|_| CacheFailure::InvalidData)
 }
@@ -746,13 +793,38 @@ fn apply_delta_change(
     connection: &Connection,
     folder: &FolderReference,
     cutoff: SystemTime,
+    full_sync_generation: Option<i64>,
     change: MessageDeltaChange,
 ) -> CacheResult<()> {
     match change {
-        MessageDeltaChange::Removed { id } => remove_message(connection, folder, &id),
-        MessageDeltaChange::Upsert { id, patch } => {
-            apply_message_patch(connection, folder, cutoff, id, patch)
+        MessageDeltaChange::Removed { id } => {
+            remove_or_defer_message(connection, folder, &id, full_sync_generation)
         }
+        MessageDeltaChange::Upsert { id, patch } => {
+            apply_message_patch(connection, folder, cutoff, full_sync_generation, id, patch)
+        }
+    }
+}
+
+fn remove_or_defer_message(
+    connection: &Connection,
+    folder: &FolderReference,
+    message_id: &MessageId,
+    full_sync_generation: Option<i64>,
+) -> CacheResult<()> {
+    if full_sync_generation.is_some() {
+        connection.execute(
+            "UPDATE mail_messages SET full_sync_generation = NULL
+             WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+            params![
+                folder.account_id().as_str(),
+                folder.folder_id().as_str(),
+                message_id.as_str()
+            ],
+        )?;
+        Ok(())
+    } else {
+        remove_message(connection, folder, message_id)
     }
 }
 
@@ -760,6 +832,7 @@ fn apply_message_patch(
     connection: &Connection,
     folder: &FolderReference,
     cutoff: SystemTime,
+    full_sync_generation: Option<i64>,
     id: MessageId,
     patch: einfach_mail_domain::MessageMetadataPatch,
 ) -> CacheResult<()> {
@@ -768,15 +841,15 @@ fn apply_message_patch(
         if let Some(message) = patch.into_complete_message(folder.clone(), id)
             && message.metadata().received_at() >= &cutoff
         {
-            return store_message_metadata(connection, &message);
+            return store_message_metadata(connection, &message, full_sync_generation);
         }
         return Ok(());
     };
     message.apply_patch(patch);
     if message.metadata().received_at() < &cutoff {
-        return remove_message(connection, folder, message.id());
+        return remove_or_defer_message(connection, folder, message.id(), full_sync_generation);
     }
-    store_message_metadata(connection, message)
+    store_message_metadata(connection, message, full_sync_generation)
 }
 
 fn read_cached_metadata(
@@ -802,7 +875,11 @@ fn read_cached_metadata(
     raw.map(|raw| decode_message(folder, raw)).transpose()
 }
 
-fn store_message_metadata(connection: &Connection, message: &MailMessage) -> CacheResult<()> {
+fn store_message_metadata(
+    connection: &Connection,
+    message: &MailMessage,
+    full_sync_generation: Option<i64>,
+) -> CacheResult<()> {
     let metadata = message.metadata();
     let (from_name, from_address) = mailbox_fields(metadata.origin().from_mailbox());
     let (sender_name, sender_address) = mailbox_fields(metadata.origin().sender());
@@ -812,8 +889,8 @@ fn store_message_metadata(connection: &Connection, message: &MailMessage) -> Cac
         "INSERT INTO mail_messages (
             account_id, folder_id, message_id, subject,
             from_display_name, from_address, sender_display_name, sender_address,
-            received_seconds, received_nanoseconds, is_read
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            received_seconds, received_nanoseconds, is_read, full_sync_generation
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT (account_id, folder_id, message_id) DO UPDATE SET
             subject = excluded.subject,
             from_display_name = excluded.from_display_name,
@@ -822,7 +899,8 @@ fn store_message_metadata(connection: &Connection, message: &MailMessage) -> Cac
             sender_address = excluded.sender_address,
             received_seconds = excluded.received_seconds,
             received_nanoseconds = excluded.received_nanoseconds,
-            is_read = excluded.is_read",
+            is_read = excluded.is_read,
+            full_sync_generation = excluded.full_sync_generation",
         params![
             message.folder().account_id().as_str(),
             message.folder().folder_id().as_str(),
@@ -834,7 +912,8 @@ fn store_message_metadata(connection: &Connection, message: &MailMessage) -> Cac
             sender_address,
             received_seconds,
             received_nanoseconds,
-            matches!(metadata.read_state(), ReadState::Read)
+            matches!(metadata.read_state(), ReadState::Read),
+            full_sync_generation
         ],
     )?;
     Ok(())
@@ -863,6 +942,85 @@ fn remove_message(
     Ok(())
 }
 
+fn begin_full_resync_transaction(
+    connection: &mut Connection,
+    folder: &FolderReference,
+    reset_link: &str,
+) -> CacheResult<MailSyncState> {
+    let transaction = connection.transaction()?;
+    let generation = transaction
+        .query_row(
+            "SELECT full_sync_generation FROM mail_sync_state
+             WHERE account_id = ?1 AND folder_id = ?2",
+            params![folder.account_id().as_str(), folder.folder_id().as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or(CacheFailure::InvalidData)?
+        .checked_add(1)
+        .filter(|generation| *generation > 0)
+        .ok_or(CacheFailure::InvalidData)?;
+    let updated_rows = transaction.execute(
+        "UPDATE mail_sync_state
+         SET full_sync_generation = ?3, full_sync_active = 1, next_link = ?4
+         WHERE account_id = ?1 AND folder_id = ?2",
+        params![
+            folder.account_id().as_str(),
+            folder.folder_id().as_str(),
+            generation,
+            reset_link
+        ],
+    )?;
+    if updated_rows != 1 {
+        return Err(CacheFailure::InvalidData);
+    }
+    transaction.commit()?;
+    read_sync_state(connection, folder)?.ok_or(CacheFailure::InvalidData)
+}
+
+fn active_full_sync_generation(
+    transaction: &Transaction<'_>,
+    folder: &FolderReference,
+) -> CacheResult<Option<i64>> {
+    let (active, generation) = transaction.query_row(
+        "SELECT full_sync_active, full_sync_generation FROM mail_sync_state
+         WHERE account_id = ?1 AND folder_id = ?2",
+        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    match (active, generation) {
+        (0, generation) if generation >= 0 => Ok(None),
+        (1, generation) if generation > 0 => Ok(Some(generation)),
+        _ => Err(CacheFailure::InvalidData),
+    }
+}
+
+fn reconcile_full_sync(
+    transaction: &Transaction<'_>,
+    folder: &FolderReference,
+    generation: i64,
+) -> CacheResult<()> {
+    transaction.execute(
+        "DELETE FROM mail_messages
+         WHERE account_id = ?1 AND folder_id = ?2 AND full_sync_generation IS NOT ?3",
+        params![
+            folder.account_id().as_str(),
+            folder.folder_id().as_str(),
+            generation
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE mail_messages SET full_sync_generation = NULL
+         WHERE account_id = ?1 AND folder_id = ?2 AND full_sync_generation = ?3",
+        params![
+            folder.account_id().as_str(),
+            folder.folder_id().as_str(),
+            generation
+        ],
+    )?;
+    Ok(())
+}
+
 fn update_sync_progress(
     transaction: &Transaction<'_>,
     folder: &FolderReference,
@@ -882,10 +1040,14 @@ fn update_sync_progress(
             )?;
         }
         MessageDeltaProgress::Complete(link) => {
+            if let Some(generation) = active_full_sync_generation(transaction, folder)? {
+                reconcile_full_sync(transaction, folder, generation)?;
+            }
             transaction.execute(
                 "UPDATE mail_sync_state
                  SET delta_link = ?3, next_link = NULL,
-                     last_sync_seconds = ?4, last_sync_nanoseconds = ?5
+                     last_sync_seconds = ?4, last_sync_nanoseconds = ?5,
+                     full_sync_active = 0
                  WHERE account_id = ?1 AND folder_id = ?2",
                 params![
                     folder.account_id().as_str(),

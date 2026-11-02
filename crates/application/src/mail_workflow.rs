@@ -15,12 +15,13 @@ use thiserror::Error;
 
 use crate::{
     MailCache, MailCacheError, MailCacheFactory, MailOperationError, MailProvider, MailSyncState,
-    MessageBodyForDisplay, prepare_message_body_for_display,
+    MessageBodyForDisplay, MessageDeltaResponse, prepare_message_body_for_display,
 };
 
 const INITIAL_SYNC_WINDOW: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const MAX_PAGES_PER_FOLDER_ROUND: usize = 1_000;
 const MAX_SYNC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DELTA_RESETS_PER_ATTEMPT: usize = 1;
 
 /// A user-safe category for a mail workflow failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -37,6 +38,9 @@ pub enum MailWorkflowError {
     /// The provider repeated a page link before completing the current round.
     #[error("the mail service repeated a synchronization cursor")]
     RepeatedCursor,
+    /// The provider repeatedly invalidated the folder's delta state.
+    #[error("the mail service repeatedly reset the folder synchronization state")]
+    RepeatedDeltaReset,
     /// The current round reached its page limit and remains resumable.
     #[error("the folder synchronization reached its page limit")]
     PageLimitExceeded,
@@ -97,12 +101,24 @@ pub struct MailSyncReport {
     page_count: usize,
 }
 
+/// Progress emitted when synchronization starts replacing a folder snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailSyncProgress {
+    /// Graph invalidated the saved cursor and a fresh folder scan has started.
+    Rebuilding,
+}
+
 /// A boxed future returned by a type-erased mail session.
 pub type MailSessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Provides mail workflows to consumers that do not own provider or cache types.
 pub trait MailSession: Send + Sync {
     /// Synchronizes visible folders and commits each page with its checkpoint.
+    /// Calls `progress_handler` after a replacement snapshot checkpoint is saved.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `progress_handler` panics.
     ///
     /// # Errors
     ///
@@ -111,6 +127,7 @@ pub trait MailSession: Send + Sync {
         &'a self,
         account_id: &'a AccountId,
         sync_started_at: SystemTime,
+        progress_handler: &'a (dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> MailSessionFuture<'a, Result<MailSyncReport, MailWorkflowError>>;
 
     /// Returns the visible folders saved for `account_id`.
@@ -243,6 +260,11 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// `sync_started_at` supplies a deterministic clock value for the initial
     /// 90-day cutoff. Existing folder scopes retain their stored cutoff.
+    /// The handler receives `Rebuilding` after a replacement checkpoint is saved.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `progress_handler` panics.
     ///
     /// # Errors
     ///
@@ -251,6 +273,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         &self,
         account_id: &AccountId,
         sync_started_at: SystemTime,
+        progress_handler: &(dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> Result<MailSyncReport, MailWorkflowError> {
         let initial_cutoff = sync_started_at
             .checked_sub(INITIAL_SYNC_WINDOW)
@@ -262,7 +285,9 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         self.cache
             .replace_folders(account_id, folders.clone())
             .await?;
-        let page_count = self.sync_folders(&folders, initial_cutoff).await?;
+        let page_count = self
+            .sync_folders(&folders, initial_cutoff, progress_handler)
+            .await?;
         Ok(MailSyncReport {
             folder_count: folders.len(),
             page_count,
@@ -273,11 +298,14 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         &self,
         folders: &[MailFolder],
         initial_cutoff: SystemTime,
+        progress_handler: &(dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> Result<usize, MailWorkflowError> {
         let mut page_count = 0;
         for folder in folders {
             let _reservation = self.reserve_folder(folder.reference())?;
-            page_count += self.sync_folder(folder.reference(), initial_cutoff).await?;
+            page_count += self
+                .sync_folder(folder.reference(), initial_cutoff, progress_handler)
+                .await?;
         }
         Ok(page_count)
     }
@@ -286,38 +314,55 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         &self,
         folder: &FolderReference,
         initial_cutoff: SystemTime,
+        progress_handler: &(dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> Result<usize, MailWorkflowError> {
         let mut state = self.cache.ensure_sync_state(folder, initial_cutoff).await?;
         let mut seen_requests = HashSet::new();
         let mut page_count = 0;
+        let mut round_page_count = 0;
         let mut response_bytes = 0_usize;
+        let mut reset_count = 0;
         loop {
             let request = state.request();
             let request_cursor = request_cursor(&request);
             if !seen_requests.insert(request_cursor) {
                 return Err(MailWorkflowError::RepeatedCursor);
             }
-            let response = self.provider.message_delta_page(folder, request).await?;
-            let (page, page_bytes) = response.into_parts();
-            response_bytes = response_bytes
-                .checked_add(page_bytes)
-                .filter(|total| *total <= MAX_SYNC_RESPONSE_BYTES)
-                .ok_or(MailWorkflowError::ResponseLimitExceeded)?;
-            if let MessageDeltaProgress::Next(link) = page.progress()
-                && seen_requests.contains(&Some(link.clone()))
-            {
-                return Err(MailWorkflowError::RepeatedCursor);
-            }
-            state = self
-                .cache
-                .commit_delta_page(folder, page, SystemTime::now())
-                .await?;
-            page_count += 1;
-            if state.next_link().is_none() {
-                return Ok(page_count);
-            }
-            if page_count == MAX_PAGES_PER_FOLDER_ROUND {
-                return Err(MailWorkflowError::PageLimitExceeded);
+            match self.provider.message_delta_page(folder, request).await? {
+                MessageDeltaResponse::Reset(reset_link) => {
+                    state = self.cache.begin_full_resync(folder, reset_link).await?;
+                    progress_handler(MailSyncProgress::Rebuilding);
+                    if reset_count == MAX_DELTA_RESETS_PER_ATTEMPT {
+                        return Err(MailWorkflowError::RepeatedDeltaReset);
+                    }
+                    reset_count += 1;
+                    seen_requests.clear();
+                    round_page_count = 0;
+                }
+                MessageDeltaResponse::Page(response) => {
+                    let (page, page_bytes) = response.into_parts();
+                    response_bytes = response_bytes
+                        .checked_add(page_bytes)
+                        .filter(|total| *total <= MAX_SYNC_RESPONSE_BYTES)
+                        .ok_or(MailWorkflowError::ResponseLimitExceeded)?;
+                    if let MessageDeltaProgress::Next(link) = page.progress()
+                        && seen_requests.contains(&Some(link.clone()))
+                    {
+                        return Err(MailWorkflowError::RepeatedCursor);
+                    }
+                    state = self
+                        .cache
+                        .commit_delta_page(folder, page, SystemTime::now())
+                        .await?;
+                    page_count += 1;
+                    round_page_count += 1;
+                    if state.next_link().is_none() {
+                        return Ok(page_count);
+                    }
+                    if round_page_count == MAX_PAGES_PER_FOLDER_ROUND {
+                        return Err(MailWorkflowError::PageLimitExceeded);
+                    }
+                }
             }
         }
     }
@@ -425,11 +470,13 @@ impl<P: MailProvider, C: MailCache> MailSession for MailWorkflow<P, C> {
         &'a self,
         account_id: &'a AccountId,
         sync_started_at: SystemTime,
+        progress_handler: &'a (dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> MailSessionFuture<'a, Result<MailSyncReport, MailWorkflowError>> {
         Box::pin(MailWorkflow::synchronize_account(
             self,
             account_id,
             sync_started_at,
+            progress_handler,
         ))
     }
 

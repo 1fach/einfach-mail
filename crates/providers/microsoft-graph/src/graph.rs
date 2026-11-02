@@ -13,9 +13,11 @@ use url::Url;
 use crate::{
     error::GraphError,
     graph_url::{GraphAuthority, GraphUrl},
-    transport::{GraphOperation, GraphTransportHandle},
+    transport::{GraphOperation, GraphResponse, GraphTransportHandle},
 };
-use einfach_mail_application::{MessageDeltaPageResponse, MessageDeltaRequest};
+use einfach_mail_application::{
+    MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
+};
 use einfach_mail_domain::{
     AccountId, AccountProfile, FolderId, FolderReference, MailFolder, MailMessage, Mailbox,
     MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
@@ -107,17 +109,26 @@ impl GraphApi {
         folder: &FolderReference,
         request: MessageDeltaRequest,
         token: std::sync::Arc<AccessToken>,
-    ) -> Result<MessageDeltaPageResponse, GraphError> {
+    ) -> Result<MessageDeltaResponse, GraphError> {
         let request_url = match request {
             MessageDeltaRequest::Initial => self
                 .authority
                 .folder_message_delta_path(folder.folder_id().as_str())?,
             MessageDeltaRequest::Continue(link) => self.authority.opaque_link(link.as_str())?,
         };
-        let response = self
-            .transport
-            .get(GraphOperation::MessageDelta, request_url, token)
-            .await?;
+        let response = self.transport.get_message_delta(request_url, token).await?;
+        let response = match response {
+            GraphResponse::Body(body) => body,
+            GraphResponse::MessageDeltaReset(Some(location)) => {
+                let reset_link = self
+                    .authority
+                    .message_delta_reset_link(folder.folder_id().as_str(), &location)?;
+                return Ok(MessageDeltaResponse::Reset(MessageDeltaLink::from_opaque(
+                    reset_link.as_str().to_owned(),
+                )));
+            }
+            GraphResponse::MessageDeltaReset(None) => return Err(GraphError::InvalidResponse),
+        };
         let response_bytes = response.len();
         let page = serde_json::from_slice::<GraphDeltaPage<WireMessageChange>>(&response)
             .map_err(|_| GraphError::InvalidResponse)?;
@@ -127,10 +138,10 @@ impl GraphApi {
             .into_iter()
             .map(MessageDeltaChange::try_from)
             .collect::<Result<_, _>>()?;
-        Ok(MessageDeltaPageResponse::new(
+        Ok(MessageDeltaResponse::Page(MessageDeltaPageResponse::new(
             MessageDeltaPage::new(changes, progress),
             response_bytes,
-        ))
+        )))
     }
 
     pub(super) async fn fetch_message_body(

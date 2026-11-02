@@ -82,6 +82,15 @@ impl MessageDeltaPageResponse {
     }
 }
 
+/// A message delta page or a provider-requested full resynchronization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MessageDeltaResponse {
+    /// Contains a page and its received response-body size.
+    Page(MessageDeltaPageResponse),
+    /// Starts a replacement snapshot from this provider-issued opaque link.
+    Reset(MessageDeltaLink),
+}
+
 /// Mail operations the application needs from a connected-account provider.
 pub trait MailProvider: Send + Sync {
     /// Lists the provider's folders for `account_id`.
@@ -117,13 +126,14 @@ pub trait MailProvider: Send + Sync {
         folder: &FolderReference,
     ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_;
 
-    /// Loads one page of changes for `folder` without traversing its links.
+    /// Loads one page of changes for `folder` or reports that its cursor expired.
     ///
     /// `request` is either the initial query or an opaque link returned by a
     /// previous page. The provider validates resumed links before it attaches
     /// the signed-in user's token.
-    /// The response includes the raw body size so the application can bound a
-    /// multi-page sync attempt.
+    /// The provider returns a reset link only after validating the provider's
+    /// reset response for this folder. A page includes its raw body size so the
+    /// application can bound a multi-page sync attempt.
     ///
     /// # Errors
     ///
@@ -133,7 +143,7 @@ pub trait MailProvider: Send + Sync {
         &self,
         folder: &FolderReference,
         request: MessageDeltaRequest,
-    ) -> impl Future<Output = Result<MessageDeltaPageResponse, MailOperationError>> + Send + '_;
+    ) -> impl Future<Output = Result<MessageDeltaResponse, MailOperationError>> + Send + '_;
 
     /// Fetches a message body after the application confirms it is cached in `folder`.
     ///

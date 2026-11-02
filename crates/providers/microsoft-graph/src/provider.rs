@@ -24,7 +24,7 @@ use crate::{
 };
 use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountProvider, MailOperationError,
-    MailProvider, MessageDeltaPageResponse, MessageDeltaRequest,
+    MailProvider, MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, FolderReference, MailFolder, MailMessage, MessageBody, MessageId,
@@ -261,8 +261,7 @@ impl MailProvider for MicrosoftGraphProvider {
         &self,
         folder: &FolderReference,
         request: MessageDeltaRequest,
-    ) -> impl Future<Output = Result<MessageDeltaPageResponse, MailOperationError>> + Send + '_
-    {
+    ) -> impl Future<Output = Result<MessageDeltaResponse, MailOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let folder = folder.clone();
         worker::run(move |_cancellation: CancellationToken| async move {
@@ -466,7 +465,7 @@ mod tests {
     };
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
-        MailOperationError, MailProvider, MessageDeltaRequest,
+        MailOperationError, MailProvider, MessageDeltaRequest, MessageDeltaResponse,
     };
     use einfach_mail_domain::{AccountId, FolderReference, MessageBodyType, MessageDeltaProgress};
 
@@ -907,10 +906,13 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].folder(), &folder);
 
-        let page = provider
+        let response = provider
             .message_delta_page(&folder, MessageDeltaRequest::Initial)
             .await
             .expect("provider loads one synthetic delta page");
+        let MessageDeltaResponse::Page(page) = response else {
+            panic!("synthetic provider response is a page");
+        };
         assert!(page.response_bytes() > 0);
         assert!(matches!(
             page.into_parts().0.progress(),

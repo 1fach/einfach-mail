@@ -93,6 +93,36 @@ impl GraphAuthority {
         Ok(GraphUrl(link.to_owned()))
     }
 
+    pub(super) fn message_delta_reset_link(
+        &self,
+        folder_id: &str,
+        location: &str,
+    ) -> Result<GraphUrl, GraphError> {
+        let reset_link = self.opaque_link(location)?;
+        let expected_path = self.folder_message_delta_path(folder_id)?;
+        let reset_url = Url::parse(reset_link.as_str()).map_err(|_| GraphError::UnsafeLink)?;
+        let expected_url =
+            Url::parse(expected_path.as_str()).map_err(|_| GraphError::UnsafeLink)?;
+        let mut has_empty_delta_token = false;
+        let mut has_message_select = false;
+        for (name, value) in reset_url.query_pairs() {
+            match name.as_ref() {
+                "$deltatoken" if !has_empty_delta_token && value.is_empty() => {
+                    has_empty_delta_token = true;
+                }
+                "$select" if !has_message_select && value == MESSAGE_SELECT => {
+                    has_message_select = true;
+                }
+                _ => return Err(GraphError::UnsafeLink),
+            }
+        }
+        if reset_url.path() != expected_url.path() || !has_empty_delta_token || !has_message_select
+        {
+            return Err(GraphError::UnsafeLink);
+        }
+        Ok(reset_link)
+    }
+
     fn folder_path(&self, folder_id: &str, tail: &str) -> Result<Url, GraphError> {
         if folder_id.is_empty() {
             return Err(GraphError::InvalidRecord);
@@ -193,7 +223,7 @@ impl GraphUrl {
 mod tests {
     use url::Url;
 
-    use super::GraphAuthority;
+    use super::{GraphAuthority, MESSAGE_SELECT};
     use crate::error::GraphError;
 
     fn authority() -> GraphAuthority {
@@ -279,5 +309,35 @@ mod tests {
             .find(|(name, _)| name == "$select")
             .map(|(_, value)| value.into_owned());
         assert_eq!(body_query.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn accepts_only_reset_links_for_the_requested_folder_delta_path() {
+        let authority = authority();
+        let link = format!(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=&$select={MESSAGE_SELECT}"
+        );
+
+        assert_eq!(
+            authority
+                .message_delta_reset_link("folder", &link)
+                .expect("reset link matches the requested folder query")
+                .as_str(),
+            link
+        );
+        for link in [
+            "https://example.test/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=&$select=id,subject,from,sender,receivedDateTime,isRead",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/other/messages/delta?$deltatoken=&$select=id,subject,from,sender,receivedDateTime,isRead",
+            "https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=&$select=id,subject,from,sender,receivedDateTime,isRead",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=expired&$select=id,subject,from,sender,receivedDateTime,isRead",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=&$deltatoken=&$select=id,subject,from,sender,receivedDateTime,isRead",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=&$select=id",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=&$select=id,subject,from,sender,receivedDateTime,isRead&$top=50",
+        ] {
+            assert_eq!(
+                authority.message_delta_reset_link("folder", link).err(),
+                Some(GraphError::UnsafeLink)
+            );
+        }
     }
 }

@@ -45,6 +45,7 @@ The dependency direction is desktop UI → application → domain, with Graph an
 - Start each folder with an unfiltered message-delta round, follow every page, then apply the fixed 90-day cutoff locally. This avoids Graph's 5,000-result cap for filtered delta responses.
 - Follow `@odata.nextLink` and `@odata.deltaLink` as opaque values. Before attaching a bearer token, require HTTPS and the configured Graph authority. Disable redirects for authorized requests.
 - Commit each page and its restart checkpoint atomically. Keep each attempt within 1,000 pages and 64 MiB of response data per folder.
+- If Graph returns `410 Gone` for a message delta request, validate its reset URL and start a durable replacement generation. Keep the old messages and bodies until the final replacement page commits. See [ADR 0032](../decisions/0032-recover-expired-message-delta-cursors.md).
 - Apply removals and sparse metadata patches only to messages already in the local scope. Preserve fields omitted from a sparse patch and distinguish explicit nulls for nullable fields.
 - Fetch bodies only after the user opens a message. Do not download attachments in M2.
 - Keep M2 read-only: the app does not mark messages read, move, archive, flag, delete, or send them on the server.

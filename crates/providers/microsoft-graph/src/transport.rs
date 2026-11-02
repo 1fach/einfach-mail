@@ -8,7 +8,7 @@ use std::{
 use huskarl::token::AccessToken;
 use reqwest::{
     Client, Response, StatusCode,
-    header::{AUTHORIZATION, HeaderValue, RETRY_AFTER},
+    header::{AUTHORIZATION, HeaderValue, LOCATION, RETRY_AFTER},
 };
 use tokio::{
     runtime::{Builder, Runtime},
@@ -56,7 +56,31 @@ struct GraphRequest {
 
 struct GetCommand {
     request: GraphRequest,
-    reply: oneshot::Sender<Result<Vec<u8>, GraphError>>,
+    reply: oneshot::Sender<Result<GraphResponse, GraphError>>,
+}
+
+#[derive(Eq, PartialEq)]
+pub(super) enum GraphResponse {
+    Body(Vec<u8>),
+    MessageDeltaReset(Option<String>),
+}
+
+impl std::fmt::Debug for GraphResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Body(_) => formatter.write_str("Body(<redacted>)"),
+            Self::MessageDeltaReset(_) => formatter.write_str("MessageDeltaReset(<redacted>)"),
+        }
+    }
+}
+
+impl GraphResponse {
+    fn into_body(self) -> Result<Vec<u8>, GraphError> {
+        match self {
+            Self::Body(body) => Ok(body),
+            Self::MessageDeltaReset(_) => Err(GraphError::InvalidResponse),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -71,6 +95,23 @@ impl GraphTransportHandle {
         url: GraphUrl,
         token: Arc<AccessToken>,
     ) -> Result<Vec<u8>, GraphError> {
+        self.request(operation, url, token).await?.into_body()
+    }
+
+    pub(super) async fn get_message_delta(
+        &self,
+        url: GraphUrl,
+        token: Arc<AccessToken>,
+    ) -> Result<GraphResponse, GraphError> {
+        self.request(GraphOperation::MessageDelta, url, token).await
+    }
+
+    async fn request(
+        &self,
+        operation: GraphOperation,
+        url: GraphUrl,
+        token: Arc<AccessToken>,
+    ) -> Result<GraphResponse, GraphError> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(GetCommand {
@@ -282,8 +323,8 @@ fn spawn_request(tasks: &mut JoinSet<()>, client: Client, command: GetCommand) {
 async fn request_with_retry(
     client: &Client,
     request: &GraphRequest,
-    reply: &mut oneshot::Sender<Result<Vec<u8>, GraphError>>,
-) -> Option<Result<Vec<u8>, GraphError>> {
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
+) -> Option<Result<GraphResponse, GraphError>> {
     let mut retry_index = 0;
     loop {
         let response = match send_once(client, request, reply).await? {
@@ -300,7 +341,7 @@ async fn request_with_retry(
                 RetryDecision::Stop(error) => return Some(Err(error)),
             }
         } else {
-            return response_result(response, reply).await;
+            return response_result(request.operation, response, reply).await;
         }
     }
 }
@@ -336,16 +377,25 @@ fn retry_decision_for(retry_after: RetryAfter, attempt: u32) -> RetryDecision {
 }
 
 async fn wait_before_retry(
-    reply: &mut oneshot::Sender<Result<Vec<u8>, GraphError>>,
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
     delay: Duration,
 ) -> Option<()> {
     while_interested(reply, tokio::time::sleep(delay)).await
 }
 
 async fn response_result(
+    operation: GraphOperation,
     response: Response,
-    reply: &mut oneshot::Sender<Result<Vec<u8>, GraphError>>,
-) -> Option<Result<Vec<u8>, GraphError>> {
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
+) -> Option<Result<GraphResponse, GraphError>> {
+    if matches!(operation, GraphOperation::MessageDelta) && response.status() == StatusCode::GONE {
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        return Some(Ok(GraphResponse::MessageDeltaReset(location)));
+    }
     match response.status() {
         StatusCode::UNAUTHORIZED => Some(Err(GraphError::AccessTokenRejected)),
         StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
@@ -356,8 +406,8 @@ async fn response_result(
 
 async fn read_limited_body(
     mut response: Response,
-    reply: &mut oneshot::Sender<Result<Vec<u8>, GraphError>>,
-) -> Option<Result<Vec<u8>, GraphError>> {
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
+) -> Option<Result<GraphResponse, GraphError>> {
     if response_body_is_too_large(&response) {
         return Some(Err(GraphError::ResponseTooLarge));
     }
@@ -368,7 +418,7 @@ async fn read_limited_body(
                 Ok(()) => {}
                 Err(error) => return Some(Err(error)),
             },
-            Ok(None) => return Some(Ok(body)),
+            Ok(None) => return Some(Ok(GraphResponse::Body(body))),
             Err(_) => return Some(Err(GraphError::Transport)),
         }
     }
@@ -391,7 +441,7 @@ fn append_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), GraphEr
 async fn send_once(
     client: &Client,
     request: &GraphRequest,
-    reply: &mut oneshot::Sender<Result<Vec<u8>, GraphError>>,
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
 ) -> Option<Result<Response, GraphError>> {
     let authorization = match authorization_header(&request.token) {
         Ok(header) => header,
@@ -418,7 +468,7 @@ fn authorization_header(token: &AccessToken) -> Result<HeaderValue, GraphError> 
 }
 
 async fn while_interested<T, F>(
-    reply: &mut oneshot::Sender<Result<Vec<u8>, GraphError>>,
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
     work: F,
 ) -> Option<T>
 where
@@ -479,8 +529,9 @@ mod tests {
     use url::Url;
 
     use super::{
-        GraphOperation, GraphTransport, RetryAfter, RetryDecision, append_response_chunk,
-        authorization_header, fallback_delay, parse_retry_after, retry_decision_for,
+        GraphOperation, GraphResponse, GraphTransport, RetryAfter, RetryDecision,
+        append_response_chunk, authorization_header, fallback_delay, parse_retry_after,
+        retry_decision_for,
     };
     use crate::{error::GraphError, graph_url::GraphUrl};
 
@@ -542,6 +593,42 @@ mod tests {
 
         assert_eq!(result, Err(GraphError::ResponseTooLarge));
         response.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn returns_delta_reset_location_only_for_message_delta_requests() {
+        let server = MockServer::start_async().await;
+        let location = format!(
+            "{}/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=",
+            server.base_url()
+        );
+        let response = server
+            .mock_async(move |when, then| {
+                when.method(GET).path("/delta");
+                then.status(410).header("Location", location);
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+        let handle = transport.handle();
+        let url = graph_url(&server.url("/delta"));
+
+        let reset = handle
+            .get_message_delta(url.clone(), synthetic_access_token())
+            .await
+            .expect("message delta reset is returned to the Graph adapter");
+        let other_operation = handle
+            .get(GraphOperation::Profile, url, synthetic_access_token())
+            .await;
+
+        assert_eq!(
+            reset,
+            GraphResponse::MessageDeltaReset(Some(format!(
+                "{}/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=",
+                server.base_url()
+            )))
+        );
+        assert_eq!(other_operation, Err(GraphError::Transport));
+        response.assert_calls_async(2).await;
     }
 
     #[test]

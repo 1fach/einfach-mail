@@ -36,6 +36,7 @@ pub struct MailSyncState {
     delta_link: Option<MessageDeltaLink>,
     next_link: Option<MessageDeltaLink>,
     last_synchronized_at: Option<SystemTime>,
+    full_sync_generation: Option<u64>,
 }
 
 impl MailSyncState {
@@ -47,6 +48,7 @@ impl MailSyncState {
             delta_link: None,
             next_link: None,
             last_synchronized_at: None,
+            full_sync_generation: None,
         }
     }
 
@@ -54,15 +56,19 @@ impl MailSyncState {
     ///
     /// # Errors
     ///
-    /// Returns [`MailCacheError::InvalidData`] when a completion time exists
-    /// without a completed delta link.
+    /// Returns [`MailCacheError::InvalidData`] when cursor, completion-time,
+    /// and replacement-generation values are inconsistent.
     pub fn from_checkpoint(
         cutoff: SystemTime,
         delta_link: Option<MessageDeltaLink>,
         next_link: Option<MessageDeltaLink>,
         last_synchronized_at: Option<SystemTime>,
+        full_sync_generation: Option<u64>,
     ) -> Result<Self, MailCacheError> {
-        if last_synchronized_at.is_some() && delta_link.is_none() {
+        if (last_synchronized_at.is_some() && delta_link.is_none())
+            || full_sync_generation.is_some_and(|generation| generation == 0)
+            || (full_sync_generation.is_some() && next_link.is_none())
+        {
             return Err(MailCacheError::InvalidData);
         }
         Ok(Self {
@@ -70,6 +76,7 @@ impl MailSyncState {
             delta_link,
             next_link,
             last_synchronized_at,
+            full_sync_generation,
         })
     }
 
@@ -95,6 +102,18 @@ impl MailSyncState {
     #[must_use]
     pub fn last_synchronized_at(&self) -> Option<SystemTime> {
         self.last_synchronized_at
+    }
+
+    /// Returns whether the folder is replacing its cached message snapshot.
+    #[must_use]
+    pub fn is_rebuilding(&self) -> bool {
+        self.full_sync_generation.is_some()
+    }
+
+    /// Returns the active replacement snapshot generation, if one exists.
+    #[must_use]
+    pub fn full_sync_generation(&self) -> Option<u64> {
+        self.full_sync_generation
     }
 
     /// Selects the next request while preferring an interrupted round checkpoint.
@@ -184,6 +203,22 @@ pub trait MailCache: Send + Sync {
         folder: &FolderReference,
         page: einfach_mail_domain::MessageDeltaPage,
         completed_at: SystemTime,
+    ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_;
+
+    /// Saves a reset link and starts a replacement snapshot generation.
+    ///
+    /// Existing messages and bodies remain available until the final replacement
+    /// page commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::InvalidData`] for a missing folder or exhausted generation,
+    /// or [`MailCacheError::Unavailable`] when the transaction fails.
+    fn begin_full_resync(
+        &self,
+        folder: &FolderReference,
+        reset_link: MessageDeltaLink,
     ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_;
 
     /// Returns all visible folders saved for `account_id`.
