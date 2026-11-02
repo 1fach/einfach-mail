@@ -1,20 +1,22 @@
 # Einfach Mail
 
-Einfach Mail is a Rust desktop mail and calendar client with Microsoft 365 integration. The native UI uses GPUI Kit. Linux is the sole development and validation target for the current milestones. Windows and macOS support follow later. Account sign-in, mail, calendar, and synchronization are not implemented yet.
+Einfach Mail is a Rust desktop mail and calendar client with Microsoft 365 integration. The native UI uses GPUI Kit. Linux is the sole development and validation target for the current milestones. Windows and macOS support follow later. Linux account connection, identity display, permission renewal, and cancellation ordering are implemented with synthetic provider, workflow, and headless UI tests. Live Entra behavior remains unverified under [issue #3](https://github.com/1fach/einfach-mail/issues/3). Mail, calendar, and synchronization are not implemented in the M1 candidate.
 
 The first provider target is Exchange Online through Microsoft Graph. Exchange Server installed on premises is outside the first release scope. See the [product brief](docs/product/brief.md) and [Microsoft Graph research](docs/research/microsoft-graph.md).
 
-## Start the desktop shell
+## Run the Linux desktop app
 
 Install Rust stable with `rustfmt` and `clippy`. Einfach Mail's locked GPUI Kit dependency graph requires Rust 1.95 or newer; see the [MSRV evidence](docs/research/gpui-kit.md#minimum-rust-version). Install the Linux native build tools described in [development setup](docs/project/setup.md).
 
-Start the native desktop app from the repository root:
+Set `EINFACH_MAIL_ENTRA_CLIENT_ID` to the public client ID from an Entra app registration to enable sign-in. Then start the app from the repository root:
 
 ```sh
+export EINFACH_MAIL_ENTRA_CLIENT_ID='<public-app-client-guid>'
+export EINFACH_MAIL_ENTRA_CALLBACK_PORT='<registered-loopback-port>'
 cargo run --locked --package einfach-mail-desktop --bin einfach-mail
 ```
 
-`Cargo.lock` pins GPUI Kit and its transitive dependencies. Keep it under version control and do not edit it by hand. When intentionally changing dependencies, update and review the lockfile before committing it. The initial window is a native shell and does not connect to an account.
+`Cargo.lock` pins GPUI Kit and its transitive dependencies. Keep it under version control and do not edit it by hand. When intentionally changing dependencies, update and review the lockfile before committing it. The native window shows the account view. Set `EINFACH_MAIL_ENTRA_CLIENT_ID` to a public app registration ID to enable sign-in. See [development setup](docs/project/setup.md) for the limits.
 
 ## Check changes locally
 
@@ -33,8 +35,9 @@ CI runs the build, dependency, and test gates in [its Linux workflow](.github/wo
 ## Project map
 
 - `apps/desktop/` contains the GPUI application and native views.
-- `crates/domain/` currently contains account-scoped opaque identifier types. Mail, calendar, and account entities are not implemented yet.
-- `crates/application/` will hold user workflows and provider/storage ports.
+- `crates/domain/` contains provider-independent account profiles and account-scoped opaque identifiers. Mail and calendar entities are not implemented yet.
+- `crates/application/` contains the single-account workflow, provider port, and cancellation ordering across account credential commits. Mail and calendar workflows are not implemented yet.
+- `crates/providers/microsoft-graph/` contains Linux OAuth sign-in and permission renewal, Graph `/me` profile mapping, and Secret Service refresh-token storage. Mail and calendar Graph operations are not implemented yet.
 - `tools/storage-proof/` contains test-only SQLCipher and Linux Secret Service proofs; it exposes no application API.
 - `docs/product/` contains product scope.
 - `docs/architecture/` describes module ownership and data flow.

@@ -33,6 +33,7 @@ When a need comes up, first look for a maintained Rust library that fits it. For
 - Use the relevant pstack skill for design and investigation. Use `architect` for new boundaries, ownership, and data flow. Use `how` and `why` to inspect existing behavior and rationale. Use `blast-radius` for changes that cross callers, persistence, providers, or lifecycle boundaries. Apply the relevant `principle-*` skills when their design problem appears.
 - Run the `clean-code-guard` pass after code edits and when reviewing code, before presenting or committing the result.
 - Use `rust-best-practices` when writing or refactoring Rust and `rust-review` when reviewing Rust. Do not force unrelated skills onto a task.
+- Consult `rust-comments-rules` before deciding whether to add a Rust comment and whenever writing or editing one, including inline comments and Rustdoc.
 - Before GPUI framework, lifecycle, state, or component work, read `.agents/skills/gpui-kit/SKILL.md` and the relevant coding-guide sections. Before designing or changing visible UI, read `.agents/skills/gpui-kit-design-guides/SKILL.md` and its required design-guide sections.
 
 ## Work in small, reviewable changes

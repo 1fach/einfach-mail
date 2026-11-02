@@ -1,7 +1,8 @@
 [rules]
 einfach-mail-domain = []
-einfach-mail-application = ["einfach-mail-domain"]
-einfach-mail-desktop = ["einfach-mail-application"]
+einfach-mail-application = ["einfach-mail-domain", "tokio-util"]
+einfach-mail-microsoft-graph = ["einfach-mail-application", "einfach-mail-domain"]
+einfach-mail-desktop = ["einfach-mail-application", "einfach-mail-domain", "einfach-mail-microsoft-graph"]
 einfach-mail-storage-proof = []
 
 [options]
