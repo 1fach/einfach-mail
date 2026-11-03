@@ -45,6 +45,12 @@ These crates are transitive lockfile entries, not direct workspace dependencies.
 
 `cargo audit --db /tmp/m2-read-only-mail-rustsec-db --deny yanked` loaded 1,395 advisories and scanned 916 locked crate dependencies. It found no known vulnerable versions or yanked crates and reported the same eight upstream unmaintained transitive crates listed above. No advisory was ignored. The temporary advisory database is kept outside the repository and removed after the local review.
 
+### Yanked executor lockfile follow-up — 2026-11-03
+
+The first RustSec workflow run for PR #47 loaded 1,403 advisories and rejected the locked `async-executor` 1.14.0 under `cargo audit --deny yanked` ([run 41661798059](https://github.com/1fach/einfach-mail/actions/runs/41661798059)). The crates.io index marks 1.14.0 yanked. The upstream [`async-executor` changelog](https://github.com/smol-rs/async-executor/blob/master/CHANGELOG.md) says 1.14.1 fixes a use-after-free when a waker fires during `Executor::drop`, introduced in 1.14.0. The transitive paths include GPUI Kit, `smol`, and Linux `zbus` integrations. Update only the locked patch release to 1.14.1; do not replace or directly depend on the executor.
+
+The follow-up lockfile audit loaded the same 1,403 advisories and scanned 916 dependencies. It found no vulnerable or yanked versions and reported the eight unmaintained transitive crates already triaged above. `cargo deny check bans`, the Rust 1.95 workspace/all-target check, and the full workspace test suite passed locally with the new lockfile. The two Secret Service credential lifecycle tests remain ignored because they require a desktop Secret Service.
+
 ### Unmaintained warning triage — 2026-10-31
 
 All eight findings are RustSec `INFO Unmaintained` advisories. The audit found no known vulnerable versions. The Linux dependency paths were traced with `cargo tree`: the findings are owned by GPUI Kit, its rendering stack, and Linux desktop integration crates; Einfach Mail does not call these crates directly. `rustls-pemfile` is present through `gpui-pre-reqwest`, but it is not active in the default Linux tree. Offline Windows and macOS tree inspection could not finish because the corresponding platform crates are not cached.
