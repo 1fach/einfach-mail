@@ -32,6 +32,13 @@ struct FixtureProvider {
     requests: Arc<Mutex<Vec<MessageDeltaRequest>>>,
     body_result: Result<MessageBody, MailOperationError>,
     body_fetches: Arc<AtomicUsize>,
+    body_gate: Option<BodyFetchGate>,
+}
+
+#[derive(Clone)]
+struct BodyFetchGate {
+    started: smol::channel::Sender<()>,
+    release: smol::channel::Receiver<()>,
 }
 
 impl FixtureProvider {
@@ -48,6 +55,7 @@ impl FixtureProvider {
             requests: Arc::new(Mutex::new(Vec::new())),
             body_result,
             body_fetches: Arc::new(AtomicUsize::new(0)),
+            body_gate: None,
         }
     }
 }
@@ -109,11 +117,22 @@ impl MailProvider for FixtureProvider {
         let expected_account = self.account_id.clone();
         let result = self.body_result.clone();
         let fetches = Arc::clone(&self.body_fetches);
+        let body_gate = self.body_gate.clone();
         async move {
             if account_id != expected_account {
                 return Err(MailOperationError::AccountMismatch);
             }
             fetches.fetch_add(1, Ordering::Relaxed);
+            if let Some(gate) = body_gate {
+                gate.started
+                    .send(())
+                    .await
+                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
+                gate.release
+                    .recv()
+                    .await
+                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
+            }
             result
         }
     }
@@ -370,6 +389,133 @@ fn interrupted_sync_resumes_its_checkpoint_and_body_reopens_from_encrypted_cache
 }
 
 #[test]
+fn opening_a_missing_body_reserves_its_folder_against_delta_sync() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let folder_reference = cached_folder.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let old_link = MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/messages?$deltatoken=before-race".to_owned(),
+        );
+        let new_link = MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/messages?$deltatoken=after-race".to_owned(),
+        );
+        let initial_page = MessageDeltaPage::new(
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Before sync".to_owned(), started_at),
+            }],
+            MessageDeltaProgress::Complete(old_link),
+        );
+        let cache = open_cache(&directory, account.clone()).await;
+        let initial_workflow = MailWorkflow::new(
+            FixtureProvider::new(
+                account.clone(),
+                vec![cached_folder.clone()],
+                [Ok(page_response(initial_page))],
+                Err(MailOperationError::ServiceUnavailable),
+            ),
+            cache.clone(),
+        );
+        initial_workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("initial metadata sync completes");
+
+        let update_page = MessageDeltaPage::new(
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("After sync".to_owned(), started_at),
+            }],
+            MessageDeltaProgress::Complete(new_link),
+        );
+        let mut provider = FixtureProvider::new(
+            account.clone(),
+            vec![cached_folder],
+            [Ok(page_response(update_page))],
+            Ok(MessageBody::new(
+                MessageBodyType::Text,
+                "Synthetic fetched body".to_owned(),
+            )),
+        );
+        let (started_sender, started_receiver) = smol::channel::unbounded();
+        let (release_sender, release_receiver) = smol::channel::bounded(1);
+        provider.body_gate = Some(BodyFetchGate {
+            started: started_sender,
+            release: release_receiver,
+        });
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let executor = smol::Executor::new();
+        let open_workflow = Arc::clone(&workflow);
+        let open_folder = folder_reference.clone();
+        let open_message_id = message_id();
+
+        let (open_result, sync_result) = smol::block_on(executor.run(async {
+            let open_task = executor.spawn(async move {
+                open_workflow
+                    .open_message(&open_folder, &open_message_id)
+                    .await
+            });
+            started_receiver
+                .recv()
+                .await
+                .expect("body fetch reaches the synchronization gate");
+            let sync_result = workflow
+                .synchronize_account(
+                    &account,
+                    started_at + Duration::from_secs(1),
+                    &ignore_sync_progress,
+                )
+                .await;
+            release_sender
+                .send(())
+                .await
+                .expect("body fetch gate is still open");
+            (open_task.await, sync_result)
+        }));
+
+        let opened = open_result.expect("message opens after the body fetch is released");
+        assert!(!opened.loaded_from_cache());
+        assert_eq!(
+            sync_result,
+            Err(MailWorkflowError::SyncInProgress),
+            "a delta page cannot commit while a missing body is being fetched"
+        );
+        let (_, cached_body) = cache
+            .read_message(&folder_reference, &message_id())
+            .await
+            .expect("message remains readable after the first open")
+            .expect("message metadata remains cached");
+        assert_eq!(
+            cached_body.expect("fetched body is cached").content(),
+            "Synthetic fetched body"
+        );
+
+        workflow
+            .synchronize_account(
+                &account,
+                started_at + Duration::from_secs(2),
+                &ignore_sync_progress,
+            )
+            .await
+            .expect("delta sync completes after the open releases its reservation");
+        let (updated_message, cached_body) = cache
+            .read_message(&folder_reference, &message_id())
+            .await
+            .expect("updated message remains readable")
+            .expect("updated message remains cached");
+        assert_eq!(updated_message.metadata().subject(), Some("After sync"));
+        assert!(cached_body.is_none());
+
+        drop(workflow);
+        drop(initial_workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
 fn sync_keeps_all_matching_messages_across_the_five_thousand_message_boundary() {
     smol::block_on(async {
         const FIRST_PAGE_COUNT: usize = 5_000;
@@ -590,6 +736,14 @@ fn expired_delta_cursor_rebuild_keeps_cached_mail_until_the_snapshot_commits() {
             )
             .await
             .expect("body is cached before replacement starts");
+        cache
+            .store_message_body(
+                &folder_reference,
+                &stale_id,
+                MessageBody::new(MessageBodyType::Text, "Synthetic stale body".to_owned()),
+            )
+            .await
+            .expect("unseen body is cached before replacement starts");
         drop(baseline_workflow);
         cache.close_for_tests().await;
 
@@ -656,9 +810,20 @@ fn expired_delta_cursor_rebuild_keeps_cached_mail_until_the_snapshot_commits() {
             .await
             .expect("matching message remains readable")
             .expect("matching message remains cached");
+        assert!(
+            cached_body.is_none(),
+            "updated metadata invalidates its body"
+        );
+        let (_, stale_body) = cache
+            .read_message(&folder_reference, &stale_id)
+            .await
+            .expect("unseen message remains readable during replacement")
+            .expect("unseen message remains cached during replacement");
         assert_eq!(
-            cached_body.expect("cached body remains attached").content(),
-            "Synthetic cached body"
+            stale_body
+                .expect("unseen body remains until the scan completes")
+                .content(),
+            "Synthetic stale body"
         );
         assert_eq!(
             requests
@@ -715,11 +880,9 @@ fn expired_delta_cursor_rebuild_keeps_cached_mail_until_the_snapshot_commits() {
             .await
             .expect("matching message remains readable after replacement")
             .expect("matching message remains cached");
-        assert_eq!(
-            cached_body
-                .expect("replacement preserves the cached body")
-                .content(),
-            "Synthetic cached body"
+        assert!(
+            cached_body.is_none(),
+            "replacement survivors require a fresh body"
         );
         assert_eq!(
             requests

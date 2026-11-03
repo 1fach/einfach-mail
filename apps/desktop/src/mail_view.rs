@@ -1034,6 +1034,9 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
         MailWorkflowError::Cache(MailCacheError::MessageNotCached) => {
             "This message is no longer in the local cache. Sync the folder and try again."
         }
+        MailWorkflowError::SyncInProgress => {
+            "This folder is busy. Try opening the message again shortly."
+        }
         MailWorkflowError::RepeatedCursor => {
             "Sync stopped because the service repeated a page. Try syncing again."
         }
@@ -1076,8 +1079,16 @@ mod tests {
 
     use super::{
         MailSyncProgress, MailView, MessageBodyForDisplay, MessageNavigation, MessageState,
-        SyncStatus, bind_message_navigation_keys,
+        SyncStatus, bind_message_navigation_keys, mail_error_message,
     };
+
+    #[test]
+    fn open_while_folder_is_busy_explains_when_to_retry() {
+        assert_eq!(
+            mail_error_message(MailWorkflowError::SyncInProgress),
+            "This folder is busy. Try opening the message again shortly."
+        );
+    }
 
     #[derive(Clone)]
     struct OfflineProvider {

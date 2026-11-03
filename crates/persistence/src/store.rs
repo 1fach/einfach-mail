@@ -900,7 +900,9 @@ fn store_message_metadata(
             received_seconds = excluded.received_seconds,
             received_nanoseconds = excluded.received_nanoseconds,
             is_read = excluded.is_read,
-            full_sync_generation = excluded.full_sync_generation",
+            full_sync_generation = excluded.full_sync_generation,
+            body_type = NULL,
+            body_content = NULL",
         params![
             message.folder().account_id().as_str(),
             message.folder().folder_id().as_str(),
@@ -1017,6 +1019,11 @@ fn reconcile_full_sync(
             folder.folder_id().as_str(),
             generation
         ],
+    )?;
+    transaction.execute(
+        "UPDATE mail_messages SET body_type = NULL, body_content = NULL
+         WHERE account_id = ?1 AND folder_id = ?2",
+        params![folder.account_id().as_str(), folder.folder_id().as_str()],
     )?;
     Ok(())
 }

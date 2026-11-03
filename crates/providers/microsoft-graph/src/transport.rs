@@ -8,7 +8,7 @@ use std::{
 use huskarl::token::AccessToken;
 use reqwest::{
     Client, Response, StatusCode,
-    header::{AUTHORIZATION, HeaderValue, LOCATION, RETRY_AFTER},
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, LOCATION, RETRY_AFTER},
 };
 use tokio::{
     runtime::{Builder, Runtime},
@@ -450,6 +450,9 @@ async fn send_once(
     let mut outbound = client
         .get(request.url.as_str())
         .header(AUTHORIZATION, authorization);
+    if matches!(request.operation, GraphOperation::MessageDelta) {
+        outbound = outbound.header(CONTENT_TYPE, "application/json");
+    }
     if request.operation.uses_immutable_ids() {
         outbound = outbound.header("Prefer", "IdType=\"ImmutableId\"");
     }

@@ -467,7 +467,9 @@ mod tests {
         AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
         MailOperationError, MailProvider, MessageDeltaRequest, MessageDeltaResponse,
     };
-    use einfach_mail_domain::{AccountId, FolderReference, MessageBodyType, MessageDeltaProgress};
+    use einfach_mail_domain::{
+        AccountId, FolderReference, MessageBodyType, MessageDeltaLink, MessageDeltaProgress,
+    };
 
     use super::{MicrosoftGraphProvider, ProviderConfig};
 
@@ -851,15 +853,36 @@ mod tests {
                     );
             })
             .await;
+        let next_link = format!(
+            "{}/v1.0/me/mailFolders/folder-inbox/messages/delta?$skiptoken=opaque-next",
+            server.base_url()
+        );
         let delta_link = format!(
             "{}/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=opaque-final",
             server.base_url()
         );
-        let message_delta = server
+        let message_delta_initial = server
             .mock_async(|when, then| {
                 when.method(GET)
                     .path("/v1.0/me/mailFolders/folder-inbox/messages/delta")
-                    .header("authorization", "Bearer synthetic-mail-access");
+                    .query_param_missing("$skiptoken")
+                    .header("authorization", "Bearer synthetic-mail-access")
+                    .header("content-type", "application/json");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({
+                        "value": [],
+                        "@odata.nextLink": next_link,
+                    }));
+            })
+            .await;
+        let message_delta_continuation = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/folder-inbox/messages/delta")
+                    .query_param("$skiptoken", "opaque-next")
+                    .header("authorization", "Bearer synthetic-mail-access")
+                    .header("content-type", "application/json");
                 then.status(200)
                     .header("content-type", "application/json")
                     .json_body(serde_json::json!({
@@ -914,6 +937,22 @@ mod tests {
             panic!("synthetic provider response is a page");
         };
         assert!(page.response_bytes() > 0);
+        let (page, _) = page.into_parts();
+        let MessageDeltaProgress::Next(next_link) = page.progress() else {
+            panic!("synthetic initial response contains a continuation link");
+        };
+        let response = provider
+            .message_delta_page(
+                &folder,
+                MessageDeltaRequest::Continue(MessageDeltaLink::from_opaque(
+                    next_link.as_str().to_owned(),
+                )),
+            )
+            .await
+            .expect("provider follows one synthetic continuation link");
+        let MessageDeltaResponse::Page(page) = response else {
+            panic!("synthetic continuation response is a page");
+        };
         assert!(matches!(
             page.into_parts().0.progress(),
             MessageDeltaProgress::Complete(_)
@@ -938,7 +977,8 @@ mod tests {
         root_folders.assert_async().await;
         child_folders.assert_async().await;
         message_list.assert_async().await;
-        message_delta.assert_async().await;
+        message_delta_initial.assert_async().await;
+        message_delta_continuation.assert_async().await;
         message_body.assert_async().await;
         assert_eq!(
             credentials.token_value().as_deref(),

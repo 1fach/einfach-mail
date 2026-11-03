@@ -24,7 +24,7 @@ Use this scope for the first read-only mail milestone:
 - Keep visible folder metadata account-scoped: provider ID, display name, and optional parent-folder ID. Exclude hidden folders from the browsable tree.
 - Keep message-list metadata account- and folder-scoped: provider ID, optional subject, `from`, `sender`, received time, and read state. Keep `from` and `sender` distinct because Graph defines different semantics for delegated messages. Do not request `bodyPreview`, message bodies, or attachments in folder listing and delta responses.
 - Fetch a message body only after the user opens that message. Store the raw body in the encrypted cache so the user can reopen it offline. Sanitize it at display time. Do not download attachments in M2.
-- Keep synchronized message metadata and opened bodies until account removal. M2 does not add a rolling-retention setting or a separate history-import control.
+- Keep synchronized message metadata until account removal. Clear an opened body's cached content when a message delta upsert updates its metadata, and clear retained bodies when a replacement scan completes. M2 does not add a rolling-retention setting or a separate history-import control. See [ADR 0034](0034-invalidate-cached-message-bodies-after-delta-updates.md).
 - Keep M2 read-only. Do not mark messages read, move, archive, flag, delete, or send mail from the app.
 
 Treat Graph's next and delta links as opaque and follow the complete chain. A response may contain read-state changes or removal entries for messages outside the local cutoff. Apply those changes to records already in the local scope; do not insert unknown messages older than the cutoff. Updated records can contain only the changed properties, so preserve omitted values and distinguish them from explicit nulls when merging into cached records.
@@ -57,13 +57,14 @@ The Graph adapter could merge changes directly into cached records, but that wou
 - The first sync requests recent metadata for every visible folder. Each folder has its own delta cursor.
 - The first sync imports messages received in the prior 90 days. It also imports later messages as they arrive. Mail received before the cutoff is unavailable offline in M2.
 - Bodies become available offline only after a user opens them while online. Message HTML remains untrusted and is sanitized every time it is rendered; sanitized output is never persisted.
-- The cache stores the account's initial 90-day cutoff, folder cursors, and encrypted metadata and bodies. The cutoff remains fixed until account removal. Connected-account sign-out removes the local SQLCipher files and key before deleting the saved sign-in; the workflow blocks sign-out if local cache removal fails.
+- The cache stores the account's initial 90-day cutoff, folder cursors, and encrypted metadata and opened bodies. The cutoff remains fixed until account removal. Delta updates invalidate a body's cache entry so the next open fetches current content. Connected-account sign-out removes the local SQLCipher files and key before deleting the saved sign-in; the workflow blocks sign-out if local cache removal fails.
 - The app's first mail sync uses the Global Graph authority. A Graph endpoint mapping alone does not establish support for every operation in a national cloud.
 - Synthetic transport and persistence tests verify unfiltered pagination with 5,001 messages, cutoff filtering, restart checkpoints, final cursor commits, delta removals, sparse read-state changes, and opened-body cache behavior. The GPUI test verifies offline cached-body access. Live Graph pagination and a full mailbox sync remain tenant-only criteria in issue #8; do not use real mailbox content in automated tests.
 
 ## Sources
 
 - [Microsoft Graph message delta](https://learn.microsoft.com/en-us/graph/api/message-delta?view=graph-rest-1.0)
+- [ADR 0034: Invalidate cached message bodies after delta updates](0034-invalidate-cached-message-bodies-after-delta-updates.md)
 - [Microsoft Graph message delta query parameter support and the filtered-result limit](https://learn.microsoft.com/en-us/graph/delta-query-messages#use-query-parameters-in-a-delta-query-for-messages)
 - [Microsoft Graph delta query state-token behavior](https://learn.microsoft.com/en-us/graph/delta-query-overview#state-tokens)
 - [Microsoft Graph message resource](https://learn.microsoft.com/en-us/graph/api/resources/message?view=graph-rest-1.0)

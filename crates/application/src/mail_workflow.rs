@@ -9,7 +9,8 @@ use std::{
 };
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, MailFolder, MailMessage, MessageDeltaProgress, MessageId,
+    AccountId, FolderReference, MailFolder, MailMessage, MessageBody, MessageDeltaProgress,
+    MessageId,
 };
 use thiserror::Error;
 
@@ -166,7 +167,8 @@ pub trait MailSession: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns provider or cache errors when metadata, body, or durable storage is unavailable.
+    /// Returns provider, cache, or synchronization-state errors when data is unavailable or the folder
+    /// is busy.
     fn open_message<'a>(
         &'a self,
         folder: &'a FolderReference,
@@ -409,7 +411,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns a provider or cache error when metadata, body, or durable storage is unavailable.
+    /// Returns a provider, cache, or synchronization-state error when data is unavailable or the
+    /// folder is busy.
     pub async fn open_message(
         &self,
         folder: &FolderReference,
@@ -419,15 +422,9 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         else {
             return Err(MailCacheError::MessageNotCached.into());
         };
-        let (raw_body, loaded_from_cache) = match cached_body {
-            Some(body) => (body, true),
-            None => {
-                let body = self.provider.fetch_message_body(folder, message_id).await?;
-                self.cache
-                    .store_message_body(folder, message_id, body.clone())
-                    .await?;
-                (body, false)
-            }
+        let (message, raw_body, loaded_from_cache) = match cached_body {
+            Some(body) => (message, body, true),
+            None => self.read_or_fetch_message_body(folder, message_id).await?,
         };
         let body = prepare_message_body_for_display(&raw_body);
         Ok(OpenedMessage {
@@ -435,6 +432,26 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             body,
             loaded_from_cache,
         })
+    }
+
+    async fn read_or_fetch_message_body(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> Result<(MailMessage, MessageBody, bool), MailWorkflowError> {
+        let _reservation = self.reserve_folder(folder)?;
+        let Some((message, cached_body)) = self.cache.read_message(folder, message_id).await?
+        else {
+            return Err(MailCacheError::MessageNotCached.into());
+        };
+        if let Some(body) = cached_body {
+            return Ok((message, body, true));
+        }
+        let body = self.provider.fetch_message_body(folder, message_id).await?;
+        self.cache
+            .store_message_body(folder, message_id, body.clone())
+            .await?;
+        Ok((message, body, false))
     }
 
     /// Removes the account's encrypted mail cache and its local encryption key.

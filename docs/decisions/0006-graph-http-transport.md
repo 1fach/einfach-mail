@@ -16,6 +16,8 @@ The desktop currently uses GPUI Kit. The active Linux dependency graph uses `smo
 
 Use `reqwest` and `serde` for HTTP and JSON in `crates/providers/microsoft-graph/`. Keep Einfach Mail's Graph endpoint calls, API-to-domain mapping, pagination, error mapping, and throttling policy in that adapter. Do not write a general HTTP client, JSON parser, or OAuth protocol.
 
+Send `Content-Type: application/json` on message-delta GET requests, including requests that follow an opaque continuation link, as required by the Graph v1.0 message-delta contract.
+
 The application-facing provider port exposes provider-independent values and errors. It does not expose `reqwest`, Tokio, Graph JSON, or response-header types. The provider obtains credentials through the approved identity boundary. Views do not receive tokens.
 
 The adapter must preserve response headers so it can honor Graph's `Retry-After` value. Retry only operations whose semantics permit another request. Do not automatically retry a write until the operation's duplicate-request behavior is proven. If Graph omits `Retry-After`, use the documented exponential-backoff behavior.
@@ -48,6 +50,7 @@ For runtime ownership, a per-operation worker and a provider-owned worker were c
 
 - [Microsoft Graph SDK overview](https://learn.microsoft.com/en-us/graph/sdks/sdks-overview)
 - [Microsoft Graph throttling guidance](https://learn.microsoft.com/en-us/graph/throttling)
+- [Microsoft Graph message delta v1.0](https://learn.microsoft.com/en-us/graph/api/message-delta?view=graph-rest-1.0)
 - [`reqwest` 0.13.5 documentation and manifest](https://docs.rs/crate/reqwest/0.13.5)
 - [`reqwest` retry behavior](https://docs.rs/reqwest/0.13.5/reqwest/retry/)
 - [`reqwest-retry-after` 0.2.1 documentation](https://docs.rs/reqwest-retry-after/0.2.1/reqwest_retry_after/)
