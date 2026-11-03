@@ -8,7 +8,7 @@ use std::{
 
 use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation, CalendarOccurrence,
-    CalendarViewReference,
+    CalendarViewReference, PendingCalendarEventCreation,
 };
 use thiserror::Error;
 
@@ -30,6 +30,9 @@ pub enum CalendarOperationError {
     /// The provider denied access to the calendar operation.
     #[error("calendar access was denied")]
     AccessDenied,
+    /// The provider confirmed that the event request was rejected.
+    #[error("the calendar event request was rejected")]
+    EventCreationRejected,
     /// The event may exist, but the provider could not confirm its creation.
     #[error("the calendar event creation outcome is unknown")]
     CreationOutcomeUnknown,
@@ -125,8 +128,11 @@ pub trait CalendarProvider: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a user-safe provider error when sign-in, access, transport, or
-    /// response validation prevents the operation from being confirmed.
+    /// Returns [`CalendarOperationError::EventCreationRejected`] only when a
+    /// provider response proves Graph did not create the event. Returns
+    /// [`CalendarOperationError::CreationOutcomeUnknown`] when the request may
+    /// have reached Graph without confirmation. Other errors describe sign-in,
+    /// access, transport, or response validation failures.
     fn create_event(
         &self,
         creation: &CalendarEventCreation,
@@ -151,6 +157,9 @@ pub enum CalendarCacheError {
     /// Another uncertain event creation must be resolved for this account first.
     #[error("another calendar event creation is already pending")]
     CreationAlreadyPending,
+    /// Removing the account cache would discard an unresolved calendar event creation.
+    #[error("a calendar event creation needs recovery before account removal")]
+    UnresolvedEventCreation,
 }
 
 /// An account and view's completed delta cursor and resumable page checkpoint.
@@ -280,23 +289,23 @@ pub trait CalendarCache: Send + Sync {
         view: &CalendarViewReference,
     ) -> impl Future<Output = Result<Vec<CalendarOccurrence>, CalendarCacheError>> + Send + '_;
 
-    /// Saves or confirms the account's one unresolved event-creation operation.
+    /// Saves or confirms the account's unresolved event-creation operation.
     ///
-    /// Repeating the same operation is idempotent. A different operation is
-    /// rejected until the current one is confirmed and removed.
+    /// Repeating the same unresolved operation is idempotent. A rejected
+    /// operation remains blocked until its marker is removed.
     ///
     /// # Errors
     ///
-    /// Returns [`CalendarCacheError::CreationAlreadyPending`] for a different
-    /// unresolved operation, an account or data error for invalid values, or
-    /// [`CalendarCacheError::Unavailable`] when the encrypted store cannot be
-    /// changed.
+    /// Returns [`CalendarCacheError::CreationAlreadyPending`] while an
+    /// unresolved operation or a different operation is stored, an account or
+    /// data error for invalid values, or [`CalendarCacheError::Unavailable`]
+    /// when the encrypted store cannot be changed.
     fn stage_event_creation(
         &self,
         creation: &CalendarEventCreation,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
 
-    /// Returns the account's unresolved event-creation operation, if present.
+    /// Returns the account's pending event-creation operation, if present.
     ///
     /// # Errors
     ///
@@ -306,7 +315,39 @@ pub trait CalendarCache: Send + Sync {
     fn pending_event_creation(
         &self,
         account_id: &AccountId,
-    ) -> impl Future<Output = Result<Option<CalendarEventCreation>, CalendarCacheError>> + Send + '_;
+    ) -> impl Future<Output = Result<Option<PendingCalendarEventCreation>, CalendarCacheError>> + Send + '_;
+
+    /// Records that Graph definitively rejected the matching operation.
+    ///
+    /// Repeating this update is safe. An absent matching marker is already
+    /// resolved, while another operation remains untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::CreationAlreadyPending`] for another
+    /// operation, an account or data error for invalid input, or
+    /// [`CalendarCacheError::Unavailable`] when the encrypted store cannot
+    /// record the rejection.
+    fn mark_event_creation_rejected(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
+
+    /// Removes the exact rejected operation after the provider definitively rejects it.
+    ///
+    /// Removing an operation that is already absent is safe. An unresolved
+    /// operation or a different pending operation remains untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::CreationAlreadyPending`] when another
+    /// operation is stored, an account or data error for invalid values, or
+    /// [`CalendarCacheError::Unavailable`] when the encrypted store cannot be
+    /// changed.
+    fn discard_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
 
     /// Stores a Graph-confirmed event and removes its matching pending operation atomically.
     ///
@@ -327,8 +368,8 @@ pub trait CalendarCache: Send + Sync {
     ///
     /// Returns [`CalendarCacheError::AccountMismatch`] for another account,
     /// [`CalendarCacheError::PendingMailSend`] while a send outcome is unresolved,
-    /// [`CalendarCacheError::CreationAlreadyPending`] while an event creation is unresolved,
-    /// or [`CalendarCacheError::Unavailable`] when cache removal fails.
+    /// [`CalendarCacheError::UnresolvedEventCreation`] while an event-creation outcome is
+    /// unresolved, or [`CalendarCacheError::Unavailable`] when cache removal fails.
     fn remove_account(
         &self,
         account_id: &AccountId,
@@ -383,7 +424,7 @@ impl CalendarSyncReport {
 pub struct CalendarSnapshot {
     events: Vec<CalendarOccurrence>,
     sync_state: CalendarSyncState,
-    pending_creation: Option<CalendarEventCreation>,
+    pending_creation: Option<PendingCalendarEventCreation>,
 }
 
 impl CalendarSnapshot {
@@ -399,14 +440,14 @@ impl CalendarSnapshot {
         &self.sync_state
     }
 
-    /// Returns the account's unresolved event-creation operation, if present.
+    /// Returns the account's unresolved or rejected event-creation operation.
     #[must_use]
-    pub fn pending_creation(&self) -> Option<&CalendarEventCreation> {
+    pub fn pending_creation(&self) -> Option<&PendingCalendarEventCreation> {
         self.pending_creation.as_ref()
     }
 }
 
-/// The Graph event was confirmed and whether the encrypted cache committed it.
+/// The result of a Graph event creation and its pending cache state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CalendarEventCreationOutcome {
     /// Graph confirmed the event and the encrypted cache committed it.
@@ -415,6 +456,13 @@ pub enum CalendarEventCreationOutcome {
     ConfirmedButNotCached {
         /// The event returned by Graph.
         event: CalendarOccurrence,
+        /// The user-safe category returned by the cache boundary.
+        cache_error: CalendarCacheError,
+    },
+    /// Graph rejected the request and the cache removed its pending operation.
+    Rejected,
+    /// Graph rejected the request, but the cache still has the pending operation.
+    RejectedButPending {
         /// The user-safe category returned by the cache boundary.
         cache_error: CalendarCacheError,
     },
@@ -569,7 +617,7 @@ where
     /// Creates one staged event and caches it only after Graph confirms it.
     ///
     /// The exact draft and retry identifier are stored before the network
-    /// request. Provider failures leave that operation available for replay.
+    /// request. Unknown outcomes keep that operation available for replay.
     ///
     /// # Errors
     ///
@@ -579,7 +627,10 @@ where
     /// event that does not match the staged draft. A cache failure after Graph
     /// confirmation is returned as
     /// [`CalendarEventCreationOutcome::ConfirmedButNotCached`] so the view can
-    /// report the remote result accurately.
+    /// report the remote result accurately. A definitive Graph rejection is
+    /// returned as [`CalendarEventCreationOutcome::Rejected`] when cleanup
+    /// succeeds, or [`CalendarEventCreationOutcome::RejectedButPending`] when
+    /// local cleanup fails.
     pub async fn create_event(
         &self,
         creation: &CalendarEventCreation,
@@ -595,7 +646,21 @@ where
             },
         )?;
         self.cache.stage_event_creation(creation).await?;
-        let event = self.provider.create_event(creation).await?;
+        let event = match self.provider.create_event(creation).await {
+            Ok(event) => event,
+            Err(CalendarOperationError::EventCreationRejected) => {
+                if let Err(cache_error) = self.cache.mark_event_creation_rejected(creation).await {
+                    return Ok(CalendarEventCreationOutcome::RejectedButPending { cache_error });
+                }
+                return match self.cache.discard_event_creation(creation).await {
+                    Ok(()) => Ok(CalendarEventCreationOutcome::Rejected),
+                    Err(cache_error) => {
+                        Ok(CalendarEventCreationOutcome::RejectedButPending { cache_error })
+                    }
+                };
+            }
+            Err(error) => return Err(error.into()),
+        };
         if !confirms_creation(creation, &event) {
             return Err(CalendarWorkflowError::InvalidConfirmation);
         }
@@ -605,6 +670,35 @@ where
                 Ok(CalendarEventCreationOutcome::ConfirmedButNotCached { event, cache_error })
             }
         }
+    }
+
+    /// Removes a pending draft after the provider definitively rejects it.
+    ///
+    /// Call this with the same operation passed to `create_event` when it
+    /// returned [`CalendarEventCreationOutcome::RejectedButPending`]. This
+    /// retries local cleanup without another Graph request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error if the matching operation cannot be removed, or a
+    /// workflow error when another calendar operation owns the view.
+    pub async fn discard_rejected_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> Result<(), CalendarWorkflowError> {
+        let _reservation = reserve_calendar_view(&self.reservations, creation.view()).map_err(
+            |error| match error {
+                AccountReservationError::OperationInProgress => {
+                    CalendarWorkflowError::OperationInProgress
+                }
+                AccountReservationError::StateUnavailable => {
+                    CalendarWorkflowError::StateUnavailable
+                }
+            },
+        )?;
+        self.cache.mark_event_creation_rejected(creation).await?;
+        self.cache.discard_event_creation(creation).await?;
+        Ok(())
     }
 
     async fn sync_round(

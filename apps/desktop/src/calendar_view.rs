@@ -6,7 +6,7 @@ use std::{
 use einfach_mail_application::{CalendarOperationError, CalendarSession, CalendarWorkflowError};
 use einfach_mail_domain::{
     AccountProfile, CalendarEventCreation, CalendarOccurrence, CalendarOccurrenceTime,
-    CalendarViewRange, CalendarViewReference,
+    CalendarViewRange, CalendarViewReference, PendingCalendarEventCreation,
 };
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt, WindowExt,
@@ -35,7 +35,7 @@ pub(crate) struct CalendarView<S: CalendarSession + ?Sized = dyn CalendarSession
     week_start: civil::Date,
     view: CalendarViewReference,
     events: Vec<CalendarOccurrence>,
-    pending_creation: Option<CalendarEventCreation>,
+    pending_creation: Option<PendingCalendarEventCreation>,
     sync_state: Option<einfach_mail_application::CalendarSyncState>,
     status: CalendarStatus,
     sync_running: bool,
@@ -1221,9 +1221,25 @@ mod tests {
         fn pending_event_creation(
             &self,
             _: &AccountId,
-        ) -> impl Future<Output = Result<Option<CalendarEventCreation>, CalendarCacheError>> + Send + '_
-        {
+        ) -> impl Future<
+            Output = Result<Option<PendingCalendarEventCreation>, CalendarCacheError>,
+        > + Send
+        + '_ {
             ready(Ok(None))
+        }
+
+        fn mark_event_creation_rejected(
+            &self,
+            _: &CalendarEventCreation,
+        ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+            ready(Ok(()))
+        }
+
+        fn discard_event_creation(
+            &self,
+            _: &CalendarEventCreation,
+        ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+            ready(Ok(()))
         }
 
         fn commit_event_creation(

@@ -632,7 +632,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                             error,
                             MailCacheError::OperationInProgress
                                 | MailCacheError::SendAlreadyPending
-                                | MailCacheError::CalendarEventCreationPending
+                                | MailCacheError::CalendarEventCreationUnresolved
                         ) {
                             view.account_session = None;
                         }
@@ -1090,8 +1090,8 @@ fn mail_cache_error_message(error: MailCacheError) -> &'static str {
         MailCacheError::SendAlreadyPending => {
             "A previous send needs review. Open Mail, check Sent Items, and resolve it before signing out."
         }
-        MailCacheError::CalendarEventCreationPending => {
-            "A calendar event may already exist in Microsoft. Open Calendar and retry the saved operation before signing out."
+        MailCacheError::CalendarEventCreationUnresolved => {
+            "A calendar event may already exist in Microsoft. Open Calendar and resolve the saved operation before signing out."
         }
         MailCacheError::MissingEncryptionKey => {
             "The encrypted account cache key is missing. Remove the local cache before syncing again."

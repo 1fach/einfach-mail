@@ -9,7 +9,7 @@ use einfach_mail_domain::{
     AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
     CalendarEventCreation, CalendarEventCreationId, CalendarOccurrence, CalendarOccurrencePatch,
     CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference,
-    EventId,
+    EventId, PendingCalendarEventCreation,
 };
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
@@ -134,14 +134,30 @@ impl CalendarProvider for FixtureProvider {
 #[derive(Clone, Default)]
 struct FixtureCache {
     views: Arc<Mutex<HashMap<CalendarViewReference, CachedView>>>,
-    pending: Arc<Mutex<HashMap<AccountId, CalendarEventCreation>>>,
+    pending: Arc<Mutex<HashMap<AccountId, PendingCalendarEventCreation>>>,
     creation_commit_error: Arc<Mutex<Option<CalendarCacheError>>>,
+    rejection_mark_error: Arc<Mutex<Option<CalendarCacheError>>>,
+    rejection_cleanup_error: Arc<Mutex<Option<CalendarCacheError>>>,
 }
 
 impl FixtureCache {
     fn fail_creation_commit(&self, error: CalendarCacheError) {
         *self
             .creation_commit_error
+            .lock()
+            .expect("synthetic cache error mutex is not poisoned") = Some(error);
+    }
+
+    fn fail_rejection_cleanup(&self, error: CalendarCacheError) {
+        *self
+            .rejection_cleanup_error
+            .lock()
+            .expect("synthetic cache error mutex is not poisoned") = Some(error);
+    }
+
+    fn fail_rejection_mark(&self, error: CalendarCacheError) {
+        *self
+            .rejection_mark_error
             .lock()
             .expect("synthetic cache error mutex is not poisoned") = Some(error);
     }
@@ -251,16 +267,31 @@ impl CalendarCache for FixtureCache {
         creation: &CalendarEventCreation,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
         let pending = Arc::clone(&self.pending);
+        let rejection_mark_error = Arc::clone(&self.rejection_mark_error);
         let creation = creation.clone();
         async move {
+            if let Some(error) = rejection_mark_error
+                .lock()
+                .expect("synthetic cache error mutex is not poisoned")
+                .take()
+            {
+                return Err(error);
+            }
             let mut pending = pending
                 .lock()
                 .expect("synthetic cache mutex is not poisoned");
             match pending.get(creation.view().account_id()) {
-                Some(existing) if existing == &creation => Ok(()),
+                Some(PendingCalendarEventCreation::Unresolved(existing))
+                    if existing == &creation =>
+                {
+                    Ok(())
+                }
                 Some(_) => Err(CalendarCacheError::CreationAlreadyPending),
                 None => {
-                    pending.insert(creation.view().account_id().clone(), creation);
+                    pending.insert(
+                        creation.view().account_id().clone(),
+                        PendingCalendarEventCreation::Unresolved(creation),
+                    );
                     Ok(())
                 }
             }
@@ -270,7 +301,7 @@ impl CalendarCache for FixtureCache {
     fn pending_event_creation(
         &self,
         account_id: &AccountId,
-    ) -> impl Future<Output = Result<Option<CalendarEventCreation>, CalendarCacheError>> + Send + '_
+    ) -> impl Future<Output = Result<Option<PendingCalendarEventCreation>, CalendarCacheError>> + Send + '_
     {
         let pending = Arc::clone(&self.pending);
         let account_id = account_id.clone();
@@ -280,6 +311,67 @@ impl CalendarCache for FixtureCache {
                 .expect("synthetic cache mutex is not poisoned")
                 .get(&account_id)
                 .cloned())
+        }
+    }
+
+    fn mark_event_creation_rejected(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let pending = Arc::clone(&self.pending);
+        let rejection_mark_error = Arc::clone(&self.rejection_mark_error);
+        let creation = creation.clone();
+        async move {
+            if let Some(error) = rejection_mark_error
+                .lock()
+                .expect("synthetic cache error mutex is not poisoned")
+                .take()
+            {
+                return Err(error);
+            }
+            let mut pending = pending
+                .lock()
+                .expect("synthetic cache mutex is not poisoned");
+            match pending.get(creation.view().account_id()) {
+                None => Ok(()),
+                Some(existing) if existing.creation() == &creation => {
+                    pending.insert(
+                        creation.view().account_id().clone(),
+                        PendingCalendarEventCreation::Rejected(creation),
+                    );
+                    Ok(())
+                }
+                Some(_) => Err(CalendarCacheError::CreationAlreadyPending),
+            }
+        }
+    }
+
+    fn discard_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let pending = Arc::clone(&self.pending);
+        let rejection_cleanup_error = Arc::clone(&self.rejection_cleanup_error);
+        let creation = creation.clone();
+        async move {
+            if let Some(error) = rejection_cleanup_error
+                .lock()
+                .expect("synthetic cache error mutex is not poisoned")
+                .take()
+            {
+                return Err(error);
+            }
+            let mut pending = pending
+                .lock()
+                .expect("synthetic cache mutex is not poisoned");
+            match pending.get(creation.view().account_id()) {
+                None => Ok(()),
+                Some(PendingCalendarEventCreation::Rejected(existing)) if existing == &creation => {
+                    pending.remove(creation.view().account_id());
+                    Ok(())
+                }
+                Some(_) => Err(CalendarCacheError::CreationAlreadyPending),
+            }
         }
     }
 
@@ -304,7 +396,8 @@ impl CalendarCache for FixtureCache {
             let mut pending = pending
                 .lock()
                 .expect("synthetic cache mutex is not poisoned");
-            if pending.get(creation.view().account_id()) != Some(&creation)
+            if pending.get(creation.view().account_id())
+                != Some(&PendingCalendarEventCreation::Unresolved(creation.clone()))
                 || event.reference() != creation.view()
                 || event.subject() != Some(creation.draft().subject())
                 || event.time() != creation.draft().time()
@@ -337,10 +430,16 @@ impl CalendarCache for FixtureCache {
             }
             views.retain(|view, _| view.account_id() != &account_id);
             drop(views);
-            pending
+            let mut pending = pending
                 .lock()
-                .expect("synthetic cache mutex is not poisoned")
-                .remove(&account_id);
+                .expect("synthetic cache mutex is not poisoned");
+            if matches!(
+                pending.get(&account_id),
+                Some(PendingCalendarEventCreation::Unresolved(_))
+            ) {
+                return Err(CalendarCacheError::UnresolvedEventCreation);
+            }
+            pending.remove(&account_id);
             Ok(())
         }
     }
@@ -367,7 +466,8 @@ fn creation(view: CalendarViewReference) -> CalendarEventCreation {
         utc(2030, Month::January, 8) + time::Duration::hours(10),
     )
     .expect("synthetic event draft is valid");
-    CalendarEventCreation::new(view, draft)
+    CalendarEventCreation::try_new(view, draft)
+        .expect("synthetic event endpoints fit the selected week")
 }
 
 fn mismatched_creation_event(creation: &CalendarEventCreation) -> CalendarOccurrence {
@@ -649,7 +749,7 @@ fn event_creation_reuses_its_pending_id_after_an_uncertain_provider_failure() {
             .await
             .expect("synthetic pending operation can be read");
         assert_eq!(
-            pending.pending_creation().map(|item| item.id()),
+            pending.pending_creation().map(|item| item.creation().id()),
             Some(creation.id())
         );
         assert!(pending.events().is_empty());
@@ -705,7 +805,9 @@ fn event_creation_recovers_when_cache_commit_fails_after_graph_confirmation() {
             .await
             .expect("the confirmed operation remains available for recovery");
         assert_eq!(
-            pending.pending_creation().map(|pending| pending.id()),
+            pending
+                .pending_creation()
+                .map(|pending| pending.creation().id()),
             Some(creation.id())
         );
         assert!(pending.events().is_empty());
@@ -765,6 +867,134 @@ fn event_creation_rejects_an_unrelated_pending_operation_for_the_account() {
 }
 
 #[test]
+fn definitive_event_creation_rejection_clears_its_pending_operation() {
+    smol::block_on(async {
+        let view = view();
+        let creation = creation(view.clone());
+        let provider = FixtureProvider::default();
+        provider.fail_next_creation(CalendarOperationError::EventCreationRejected);
+        let cache = FixtureCache::default();
+        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+
+        assert_eq!(
+            workflow.create_event(&creation).await,
+            Ok(CalendarEventCreationOutcome::Rejected)
+        );
+        assert!(
+            workflow
+                .load_cached_view(&view)
+                .await
+                .expect("the rejected event leaves no pending marker")
+                .pending_creation()
+                .is_none()
+        );
+        assert_eq!(
+            *provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned"),
+            vec![creation.id()]
+        );
+    });
+}
+
+#[test]
+fn rejected_event_cleanup_can_resume_without_reposting_to_graph() {
+    smol::block_on(async {
+        let view = view();
+        let creation = creation(view.clone());
+        let provider = FixtureProvider::default();
+        provider.fail_next_creation(CalendarOperationError::EventCreationRejected);
+        let cache = FixtureCache::default();
+        cache.fail_rejection_cleanup(CalendarCacheError::Unavailable);
+        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+
+        assert_eq!(
+            workflow.create_event(&creation).await,
+            Ok(CalendarEventCreationOutcome::RejectedButPending {
+                cache_error: CalendarCacheError::Unavailable,
+            })
+        );
+        let pending = workflow
+            .load_cached_view(&view)
+            .await
+            .expect("the definitive rejection remains visible for local cleanup");
+        assert_eq!(
+            pending.pending_creation(),
+            Some(&PendingCalendarEventCreation::Rejected(creation.clone()))
+        );
+
+        workflow
+            .discard_rejected_event_creation(&creation)
+            .await
+            .expect("local cleanup retries without another provider request");
+        assert!(
+            workflow
+                .load_cached_view(&view)
+                .await
+                .expect("the rejected marker is removed")
+                .pending_creation()
+                .is_none()
+        );
+        assert_eq!(
+            *provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned"),
+            vec![creation.id()]
+        );
+    });
+}
+
+#[test]
+fn rejected_event_can_be_resolved_after_persisting_the_rejection_recovers() {
+    smol::block_on(async {
+        let view = view();
+        let creation = creation(view.clone());
+        let provider = FixtureProvider::default();
+        provider.fail_next_creation(CalendarOperationError::EventCreationRejected);
+        let cache = FixtureCache::default();
+        cache.fail_rejection_mark(CalendarCacheError::Unavailable);
+        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+
+        assert_eq!(
+            workflow.create_event(&creation).await,
+            Ok(CalendarEventCreationOutcome::RejectedButPending {
+                cache_error: CalendarCacheError::Unavailable,
+            })
+        );
+        assert_eq!(
+            workflow
+                .load_cached_view(&view)
+                .await
+                .expect("the unresolved draft remains available")
+                .pending_creation(),
+            Some(&PendingCalendarEventCreation::Unresolved(creation.clone()))
+        );
+
+        workflow
+            .discard_rejected_event_creation(&creation)
+            .await
+            .expect("the stored rejection can be recorded and cleared locally");
+        assert!(
+            workflow
+                .load_cached_view(&view)
+                .await
+                .expect("the rejected operation is cleared")
+                .pending_creation()
+                .is_none()
+        );
+        assert_eq!(
+            *provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned"),
+            vec![creation.id()]
+        );
+    });
+}
+
+#[test]
 fn event_creation_keeps_the_pending_operation_when_graph_confirms_another_event() {
     smol::block_on(async {
         let view = view();
@@ -782,7 +1012,7 @@ fn event_creation_keeps_the_pending_operation_when_graph_confirms_another_event(
             .await
             .expect("unconfirmed operation remains visible for recovery");
         assert_eq!(
-            snapshot.pending_creation().map(|item| item.id()),
+            snapshot.pending_creation().map(|item| item.creation().id()),
             Some(creation.id())
         );
         assert!(snapshot.events().is_empty());

@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike, Weekday};
 use einfach_mail_application::{
-    CalendarCache, CalendarCacheError, CalendarEventCreationOutcome, CalendarProvider,
-    CalendarWorkflow, CalendarWorkflowError,
+    CalendarCache, CalendarCacheError, CalendarEventCreationOutcome, CalendarOperationError,
+    CalendarProvider, CalendarWorkflow, CalendarWorkflowError,
 };
 use einfach_mail_domain::{
     CalendarEventCreation, CalendarEventDraft, CalendarTimeZoneId, CalendarViewRange,
-    CalendarViewReference,
+    CalendarViewReference, PendingCalendarEventCreation,
 };
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
@@ -46,7 +46,7 @@ where
     /// User-facing label for the selected time zone.
     pub(super) time_zone_label: String,
     /// Persisted operation to retry with the same creation ID, when present.
-    pub(super) pending_creation: Option<CalendarEventCreation>,
+    pub(super) pending_creation: Option<PendingCalendarEventCreation>,
     /// First date in the displayed calendar week.
     pub(super) week_start: civil::Date,
 }
@@ -77,6 +77,9 @@ enum CreationStatus {
     InvalidDraft(DraftError),
     Submitting,
     Failed(CalendarWorkflowError),
+    DiscardingRejected,
+    RejectedPendingCleanup(Option<CalendarWorkflowError>),
+    Rejected,
     PendingResolutionRequired(Option<CalendarWorkflowError>),
     Confirmed,
     ConfirmedButNotCached,
@@ -96,7 +99,7 @@ where
     P: CalendarProvider + 'static,
     C: CalendarCache + 'static,
 {
-    /// Creates a composer that retries a saved operation using its existing ID.
+    /// Creates a composer that retries or resolves a saved operation.
     ///
     /// # Panics
     ///
@@ -111,10 +114,14 @@ where
             CalendarTimeZoneId::try_from(setup.time_zone.iana_name().unwrap_or("UTC").to_owned())
                 .expect("the fixed time-zone identifier is valid");
         let (subject, start, end) = new_composer_inputs(setup.week_start, window, cx);
-        let status = if setup.pending_creation.is_some() {
-            CreationStatus::Pending
-        } else {
-            CreationStatus::Editing
+        let (creation, status) = match setup.pending_creation {
+            Some(PendingCalendarEventCreation::Unresolved(creation)) => {
+                (Some(creation), CreationStatus::Pending)
+            }
+            Some(PendingCalendarEventCreation::Rejected(creation)) => {
+                (Some(creation), CreationStatus::RejectedPendingCleanup(None))
+            }
+            None => (None, CreationStatus::Editing),
         };
         Self {
             workflow: setup.workflow,
@@ -126,13 +133,17 @@ where
             start,
             end,
             status,
-            creation: setup.pending_creation,
+            creation,
             task: None,
         }
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
         if !self.can_submit() {
+            return;
+        }
+        if matches!(self.status, CreationStatus::RejectedPendingCleanup(_)) {
+            self.discard_rejected_creation(cx);
             return;
         }
         match self.creation_for_submission(cx) {
@@ -179,7 +190,9 @@ where
     fn apply_submission(
         &mut self,
         creation_outcome: Result<CalendarEventCreationOutcome, CalendarWorkflowError>,
-        conflict_recovery: Option<Result<Option<CalendarEventCreation>, CalendarWorkflowError>>,
+        conflict_recovery: Option<
+            Result<Option<PendingCalendarEventCreation>, CalendarWorkflowError>,
+        >,
         cx: &mut Context<Self>,
     ) {
         self.task = None;
@@ -191,7 +204,9 @@ where
     fn apply_creation_outcome(
         &mut self,
         creation_outcome: Result<CalendarEventCreationOutcome, CalendarWorkflowError>,
-        conflict_recovery: Option<Result<Option<CalendarEventCreation>, CalendarWorkflowError>>,
+        conflict_recovery: Option<
+            Result<Option<PendingCalendarEventCreation>, CalendarWorkflowError>,
+        >,
     ) {
         self.status = match creation_outcome {
             Ok(CalendarEventCreationOutcome::Cached(_)) => {
@@ -200,6 +215,15 @@ where
             }
             Ok(CalendarEventCreationOutcome::ConfirmedButNotCached { .. }) => {
                 CreationStatus::ConfirmedButNotCached
+            }
+            Ok(CalendarEventCreationOutcome::Rejected) => {
+                self.creation = None;
+                CreationStatus::Rejected
+            }
+            Ok(CalendarEventCreationOutcome::RejectedButPending { cache_error }) => {
+                CreationStatus::RejectedPendingCleanup(Some(CalendarWorkflowError::Cache(
+                    cache_error,
+                )))
             }
             Err(CalendarWorkflowError::Cache(CalendarCacheError::CreationAlreadyPending)) => {
                 self.resolve_pending_conflict(conflict_recovery)
@@ -210,12 +234,18 @@ where
 
     fn resolve_pending_conflict(
         &mut self,
-        conflict_recovery: Option<Result<Option<CalendarEventCreation>, CalendarWorkflowError>>,
+        conflict_recovery: Option<
+            Result<Option<PendingCalendarEventCreation>, CalendarWorkflowError>,
+        >,
     ) -> CreationStatus {
         match conflict_recovery {
-            Some(Ok(Some(pending_creation))) => {
-                self.creation = Some(pending_creation);
+            Some(Ok(Some(PendingCalendarEventCreation::Unresolved(creation)))) => {
+                self.creation = Some(creation);
                 CreationStatus::Pending
+            }
+            Some(Ok(Some(PendingCalendarEventCreation::Rejected(creation)))) => {
+                self.creation = Some(creation);
+                CreationStatus::RejectedPendingCleanup(None)
             }
             Some(Ok(None)) => {
                 self.creation = None;
@@ -227,6 +257,34 @@ where
             }
             None => CreationStatus::PendingResolutionRequired(None),
         }
+    }
+
+    fn discard_rejected_creation(&mut self, cx: &mut Context<Self>) {
+        let Some(creation) = self.creation.clone() else {
+            self.status = CreationStatus::PendingResolutionRequired(None);
+            cx.notify();
+            return;
+        };
+        self.status = CreationStatus::DiscardingRejected;
+        let workflow = Arc::clone(&self.workflow);
+        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let result = workflow.discard_rejected_event_creation(&creation).await;
+            let _ = this.update(cx, |composer, cx| {
+                composer.task = None;
+                match result {
+                    Ok(()) => {
+                        composer.creation = None;
+                        composer.status = CreationStatus::Rejected;
+                        cx.emit(EventComposerEvent::PendingOperationUpdated);
+                    }
+                    Err(error) => {
+                        composer.status = CreationStatus::RejectedPendingCleanup(Some(error));
+                    }
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn creation_for_submission(&self, cx: &App) -> Result<CalendarEventCreation, DraftError> {
@@ -245,7 +303,8 @@ where
         ) {
             return Err(DraftError::OutsideSelectedWeek);
         }
-        Ok(CalendarEventCreation::new(self.view.clone(), draft))
+        CalendarEventCreation::try_new(self.view.clone(), draft)
+            .map_err(|_| DraftError::OutsideSelectedWeek)
     }
 
     fn build_draft(&self, cx: &App) -> Result<CalendarEventDraft, DraftError> {
@@ -361,10 +420,13 @@ where
             .child(render_pending_subject(creation))
             .child(render_pending_range(creation))
             .when(
-                matches!(self.status, CreationStatus::Submitting),
-                |element| element.child(render_creation_submitting(colors)),
+                matches!(
+                    self.status,
+                    CreationStatus::Submitting | CreationStatus::DiscardingRejected
+                ),
+                |element| element.child(render_creation_submitting(self.status, colors)),
             )
-            .child(render_pending_explanation(colors))
+            .child(render_pending_explanation(self.status, colors))
     }
 
     fn render_status(&self, colors: ColorTokens, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -377,6 +439,9 @@ where
             }
             CreationStatus::PendingResolutionRequired(None) => {
                 return Some(render_pending_operation_missing(colors).into_any_element());
+            }
+            CreationStatus::RejectedPendingCleanup(Some(error)) => {
+                return Some(render_rejected_cleanup_failure(error, colors).into_any_element());
             }
             _ => {}
         }
@@ -401,7 +466,9 @@ where
     fn render_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         if matches!(
             self.status,
-            CreationStatus::Confirmed | CreationStatus::PendingResolutionRequired(_)
+            CreationStatus::Confirmed
+                | CreationStatus::Rejected
+                | CreationStatus::PendingResolutionRequired(_)
         ) {
             return render_close_action();
         }
@@ -414,9 +481,9 @@ where
         Button::new("event-composer-submit")
             .debug_selector(|| "event-composer-submit".to_owned())
             .primary()
-            .label(submit_label(submitting, retrying))
-            .loading(submitting)
-            .disabled(submitting)
+            .label(submit_label(self.status, submitting, retrying))
+            .loading(submitting || matches!(self.status, CreationStatus::DiscardingRejected))
+            .disabled(submitting || matches!(self.status, CreationStatus::DiscardingRejected))
             .on_click(cx.listener(|composer, _, _, cx| composer.submit(cx)))
             .into_any_element()
     }
@@ -470,7 +537,7 @@ async fn recover_pending_conflict<P, C>(
     workflow: &CalendarWorkflow<P, C>,
     creation: &CalendarEventCreation,
     creation_outcome: &Result<CalendarEventCreationOutcome, CalendarWorkflowError>,
-) -> Option<Result<Option<CalendarEventCreation>, CalendarWorkflowError>>
+) -> Option<Result<Option<PendingCalendarEventCreation>, CalendarWorkflowError>>
 where
     P: CalendarProvider + 'static,
     C: CalendarCache + 'static,
@@ -541,21 +608,52 @@ fn render_pending_range(creation: &CalendarEventCreation) -> impl IntoElement {
     div().text_sm().child(format_local_range(creation.draft()))
 }
 
-fn render_pending_explanation(colors: ColorTokens) -> impl IntoElement {
+fn render_pending_explanation(status: CreationStatus, colors: ColorTokens) -> impl IntoElement {
+    let message = if matches!(status, CreationStatus::RejectedPendingCleanup(_)) {
+        "Microsoft rejected this event. Clear the saved draft locally before submitting a corrected event."
+    } else {
+        "This event may already exist in Microsoft. Retrying uses the same operation ID."
+    };
     div()
         .text_sm()
         .text_color(colors.muted_foreground)
-        .child("This event may already exist in Microsoft. Retrying uses the same operation ID.")
+        .child(message)
 }
 
-fn render_creation_submitting(colors: ColorTokens) -> impl IntoElement {
+fn render_creation_submitting(status: CreationStatus, colors: ColorTokens) -> impl IntoElement {
+    let message = if matches!(status, CreationStatus::DiscardingRejected) {
+        "Clearing rejected event draft…"
+    } else {
+        "Creating event…"
+    };
     div()
         .id("event-creation-submitting")
         .debug_selector(|| "event-creation-submitting".to_owned())
         .role(Role::Status)
         .text_sm()
         .text_color(colors.muted_foreground)
-        .child("Creating event…")
+        .child(message)
+}
+
+fn render_rejected_cleanup_failure(
+    error: CalendarWorkflowError,
+    colors: ColorTokens,
+) -> impl IntoElement {
+    div()
+        .id("event-creation-status")
+        .debug_selector(|| "event-creation-status".to_owned())
+        .role(Role::Alert)
+        .text_sm()
+        .text_color(colors.destructive)
+        .child(format!(
+            "Microsoft rejected this event, but its saved draft could not be cleared: {}",
+            match error {
+                CalendarWorkflowError::Cache(cache_error) => {
+                    cache_creation_error_text(cache_error)
+                }
+                _ => "the calendar recovery action is unavailable.",
+            }
+        ))
 }
 
 fn render_pending_resolution_failure(
@@ -605,6 +703,13 @@ fn status_text(status: CreationStatus) -> Option<&'static str> {
         CreationStatus::ConfirmedButNotCached => Some(
             "Microsoft confirmed the event, but it could not be saved locally. Retry to recover it safely.",
         ),
+        CreationStatus::Rejected => {
+            Some("Microsoft rejected this event. Correct the details and submit a new event.")
+        }
+        CreationStatus::RejectedPendingCleanup(None) => Some(
+            "Microsoft rejected this event. Clear the saved draft locally before submitting a corrected event.",
+        ),
+        CreationStatus::DiscardingRejected => Some("Clearing the rejected event draft…"),
         _ => None,
     }
 }
@@ -676,9 +781,13 @@ fn render_close_action() -> AnyElement {
         .into_any_element()
 }
 
-fn submit_label(submitting: bool, retrying: bool) -> &'static str {
+fn submit_label(status: CreationStatus, submitting: bool, retrying: bool) -> &'static str {
     if submitting {
         "Creating event…"
+    } else if matches!(status, CreationStatus::RejectedPendingCleanup(_)) {
+        "Clear rejected draft"
+    } else if matches!(status, CreationStatus::DiscardingRejected) {
+        "Clearing draft…"
     } else if retrying {
         "Retry event creation"
     } else {
@@ -836,6 +945,9 @@ fn creation_error_text(error: CalendarWorkflowError) -> &'static str {
         ) => {
             "Microsoft denied access to create this calendar event. Review the requested permission or your organization's consent policy."
         }
+        CalendarWorkflowError::Provider(CalendarOperationError::EventCreationRejected) => {
+            "Microsoft rejected this event request. Check the event details and try again."
+        }
         CalendarWorkflowError::Provider(
             einfach_mail_application::CalendarOperationError::SignInRequired,
         ) => "Your Microsoft sign-in needs attention. Return to Accounts and connect again.",
@@ -869,6 +981,12 @@ fn cache_creation_error_text(error: CalendarCacheError) -> &'static str {
         }
         CalendarCacheError::CreationAlreadyPending => {
             "Another event creation needs to be resolved before a new event can be created."
+        }
+        CalendarCacheError::PendingMailSend => {
+            "A pending mail send must be resolved before the account cache can be removed."
+        }
+        CalendarCacheError::UnresolvedEventCreation => {
+            "A pending calendar event must be resolved before the account cache can be removed."
         }
     }
 }

@@ -339,6 +339,16 @@ fn migrations() -> Migrations<'static> {
                 )
             );",
         ),
+        M::up(
+            "ALTER TABLE calendar_pending_event_creation
+                ADD COLUMN resolution TEXT NOT NULL DEFAULT 'unresolved'
+                CHECK (resolution IN ('unresolved', 'rejected'));",
+        ),
+        M::up(
+            "ALTER TABLE calendar_pending_event_creation
+                ADD COLUMN view_scope TEXT NOT NULL DEFAULT 'legacy_unbounded'
+                CHECK (view_scope IN ('bounded', 'legacy_unbounded'));",
+        ),
     ])
 }
 
@@ -833,5 +843,59 @@ mod tests {
             )
             .expect("pending-send table remains available");
         assert!(pending_send_exists);
+    }
+
+    #[test]
+    fn event_creation_migrations_preserve_legacy_marker_recovery_policy() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database opens");
+        migrations()
+            .to_version(&mut connection, 9)
+            .expect("previous schema is applied");
+        connection
+            .execute(
+                "INSERT INTO calendar_view_sync_state (
+                    account_id, range_start_seconds, range_start_nanoseconds,
+                    range_end_seconds, range_end_nanoseconds, local_start_julian_day,
+                    local_end_julian_day
+                ) VALUES (
+                    ?1, 1893974400, 0, 1894579200, 0, 2462504, 2462511
+                )",
+                ["synthetic-account"],
+            )
+            .expect("legacy calendar view is stored");
+        connection
+            .execute(
+                "INSERT INTO calendar_pending_event_creation (
+                    account_id, range_start_seconds, range_start_nanoseconds,
+                    range_end_seconds, range_end_nanoseconds, local_start_julian_day,
+                    local_end_julian_day, creation_id, subject, local_start_seconds,
+                    local_start_nanoseconds, local_end_seconds, local_end_nanoseconds,
+                    time_zone, start_seconds, start_nanoseconds, end_seconds,
+                    end_nanoseconds
+                ) VALUES (
+                    ?1, 1893974400, 0, 1894579200, 0, 2462504, 2462511,
+                    ?2, 'Synthetic event', 1894006800, 0, 1894010400, 0,
+                    'Etc/UTC', 1894006800, 0, 1894010400, 0
+                )",
+                params!["synthetic-account", "8d719f02-64d5-4c4b-905e-0d8ca42c21a8"],
+            )
+            .expect("legacy event creation marker is stored");
+
+        migrations()
+            .to_latest(&mut connection)
+            .expect("event creation resolution migrations apply");
+        let marker_metadata = connection
+            .query_row(
+                "SELECT resolution, view_scope FROM calendar_pending_event_creation
+                 WHERE account_id = ?1",
+                ["synthetic-account"],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("legacy marker remains recoverable");
+
+        assert_eq!(
+            marker_metadata,
+            ("unresolved".to_owned(), "legacy_unbounded".to_owned())
+        );
     }
 }

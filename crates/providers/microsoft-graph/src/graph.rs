@@ -182,8 +182,10 @@ impl GraphApi {
             .post_json(GraphOperation::CalendarEventCreate, url, token, body)
             .await?;
         let event = serde_json::from_slice::<WireCalendarEvent>(&response)
-            .map_err(|_| GraphError::InvalidResponse)?;
-        event.into_new(creation.view().clone())
+            .map_err(|_| GraphError::CalendarEventCreationOutcomeUnknown)?;
+        event
+            .into_new(creation.view().clone())
+            .map_err(|_| GraphError::CalendarEventCreationOutcomeUnknown)
     }
 
     fn parse_calendar_delta_page(&self, response: &[u8]) -> Result<CalendarDeltaPage, GraphError> {
@@ -1580,7 +1582,8 @@ mod tests {
                 .assume_utc(),
         )
         .expect("synthetic event draft is valid");
-        let creation = CalendarEventCreation::new(view, draft);
+        let creation =
+            CalendarEventCreation::try_new(view, draft).expect("synthetic event fits its week");
 
         let body = create_calendar_event_body(&creation).expect("synthetic event body serializes");
         let body: serde_json::Value =

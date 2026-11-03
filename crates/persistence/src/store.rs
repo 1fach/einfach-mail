@@ -31,7 +31,7 @@ use einfach_mail_domain::{
     FollowUpFlagStatus, MailFolder, MailMessage, MailRecipient, MailReplySource,
     MailSendOperationId, MailSendTarget, MailSubject, Mailbox, MessageBody, MessageBodyType,
     MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
-    MessageMetadata, MessageOrigin, PendingMailSend, ReadState,
+    MessageMetadata, MessageOrigin, PendingCalendarEventCreation, PendingMailSend, ReadState,
 };
 use thiserror::Error;
 use time::{Date, OffsetDateTime, PrimitiveDateTime};
@@ -381,7 +381,7 @@ impl SqliteMailCache {
         }
     }
 
-    async fn has_pending_event_creation(
+    async fn has_unresolved_event_creation(
         &self,
         account_id: &AccountId,
     ) -> Result<bool, MailCacheError> {
@@ -393,7 +393,7 @@ impl SqliteMailCache {
                     .query_row(
                         "SELECT EXISTS (
                             SELECT 1 FROM calendar_pending_event_creation
-                            WHERE account_id = ?1
+                            WHERE account_id = ?1 AND resolution = 'unresolved'
                         )",
                         [account_id],
                         |row| row.get::<_, bool>(0),
@@ -1106,8 +1106,8 @@ impl MailCache for SqliteMailCache {
             if self.load_pending_send(&account_id).await?.is_some() {
                 return Err(MailCacheError::SendAlreadyPending);
             }
-            if self.has_pending_event_creation(&account_id).await? {
-                return Err(MailCacheError::CalendarEventCreationPending);
+            if self.has_unresolved_event_creation(&account_id).await? {
+                return Err(MailCacheError::CalendarEventCreationUnresolved);
             }
             #[cfg(test)]
             let gate = removal_gate
@@ -1215,7 +1215,8 @@ impl CalendarCache for SqliteMailCache {
                     let transaction = connection.transaction()?;
                     insert_calendar_view_state(&transaction, &account_id, scope)?;
                     match read_pending_event_creation(&transaction, &account_id)? {
-                        Some(existing) if existing == creation => {}
+                        Some(PendingCalendarEventCreation::Unresolved(existing))
+                            if existing == creation => {}
                         Some(_) => return Err(CacheFailure::CreationAlreadyPending),
                         None => write_pending_event_creation(&transaction, &creation)?,
                     }
@@ -1230,7 +1231,7 @@ impl CalendarCache for SqliteMailCache {
     fn pending_event_creation(
         &self,
         account_id: &AccountId,
-    ) -> impl Future<Output = Result<Option<CalendarEventCreation>, CalendarCacheError>> + Send + '_
+    ) -> impl Future<Output = Result<Option<PendingCalendarEventCreation>, CalendarCacheError>> + Send + '_
     {
         let validation = if &self.account_id == account_id {
             Ok(())
@@ -1244,6 +1245,64 @@ impl CalendarCache for SqliteMailCache {
             client
                 .conn_and_then(move |connection| {
                     read_pending_event_creation(connection, &account_id)
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn mark_event_creation_rejected(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(creation.view());
+        let creation = creation.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    mark_pending_event_creation_rejected(&transaction, &creation)?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn discard_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(creation.view());
+        let creation = creation.clone();
+        let account_id = creation.view().account_id().as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    match read_pending_event_creation(&transaction, &account_id)? {
+                        None => {}
+                        Some(PendingCalendarEventCreation::Rejected(pending))
+                            if pending == creation =>
+                        {
+                            let deleted = transaction.execute(
+                                "DELETE FROM calendar_pending_event_creation
+                                 WHERE account_id = ?1 AND creation_id = ?2",
+                                params![account_id, creation.id().as_uuid().to_string()],
+                            )?;
+                            if deleted != 1 {
+                                return Err(CacheFailure::InvalidData);
+                            }
+                        }
+                        Some(_) => return Err(CacheFailure::CreationAlreadyPending),
+                    }
+                    transaction.commit()?;
+                    Ok(())
                 })
                 .await
                 .map_err(CacheFailure::calendar_public)
@@ -1269,7 +1328,7 @@ impl CalendarCache for SqliteMailCache {
                 .conn_mut_and_then(move |connection| {
                     let transaction = connection.transaction()?;
                     let pending = read_pending_event_creation(&transaction, &account_id)?;
-                    if pending.as_ref() != Some(&creation) {
+                    if pending != Some(PendingCalendarEventCreation::Unresolved(creation.clone())) {
                         return Err(CacheFailure::InvalidData);
                     }
                     write_calendar_event(
@@ -1313,8 +1372,8 @@ impl CalendarCache for SqliteMailCache {
                 | MailCacheError::PendingSendNotFound
                 | MailCacheError::OperationInProgress => CalendarCacheError::Unavailable,
                 MailCacheError::SendAlreadyPending => CalendarCacheError::PendingMailSend,
-                MailCacheError::CalendarEventCreationPending => {
-                    CalendarCacheError::CreationAlreadyPending
+                MailCacheError::CalendarEventCreationUnresolved => {
+                    CalendarCacheError::UnresolvedEventCreation
                 }
             })
         }
@@ -1535,6 +1594,8 @@ struct RawPendingEventCreation {
     start_nanoseconds: i64,
     end_seconds: i64,
     end_nanoseconds: i64,
+    resolution: String,
+    view_scope: String,
 }
 
 fn raw_pending_event_creation_from_row(
@@ -1558,13 +1619,15 @@ fn raw_pending_event_creation_from_row(
         start_nanoseconds: row.get(14)?,
         end_seconds: row.get(15)?,
         end_nanoseconds: row.get(16)?,
+        resolution: row.get(17)?,
+        view_scope: row.get(18)?,
     })
 }
 
 fn read_pending_event_creation(
     connection: &Connection,
     account_id: &str,
-) -> CacheResult<Option<CalendarEventCreation>> {
+) -> CacheResult<Option<PendingCalendarEventCreation>> {
     let raw = connection
         .query_row(
             "SELECT range_start_seconds, range_start_nanoseconds,
@@ -1574,7 +1637,7 @@ fn read_pending_event_creation(
                     local_start_seconds, local_start_nanoseconds,
                     local_end_seconds, local_end_nanoseconds,
                     time_zone, start_seconds, start_nanoseconds,
-                    end_seconds, end_nanoseconds
+                    end_seconds, end_nanoseconds, resolution, view_scope
              FROM calendar_pending_event_creation
              WHERE account_id = ?1",
             [account_id],
@@ -1585,10 +1648,34 @@ fn read_pending_event_creation(
         .transpose()
 }
 
+fn mark_pending_event_creation_rejected(
+    transaction: &Transaction<'_>,
+    creation: &CalendarEventCreation,
+) -> CacheResult<()> {
+    let account_id = creation.view().account_id().as_str();
+    match read_pending_event_creation(transaction, account_id)? {
+        None => Ok(()),
+        Some(pending) if pending.creation() == creation => {
+            let updated = transaction.execute(
+                "UPDATE calendar_pending_event_creation
+                 SET resolution = 'rejected'
+                 WHERE account_id = ?1 AND creation_id = ?2",
+                params![account_id, creation.id().as_uuid().to_string()],
+            )?;
+            if updated == 1 {
+                Ok(())
+            } else {
+                Err(CacheFailure::InvalidData)
+            }
+        }
+        Some(_) => Err(CacheFailure::CreationAlreadyPending),
+    }
+}
+
 fn decode_pending_event_creation(
     raw: RawPendingEventCreation,
     account_id: &str,
-) -> CacheResult<CalendarEventCreation> {
+) -> CacheResult<PendingCalendarEventCreation> {
     let account_id =
         AccountId::try_from(account_id.to_owned()).map_err(|_| CacheFailure::InvalidData)?;
     let start = offset_datetime_from_parts(raw.range_start_seconds, raw.range_start_nanoseconds)?;
@@ -1611,18 +1698,30 @@ fn decode_pending_event_creation(
     let draft =
         CalendarEventDraft::timed(raw.subject, local_start, local_end, time_zone, start, end)
             .map_err(|_| CacheFailure::InvalidData)?;
-    if !draft.time().overlaps(view.range()) {
-        return Err(CacheFailure::InvalidData);
-    }
     let id =
         CalendarEventCreationId::parse(&raw.creation_id).map_err(|_| CacheFailure::InvalidData)?;
-    Ok(CalendarEventCreation::restore(id, view, draft))
+    let creation = match raw.view_scope.as_str() {
+        "bounded" => CalendarEventCreation::try_restore(id, view, draft),
+        "legacy_unbounded" => Ok(CalendarEventCreation::restore_legacy_pending(
+            id, view, draft,
+        )),
+        _ => return Err(CacheFailure::InvalidData),
+    }
+    .map_err(|_| CacheFailure::InvalidData)?;
+    match raw.resolution.as_str() {
+        "unresolved" => Ok(PendingCalendarEventCreation::Unresolved(creation)),
+        "rejected" => Ok(PendingCalendarEventCreation::Rejected(creation)),
+        _ => Err(CacheFailure::InvalidData),
+    }
 }
 
 fn write_pending_event_creation(
     connection: &Connection,
     creation: &CalendarEventCreation,
 ) -> CacheResult<()> {
+    if creation.is_legacy_pending() {
+        return Err(CacheFailure::InvalidData);
+    }
     let CalendarOccurrenceTime::Timed { start, end } = creation.draft().time() else {
         return Err(CacheFailure::InvalidData);
     };
@@ -1655,10 +1754,11 @@ fn write_pending_event_creation(
             start_seconds,
             start_nanoseconds,
             end_seconds,
-            end_nanoseconds
+            end_nanoseconds,
+            view_scope
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-            ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+            ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 'bounded'
          )",
         params![
             creation.view().account_id().as_str(),
@@ -2971,7 +3071,8 @@ mod tests {
         CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange,
         CalendarViewReference, EventId, FolderId, FolderReference, FollowUpFlagStatus, MailFolder,
         MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
-        MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
+        MessageDeltaProgress, MessageId, MessageMetadataPatch, PendingCalendarEventCreation,
+        ReadState,
     };
     use tempfile::TempDir;
     use time::{Date, Month, PrimitiveDateTime, Time};
@@ -3044,7 +3145,8 @@ mod tests {
                 .assume_utc(),
         )
         .expect("synthetic calendar event draft is valid");
-        CalendarEventCreation::new(view, draft)
+        CalendarEventCreation::try_new(view, draft)
+            .expect("synthetic event endpoints fit the selected week")
     }
 
     fn calendar_event(creation: &CalendarEventCreation) -> einfach_mail_domain::CalendarOccurrence {
@@ -3459,22 +3561,26 @@ mod tests {
             );
             assert_eq!(
                 cache.pending_event_creation(&account).await,
-                Ok(Some(creation.clone()))
+                Ok(Some(PendingCalendarEventCreation::Unresolved(
+                    creation.clone()
+                )))
             );
             cache.close_for_tests().await;
 
             let reopened = open_test_cache(&directory, account.clone()).await;
             assert_eq!(
                 reopened.pending_event_creation(&account).await,
-                Ok(Some(creation.clone()))
+                Ok(Some(PendingCalendarEventCreation::Unresolved(
+                    creation.clone()
+                )))
             );
             assert_eq!(
                 MailCache::remove_account(&reopened, &account).await,
-                Err(MailCacheError::CalendarEventCreationPending)
+                Err(MailCacheError::CalendarEventCreationUnresolved)
             );
             assert_eq!(
                 CalendarCache::remove_account(&reopened, &account).await,
-                Err(CalendarCacheError::CreationAlreadyPending)
+                Err(CalendarCacheError::UnresolvedEventCreation)
             );
             assert!(directory.path().join("mail.sqlite3").exists());
             let other_account = account_id("synthetic-other-account");
@@ -3513,7 +3619,9 @@ mod tests {
             );
             assert_eq!(
                 reopened.pending_event_creation(&account).await,
-                Ok(Some(creation.clone()))
+                Ok(Some(PendingCalendarEventCreation::Unresolved(
+                    creation.clone()
+                )))
             );
             assert!(
                 reopened
@@ -3536,6 +3644,58 @@ mod tests {
                     .as_slice(),
                 std::slice::from_ref(&event)
             );
+            reopened.close_for_tests().await;
+        });
+    }
+
+    #[test]
+    fn rejected_calendar_event_survives_restart_and_can_be_discarded_locally() {
+        smol::block_on(async {
+            let directory = TempDir::new().expect("temporary directory is created");
+            let account = account_id("synthetic-account");
+            let creation = calendar_creation(calendar_view(&account));
+            let cache = open_test_cache(&directory, account.clone()).await;
+            cache
+                .stage_event_creation(&creation)
+                .await
+                .expect("synthetic event operation is staged");
+
+            assert_eq!(
+                cache.discard_event_creation(&creation).await,
+                Err(CalendarCacheError::CreationAlreadyPending)
+            );
+            assert_eq!(
+                cache.pending_event_creation(&account).await,
+                Ok(Some(PendingCalendarEventCreation::Unresolved(
+                    creation.clone()
+                )))
+            );
+
+            cache
+                .mark_event_creation_rejected(&creation)
+                .await
+                .expect("the synthetic Graph rejection is persisted");
+            cache.close_for_tests().await;
+
+            let reopened = open_test_cache(&directory, account.clone()).await;
+            assert_eq!(
+                reopened.pending_event_creation(&account).await,
+                Ok(Some(PendingCalendarEventCreation::Rejected(
+                    creation.clone()
+                )))
+            );
+            assert!(
+                !reopened
+                    .has_unresolved_event_creation(&account)
+                    .await
+                    .expect("rejected operations do not block account removal")
+            );
+
+            reopened
+                .discard_event_creation(&creation)
+                .await
+                .expect("rejected operation can be cleared without another Graph request");
+            assert_eq!(reopened.pending_event_creation(&account).await, Ok(None));
             reopened.close_for_tests().await;
         });
     }

@@ -195,6 +195,7 @@ impl GraphTransportHandle {
             GraphOperation::MailSend => GraphError::SendOutcomeUnknown,
             GraphOperation::MessageUpdate => GraphError::MessageUpdateOutcomeUnknown,
             GraphOperation::MessageMove => GraphError::MessageMoveOutcomeUnknown,
+            GraphOperation::CalendarEventCreate => GraphError::CalendarEventCreationOutcomeUnknown,
             _ => GraphError::WorkerClosed,
         })?
     }
@@ -431,6 +432,11 @@ async fn request_with_retry(
             {
                 return Some(Err(GraphError::MessageMoveOutcomeUnknown));
             }
+            Err(GraphError::Transport)
+                if matches!(request.operation, GraphOperation::CalendarEventCreate) =>
+            {
+                return Some(Err(GraphError::CalendarEventCreationOutcomeUnknown));
+            }
             Err(error) => return Some(Err(error)),
         };
         if matches!(request.operation, GraphOperation::MessageMove) {
@@ -546,6 +552,9 @@ async fn response_result(
             _ => Err(GraphError::SendOutcomeUnknown),
         });
     }
+    if matches!(operation, GraphOperation::CalendarEventCreate) {
+        return calendar_event_create_response_result(response, reply).await;
+    }
     if matches!(operation, GraphOperation::MessageDelta) && response.status() == StatusCode::GONE {
         let location = response
             .headers()
@@ -559,6 +568,28 @@ async fn response_result(
         StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
         status if status.is_success() => read_limited_body(response, reply).await,
         _ => Some(Err(GraphError::Transport)),
+    }
+}
+
+async fn calendar_event_create_response_result(
+    response: Response,
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
+) -> Option<Result<GraphResponse, GraphError>> {
+    match response.status() {
+        StatusCode::UNAUTHORIZED => Some(Err(GraphError::AccessTokenRejected)),
+        StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
+        StatusCode::REQUEST_TIMEOUT | StatusCode::CONFLICT => {
+            Some(Err(GraphError::CalendarEventCreationOutcomeUnknown))
+        }
+        status if status.is_server_error() => {
+            Some(Err(GraphError::CalendarEventCreationOutcomeUnknown))
+        }
+        StatusCode::CREATED => match read_limited_body(response, reply).await? {
+            Ok(body) => Some(Ok(body)),
+            Err(_) => Some(Err(GraphError::CalendarEventCreationOutcomeUnknown)),
+        },
+        status if status.is_client_error() => Some(Err(GraphError::CalendarEventCreationRejected)),
+        _ => Some(Err(GraphError::CalendarEventCreationOutcomeUnknown)),
     }
 }
 
@@ -1466,7 +1497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_rejects_a_success_status_that_does_not_confirm_creation() {
+    async fn post_treats_a_success_status_that_does_not_confirm_creation_as_unknown() {
         let server = MockServer::start_async().await;
         let post = server
             .mock_async(|when, then| {
@@ -1486,8 +1517,48 @@ mod tests {
             )
             .await;
 
-        assert_eq!(result, Err(GraphError::InvalidResponse));
+        assert_eq!(result, Err(GraphError::CalendarEventCreationOutcomeUnknown));
         post.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn classifies_calendar_creation_responses_without_retrying() {
+        for (status, expected) in [
+            (201, Ok(())),
+            (400, Err(GraphError::CalendarEventCreationRejected)),
+            (401, Err(GraphError::AccessTokenRejected)),
+            (403, Err(GraphError::AccessDenied)),
+            (408, Err(GraphError::CalendarEventCreationOutcomeUnknown)),
+            (409, Err(GraphError::CalendarEventCreationOutcomeUnknown)),
+            (500, Err(GraphError::CalendarEventCreationOutcomeUnknown)),
+            (302, Err(GraphError::CalendarEventCreationOutcomeUnknown)),
+        ] {
+            let server = MockServer::start_async().await;
+            let response = server
+                .mock_async(|when, then| {
+                    when.method(POST).path("/v1.0/me/calendar/events");
+                    then.status(status).body("{}");
+                })
+                .await;
+            let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+            let result = transport
+                .handle()
+                .post_json(
+                    GraphOperation::CalendarEventCreate,
+                    graph_url(&server.url("/v1.0/me/calendar/events")),
+                    synthetic_access_token(),
+                    b"{}".to_vec(),
+                )
+                .await
+                .map(|_| ());
+
+            assert_eq!(
+                result, expected,
+                "unexpected classification for HTTP {status}"
+            );
+            response.assert_calls_async(1).await;
+        }
     }
 
     #[tokio::test]

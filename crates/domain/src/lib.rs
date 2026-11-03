@@ -18,7 +18,8 @@ pub use calendar::{
 };
 pub use calendar_creation::{
     CalendarEventCreation, CalendarEventCreationId, CalendarEventDraft, CalendarTimeZoneId,
-    InvalidCalendarEventCreationId, InvalidCalendarEventDraft, InvalidCalendarEventTimeZone,
+    InvalidCalendarEventCreation, InvalidCalendarEventCreationId, InvalidCalendarEventDraft,
+    InvalidCalendarEventTimeZone, PendingCalendarEventCreation,
 };
 pub use identifiers::{AccountId, CalendarId, EmptyIdentifier, EventId, FolderId, MessageId};
 pub use mail::{

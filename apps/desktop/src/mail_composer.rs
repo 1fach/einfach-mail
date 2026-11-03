@@ -971,6 +971,9 @@ fn cache_error_text(error: MailCacheError) -> &'static str {
         MailCacheError::SendAlreadyPending => {
             "A previous send needs review before another message can be submitted."
         }
+        MailCacheError::CalendarEventCreationUnresolved => {
+            "A calendar event still needs recovery before the account cache can be removed."
+        }
         MailCacheError::PendingSendMismatch | MailCacheError::PendingSendNotFound => {
             "The pending send changed. Reload mail before continuing."
         }

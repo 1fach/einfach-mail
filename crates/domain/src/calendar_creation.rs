@@ -184,12 +184,19 @@ impl CalendarEventDraft {
     }
 }
 
-/// A one-off event creation bound to an account's exact calendar view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CalendarEventCreationScope {
+    Bounded,
+    LegacyUnbounded,
+}
+
+/// A one-off event creation scoped to an account's calendar view.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CalendarEventCreation {
     id: CalendarEventCreationId,
     view: CalendarViewReference,
     draft: CalendarEventDraft,
+    scope: CalendarEventCreationScope,
 }
 
 impl fmt::Debug for CalendarEventCreation {
@@ -199,24 +206,67 @@ impl fmt::Debug for CalendarEventCreation {
 }
 
 impl CalendarEventCreation {
-    /// Creates a new operation with its own retry-stable identifier.
-    #[must_use]
-    pub fn new(view: CalendarViewReference, draft: CalendarEventDraft) -> Self {
-        Self {
-            id: CalendarEventCreationId::new(),
-            view,
-            draft,
-        }
+    /// Creates an operation whose endpoints fit the selected calendar view.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidCalendarEventCreation`] when either local endpoint date
+    /// or resolved UTC endpoint falls outside the view.
+    pub fn try_new(
+        view: CalendarViewReference,
+        draft: CalendarEventDraft,
+    ) -> Result<Self, InvalidCalendarEventCreation> {
+        Self::try_from_parts(CalendarEventCreationId::new(), view, draft)
     }
 
-    /// Restores an operation already validated by its encrypted persistence boundary.
+    /// Restores a pending operation after validating its endpoints against the view.
+    ///
+    /// Retains `id` so the operation keeps its retry identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidCalendarEventCreation`] when either local endpoint date
+    /// or resolved UTC endpoint falls outside the view.
+    pub fn try_restore(
+        id: CalendarEventCreationId,
+        view: CalendarViewReference,
+        draft: CalendarEventDraft,
+    ) -> Result<Self, InvalidCalendarEventCreation> {
+        Self::try_from_parts(id, view, draft)
+    }
+
+    /// Restores a pending operation written before creations were bounded to the selected view.
+    ///
+    /// Persistence uses this only for markers migrated from the older format.
+    /// New operations must use [`Self::try_new`] or [`Self::try_restore`].
     #[must_use]
-    pub fn restore(
+    pub fn restore_legacy_pending(
         id: CalendarEventCreationId,
         view: CalendarViewReference,
         draft: CalendarEventDraft,
     ) -> Self {
-        Self { id, view, draft }
+        Self {
+            id,
+            view,
+            draft,
+            scope: CalendarEventCreationScope::LegacyUnbounded,
+        }
+    }
+
+    fn try_from_parts(
+        id: CalendarEventCreationId,
+        view: CalendarViewReference,
+        draft: CalendarEventDraft,
+    ) -> Result<Self, InvalidCalendarEventCreation> {
+        if !draft_fits_view(&draft, view.range()) {
+            return Err(InvalidCalendarEventCreation);
+        }
+        Ok(Self {
+            id,
+            view,
+            draft,
+            scope: CalendarEventCreationScope::Bounded,
+        })
     }
 
     /// Returns the stable identifier reused for every retry of this operation.
@@ -236,7 +286,57 @@ impl CalendarEventCreation {
     pub fn draft(&self) -> &CalendarEventDraft {
         &self.draft
     }
+
+    /// Returns whether this operation came from the earlier unbounded format.
+    #[must_use]
+    pub fn is_legacy_pending(&self) -> bool {
+        self.scope == CalendarEventCreationScope::LegacyUnbounded
+    }
 }
+
+/// An event creation retained because its result or local cleanup still needs resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PendingCalendarEventCreation {
+    /// The request may have reached Graph, or its accepted event is not yet cached.
+    Unresolved(CalendarEventCreation),
+    /// Graph rejected the request and only local marker cleanup remains.
+    Rejected(CalendarEventCreation),
+}
+
+impl PendingCalendarEventCreation {
+    /// Returns the operation retained for resolution.
+    #[must_use]
+    pub fn creation(&self) -> &CalendarEventCreation {
+        match self {
+            Self::Unresolved(creation) | Self::Rejected(creation) => creation,
+        }
+    }
+}
+
+fn draft_fits_view(draft: &CalendarEventDraft, range: &crate::CalendarViewRange) -> bool {
+    let start_date = draft.local_start().date();
+    let end_date = draft.local_end().date();
+    let local_dates_fit = range.start_date() <= start_date
+        && start_date < range.end_date_exclusive()
+        && range.start_date() <= end_date
+        && end_date < range.end_date_exclusive();
+    let CalendarOccurrenceTime::Timed { start, end } = draft.time() else {
+        return false;
+    };
+    local_dates_fit && *start >= range.start() && *end < range.end()
+}
+
+/// A calendar event's local or resolved endpoints fall outside its selected view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidCalendarEventCreation;
+
+impl fmt::Display for InvalidCalendarEventCreation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("calendar event endpoints must fit the selected view")
+    }
+}
+
+impl std::error::Error for InvalidCalendarEventCreation {}
 
 /// A calendar event draft contains invalid title or local-time values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -254,7 +354,9 @@ impl std::error::Error for InvalidCalendarEventDraft {}
 mod tests {
     use time::{Date, Month, PrimitiveDateTime, Time};
 
-    use super::{CalendarEventCreation, CalendarEventDraft, CalendarTimeZoneId};
+    use super::{
+        CalendarEventCreation, CalendarEventCreationId, CalendarEventDraft, CalendarTimeZoneId,
+    };
     use crate::{CalendarViewRange, CalendarViewReference};
 
     #[test]
@@ -271,13 +373,76 @@ mod tests {
             local_end.assume_utc(),
         )
         .expect("synthetic event draft is valid");
-        let creation = CalendarEventCreation::new(view.clone(), draft.clone());
-        let restored = CalendarEventCreation::restore(creation.id(), view, draft);
+        let creation = CalendarEventCreation::try_new(view.clone(), draft.clone())
+            .expect("synthetic creation fits its week");
+        let restored = CalendarEventCreation::try_restore(creation.id(), view, draft)
+            .expect("synthetic restored event fits its week");
 
         assert_eq!(restored, creation);
+        assert!(!restored.is_legacy_pending());
         assert_eq!(restored.draft().subject(), "Planning");
         assert_eq!(restored.draft().local_start(), local_start);
         assert_eq!(restored.draft().time_zone().as_str(), "Europe/Berlin");
+    }
+
+    #[test]
+    fn rejects_creation_endpoints_outside_local_dates_or_utc_view_instants() {
+        let time_zone = time_zone("UTC");
+        let view = view_for_system_offset(-3);
+        let local_start = local(2030, Month::January, 13, 23, 30);
+        let local_end = local(2030, Month::January, 14, 0, 30);
+        let draft = CalendarEventDraft::timed(
+            "Planning".to_owned(),
+            local_start,
+            local_end,
+            time_zone.clone(),
+            local_start.assume_utc(),
+            local_end.assume_utc(),
+        )
+        .expect("synthetic event draft is valid");
+        let id = CalendarEventCreationId::new();
+        assert!(CalendarEventCreation::try_new(view.clone(), draft.clone()).is_err());
+        assert!(CalendarEventCreation::try_restore(id, view, draft).is_err());
+
+        let view = view_for_system_offset(3);
+        let local_start = local(2030, Month::January, 13, 20, 30);
+        let local_end = local(2030, Month::January, 13, 21, 30);
+        let draft = CalendarEventDraft::timed(
+            "Planning".to_owned(),
+            local_start,
+            local_end,
+            time_zone,
+            local_start.assume_utc(),
+            local_end.assume_utc(),
+        )
+        .expect("synthetic event draft is valid");
+        let id = CalendarEventCreationId::new();
+        assert!(CalendarEventCreation::try_new(view.clone(), draft.clone()).is_err());
+        assert!(CalendarEventCreation::try_restore(id, view, draft).is_err());
+    }
+
+    #[test]
+    fn legacy_pending_creation_can_be_restored_outside_its_view() {
+        let view = view();
+        let local_start = local(2030, Month::January, 7, 0, 30);
+        let local_end = local(2030, Month::January, 7, 1, 0);
+        let draft = CalendarEventDraft::timed(
+            "Planning".to_owned(),
+            local_start,
+            local_end,
+            time_zone("Pacific/Kiritimati"),
+            local(2030, Month::January, 6, 10, 30).assume_utc(),
+            local(2030, Month::January, 6, 11, 0).assume_utc(),
+        )
+        .expect("synthetic legacy event draft is valid");
+        let id = CalendarEventCreationId::new();
+
+        assert!(CalendarEventCreation::try_restore(id, view.clone(), draft.clone()).is_err());
+        let restored = CalendarEventCreation::restore_legacy_pending(id, view, draft);
+
+        assert_eq!(restored.id(), id);
+        assert!(restored.is_legacy_pending());
+        assert_eq!(restored.draft().local_start(), local_start);
     }
 
     #[test]
@@ -342,6 +507,23 @@ mod tests {
                 .expect("account id is valid"),
             CalendarViewRange::new(start, end, start.date(), end.date())
                 .expect("synthetic view range is valid"),
+        )
+    }
+
+    fn view_for_system_offset(offset_hours: i64) -> CalendarViewReference {
+        let start_date =
+            Date::from_calendar_date(2030, Month::January, 7).expect("synthetic date is valid");
+        let end_date =
+            Date::from_calendar_date(2030, Month::January, 14).expect("synthetic date is valid");
+        let start = start_date.midnight().assume_utc() - time::Duration::hours(offset_hours);
+        let end = end_date.midnight().assume_utc() - time::Duration::hours(offset_hours);
+        CalendarViewReference::new(
+            "synthetic-account"
+                .to_owned()
+                .try_into()
+                .expect("account id is valid"),
+            CalendarViewRange::new(start, end, start_date, end_date)
+                .expect("synthetic fixed-offset view range is valid"),
         )
     }
 }
