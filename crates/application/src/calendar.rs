@@ -30,6 +30,9 @@ pub enum CalendarOperationError {
     /// The provider denied access to the calendar operation.
     #[error("calendar access was denied")]
     AccessDenied,
+    /// The event may exist, but the provider could not confirm its creation.
+    #[error("the calendar event creation outcome is unknown")]
+    CreationOutcomeUnknown,
     /// The service asked the application to wait before retrying.
     #[error("the calendar service is throttling requests")]
     RateLimited {

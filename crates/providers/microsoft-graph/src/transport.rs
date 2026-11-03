@@ -452,6 +452,11 @@ async fn request_with_retry(
                     }
                     RetryDecision::Stop(error) => return Some(Err(error)),
                 },
+                GraphRequestMethod::PostJson(_)
+                    if matches!(request.operation, GraphOperation::CalendarEventCreate) =>
+                {
+                    return Some(Err(GraphError::CalendarEventCreationOutcomeUnknown));
+                }
                 GraphRequestMethod::PatchJson(_) | GraphRequestMethod::PostJson(_) => {
                     return Some(Err(rate_limit_error(&response)));
                 }
@@ -1515,7 +1520,7 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(GraphError::RateLimited { .. })));
+        assert_eq!(result, Err(GraphError::CalendarEventCreationOutcomeUnknown));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         post.assert_calls_async(1).await;
     }

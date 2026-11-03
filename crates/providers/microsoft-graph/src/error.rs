@@ -13,6 +13,7 @@ pub(super) enum GraphError {
     SendRejected,
     SendOutcomeUnknown,
     MessageMoveOutcomeUnknown,
+    CalendarEventCreationOutcomeUnknown,
     InvalidResponse,
     UnsafeLink,
     InvalidRecord,

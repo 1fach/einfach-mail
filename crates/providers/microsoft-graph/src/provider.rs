@@ -538,6 +538,9 @@ fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
     match error {
         GraphError::AccessTokenRejected => CalendarOperationError::SignInRequired,
         GraphError::AccessDenied => CalendarOperationError::AccessDenied,
+        GraphError::CalendarEventCreationOutcomeUnknown => {
+            CalendarOperationError::CreationOutcomeUnknown
+        }
         GraphError::RateLimited { retry_after } => {
             CalendarOperationError::RateLimited { retry_after }
         }
@@ -554,6 +557,7 @@ fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
         | GraphError::SendRejected
         | GraphError::SendOutcomeUnknown
         | GraphError::MessageMoveOutcomeUnknown
+        | GraphError::CalendarEventCreationOutcomeUnknown
         | GraphError::InvalidToken => CalendarOperationError::ServiceUnavailable,
     }
 }
@@ -607,6 +611,7 @@ fn map_graph_error(error: GraphError) -> MailOperationError {
         | GraphError::Transport
         | GraphError::SendRejected
         | GraphError::SendOutcomeUnknown
+        | GraphError::CalendarEventCreationOutcomeUnknown
         | GraphError::InvalidToken => MailOperationError::ServiceUnavailable,
     }
 }
@@ -628,6 +633,7 @@ fn map_profile_graph_error(error: GraphError) -> AccountOperationError {
         | GraphError::SendRejected
         | GraphError::SendOutcomeUnknown
         | GraphError::MessageMoveOutcomeUnknown
+        | GraphError::CalendarEventCreationOutcomeUnknown
         | GraphError::RateLimited { .. } => AccountOperationError::ServiceUnavailable,
     }
 }
@@ -667,7 +673,10 @@ fn map_send_graph_error(error: GraphError) -> MailSendProviderError {
         | GraphError::ResponseTooLarge
         | GraphError::PaginationLimitExceeded
         | GraphError::MessageUpdateOutcomeUnknown
-        | GraphError::MessageMoveOutcomeUnknown => MailSendProviderError::ServiceUnavailable,
+        | GraphError::MessageMoveOutcomeUnknown
+        | GraphError::CalendarEventCreationOutcomeUnknown => {
+            MailSendProviderError::ServiceUnavailable
+        }
     }
 }
 
