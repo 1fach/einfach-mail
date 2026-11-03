@@ -9,7 +9,8 @@ use std::{
 };
 
 use einfach_mail_application::{
-    MailCache, MailOperationError, MailProvider, MailSyncProgress, MailWorkflow, MailWorkflowError,
+    MailCache, MailCacheError, MailCacheFactory, MailOperationError, MailProvider,
+    MailSessionFactory, MailSyncProgress, MailWorkflow, MailWorkflowError, MailWorkflowFactory,
     MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
@@ -25,18 +26,57 @@ const DATABASE_KEY_BYTE: u8 = 0x62;
 
 type PageQueue = VecDeque<Result<MessageDeltaResponse, MailOperationError>>;
 
+#[derive(Clone)]
 struct FixtureProvider {
     account_id: AccountId,
     folders: Vec<MailFolder>,
+    folder_snapshots: Arc<Mutex<VecDeque<Vec<MailFolder>>>>,
+    folder_list_calls: Arc<AtomicUsize>,
     pages: Arc<Mutex<PageQueue>>,
     requests: Arc<Mutex<Vec<MessageDeltaRequest>>>,
     body_result: Result<MessageBody, MailOperationError>,
     body_fetches: Arc<AtomicUsize>,
     body_gate: Option<BodyFetchGate>,
+    delta_gate: Option<DeltaPageGate>,
+}
+
+struct FixtureCacheFactory {
+    database_directory: std::path::PathBuf,
+}
+
+impl MailCacheFactory for FixtureCacheFactory {
+    type Cache = SqliteMailCache;
+
+    fn open_for_account(
+        &self,
+        account_id: AccountId,
+    ) -> impl Future<Output = Result<Self::Cache, MailCacheError>> + Send + '_ {
+        let database_path = self.database_directory.join("mail.sqlite3");
+        async move {
+            Ok(
+                SqliteMailCache::open_with_test_key(database_path, account_id, DATABASE_KEY_BYTE)
+                    .await,
+            )
+        }
+    }
+
+    fn remove_for_account<'a>(
+        &'a self,
+        _: &'a AccountId,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + 'a {
+        ready(Err(MailCacheError::Unavailable))
+    }
 }
 
 #[derive(Clone)]
 struct BodyFetchGate {
+    started: smol::channel::Sender<()>,
+    release: smol::channel::Receiver<()>,
+}
+
+#[derive(Clone)]
+struct DeltaPageGate {
+    entered: Arc<AtomicUsize>,
     started: smol::channel::Sender<()>,
     release: smol::channel::Receiver<()>,
 }
@@ -51,11 +91,14 @@ impl FixtureProvider {
         Self {
             account_id,
             folders,
+            folder_snapshots: Arc::new(Mutex::new(VecDeque::new())),
+            folder_list_calls: Arc::new(AtomicUsize::new(0)),
             pages: Arc::new(Mutex::new(pages.into_iter().collect())),
             requests: Arc::new(Mutex::new(Vec::new())),
             body_result,
             body_fetches: Arc::new(AtomicUsize::new(0)),
             body_gate: None,
+            delta_gate: None,
         }
     }
 }
@@ -66,10 +109,17 @@ impl MailProvider for FixtureProvider {
         account_id: &AccountId,
     ) -> impl Future<Output = Result<Vec<MailFolder>, MailOperationError>> + Send + '_ {
         let folders = self.folders.clone();
+        let snapshots = Arc::clone(&self.folder_snapshots);
+        let calls = Arc::clone(&self.folder_list_calls);
         let matches_account = account_id == &self.account_id;
         async move {
             if matches_account {
-                Ok(folders)
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(snapshots
+                    .lock()
+                    .expect("synthetic folder snapshot mutex is not poisoned")
+                    .pop_front()
+                    .unwrap_or(folders))
             } else {
                 Err(MailOperationError::AccountMismatch)
             }
@@ -92,6 +142,7 @@ impl MailProvider for FixtureProvider {
         let expected_account = self.account_id.clone();
         let pages = Arc::clone(&self.pages);
         let requests = Arc::clone(&self.requests);
+        let delta_gate = self.delta_gate.clone();
         async move {
             if account_id != expected_account {
                 return Err(MailOperationError::AccountMismatch);
@@ -100,6 +151,18 @@ impl MailProvider for FixtureProvider {
                 .lock()
                 .expect("synthetic request log mutex is not poisoned")
                 .push(request);
+            if let Some(gate) = delta_gate
+                && gate.entered.fetch_add(1, Ordering::Relaxed) == 0
+            {
+                gate.started
+                    .send(())
+                    .await
+                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
+                gate.release
+                    .recv()
+                    .await
+                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
+            }
             pages
                 .lock()
                 .expect("synthetic delta page mutex is not poisoned")
@@ -480,7 +543,7 @@ fn opening_a_missing_body_reserves_its_folder_against_delta_sync() {
         assert!(!opened.loaded_from_cache());
         assert_eq!(
             sync_result,
-            Err(MailWorkflowError::SyncInProgress),
+            Err(MailWorkflowError::OperationInProgress),
             "a delta page cannot commit while a missing body is being fetched"
         );
         let (_, cached_body) = cache
@@ -512,6 +575,228 @@ fn opening_a_missing_body_reserves_its_folder_against_delta_sync() {
         drop(workflow);
         drop(initial_workflow);
         cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn factory_sessions_share_folder_reservations_during_body_fetch() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let folder_reference = cached_folder.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let cutoff = started_at - Duration::from_secs(90 * 24 * 60 * 60);
+        let cache = open_cache(&directory, account.clone()).await;
+        cache
+            .replace_folders(&account, vec![cached_folder.clone()])
+            .await
+            .expect("synthetic folder is cached");
+        cache
+            .ensure_account_sync_scope(&account, cutoff)
+            .await
+            .expect("account cutoff is saved");
+        let initial_state = cache
+            .ensure_sync_state(&folder_reference, cutoff)
+            .await
+            .expect("initial checkpoint is saved");
+        cache
+            .commit_delta_page(
+                &folder_reference,
+                &initial_state,
+                MessageDeltaPage::new(
+                    vec![MessageDeltaChange::Upsert {
+                        id: message_id(),
+                        patch: complete_patch("Cached message".to_owned(), started_at),
+                    }],
+                    MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(
+                        "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=baseline"
+                            .to_owned(),
+                    )),
+                ),
+                started_at,
+            )
+            .await
+            .expect("synthetic baseline sync commits");
+        cache.close_for_tests().await;
+
+        let (started_sender, started_receiver) = smol::channel::unbounded();
+        let (release_sender, release_receiver) = smol::channel::bounded(1);
+        let mut provider = FixtureProvider::new(
+            account.clone(),
+            vec![cached_folder],
+            [],
+            Ok(MessageBody::new(
+                MessageBodyType::Text,
+                "Synthetic fetched body".to_owned(),
+            )),
+        );
+        provider.body_gate = Some(BodyFetchGate {
+            started: started_sender,
+            release: release_receiver,
+        });
+        let requests = Arc::clone(&provider.requests);
+        let factory = MailWorkflowFactory::new(
+            provider,
+            FixtureCacheFactory {
+                database_directory: directory.path().to_path_buf(),
+            },
+        );
+        let opening_session = factory
+            .open_session(account.clone())
+            .await
+            .expect("first mail session opens");
+        let syncing_session = factory
+            .open_session(account.clone())
+            .await
+            .expect("second mail session opens");
+        let executor = smol::Executor::new();
+        let opening_session_task = Arc::clone(&opening_session);
+        let opening_folder = folder_reference.clone();
+        let opening_message = message_id();
+
+        let (open_result, sync_result) = smol::block_on(executor.run(async {
+            let open_task = executor.spawn(async move {
+                opening_session_task
+                    .open_message(&opening_folder, &opening_message)
+                    .await
+            });
+            started_receiver
+                .recv()
+                .await
+                .expect("body fetch reaches the synchronization gate");
+            let sync_result = syncing_session
+                .synchronize_account(
+                    &account,
+                    started_at + Duration::from_secs(1),
+                    &ignore_sync_progress,
+                )
+                .await;
+            release_sender
+                .send(())
+                .await
+                .expect("body fetch gate is still open");
+            (open_task.await, sync_result)
+        }));
+
+        assert!(
+            !open_result
+                .expect("message open completes")
+                .loaded_from_cache()
+        );
+        assert_eq!(sync_result, Err(MailWorkflowError::OperationInProgress));
+        assert!(
+            requests
+                .lock()
+                .expect("synthetic request log mutex is not poisoned")
+                .is_empty()
+        );
+        drop(opening_session);
+        drop(syncing_session);
+    });
+}
+
+#[test]
+fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let folder_reference = cached_folder.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let page = MessageDeltaPage::new(
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Account snapshot survives".to_owned(), started_at),
+            }],
+            MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(
+                "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=complete"
+                    .to_owned(),
+            )),
+        );
+        let mut provider = FixtureProvider::new(
+            account.clone(),
+            vec![cached_folder.clone()],
+            [Ok(page_response(page))],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        provider
+            .folder_snapshots
+            .lock()
+            .expect("synthetic folder snapshot mutex is not poisoned")
+            .extend([vec![cached_folder.clone()], Vec::new()]);
+        let (started_sender, started_receiver) = smol::channel::unbounded();
+        let (release_sender, release_receiver) = smol::channel::bounded(1);
+        provider.delta_gate = Some(DeltaPageGate {
+            entered: Arc::new(AtomicUsize::new(0)),
+            started: started_sender,
+            release: release_receiver,
+        });
+        let folder_list_calls = Arc::clone(&provider.folder_list_calls);
+        let factory = MailWorkflowFactory::new(
+            provider,
+            FixtureCacheFactory {
+                database_directory: directory.path().to_path_buf(),
+            },
+        );
+        let syncing_session = factory
+            .open_session(account.clone())
+            .await
+            .expect("first mail session opens");
+        let competing_session = factory
+            .open_session(account.clone())
+            .await
+            .expect("second mail session opens");
+        let executor = smol::Executor::new();
+        let first_account = account.clone();
+
+        let (sync_result, competing_result) = smol::block_on(executor.run(async {
+            let sync_task = executor.spawn(async move {
+                syncing_session
+                    .synchronize_account(&first_account, started_at, &ignore_sync_progress)
+                    .await
+            });
+            started_receiver
+                .recv()
+                .await
+                .expect("first delta request reaches its gate");
+            let competing_result = competing_session
+                .synchronize_account(
+                    &account,
+                    started_at + Duration::from_secs(1),
+                    &ignore_sync_progress,
+                )
+                .await;
+            release_sender
+                .send(())
+                .await
+                .expect("first delta request gate is still open");
+            (sync_task.await, competing_result)
+        }));
+
+        let report = sync_result.expect("first account synchronization completes");
+        assert_eq!(report.folder_count(), 1);
+        assert_eq!(
+            competing_result,
+            Err(MailWorkflowError::OperationInProgress),
+            "a competing sync is rejected before it can replace the folder snapshot"
+        );
+        assert_eq!(folder_list_calls.load(Ordering::Relaxed), 1);
+        let folders = competing_session
+            .list_cached_folders(&account)
+            .await
+            .expect("saved folder snapshot remains readable");
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].reference(), &folder_reference);
+        let messages = competing_session
+            .list_cached_messages(&folder_reference)
+            .await
+            .expect("saved message snapshot remains readable");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].metadata().subject(),
+            Some("Account snapshot survives")
+        );
     });
 }
 
@@ -984,6 +1269,105 @@ fn a_second_delta_reset_is_checkpointed_for_the_next_attempt() {
             .expect("folder state exists");
         assert!(!state.is_rebuilding());
         drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn stale_delta_responses_cannot_advance_a_replaced_checkpoint() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let folder_reference = cached_folder.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let cutoff = started_at - Duration::from_secs(90 * 24 * 60 * 60);
+        let cache = open_cache(&directory, account.clone()).await;
+        cache
+            .replace_folders(&account, vec![cached_folder])
+            .await
+            .expect("synthetic folder is cached");
+        cache
+            .ensure_account_sync_scope(&account, cutoff)
+            .await
+            .expect("account cutoff is saved");
+        let initial_state = cache
+            .ensure_sync_state(&folder_reference, cutoff)
+            .await
+            .expect("initial checkpoint is saved");
+        let old_delta_link = MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=old"
+                .to_owned(),
+        );
+        let baseline_page = MessageDeltaPage::new(
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Baseline message".to_owned(), started_at),
+            }],
+            MessageDeltaProgress::Complete(old_delta_link),
+        );
+        let baseline_state = cache
+            .commit_delta_page(&folder_reference, &initial_state, baseline_page, started_at)
+            .await
+            .expect("baseline snapshot commits");
+        let reset_link = MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken="
+                .to_owned(),
+        );
+        let replacement_state = cache
+            .begin_full_resync(&folder_reference, &baseline_state, reset_link)
+            .await
+            .expect("replacement checkpoint starts");
+
+        assert_eq!(
+            cache
+                .begin_full_resync(
+                    &folder_reference,
+                    &baseline_state,
+                    MessageDeltaLink::from_opaque(
+                        "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=stale-reset"
+                            .to_owned(),
+                    ),
+                )
+                .await,
+            Err(MailCacheError::SyncStateChanged)
+        );
+        assert_eq!(
+            cache
+                .commit_delta_page(
+                    &folder_reference,
+                    &baseline_state,
+                    MessageDeltaPage::new(
+                        vec![MessageDeltaChange::Upsert {
+                            id: MessageId::try_from("stale-session-message".to_owned())
+                                .expect("synthetic message ID is valid"),
+                            patch: complete_patch("Stale page".to_owned(), started_at),
+                        }],
+                        MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(
+                            "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=stale-page"
+                                .to_owned(),
+                        )),
+                    ),
+                    started_at + Duration::from_secs(1),
+                )
+                .await,
+            Err(MailCacheError::SyncStateChanged)
+        );
+
+        let stored_state = cache
+            .load_sync_state(&folder_reference)
+            .await
+            .expect("replacement checkpoint remains readable")
+            .expect("folder checkpoint exists");
+        assert_eq!(stored_state, replacement_state);
+        assert_eq!(stored_state.checkpoint_revision(), 2);
+        assert!(stored_state.is_rebuilding());
+        let messages = cache
+            .list_messages(&folder_reference)
+            .await
+            .expect("the previous snapshot remains readable");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id(), &message_id());
         cache.close_for_tests().await;
     });
 }

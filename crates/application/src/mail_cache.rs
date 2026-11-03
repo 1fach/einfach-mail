@@ -27,6 +27,9 @@ pub enum MailCacheError {
     /// The requested message is not present in the cached folder.
     #[error("the message is not in the local mail cache")]
     MessageNotCached,
+    /// Another synchronization advanced the folder checkpoint.
+    #[error("the folder synchronization checkpoint changed")]
+    SyncStateChanged,
 }
 
 /// A folder's account-wide cutoff and message delta checkpoints.
@@ -37,6 +40,7 @@ pub struct MailSyncState {
     next_link: Option<MessageDeltaLink>,
     last_synchronized_at: Option<SystemTime>,
     full_sync_generation: Option<u64>,
+    checkpoint_revision: u64,
 }
 
 impl MailSyncState {
@@ -49,6 +53,7 @@ impl MailSyncState {
             next_link: None,
             last_synchronized_at: None,
             full_sync_generation: None,
+            checkpoint_revision: 0,
         }
     }
 
@@ -64,6 +69,7 @@ impl MailSyncState {
         next_link: Option<MessageDeltaLink>,
         last_synchronized_at: Option<SystemTime>,
         full_sync_generation: Option<u64>,
+        checkpoint_revision: u64,
     ) -> Result<Self, MailCacheError> {
         if (last_synchronized_at.is_some() && delta_link.is_none())
             || full_sync_generation.is_some_and(|generation| generation == 0)
@@ -77,6 +83,7 @@ impl MailSyncState {
             next_link,
             last_synchronized_at,
             full_sync_generation,
+            checkpoint_revision,
         })
     }
 
@@ -114,6 +121,12 @@ impl MailSyncState {
     #[must_use]
     pub fn full_sync_generation(&self) -> Option<u64> {
         self.full_sync_generation
+    }
+
+    /// Returns the revision of this folder's persisted synchronization checkpoint.
+    #[must_use]
+    pub fn checkpoint_revision(&self) -> u64 {
+        self.checkpoint_revision
     }
 
     /// Selects the next request while preferring an interrupted round checkpoint.
@@ -187,37 +200,43 @@ pub trait MailCache: Send + Sync {
         folder: &FolderReference,
     ) -> impl Future<Output = Result<Option<MailSyncState>, MailCacheError>> + Send + '_;
 
-    /// Applies one page and advances its checkpoint in the same transaction.
+    /// Applies one page when `expected_state` still matches the stored checkpoint.
     ///
     /// The store reads the fixed cutoff from the scope. A `Next` link updates
     /// only the in-progress checkpoint; a `Complete` link replaces the durable
-    /// delta link and records the completion time.
+    /// delta link and records the completion time. Each accepted page advances
+    /// the checkpoint revision atomically with its changes.
     ///
     /// # Errors
     ///
     /// Returns [`MailCacheError::AccountMismatch`] for a different cache account,
-    /// [`MailCacheError::InvalidData`] for malformed cached values, or
-    /// [`MailCacheError::Unavailable`] when the transaction fails.
+    /// [`MailCacheError::SyncStateChanged`] when another synchronization advanced
+    /// the checkpoint, [`MailCacheError::InvalidData`] for malformed cached values,
+    /// or [`MailCacheError::Unavailable`] when the transaction fails.
     fn commit_delta_page(
         &self,
         folder: &FolderReference,
+        expected_state: &MailSyncState,
         page: einfach_mail_domain::MessageDeltaPage,
         completed_at: SystemTime,
     ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_;
 
-    /// Saves a reset link and starts a replacement snapshot generation.
+    /// Saves a reset link when `expected_state` still matches the stored checkpoint.
     ///
     /// Existing messages and bodies remain available until the final replacement
-    /// page commits.
+    /// page commits. Starting a replacement atomically advances the checkpoint
+    /// revision.
     ///
     /// # Errors
     ///
     /// Returns [`MailCacheError::AccountMismatch`] for another account,
-    /// [`MailCacheError::InvalidData`] for a missing folder or exhausted generation,
-    /// or [`MailCacheError::Unavailable`] when the transaction fails.
+    /// [`MailCacheError::SyncStateChanged`] when another synchronization advanced
+    /// the checkpoint, [`MailCacheError::InvalidData`] for a missing folder or
+    /// exhausted generation, or [`MailCacheError::Unavailable`] when the transaction fails.
     fn begin_full_resync(
         &self,
         folder: &FolderReference,
+        expected_state: &MailSyncState,
         reset_link: MessageDeltaLink,
     ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_;
 

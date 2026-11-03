@@ -8,7 +8,10 @@ use std::{
 
 use async_sqlite::{
     Client,
-    rusqlite::{Connection, OptionalExtension, Result as SqlResult, Transaction, params},
+    rusqlite::{
+        Connection, OptionalExtension, Result as SqlResult, Transaction, TransactionBehavior,
+        params,
+    },
 };
 use einfach_mail_application::{MailCache, MailCacheError, MailCacheFactory, MailSyncState};
 use einfach_mail_domain::{
@@ -30,6 +33,8 @@ pub(super) enum CacheFailure {
     InvalidData,
     #[error("the message is not cached")]
     MessageNotCached,
+    #[error("the folder synchronization checkpoint changed")]
+    SyncStateChanged,
 }
 
 impl From<async_sqlite::Error> for CacheFailure {
@@ -50,6 +55,7 @@ impl CacheFailure {
             Self::Unavailable => MailCacheError::Unavailable,
             Self::InvalidData => MailCacheError::InvalidData,
             Self::MessageNotCached => MailCacheError::MessageNotCached,
+            Self::SyncStateChanged => MailCacheError::SyncStateChanged,
         }
     }
 }
@@ -275,6 +281,7 @@ impl MailCache for SqliteMailCache {
     fn commit_delta_page(
         &self,
         folder: &FolderReference,
+        expected_state: &MailSyncState,
         page: MessageDeltaPage,
         completed_at: SystemTime,
     ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_ {
@@ -282,20 +289,29 @@ impl MailCache for SqliteMailCache {
             .check_folder(folder)
             .and_then(|()| timestamp_parts(completed_at));
         let folder = folder.clone();
+        let expected_state = expected_state.clone();
         let client = self.client.clone();
         async move {
             let completed_at = validation?;
             let (changes, progress) = page.into_parts();
             client
                 .conn_mut_and_then(move |connection| {
-                    let transaction = connection.transaction()?;
+                    let transaction = begin_checkpoint_write(connection)?;
                     let state =
                         read_sync_state(&transaction, &folder)?.ok_or(CacheFailure::InvalidData)?;
+                    if state != expected_state {
+                        return Err(CacheFailure::SyncStateChanged);
+                    }
                     let full_sync_generation = state
                         .full_sync_generation()
                         .map(i64::try_from)
                         .transpose()
                         .map_err(|_| CacheFailure::InvalidData)?;
+                    let checkpoint_revision = state
+                        .checkpoint_revision()
+                        .checked_add(1)
+                        .and_then(|revision| i64::try_from(revision).ok())
+                        .ok_or(CacheFailure::InvalidData)?;
                     for change in changes {
                         apply_delta_change(
                             &transaction,
@@ -305,7 +321,13 @@ impl MailCache for SqliteMailCache {
                             change,
                         )?;
                     }
-                    update_sync_progress(&transaction, &folder, progress, completed_at)?;
+                    update_sync_progress(
+                        &transaction,
+                        &folder,
+                        progress,
+                        completed_at,
+                        checkpoint_revision,
+                    )?;
                     transaction.commit()?;
                     read_sync_state(connection, &folder)?.ok_or(CacheFailure::InvalidData)
                 })
@@ -317,17 +339,19 @@ impl MailCache for SqliteMailCache {
     fn begin_full_resync(
         &self,
         folder: &FolderReference,
+        expected_state: &MailSyncState,
         reset_link: MessageDeltaLink,
     ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_ {
         let validation = self.check_folder(folder);
         let folder = folder.clone();
+        let expected_state = expected_state.clone();
         let reset_link = reset_link.as_str().to_owned();
         let client = self.client.clone();
         async move {
             validation?;
             client
                 .conn_mut_and_then(move |connection| {
-                    begin_full_resync_transaction(connection, &folder, &reset_link)
+                    begin_full_resync_transaction(connection, &folder, &expected_state, &reset_link)
                 })
                 .await
                 .map_err(CacheFailure::public)
@@ -696,7 +720,7 @@ fn read_sync_state(
         .query_row(
             "SELECT a.query_version, a.cutoff_seconds, a.cutoff_nanoseconds,
                     s.delta_link, s.next_link, s.last_sync_seconds, s.last_sync_nanoseconds,
-                    s.full_sync_generation, s.full_sync_active
+                    s.full_sync_generation, s.full_sync_active, s.checkpoint_revision
              FROM mail_sync_state s
              JOIN mail_account_sync_scope a USING (account_id)
              WHERE s.account_id = ?1 AND s.folder_id = ?2",
@@ -712,6 +736,7 @@ fn read_sync_state(
                     sync_nanoseconds: row.get(6)?,
                     full_sync_generation: row.get(7)?,
                     full_sync_active: row.get(8)?,
+                    checkpoint_revision: row.get(9)?,
                 })
             },
         )
@@ -729,6 +754,7 @@ struct RawSyncState {
     sync_nanoseconds: Option<i64>,
     full_sync_generation: i64,
     full_sync_active: i64,
+    checkpoint_revision: i64,
 }
 
 fn decode_sync_state(raw: RawSyncState) -> CacheResult<MailSyncState> {
@@ -744,6 +770,9 @@ fn decode_sync_state(raw: RawSyncState) -> CacheResult<MailSyncState> {
     if raw.full_sync_generation < 0 {
         return Err(CacheFailure::InvalidData);
     }
+    if raw.checkpoint_revision < 0 {
+        return Err(CacheFailure::InvalidData);
+    }
     let full_sync_generation = match raw.full_sync_active {
         0 => None,
         1 if raw.full_sync_generation > 0 => {
@@ -757,6 +786,7 @@ fn decode_sync_state(raw: RawSyncState) -> CacheResult<MailSyncState> {
         raw.next_link.map(MessageDeltaLink::from_opaque),
         last_synchronized_at,
         full_sync_generation,
+        u64::try_from(raw.checkpoint_revision).map_err(|_| CacheFailure::InvalidData)?,
     )
     .map_err(|_| CacheFailure::InvalidData)
 }
@@ -947,30 +977,36 @@ fn remove_message(
 fn begin_full_resync_transaction(
     connection: &mut Connection,
     folder: &FolderReference,
+    expected_state: &MailSyncState,
     reset_link: &str,
 ) -> CacheResult<MailSyncState> {
-    let transaction = connection.transaction()?;
-    let generation = transaction
-        .query_row(
-            "SELECT full_sync_generation FROM mail_sync_state
-             WHERE account_id = ?1 AND folder_id = ?2",
-            params![folder.account_id().as_str(), folder.folder_id().as_str()],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-        .ok_or(CacheFailure::InvalidData)?
+    let transaction = begin_checkpoint_write(connection)?;
+    let state = read_sync_state(&transaction, folder)?.ok_or(CacheFailure::InvalidData)?;
+    if &state != expected_state {
+        return Err(CacheFailure::SyncStateChanged);
+    }
+    let generation = state
+        .full_sync_generation()
+        .unwrap_or_default()
         .checked_add(1)
-        .filter(|generation| *generation > 0)
+        .and_then(|generation| i64::try_from(generation).ok())
+        .ok_or(CacheFailure::InvalidData)?;
+    let checkpoint_revision = state
+        .checkpoint_revision()
+        .checked_add(1)
+        .and_then(|revision| i64::try_from(revision).ok())
         .ok_or(CacheFailure::InvalidData)?;
     let updated_rows = transaction.execute(
         "UPDATE mail_sync_state
-         SET full_sync_generation = ?3, full_sync_active = 1, next_link = ?4
+         SET full_sync_generation = ?3, full_sync_active = 1, next_link = ?4,
+             checkpoint_revision = ?5
          WHERE account_id = ?1 AND folder_id = ?2",
         params![
             folder.account_id().as_str(),
             folder.folder_id().as_str(),
             generation,
-            reset_link
+            reset_link,
+            checkpoint_revision
         ],
     )?;
     if updated_rows != 1 {
@@ -978,6 +1014,11 @@ fn begin_full_resync_transaction(
     }
     transaction.commit()?;
     read_sync_state(connection, folder)?.ok_or(CacheFailure::InvalidData)
+}
+
+/// Starts a write transaction that serializes checkpoint comparisons.
+fn begin_checkpoint_write(connection: &mut Connection) -> CacheResult<Transaction<'_>> {
+    Ok(connection.transaction_with_behavior(TransactionBehavior::Immediate)?)
 }
 
 fn active_full_sync_generation(
@@ -1033,16 +1074,18 @@ fn update_sync_progress(
     folder: &FolderReference,
     progress: MessageDeltaProgress,
     completed_at: (i64, i64),
+    checkpoint_revision: i64,
 ) -> CacheResult<()> {
     match progress {
         MessageDeltaProgress::Next(link) => {
             transaction.execute(
-                "UPDATE mail_sync_state SET next_link = ?3
+                "UPDATE mail_sync_state SET next_link = ?3, checkpoint_revision = ?4
                  WHERE account_id = ?1 AND folder_id = ?2",
                 params![
                     folder.account_id().as_str(),
                     folder.folder_id().as_str(),
-                    link.as_str()
+                    link.as_str(),
+                    checkpoint_revision
                 ],
             )?;
         }
@@ -1054,14 +1097,15 @@ fn update_sync_progress(
                 "UPDATE mail_sync_state
                  SET delta_link = ?3, next_link = NULL,
                      last_sync_seconds = ?4, last_sync_nanoseconds = ?5,
-                     full_sync_active = 0
+                     full_sync_active = 0, checkpoint_revision = ?6
                  WHERE account_id = ?1 AND folder_id = ?2",
                 params![
                     folder.account_id().as_str(),
                     folder.folder_id().as_str(),
                     link.as_str(),
                     completed_at.0,
-                    completed_at.1
+                    completed_at.1,
+                    checkpoint_revision
                 ],
             )?;
         }
@@ -1208,17 +1252,19 @@ mod tests {
             );
             let page = MessageDeltaPage::new(page, MessageDeltaProgress::Next(link.clone()));
             let first_commit = cache
-                .commit_delta_page(&folder_reference, page.clone(), cutoff)
+                .commit_delta_page(&folder_reference, &initial_state, page.clone(), cutoff)
                 .await
                 .expect("first page commits with its resumable cursor");
-            let repeated_commit = cache
-                .commit_delta_page(&folder_reference, page, cutoff)
-                .await
-                .expect("replaying an uncheckpointed page is safe");
-            assert_eq!(first_commit, repeated_commit);
-            assert_eq!(repeated_commit.next_link(), Some(&link));
-            assert!(repeated_commit.delta_link().is_none());
-            assert!(repeated_commit.last_synchronized_at().is_none());
+            assert_eq!(
+                cache
+                    .commit_delta_page(&folder_reference, &initial_state, page, cutoff)
+                    .await,
+                Err(MailCacheError::SyncStateChanged)
+            );
+            assert_eq!(first_commit.next_link(), Some(&link));
+            assert!(first_commit.delta_link().is_none());
+            assert!(first_commit.last_synchronized_at().is_none());
+            assert_eq!(first_commit.checkpoint_revision(), 1);
             assert_eq!(
                 cache
                     .list_messages(&folder_reference)
@@ -1253,6 +1299,7 @@ mod tests {
                 .expect("stored cursor remains readable")
                 .expect("folder cursor exists");
             assert_eq!(persisted_state.next_link(), Some(&link));
+            assert_eq!(persisted_state.checkpoint_revision(), 1);
             let (stored_message, stored_body) = reopened
                 .read_message(&folder_reference, &message)
                 .await

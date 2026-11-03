@@ -35,7 +35,7 @@ The dependency direction is desktop UI → application → domain, with Graph an
 2. The workflow coordinates account-scoped operations through provider and cache ports. Graph OAuth tokens remain private to the provider.
 3. The Graph adapter validates and maps external responses into provider-independent values. It follows opaque next links through the private transport worker.
 4. The workflow applies the account's fixed 90-day cutoff and persists each page with its matching cursor update in one SQLCipher transaction. A folder becomes synchronized only after its complete page chain and final delta link commit.
-5. Opening a message returns an encrypted cached body when available. Otherwise, the workflow reserves the folder against delta sync, rereads the message, fetches its body, and stores the raw form for offline reading.
+5. Opening a message returns an encrypted cached body when available. Otherwise, the workflow reserves the folder against account sync, rereads the message, fetches its body, and stores the raw form for offline reading.
 6. The application sanitizes raw HTML whenever it prepares a body for display and returns an opaque `SanitizedEmailHtml`. Sanitized output is not persisted.
 7. The desktop renders only that sanitized value through GPUI Kit `TextView::html`; oversized sanitized content becomes bounded, escaped plain text.
 
@@ -46,6 +46,7 @@ The dependency direction is desktop UI → application → domain, with Graph an
 - Follow `@odata.nextLink` and `@odata.deltaLink` as opaque values. Before attaching a bearer token, require HTTPS and the configured Graph authority. Disable redirects for authorized requests.
 - Send `Content-Type: application/json` on initial and continuation message-delta GETs, as required by Microsoft Graph v1.0.
 - Commit each page and its restart checkpoint atomically. Keep each attempt within 1,000 pages and 64 MiB of response data per folder.
+- Share account and folder reservations among sessions from one workflow factory. Acquire the account reservation before listing or replacing folders and hold it through delta sync. Persist a checkpoint revision and accept a page or reset only when its request started from the current revision.
 - If Graph returns `410 Gone` for a message delta request, validate its reset URL and start a durable replacement generation. Keep unseen rows and their bodies until the final replacement page commits. A replacement upsert clears that message's cached body in the page transaction; completion deletes unseen rows and clears bodies for all retained rows atomically with the final cursor. See [ADR 0032](../decisions/0032-recover-expired-message-delta-cursors.md) and [ADR 0034](../decisions/0034-invalidate-cached-message-bodies-after-delta-updates.md).
 - Apply removals and sparse metadata patches only to messages already in the local scope. Preserve fields omitted from a sparse patch and distinguish explicit nulls for nullable fields.
 - Fetch bodies only after the user opens a message. Do not download attachments in M2.

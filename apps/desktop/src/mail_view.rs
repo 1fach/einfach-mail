@@ -1028,14 +1028,17 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
         MailWorkflowError::Cache(MailCacheError::MissingEncryptionKey) => {
             "The encrypted mail cache key is missing. Remove the local cache and sync again."
         }
+        MailWorkflowError::Cache(MailCacheError::SyncStateChanged) => {
+            "Another sync updated this folder. Choose Sync to continue."
+        }
         MailWorkflowError::Cache(MailCacheError::Unavailable) => {
             "The encrypted mail cache is unavailable. Unlock your Linux keyring and try again."
         }
         MailWorkflowError::Cache(MailCacheError::MessageNotCached) => {
             "This message is no longer in the local cache. Sync the folder and try again."
         }
-        MailWorkflowError::SyncInProgress => {
-            "This folder is busy. Try opening the message again shortly."
+        MailWorkflowError::OperationInProgress => {
+            "Another mail operation is active. Try again shortly."
         }
         MailWorkflowError::RepeatedCursor => {
             "Sync stopped because the service repeated a page. Try syncing again."
@@ -1083,10 +1086,18 @@ mod tests {
     };
 
     #[test]
-    fn open_while_folder_is_busy_explains_when_to_retry() {
+    fn active_mail_operation_explains_when_to_retry() {
         assert_eq!(
-            mail_error_message(MailWorkflowError::SyncInProgress),
-            "This folder is busy. Try opening the message again shortly."
+            mail_error_message(MailWorkflowError::OperationInProgress),
+            "Another mail operation is active. Try again shortly."
+        );
+    }
+
+    #[test]
+    fn stale_sync_checkpoint_explains_how_to_resume() {
+        assert_eq!(
+            mail_error_message(MailWorkflowError::Cache(MailCacheError::SyncStateChanged)),
+            "Another sync updated this folder. Choose Sync to continue."
         );
     }
 
@@ -1200,6 +1211,7 @@ mod tests {
         fn commit_delta_page(
             &self,
             _: &FolderReference,
+            _: &MailSyncState,
             _: MessageDeltaPage,
             _: SystemTime,
         ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_ {
@@ -1209,14 +1221,21 @@ mod tests {
         fn begin_full_resync(
             &self,
             _: &FolderReference,
+            expected_state: &MailSyncState,
             reset_link: MessageDeltaLink,
         ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_ {
             let mut data = self.0.lock().expect("fixture cache mutex is healthy");
             let Some(current) = data.sync_state.as_ref() else {
                 return ready(Err(MailCacheError::InvalidData));
             };
+            if current != expected_state {
+                return ready(Err(MailCacheError::SyncStateChanged));
+            }
             let Some(generation) = current.full_sync_generation().unwrap_or(0).checked_add(1)
             else {
+                return ready(Err(MailCacheError::InvalidData));
+            };
+            let Some(checkpoint_revision) = current.checkpoint_revision().checked_add(1) else {
                 return ready(Err(MailCacheError::InvalidData));
             };
             let state = MailSyncState::from_checkpoint(
@@ -1225,6 +1244,7 @@ mod tests {
                 Some(reset_link),
                 current.last_synchronized_at(),
                 Some(generation),
+                checkpoint_revision,
             );
             match state {
                 Ok(state) => {
@@ -1346,6 +1366,7 @@ mod tests {
                     None,
                     Some(UNIX_EPOCH + Duration::from_secs(1_800_000_000)),
                     None,
+                    0,
                 )
                 .expect("synthetic sync checkpoint is valid"),
             );
@@ -1861,6 +1882,7 @@ mod tests {
                     )),
                     current.last_synchronized_at(),
                     Some(1),
+                    1,
                 )
                 .expect("synthetic rebuild checkpoint is valid"),
             );

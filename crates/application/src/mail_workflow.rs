@@ -33,9 +33,9 @@ pub enum MailWorkflowError {
     /// The encrypted local cache could not read or commit mail data.
     #[error("the local mail cache is unavailable")]
     Cache(#[from] MailCacheError),
-    /// Another synchronization round already owns this account and folder.
-    #[error("this folder is already synchronizing")]
-    SyncInProgress,
+    /// Another mail operation already owns this account or folder.
+    #[error("a mail operation is already active for this account or folder")]
+    OperationInProgress,
     /// The provider repeated a page link before completing the current round.
     #[error("the mail service repeated a synchronization cursor")]
     RepeatedCursor,
@@ -227,13 +227,14 @@ impl MailSyncReport {
 pub struct MailWorkflow<P, C> {
     provider: P,
     cache: C,
-    active_folders: Arc<Mutex<HashSet<FolderReference>>>,
+    reservations: Arc<Mutex<ActiveOperations>>,
 }
 
-/// Creates type-erased application sessions from a provider and a cache factory.
+/// Creates application sessions and shares account and folder reservations among them.
 pub struct MailWorkflowFactory<P, F> {
     provider: P,
     cache_factory: F,
+    reservations: Arc<Mutex<ActiveOperations>>,
 }
 
 impl<P, F> MailWorkflowFactory<P, F> {
@@ -243,18 +244,34 @@ impl<P, F> MailWorkflowFactory<P, F> {
         Self {
             provider,
             cache_factory,
+            reservations: Arc::new(Mutex::new(ActiveOperations::default())),
         }
     }
 }
 
 impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
-    /// Creates mail workflows backed by a provider and local cache.
+    /// Creates a standalone mail workflow backed by a provider and local cache.
+    ///
+    /// Reservations are local to this workflow. When workflows share a persisted cache,
+    /// checkpoint revisions reject delta responses built from older checkpoints.
     #[must_use]
     pub fn new(provider: P, cache: C) -> Self {
+        Self::with_reservations(
+            provider,
+            cache,
+            Arc::new(Mutex::new(ActiveOperations::default())),
+        )
+    }
+
+    fn with_reservations(
+        provider: P,
+        cache: C,
+        reservations: Arc<Mutex<ActiveOperations>>,
+    ) -> Self {
         Self {
             provider,
             cache,
-            active_folders: Arc::new(Mutex::new(HashSet::new())),
+            reservations,
         }
     }
 
@@ -262,6 +279,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// `sync_started_at` supplies a deterministic clock value for the initial
     /// 90-day cutoff. Existing folder scopes retain their stored cutoff.
+    /// One reservation covers folder enumeration, folder replacement, and every delta request.
     /// The handler receives `Rebuilding` after a replacement checkpoint is saved.
     ///
     /// # Panics
@@ -270,13 +288,15 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns a provider, cache, synchronization-state, or resource-limit error.
+    /// Returns a provider, cache, synchronization-state, or resource-limit error. Returns
+    /// [`MailWorkflowError::OperationInProgress`] when another operation owns this account.
     pub async fn synchronize_account(
         &self,
         account_id: &AccountId,
         sync_started_at: SystemTime,
         progress_handler: &(dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> Result<MailSyncReport, MailWorkflowError> {
+        let _reservation = self.reserve_account(account_id)?;
         let initial_cutoff = sync_started_at
             .checked_sub(INITIAL_SYNC_WINDOW)
             .ok_or(MailWorkflowError::ClockUnavailable)?;
@@ -304,7 +324,6 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ) -> Result<usize, MailWorkflowError> {
         let mut page_count = 0;
         for folder in folders {
-            let _reservation = self.reserve_folder(folder.reference())?;
             page_count += self
                 .sync_folder(folder.reference(), initial_cutoff, progress_handler)
                 .await?;
@@ -325,14 +344,18 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         let mut response_bytes = 0_usize;
         let mut reset_count = 0;
         loop {
-            let request = state.request();
+            let expected_state = state.clone();
+            let request = expected_state.request();
             let request_cursor = request_cursor(&request);
             if !seen_requests.insert(request_cursor) {
                 return Err(MailWorkflowError::RepeatedCursor);
             }
             match self.provider.message_delta_page(folder, request).await? {
                 MessageDeltaResponse::Reset(reset_link) => {
-                    state = self.cache.begin_full_resync(folder, reset_link).await?;
+                    state = self
+                        .cache
+                        .begin_full_resync(folder, &expected_state, reset_link)
+                        .await?;
                     progress_handler(MailSyncProgress::Rebuilding);
                     if reset_count == MAX_DELTA_RESETS_PER_ATTEMPT {
                         return Err(MailWorkflowError::RepeatedDeltaReset);
@@ -354,7 +377,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
                     }
                     state = self
                         .cache
-                        .commit_delta_page(folder, page, SystemTime::now())
+                        .commit_delta_page(folder, &expected_state, page, SystemTime::now())
                         .await?;
                     page_count += 1;
                     round_page_count += 1;
@@ -411,8 +434,11 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns a provider, cache, or synchronization-state error when data is unavailable or the
-    /// folder is busy.
+    /// Returns provider or cache errors when message data is unavailable.
+    ///
+    /// Returns [`MailWorkflowError::OperationInProgress`] when another operation owns the account
+    /// or folder, or [`MailWorkflowError::StateUnavailable`] when the reservation state cannot be
+    /// read.
     pub async fn open_message(
         &self,
         folder: &FolderReference,
@@ -467,17 +493,42 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     fn reserve_folder(
         &self,
         folder: &FolderReference,
-    ) -> Result<SyncReservation, MailWorkflowError> {
-        let mut active_folders = self
-            .active_folders
+    ) -> Result<OperationReservation, MailWorkflowError> {
+        let mut reservations = self
+            .reservations
             .lock()
             .map_err(|_| MailWorkflowError::StateUnavailable)?;
-        if !active_folders.insert(folder.clone()) {
-            return Err(MailWorkflowError::SyncInProgress);
+        if reservations.accounts.contains(folder.account_id())
+            || !reservations.folders.insert(folder.clone())
+        {
+            return Err(MailWorkflowError::OperationInProgress);
         }
-        Ok(SyncReservation {
-            active_folders: Arc::clone(&self.active_folders),
-            folder: folder.clone(),
+        Ok(OperationReservation {
+            reservations: Arc::clone(&self.reservations),
+            key: ReservationKey::Folder(folder.clone()),
+        })
+    }
+
+    fn reserve_account(
+        &self,
+        account: &AccountId,
+    ) -> Result<OperationReservation, MailWorkflowError> {
+        let mut reservations = self
+            .reservations
+            .lock()
+            .map_err(|_| MailWorkflowError::StateUnavailable)?;
+        if reservations.accounts.contains(account)
+            || reservations
+                .folders
+                .iter()
+                .any(|folder| folder.account_id() == account)
+        {
+            return Err(MailWorkflowError::OperationInProgress);
+        }
+        reservations.accounts.insert(account.clone());
+        Ok(OperationReservation {
+            reservations: Arc::clone(&self.reservations),
+            key: ReservationKey::Account(account.clone()),
         })
     }
 }
@@ -545,7 +596,11 @@ where
     ) -> MailSessionFuture<'_, Result<Arc<dyn MailSession>, MailCacheError>> {
         Box::pin(async move {
             let cache = self.cache_factory.open_for_account(account_id).await?;
-            Ok(Arc::new(MailWorkflow::new(self.provider.clone(), cache)) as Arc<dyn MailSession>)
+            Ok(Arc::new(MailWorkflow::with_reservations(
+                self.provider.clone(),
+                cache,
+                Arc::clone(&self.reservations),
+            )) as Arc<dyn MailSession>)
         })
     }
 
@@ -566,15 +621,33 @@ fn request_cursor(
     }
 }
 
-struct SyncReservation {
-    active_folders: Arc<Mutex<HashSet<FolderReference>>>,
-    folder: FolderReference,
+#[derive(Default)]
+struct ActiveOperations {
+    accounts: HashSet<AccountId>,
+    folders: HashSet<FolderReference>,
 }
 
-impl Drop for SyncReservation {
+enum ReservationKey {
+    Account(AccountId),
+    Folder(FolderReference),
+}
+
+struct OperationReservation {
+    reservations: Arc<Mutex<ActiveOperations>>,
+    key: ReservationKey,
+}
+
+impl Drop for OperationReservation {
     fn drop(&mut self) {
-        if let Ok(mut active_folders) = self.active_folders.lock() {
-            active_folders.remove(&self.folder);
+        if let Ok(mut reservations) = self.reservations.lock() {
+            match &self.key {
+                ReservationKey::Account(account) => {
+                    reservations.accounts.remove(account);
+                }
+                ReservationKey::Folder(folder) => {
+                    reservations.folders.remove(folder);
+                }
+            }
         }
     }
 }

@@ -93,6 +93,11 @@ fn migrations() -> Migrations<'static> {
             ADD COLUMN full_sync_generation INTEGER
             CHECK (full_sync_generation IS NULL OR full_sync_generation >= 0);",
         ),
+        M::up(
+            "ALTER TABLE mail_sync_state
+            ADD COLUMN checkpoint_revision INTEGER NOT NULL DEFAULT 0
+            CHECK (checkpoint_revision >= 0);",
+        ),
     ])
 }
 
@@ -150,10 +155,16 @@ mod tests {
 
         let sync_state = connection
             .query_row(
-                "SELECT full_sync_generation, full_sync_active
+                "SELECT full_sync_generation, full_sync_active, checkpoint_revision
                  FROM mail_sync_state WHERE account_id = 'account' AND folder_id = 'inbox'",
                 [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .expect("existing sync checkpoint remains readable");
         let message = connection
@@ -172,7 +183,7 @@ mod tests {
             )
             .expect("existing message and body remain readable");
 
-        assert_eq!(sync_state, (0, 0));
+        assert_eq!(sync_state, (0, 0, 0));
         assert_eq!(
             message,
             (
