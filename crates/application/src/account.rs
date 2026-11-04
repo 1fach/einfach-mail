@@ -49,6 +49,9 @@ pub enum AccountOperationError {
     /// The account selected during permission renewal does not match the active account.
     #[error("the selected account does not match the connected account")]
     AccountMismatch,
+    /// A saved credential has no Graph-verified identity.
+    #[error("the saved sign-in identity is not verified")]
+    SavedAccountIdentityUnavailable,
     /// Another account operation is still running.
     #[error("another account operation is still running")]
     AccountOperationInProgress,
@@ -177,6 +180,20 @@ pub trait AccountProvider: Send + Sync {
         &self,
     ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_;
 
+    /// Returns a verified account ID that can identify the cache to remove.
+    ///
+    /// `Ok(None)` means an unverified saved credential or the absence of both
+    /// a saved credential and an active session prevents safe cache removal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountOperationError::AccountMismatch`] when the saved
+    /// credential and active session identify different accounts, or a
+    /// provider error when the credential cannot be read.
+    fn saved_credential_account_id(
+        &self,
+    ) -> impl Future<Output = Result<Option<AccountId>, AccountOperationError>> + Send + '_;
+
     /// Connects an account through the provider's delegated sign-in flow.
     ///
     /// Implementations must call [`AccountOperationCancellation::begin_credential_commit`]
@@ -185,8 +202,12 @@ pub trait AccountProvider: Send + Sync {
     /// # Errors
     ///
     /// Returns [`AccountOperationError::SignInCancelled`] when cancellation
-    /// wins before credential commit. Returns another provider error when
-    /// authorization, profile loading, or credential storage fails.
+    /// wins before credential commit,
+    /// [`AccountOperationError::SavedAccountIdentityUnavailable`] when an
+    /// unverified saved credential blocks replacement sign-in, or
+    /// [`AccountOperationError::AccountMismatch`] when the saved identity
+    /// differs from the newly authorized account. Returns another provider
+    /// error when authorization, profile loading, or credential storage fails.
     fn connect_account(
         &self,
         cancellation: AccountOperationCancellation,
@@ -216,7 +237,11 @@ pub trait AccountProvider: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a provider error when the credential cannot be removed.
+    /// Returns [`AccountOperationError::SavedAccountIdentityUnavailable`]
+    /// when the credential has no Graph-verified identity, or another provider
+    /// error when the credential cannot be removed. Returns
+    /// [`AccountOperationError::AccountMismatch`] when the saved identity
+    /// differs from the active provider session.
     fn sign_out(&self) -> impl Future<Output = Result<(), AccountOperationError>> + Send + '_;
 }
 
@@ -256,6 +281,25 @@ impl<P: AccountProvider> AccountWorkflow<P> {
         restore_result
     }
 
+    /// Returns the verified identity that can authorize removal of the account cache.
+    ///
+    /// This reserves the account workflow while the provider reads the credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountOperationError::AccountOperationInProgress`] when
+    /// another account operation is running, or
+    /// [`AccountOperationError::AccountStateUnavailable`] if workflow state
+    /// cannot be reserved. Returns
+    /// [`AccountOperationError::AccountMismatch`] if saved and active identities
+    /// differ, or another provider error when the identity cannot be read.
+    pub async fn saved_credential_account_id(
+        &self,
+    ) -> Result<Option<AccountId>, AccountOperationError> {
+        let _operation = self.begin(AccountOperation::ReadingSavedIdentity)?;
+        self.provider.saved_credential_account_id().await
+    }
+
     /// Connects an account when no account is active.
     ///
     /// # Errors
@@ -267,7 +311,12 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     /// [`AccountOperationError::AccountStateUnavailable`] if local workflow
     /// state cannot be read or updated, or
     /// [`AccountOperationError::SignInCancelled`] when the provider or browser
-    /// cancels sign-in. Otherwise returns a provider error.
+    /// cancels sign-in. Returns
+    /// [`AccountOperationError::SavedAccountIdentityUnavailable`] when an
+    /// unverified credential blocks replacement, or
+    /// [`AccountOperationError::AccountMismatch`] when a verified saved
+    /// identity differs from the newly authorized account. Otherwise returns
+    /// a provider error.
     ///
     /// Dropping this future releases its operation reservation without
     /// changing the workflow's active account.
@@ -363,9 +412,13 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     ///
     /// # Errors
     ///
-    /// Returns a provider error when the credential cannot be removed, or
+    /// Returns [`AccountOperationError::SavedAccountIdentityUnavailable`]
+    /// when the saved credential has no Graph-verified identity,
+    /// [`AccountOperationError::AccountMismatch`] when the saved and active
+    /// identities differ, or another provider error when the credential
+    /// cannot be removed. Returns
     /// [`AccountOperationError::AccountOperationInProgress`] when another
-    /// account operation is running. Returns
+    /// account operation is running, or
     /// [`AccountOperationError::AccountStateUnavailable`] if local workflow
     /// state cannot be read or updated.
     pub async fn sign_out(&self) -> Result<(), AccountOperationError> {
@@ -456,6 +509,7 @@ enum AccountOperation {
     #[default]
     Idle,
     Restoring,
+    ReadingSavedIdentity,
     Connecting,
     Reauthorizing,
     SigningOut,
@@ -587,6 +641,13 @@ mod tests {
             ready(Ok(Some(synthetic_profile())))
         }
 
+        fn saved_credential_account_id(
+            &self,
+        ) -> impl Future<Output = Result<Option<AccountId>, AccountOperationError>> + Send + '_
+        {
+            ready(Ok(Some(synthetic_profile().id().clone())))
+        }
+
         fn connect_account(
             &self,
             _: super::AccountOperationCancellation,
@@ -631,6 +692,13 @@ mod tests {
             ready(Ok(None))
         }
 
+        fn saved_credential_account_id(
+            &self,
+        ) -> impl Future<Output = Result<Option<AccountId>, AccountOperationError>> + Send + '_
+        {
+            ready(Ok(None))
+        }
+
         fn connect_account(
             &self,
             _: super::AccountOperationCancellation,
@@ -666,6 +734,23 @@ mod tests {
             workflow.connect_account().await,
             Err(AccountOperationError::AccountAlreadyConnected)
         );
+    }
+
+    #[tokio::test]
+    async fn saved_identity_read_is_serialized_with_account_operations() {
+        let workflow = Arc::new(AccountWorkflow::new(PendingProvider));
+        let pending_workflow = Arc::clone(&workflow);
+        let connection = tokio::spawn(async move { pending_workflow.connect_account().await });
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            workflow.saved_credential_account_id().await,
+            Err(AccountOperationError::AccountOperationInProgress)
+        );
+
+        connection.abort();
+        let _ = connection.await;
+        assert_eq!(workflow.saved_credential_account_id().await, Ok(None));
     }
 
     #[tokio::test]

@@ -42,3 +42,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0038](0038-per-account-mail-and-calendar-session.md) | Use one per-account mail and calendar session | Accepted |
 | [0039](0039-move-messages-to-deleted-items.md) | Move messages to Deleted Items | Accepted; shared API superseded by ADR 0040 |
 | [0040](0040-move-messages-to-the-default-archive-folder.md) | Move messages to the default Archive folder | Accepted |
+| [0041](0041-bind-saved-sign-in-to-cache-identity.md) | Bind saved sign-in to a verified cache identity | Accepted for Linux M1 |

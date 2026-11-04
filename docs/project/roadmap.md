@@ -16,6 +16,8 @@ M1 work is grouped under the [GitHub milestone](https://github.com/1fach/einfach
 
 [Issue #45](https://github.com/1fach/einfach-mail/issues/45) tracks accurate cancellation state across account connection and permission renewal. The implementation is recorded in [ADR 0030](../decisions/0030-account-operation-cancellation-boundary.md). PR #46 merged into `main` on 2026-11-02 after its four required GitHub checks passed. Live tenant behavior remains under issue #3.
 
+[Issue #48](https://github.com/1fach/einfach-mail/issues/48) binds saved sign-in credentials to the Graph-verified cache identity. Draft [PR #63](https://github.com/1fach/einfach-mail/pull/63) presents the migration on top of PR #62 and records the pending identity state, legacy credential handling, and cache-before-credential removal order in [ADR 0041](../decisions/0041-bind-saved-sign-in-to-cache-identity.md). Synthetic Linux verification does not replace live Entra or Secret Service evidence; keep issue #3 open for tenant verification.
+
 ## M2: Read-only mail — in progress
 
 Let the user browse folders, read synchronized messages from the offline cache, and view message content safely. M2 does not change mail on the server; mail and event actions belong to M4. The Graph transport and message renderer remain subject to ADRs [0006](../decisions/0006-graph-http-transport.md) and [0007](../decisions/0007-message-body-rendering.md).

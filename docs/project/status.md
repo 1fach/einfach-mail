@@ -24,6 +24,8 @@ Review found that event creation could stage a request before the first successf
 
 Issue #48's saved sign-in identity migration is in draft PR #63, now based on PR #55 after PR #56 merged. Its current head `9788c96a0c429b2c38151b3df8538f506cda92c1` retains pending identity across token rotation and restart, and blocks cache removal or replacement sign-in if identity cannot be verified. All four required checks passed on that head. Keep PR #63 in draft and issue #48 open through exact-head review. Live Entra and desktop Secret Service evidence remain under issue #3.
 
+Issue #48's saved-identity migration is in draft PR #63 on `candidate/issue-48-identity-binding-local`, stacked on the current PR #62 head `5ca8c9b506f39675b6bc0370852edb6a6f6ab151`. Review rebased it onto that head and fixed a malformed-record parser fallback that could discard versioned identity fields. The full Linux gate passed locally on 2026-11-05: 366 workspace tests passed, 0 failed, and 3 environment-dependent Secret Service tests were ignored. Rust 1.95 compilation, formatting, Clippy, rustdoc, dependency policy, no-Tauri, and RustSec passed. RustSec found no vulnerable or yanked locked crates and reported 8 allowed unmaintained transitive advisories. Synthetic coverage includes credential formats, refresh rotation, restart, identity mismatch, replacement blocking, and cache-before-credential removal. No live Entra request, real mailbox, desktop Secret Service lifecycle, or native window was used. Keep issue #48 open through review and issue #3 open for live Entra verification.
+
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
 ## Verified state
