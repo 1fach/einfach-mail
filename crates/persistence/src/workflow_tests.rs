@@ -9,14 +9,16 @@ use std::{
 };
 
 use einfach_mail_application::{
-    MailCache, MailCacheError, MailCacheFactory, MailOperationError, MailProvider,
-    MailSessionFactory, MailSyncProgress, MailWorkflow, MailWorkflowError, MailWorkflowFactory,
-    MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
+    AccountCacheFactory, AccountSessionFactory, AccountSessionWorkflowFactory,
+    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarOperationError, CalendarProvider,
+    MailCache, MailCacheError, MailOperationError, MailProvider, MailSyncProgress, MailWorkflow,
+    MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
+    MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, FolderId, FolderReference, MailFolder, MailMessage, MessageBody, MessageBodyType,
-    MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
-    MessageMetadataPatch, ReadState,
+    AccountId, CalendarViewReference, FolderId, FolderReference, MailFolder, MailMessage,
+    MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+    MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
 };
 use tempfile::TempDir;
 
@@ -44,7 +46,7 @@ struct FixtureCacheFactory {
     database_directory: std::path::PathBuf,
 }
 
-impl MailCacheFactory for FixtureCacheFactory {
+impl AccountCacheFactory for FixtureCacheFactory {
     type Cache = SqliteMailCache;
 
     fn open_for_account(
@@ -198,6 +200,17 @@ impl MailProvider for FixtureProvider {
             }
             result
         }
+    }
+}
+
+impl CalendarProvider for FixtureProvider {
+    fn calendar_delta_page(
+        &self,
+        _view: &CalendarViewReference,
+        _request: CalendarDeltaRequest,
+    ) -> impl Future<Output = Result<CalendarDeltaPageResponse, CalendarOperationError>> + Send + '_
+    {
+        ready(Err(CalendarOperationError::ServiceUnavailable))
     }
 }
 
@@ -636,7 +649,7 @@ fn factory_sessions_share_folder_reservations_during_body_fetch() {
             release: release_receiver,
         });
         let requests = Arc::clone(&provider.requests);
-        let factory = MailWorkflowFactory::new(
+        let factory = AccountSessionWorkflowFactory::new(
             provider,
             FixtureCacheFactory {
                 database_directory: directory.path().to_path_buf(),
@@ -658,6 +671,7 @@ fn factory_sessions_share_folder_reservations_during_body_fetch() {
         let (open_result, sync_result) = smol::block_on(executor.run(async {
             let open_task = executor.spawn(async move {
                 opening_session_task
+                    .mail_session()
                     .open_message(&opening_folder, &opening_message)
                     .await
             });
@@ -666,6 +680,7 @@ fn factory_sessions_share_folder_reservations_during_body_fetch() {
                 .await
                 .expect("body fetch reaches the synchronization gate");
             let sync_result = syncing_session
+                .mail_session()
                 .synchronize_account(
                     &account,
                     started_at + Duration::from_secs(1),
@@ -733,7 +748,7 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
             release: release_receiver,
         });
         let folder_list_calls = Arc::clone(&provider.folder_list_calls);
-        let factory = MailWorkflowFactory::new(
+        let factory = AccountSessionWorkflowFactory::new(
             provider,
             FixtureCacheFactory {
                 database_directory: directory.path().to_path_buf(),
@@ -753,6 +768,7 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
         let (sync_result, competing_result) = smol::block_on(executor.run(async {
             let sync_task = executor.spawn(async move {
                 syncing_session
+                    .mail_session()
                     .synchronize_account(&first_account, started_at, &ignore_sync_progress)
                     .await
             });
@@ -761,6 +777,7 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
                 .await
                 .expect("first delta request reaches its gate");
             let competing_result = competing_session
+                .mail_session()
                 .synchronize_account(
                     &account,
                     started_at + Duration::from_secs(1),
@@ -783,12 +800,14 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
         );
         assert_eq!(folder_list_calls.load(Ordering::Relaxed), 1);
         let folders = competing_session
+            .mail_session()
             .list_cached_folders(&account)
             .await
             .expect("saved folder snapshot remains readable");
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].reference(), &folder_reference);
         let messages = competing_session
+            .mail_session()
             .list_cached_messages(&folder_reference)
             .await
             .expect("saved message snapshot remains readable");

@@ -98,6 +98,111 @@ fn migrations() -> Migrations<'static> {
             ADD COLUMN checkpoint_revision INTEGER NOT NULL DEFAULT 0
             CHECK (checkpoint_revision >= 0);",
         ),
+        M::up(
+            "CREATE TABLE calendar_view_sync_state (
+                account_id TEXT NOT NULL,
+                range_start_seconds INTEGER NOT NULL,
+                range_start_nanoseconds INTEGER NOT NULL
+                    CHECK (range_start_nanoseconds BETWEEN 0 AND 999999999),
+                range_end_seconds INTEGER NOT NULL,
+                range_end_nanoseconds INTEGER NOT NULL
+                    CHECK (range_end_nanoseconds BETWEEN 0 AND 999999999),
+                local_start_julian_day INTEGER NOT NULL,
+                local_end_julian_day INTEGER NOT NULL,
+                delta_link TEXT,
+                next_link TEXT,
+                last_sync_seconds INTEGER,
+                last_sync_nanoseconds INTEGER,
+                PRIMARY KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ),
+                CHECK (
+                    range_start_seconds < range_end_seconds
+                    OR (range_start_seconds = range_end_seconds
+                        AND range_start_nanoseconds < range_end_nanoseconds)
+                ),
+                CHECK (local_start_julian_day < local_end_julian_day),
+                CHECK ((last_sync_seconds IS NULL) = (last_sync_nanoseconds IS NULL)),
+                CHECK (last_sync_nanoseconds IS NULL
+                       OR last_sync_nanoseconds BETWEEN 0 AND 999999999),
+                CHECK (last_sync_seconds IS NULL OR delta_link IS NOT NULL)
+            );
+
+            CREATE TABLE calendar_events (
+                account_id TEXT NOT NULL,
+                range_start_seconds INTEGER NOT NULL,
+                range_start_nanoseconds INTEGER NOT NULL,
+                range_end_seconds INTEGER NOT NULL,
+                range_end_nanoseconds INTEGER NOT NULL,
+                local_start_julian_day INTEGER NOT NULL,
+                local_end_julian_day INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                subject TEXT,
+                location TEXT,
+                is_all_day INTEGER NOT NULL CHECK (is_all_day IN (0, 1)),
+                start_seconds INTEGER,
+                start_nanoseconds INTEGER,
+                end_seconds INTEGER,
+                end_nanoseconds INTEGER,
+                start_julian_day INTEGER,
+                end_julian_day INTEGER,
+                original_start_time_zone TEXT,
+                original_end_time_zone TEXT,
+                PRIMARY KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day,
+                    event_id
+                ),
+                FOREIGN KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) REFERENCES calendar_view_sync_state (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) ON DELETE CASCADE,
+                CHECK ((start_nanoseconds IS NULL) = (start_seconds IS NULL)),
+                CHECK ((end_nanoseconds IS NULL) = (end_seconds IS NULL)),
+                CHECK (start_nanoseconds IS NULL
+                       OR start_nanoseconds BETWEEN 0 AND 999999999),
+                CHECK (end_nanoseconds IS NULL
+                       OR end_nanoseconds BETWEEN 0 AND 999999999),
+                CHECK (
+                    (is_all_day = 0
+                     AND start_seconds IS NOT NULL
+                     AND end_seconds IS NOT NULL
+                     AND start_julian_day IS NULL
+                     AND end_julian_day IS NULL)
+                    OR
+                    (is_all_day = 1
+                     AND start_seconds IS NULL
+                     AND end_seconds IS NULL
+                     AND start_julian_day IS NOT NULL
+                     AND end_julian_day IS NOT NULL
+                     AND start_julian_day < end_julian_day)
+                )
+            );",
+        ),
     ])
 }
 

@@ -5,13 +5,16 @@ use std::{
     sync::{Arc, mpsc},
 };
 
-use einfach_mail_application::{AccountWorkflow, MailSessionFactory, MailWorkflowFactory};
+use einfach_mail_application::{
+    AccountSessionFactory, AccountSessionWorkflowFactory, AccountWorkflow,
+};
 use einfach_mail_microsoft_graph::{CallbackPort, MicrosoftGraphProvider};
 use einfach_mail_persistence::SqliteMailCacheFactory;
 use gpui_kit::*;
 use uuid::Uuid;
 
 mod account_view;
+mod calendar_view;
 mod mail_view;
 
 use account_view::{AccountView, SetupIssue};
@@ -23,24 +26,24 @@ type MicrosoftAccountWorkflow = Arc<AccountWorkflow<MicrosoftGraphProvider>>;
 
 struct AccountServices {
     workflow: Result<MicrosoftAccountWorkflow, SetupIssue>,
-    mail_session_factory: Option<Arc<dyn MailSessionFactory>>,
+    account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
 }
 
 fn account_services_from_environment() -> AccountServices {
     match configured_account_services() {
-        Ok((workflow, mail_session_factory)) => AccountServices {
+        Ok((workflow, account_session_factory)) => AccountServices {
             workflow: Ok(workflow),
-            mail_session_factory: Some(mail_session_factory),
+            account_session_factory: Some(account_session_factory),
         },
         Err(issue) => AccountServices {
             workflow: Err(issue),
-            mail_session_factory: None,
+            account_session_factory: None,
         },
     }
 }
 
 fn configured_account_services()
--> Result<(MicrosoftAccountWorkflow, Arc<dyn MailSessionFactory>), SetupIssue> {
+-> Result<(MicrosoftAccountWorkflow, Arc<dyn AccountSessionFactory>), SetupIssue> {
     let client_id = match env::var(CLIENT_ID_ENV) {
         Ok(client_id_value) => {
             Uuid::parse_str(&client_id_value).map_err(|_| SetupIssue::InvalidClientId)?
@@ -57,9 +60,10 @@ fn configured_account_services()
 
     let provider = MicrosoftGraphProvider::new(client_id, callback_port);
     let account_workflow = Arc::new(AccountWorkflow::new(provider.clone()));
-    let mail_session_factory: Arc<dyn MailSessionFactory> =
-        Arc::new(MailWorkflowFactory::new(provider, SqliteMailCacheFactory));
-    Ok((account_workflow, mail_session_factory))
+    let account_session_factory: Arc<dyn AccountSessionFactory> = Arc::new(
+        AccountSessionWorkflowFactory::new(provider, SqliteMailCacheFactory),
+    );
+    Ok((account_workflow, account_session_factory))
 }
 
 fn configured_callback_port(port_text: Option<&str>) -> Result<CallbackPort, SetupIssue> {
@@ -87,7 +91,7 @@ fn main() -> Result<(), std::io::Error> {
             cx.new(|cx| {
                 AccountView::new(
                     account_services.workflow,
-                    account_services.mail_session_factory,
+                    account_services.account_session_factory,
                     cx,
                 )
             })

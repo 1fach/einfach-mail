@@ -232,7 +232,7 @@ impl MailView {
         self.sync_status = status;
     }
 
-    pub(crate) fn stop_pending_work(&mut self) -> Arc<dyn MailSession> {
+    pub(crate) fn stop_pending_work(&mut self) {
         drop(self.sync_task.take());
         drop(self.message_task.take());
         self.sync_running = false;
@@ -242,7 +242,6 @@ impl MailView {
         self.folders.clear();
         self.messages.clear();
         self.message_state = MessageState::Empty;
-        Arc::clone(&self.workflow)
     }
 
     fn select_folder(&mut self, folder: FolderReference, cx: &mut Context<Self>) {

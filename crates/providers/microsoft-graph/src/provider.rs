@@ -23,11 +23,13 @@ use crate::{
     worker,
 };
 use einfach_mail_application::{
-    AccountOperationCancellation, AccountOperationError, AccountProvider, MailOperationError,
-    MailProvider, MessageDeltaRequest, MessageDeltaResponse,
+    AccountOperationCancellation, AccountOperationError, AccountProvider,
+    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarOperationError, CalendarProvider,
+    MailOperationError, MailProvider, MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, FolderReference, MailFolder, MailMessage, MessageBody, MessageId,
+    AccountId, AccountProfile, CalendarViewReference, FolderReference, MailFolder, MailMessage,
+    MessageBody, MessageId,
 };
 
 const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
@@ -294,6 +296,29 @@ impl MailProvider for MicrosoftGraphProvider {
     }
 }
 
+impl CalendarProvider for MicrosoftGraphProvider {
+    fn calendar_delta_page(
+        &self,
+        view: &CalendarViewReference,
+        request: CalendarDeltaRequest,
+    ) -> impl Future<Output = Result<CalendarDeltaPageResponse, CalendarOperationError>> + Send + '_
+    {
+        let config = Arc::clone(&self.config);
+        let view = view.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = view.account_id().clone();
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_calendar)?;
+            let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
+            let page = graph_api
+                .calendar_delta_page(&view, request, Arc::clone(&token))
+                .await;
+            map_calendar_result(&config, &account_id, &token, page).await
+        })
+    }
+}
+
 async fn ensure_access_token(
     config: &ProviderConfig,
     account_id: &AccountId,
@@ -351,6 +376,55 @@ async fn map_mail_result<T>(
         invalidate_access_token(config, account_id, access_token).await;
     }
     mail_result.map_err(map_graph_error)
+}
+
+async fn map_calendar_result<T>(
+    config: &ProviderConfig,
+    account_id: &AccountId,
+    access_token: &Arc<AccessToken>,
+    calendar_result: Result<T, GraphError>,
+) -> Result<T, CalendarOperationError> {
+    if matches!(&calendar_result, Err(GraphError::AccessTokenRejected)) {
+        invalidate_access_token(config, account_id, access_token).await;
+    }
+    calendar_result.map_err(map_calendar_graph_error)
+}
+
+fn map_mail_operation_to_calendar(error: MailOperationError) -> CalendarOperationError {
+    match error {
+        MailOperationError::SignInRequired => CalendarOperationError::SignInRequired,
+        MailOperationError::AccountMismatch => CalendarOperationError::AccountMismatch,
+        MailOperationError::AccessDenied => CalendarOperationError::AccessDenied,
+        MailOperationError::RateLimited { retry_after } => {
+            CalendarOperationError::RateLimited { retry_after }
+        }
+        MailOperationError::InvalidResponse => CalendarOperationError::InvalidResponse,
+        MailOperationError::ResourceLimitExceeded => CalendarOperationError::ResourceLimitExceeded,
+        MailOperationError::CredentialStoreUnavailable | MailOperationError::ServiceUnavailable => {
+            CalendarOperationError::ServiceUnavailable
+        }
+        _ => CalendarOperationError::ServiceUnavailable,
+    }
+}
+
+fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
+    match error {
+        GraphError::AccessTokenRejected => CalendarOperationError::SignInRequired,
+        GraphError::AccessDenied => CalendarOperationError::AccessDenied,
+        GraphError::RateLimited { retry_after } => {
+            CalendarOperationError::RateLimited { retry_after }
+        }
+        GraphError::ResponseTooLarge | GraphError::PaginationLimitExceeded => {
+            CalendarOperationError::ResourceLimitExceeded
+        }
+        GraphError::InvalidResponse | GraphError::UnsafeLink | GraphError::InvalidRecord => {
+            CalendarOperationError::InvalidResponse
+        }
+        GraphError::WorkerStart
+        | GraphError::WorkerClosed
+        | GraphError::Transport
+        | GraphError::InvalidToken => CalendarOperationError::ServiceUnavailable,
+    }
 }
 
 async fn invalidate_access_token(
@@ -679,7 +753,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-access","expires_in":3600,"refresh_token":"synthetic-refresh","scope":"Mail.Read User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-access","expires_in":3600,"refresh_token":"synthetic-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -730,6 +804,7 @@ mod tests {
         );
         assert!(has_scope(&parameters, "User.Read"));
         assert!(has_scope(&parameters, "Mail.Read"));
+        assert!(has_scope(&parameters, "Calendars.Read"));
         assert!(has_scope(&parameters, "offline_access"));
         assert_eq!(
             parameters.get("code_challenge_method").map(String::as_str),
@@ -1091,7 +1166,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Mail.Read User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -1139,7 +1214,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-rejected-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Mail.Read User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-rejected-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -1210,7 +1285,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-connect-access","expires_in":3600,"refresh_token":"synthetic-connect-refresh","scope":"User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-connect-access","expires_in":3600,"refresh_token":"synthetic-connect-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -1311,7 +1386,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-initial-access","expires_in":3600,"refresh_token":"synthetic-current-refresh","scope":"User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-initial-access","expires_in":3600,"refresh_token":"synthetic-current-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -1356,7 +1431,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-restored-access","expires_in":3600,"refresh_token":"synthetic-final-refresh","scope":"User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-restored-access","expires_in":3600,"refresh_token":"synthetic-final-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;

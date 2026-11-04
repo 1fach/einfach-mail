@@ -13,7 +13,9 @@ tokio-util.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+smol = "2.0.2"
 tokio.workspace = true
+time.workspace = true
 
 [lints]
 workspace = true

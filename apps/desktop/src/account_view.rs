@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::mail_view::{MailView, MailViewEvent};
 use einfach_mail_application::{
-    AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
-    MailCacheError, MailSession, MailSessionFactory,
+    AccountOperationCancellation, AccountOperationError, AccountProvider, AccountSession,
+    AccountSessionFactory, AccountWorkflow, MailCacheError,
 };
 use einfach_mail_domain::AccountProfile;
 use gpui_kit::component::{
@@ -153,20 +154,29 @@ impl AccountStatus {
 
 pub(super) struct AccountView<P: AccountProvider + 'static> {
     workflow: Option<Arc<AccountWorkflow<P>>>,
-    mail_session_factory: Option<Arc<dyn MailSessionFactory>>,
+    account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
+    account_session: Option<Arc<dyn AccountSession>>,
     setup_issue: Option<SetupIssue>,
     status: AccountStatus,
-    mail_opening: bool,
-    mail_open_error: Option<MailCacheError>,
+    opening_content: Option<OpeningContent>,
+    session_open_error: Option<MailCacheError>,
     mail_view: Option<Entity<MailView>>,
     mail_view_subscription: Option<Subscription>,
+    calendar_view: Option<Entity<CalendarView>>,
+    calendar_view_subscription: Option<Subscription>,
     task: Option<Task<()>>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum OpeningContent {
+    Mail,
+    Calendar,
 }
 
 impl<P: AccountProvider + 'static> AccountView<P> {
     pub(super) fn new(
         workflow: Result<Arc<AccountWorkflow<P>>, SetupIssue>,
-        mail_session_factory: Option<Arc<dyn MailSessionFactory>>,
+        account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let (workflow, setup_issue, status) = match workflow {
@@ -175,13 +185,16 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         };
         let mut view = Self {
             workflow,
-            mail_session_factory,
+            account_session_factory,
+            account_session: None,
             setup_issue,
             status,
-            mail_opening: false,
-            mail_open_error: None,
+            opening_content: None,
+            session_open_error: None,
             mail_view: None,
             mail_view_subscription: None,
+            calendar_view: None,
+            calendar_view_subscription: None,
             task: None,
         };
         view.start_restore(cx);
@@ -329,7 +342,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         };
         if !self.status.saved_credential_may_exist()
-            || self.mail_opening
+            || self.opening_content.is_some()
             || matches!(
                 &self.status,
                 AccountStatus::Connecting { .. }
@@ -342,59 +355,73 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         }
 
-        let connected_account = self.mail_session_factory.clone().and_then(|factory| {
+        let connected_account = self.account_session_factory.clone().and_then(|factory| {
             self.status
                 .connected_profile()
                 .map(|profile| (self.status.clone(), profile.clone(), factory))
         });
-        let mail_session = self.close_mail_view(cx);
-        self.mail_opening = false;
-        self.mail_open_error = None;
+        let account_session = self
+            .close_mail_view(cx)
+            .or_else(|| self.close_calendar_view(cx));
+        self.opening_content = None;
+        self.session_open_error = None;
         self.status = AccountStatus::SigningOut;
         self.task = Some(Self::sign_out_task(
             workflow,
             connected_account,
-            mail_session,
+            account_session,
             cx,
         ));
         cx.notify();
     }
 
-    fn close_mail_view(&mut self, cx: &mut Context<Self>) -> Option<Arc<dyn MailSession>> {
+    fn close_mail_view(&mut self, cx: &mut Context<Self>) -> Option<Arc<dyn AccountSession>> {
         let mail_view = self.mail_view.take()?;
         drop(self.mail_view_subscription.take());
-        Some(mail_view.update(cx, |view, _| view.stop_pending_work()))
+        mail_view.update(cx, |view, _| view.stop_pending_work());
+        self.account_session.take()
+    }
+
+    fn close_calendar_view(&mut self, cx: &mut Context<Self>) -> Option<Arc<dyn AccountSession>> {
+        let calendar_view = self.calendar_view.take()?;
+        drop(self.calendar_view_subscription.take());
+        calendar_view.update(cx, |view, _| view.stop_pending_work());
+        self.account_session.take()
     }
 
     fn open_mail(&mut self, cx: &mut Context<Self>) {
-        if self.mail_opening || self.mail_view.is_some() {
+        if self.opening_content.is_some()
+            || self.mail_view.is_some()
+            || self.calendar_view.is_some()
+        {
             return;
         }
         let AccountStatus::Connected(profile) = &self.status else {
             return;
         };
-        let Some(mail_session_factory) = self.mail_session_factory.clone() else {
+        let Some(account_session_factory) = self.account_session_factory.clone() else {
             return;
         };
         let profile = profile.clone();
-        self.mail_opening = true;
-        self.mail_open_error = None;
+        self.opening_content = Some(OpeningContent::Mail);
+        self.session_open_error = None;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let account_id = profile.id().clone();
             let session = cx
                 .background_executor()
-                .spawn(async move { mail_session_factory.open_session(account_id).await })
+                .spawn(async move { account_session_factory.open_session(account_id).await })
                 .await;
             match session {
                 Ok(session) => {
                     let _ = this.update(cx, |view, cx| {
-                        if !view.mail_opening
+                        if view.opening_content != Some(OpeningContent::Mail)
                             || !matches!(&view.status, AccountStatus::Connected(_))
                         {
                             return;
                         }
-                        view.mail_opening = false;
-                        let mail_view = cx.new(|cx| MailView::new(profile, session, cx));
+                        view.opening_content = None;
+                        let mail_view_session = session.mail_session();
+                        let mail_view = cx.new(|cx| MailView::new(profile, mail_view_session, cx));
                         let subscription =
                             cx.subscribe(&mail_view, |view, _, event: &MailViewEvent, cx| {
                                 match event {
@@ -406,13 +433,75 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                             });
                         view.mail_view = Some(mail_view);
                         view.mail_view_subscription = Some(subscription);
+                        view.account_session = Some(session);
                         cx.notify();
                     });
                 }
                 Err(error) => {
                     let _ = this.update(cx, |view, cx| {
-                        view.mail_opening = false;
-                        view.mail_open_error = Some(error);
+                        view.opening_content = None;
+                        view.session_open_error = Some(error);
+                        cx.notify();
+                    });
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    fn open_calendar(&mut self, cx: &mut Context<Self>) {
+        if self.opening_content.is_some()
+            || self.mail_view.is_some()
+            || self.calendar_view.is_some()
+        {
+            return;
+        }
+        let AccountStatus::Connected(profile) = &self.status else {
+            return;
+        };
+        let Some(account_session_factory) = self.account_session_factory.clone() else {
+            return;
+        };
+        let profile = profile.clone();
+        self.opening_content = Some(OpeningContent::Calendar);
+        self.session_open_error = None;
+        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let account_id = profile.id().clone();
+            let session = cx
+                .background_executor()
+                .spawn(async move { account_session_factory.open_session(account_id).await })
+                .await;
+            match session {
+                Ok(session) => {
+                    let _ = this.update(cx, |view, cx| {
+                        if view.opening_content != Some(OpeningContent::Calendar)
+                            || !matches!(&view.status, AccountStatus::Connected(_))
+                        {
+                            return;
+                        }
+                        view.opening_content = None;
+                        let calendar_session = session.calendar_session();
+                        let calendar_view =
+                            cx.new(|cx| CalendarView::new(profile, calendar_session, cx));
+                        let subscription = cx.subscribe(
+                            &calendar_view,
+                            |view, _, event: &CalendarViewEvent, cx| match event {
+                                CalendarViewEvent::BackToAccount => {
+                                    drop(view.close_calendar_view(cx));
+                                    cx.notify();
+                                }
+                            },
+                        );
+                        view.calendar_view = Some(calendar_view);
+                        view.calendar_view_subscription = Some(subscription);
+                        view.account_session = Some(session);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.opening_content = None;
+                        view.session_open_error = Some(error);
                         cx.notify();
                     });
                 }
@@ -423,27 +512,31 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn sign_out_task(
         workflow: Arc<AccountWorkflow<P>>,
-        connected_account: Option<(AccountStatus, AccountProfile, Arc<dyn MailSessionFactory>)>,
-        mail_session: Option<Arc<dyn MailSession>>,
+        connected_account: Option<(
+            AccountStatus,
+            AccountProfile,
+            Arc<dyn AccountSessionFactory>,
+        )>,
+        account_session: Option<Arc<dyn AccountSession>>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
-            if let Some((previous_status, connected_profile, mail_session_factory)) =
+            if let Some((previous_status, connected_profile, account_session_factory)) =
                 connected_account
             {
                 let account_id = connected_profile.id().clone();
                 let cache_removal = cx
                     .background_executor()
                     .spawn(remove_account_cache(
-                        mail_session,
-                        mail_session_factory,
+                        account_session,
+                        account_session_factory,
                         account_id,
                     ))
                     .await;
                 if let Err(error) = cache_removal {
                     let _ = this.update(cx, |view, cx| {
                         view.status = previous_status;
-                        view.mail_open_error = Some(error);
+                        view.session_open_error = Some(error);
                         view.task = None;
                         cx.notify();
                     });
@@ -520,7 +613,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 div()
                     .text_sm()
                     .text_color(colors.muted_foreground)
-                    .child("User.Read lets Einfach Mail display your account identity. offline_access lets it refresh your sign-in. Mail access is not requested here."),
+                    .child("User.Read lets Einfach Mail display your account identity. Mail.Read lets it read your mail. Calendars.Read lets it read your primary calendar. offline_access lets it refresh your sign-in. Einfach Mail cannot send mail or change calendar events."),
             )
     }
 
@@ -596,7 +689,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     div()
                         .text_sm()
                         .text_color(colors.muted_foreground)
-                        .child("Signing out removes the saved sign-in and encrypted mail cache from this device. Microsoft organization consent is unchanged."),
+                        .child("Signing out removes the saved sign-in and encrypted mail and calendar cache from this device. Microsoft organization consent is unchanged."),
                 ),
         )
     }
@@ -614,7 +707,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 Button::new("sign-out")
                     .danger()
                     .label(label)
-                    .disabled(self.mail_opening)
+                    .disabled(self.opening_content.is_some())
                     .on_click(cx.listener(|view, _, _, cx| view.sign_out(cx))),
             )
     }
@@ -627,7 +720,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .child(
                 Button::new("review-app-permissions")
                     .label("Review sign-in permissions")
-                    .disabled(self.mail_opening)
+                    .disabled(self.opening_content.is_some())
                     .on_click(cx.listener(|view, _, _, cx| view.reauthorize(cx))),
             )
     }
@@ -672,8 +765,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                         .label("Cancel sign-in")
                         .on_click(cx.listener(|view, _, _, cx| view.cancel_connect(cx))),
                 ),
-            AccountStatus::Connected(_) if self.mail_session_factory.is_some() => {
-                self.render_open_mail(cx)
+            AccountStatus::Connected(_) if self.account_session_factory.is_some() => {
+                self.render_open_content(cx)
             }
             AccountStatus::Disconnected | AccountStatus::Failed { .. } => div()
                 .flex()
@@ -689,20 +782,38 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         }
     }
 
-    fn render_open_mail(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let label = if self.mail_opening {
-            "Opening mail…"
-        } else {
-            "Open mail"
-        };
-        div().flex().justify_center().child(
-            Button::new("open-mail")
-                .primary()
-                .label(label)
-                .loading(self.mail_opening)
-                .disabled(self.mail_opening)
-                .on_click(cx.listener(|view, _, _, cx| view.open_mail(cx))),
-        )
+    fn render_open_content(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let mail_opening = self.opening_content == Some(OpeningContent::Mail);
+        let calendar_opening = self.opening_content == Some(OpeningContent::Calendar);
+        let opening = self.opening_content.is_some();
+        div()
+            .flex()
+            .justify_center()
+            .gap_2()
+            .child(
+                Button::new("open-mail")
+                    .primary()
+                    .label(if mail_opening {
+                        "Opening mail…"
+                    } else {
+                        "Open mail"
+                    })
+                    .loading(mail_opening)
+                    .disabled(opening)
+                    .on_click(cx.listener(|view, _, _, cx| view.open_mail(cx))),
+            )
+            .child(
+                Button::new("open-calendar")
+                    .outline()
+                    .label(if calendar_opening {
+                        "Opening calendar…"
+                    } else {
+                        "Open calendar"
+                    })
+                    .loading(calendar_opening)
+                    .disabled(opening)
+                    .on_click(cx.listener(|view, _, _, cx| view.open_calendar(cx))),
+            )
     }
 
     fn render_header(&self, colors: ColorTokens) -> gpui_kit::Div {
@@ -738,10 +849,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return content.child(self.render_setup_status(issue));
         }
         let mut content = content.child(self.render_status());
-        if let Some(error) = self.mail_open_error {
+        if let Some(error) = self.session_open_error {
             content = content.child(
                 div()
-                    .id("mail-cache-error")
+                    .id("account-cache-error")
                     .role(Role::Alert)
                     .text_sm()
                     .child(mail_cache_error_message(error)),
@@ -788,6 +899,12 @@ impl<P: AccountProvider + 'static> Render for AccountView<P> {
                 .child(mail_view.clone())
                 .into_any_element();
         }
+        if let Some(calendar_view) = &self.calendar_view {
+            return div()
+                .size_full()
+                .child(calendar_view.clone())
+                .into_any_element();
+        }
         let colors = cx.theme().semantic_tokens().colors;
         div()
             .size_full()
@@ -802,23 +919,27 @@ impl<P: AccountProvider + 'static> Render for AccountView<P> {
 }
 
 async fn remove_account_cache(
-    mail_session: Option<Arc<dyn MailSession>>,
-    mail_session_factory: Arc<dyn MailSessionFactory>,
+    account_session: Option<Arc<dyn AccountSession>>,
+    account_session_factory: Arc<dyn AccountSessionFactory>,
     account_id: einfach_mail_domain::AccountId,
 ) -> Result<(), MailCacheError> {
-    match mail_session {
-        Some(mail_session) => mail_session.remove_account_cache(&account_id).await,
-        None => mail_session_factory.remove_account_cache(&account_id).await,
+    match account_session {
+        Some(account_session) => account_session.remove_account_cache(&account_id).await,
+        None => {
+            account_session_factory
+                .remove_account_cache(&account_id)
+                .await
+        }
     }
 }
 
 fn mail_cache_error_message(error: MailCacheError) -> &'static str {
     match error {
         MailCacheError::MissingEncryptionKey => {
-            "The encrypted mail cache key is missing. Remove the local cache before syncing again."
+            "The encrypted account cache key is missing. Remove the local cache before syncing again."
         }
         MailCacheError::Unavailable => {
-            "The encrypted mail cache is unavailable. Unlock your Linux keyring and try again."
+            "The encrypted account cache is unavailable. Unlock your Linux keyring and try again."
         }
         _ => "The local mail cache could not be opened. Try again.",
     }

@@ -2,12 +2,12 @@
 
 ## Runtime shape
 
-The application uses GPUI Kit for its native interface. Rust owns the UI, mail workflows, provider access, persistence, synchronization, and Linux operating-system integration. It does not use the Tauri runtime or a browser frontend.
+The application uses GPUI Kit for its native interface. Rust owns the UI, mail and calendar workflows, provider access, persistence, synchronization, and Linux operating-system integration. It does not use the Tauri runtime or a browser frontend.
 
 ```mermaid
 flowchart LR
     View[Native GPUI views] -->|actions and results| App[Application workflows]
-    App --> Domain[Account and mail domain]
+    App --> Domain[Account, mail, and calendar domain]
     App --> Graph[Microsoft Graph provider]
     App --> Store[Encrypted local cache]
     Graph --> Identity[Private Entra identity module]
@@ -15,36 +15,40 @@ flowchart LR
     Graph -->|HTTPS with a private delegated token| MS[Microsoft Graph v1.0]
 ```
 
-The local M2 candidate builds on the Linux account connection and cancellation boundary in PR #46. It adds read-only mail synchronization, encrypted offline browsing, and native rendering of sanitized message bodies. Calendar workflows and server-side mail actions are outside this candidate.
+PR #47 contains the M2 read-only mail candidate. The M3 branch `candidate/issue-22-calendar-sync` adds a Linux-only, read-only weekly agenda on the same account session and encrypted cache. Server-side mail and calendar actions remain outside M3.
 
 ## Module ownership
 
 | Path | Owns | Must not own |
 | --- | --- | --- |
 | `apps/desktop/` | GPUI lifecycle, native views, keyboard actions, OS integration, and sanitized email rendering | Mail rules, Graph requests, database schema |
-| `crates/application/` | Account and mail workflows, provider/cache ports, application errors, and email sanitization | GPUI, Graph JSON, concrete database types |
-| `crates/domain/` | Provider-independent account, folder, message, metadata-patch, and sync invariants | Framework and provider details |
-| `crates/providers/microsoft-graph/` | Linux OAuth, Graph profile/folder/message requests, response mapping, private HTTP transport, and refresh-token storage | UI decisions, persistence policy, token access in application code |
-| `crates/persistence/` | Linux XDG paths, Secret Service key references, SQLCipher schema and migrations, encrypted records, atomic mail sync, and cache removal | Graph or GPUI types |
+| `crates/application/` | Account, mail, and calendar workflows, provider/cache ports, application errors, and email sanitization | GPUI, Graph JSON, concrete database types |
+| `crates/domain/` | Provider-independent account, folder, message, calendar occurrence, and sync invariants | Framework and provider details |
+| `crates/providers/microsoft-graph/` | Linux OAuth, Graph profile/folder/message/calendar-view requests, response mapping, private HTTP transport, and refresh-token storage | UI decisions, persistence policy, token access in application code |
+| `crates/persistence/` | Linux XDG paths, Secret Service key references, SQLCipher schema and migrations, encrypted records, atomic mail/calendar sync, and cache removal | Graph or GPUI types |
 
 The dependency direction is desktop UI → application → domain, with Graph and persistence adapters implementing application-owned ports. Views never call Graph or access the database directly.
 
 ## Data flow
 
-1. A GPUI view calls an application workflow to list cached folders/messages, synchronize mail, or open a message.
-2. The workflow coordinates account-scoped operations through provider and cache ports. Graph OAuth tokens remain private to the provider.
+1. A GPUI view calls an application workflow to list cached folders/messages, synchronize mail, open a message, or load a calendar week.
+2. The account session composes focused mail and calendar sessions over the same account cache and provider. Graph OAuth tokens remain private to the provider.
 3. The Graph adapter validates and maps external responses into provider-independent values. It follows opaque next links through the private transport worker.
-4. The workflow applies the account's fixed 90-day cutoff and persists each page with its matching cursor update in one SQLCipher transaction. A folder becomes synchronized only after its complete page chain and final delta link commit.
+4. The mail workflow applies the account's fixed 90-day cutoff and persists each page with its matching cursor update in one SQLCipher transaction. A folder becomes synchronized only after its complete page chain and final delta link commit.
 5. Opening a message returns an encrypted cached body when available. Otherwise, the workflow reserves the folder against account sync, rereads the message, fetches its body, and stores the raw form for offline reading.
 6. The application sanitizes raw HTML whenever it prepares a body for display and returns an opaque `SanitizedEmailHtml`. Sanitized output is not persisted.
 7. The desktop renders only that sanitized value through GPUI Kit `TextView::html`; oversized sanitized content becomes bounded, escaped plain text.
+8. The calendar workflow requests bounded Graph `calendarView/delta` pages for the fixed UTC bounds of the selected Linux week. Each page and range cursor commit together, while cached events remain available when a request fails. The agenda uses Jiff only to display timed instants in the Linux system zone; all-day dates remain unchanged.
 
 ## Synchronization rules
 
 - Enumerate visible, non-hidden folders for the signed-in account. Keep folders, messages, and cursors scoped to that account and folder.
 - Start each folder with an unfiltered message-delta round, follow every page, then apply the fixed 90-day cutoff locally. This avoids Graph's 5,000-result cap for filtered delta responses.
 - Follow `@odata.nextLink` and `@odata.deltaLink` as opaque values. Before attaching a bearer token, require HTTPS and the configured Graph authority. Disable redirects for authorized requests.
-- Send `Content-Type: application/json` on initial and continuation message-delta GETs, as required by Microsoft Graph v1.0.
+- Send `Content-Type: application/json` on initial and continuation message-delta and calendar-view-delta GETs, as required by Microsoft Graph v1.0.
+- Scope each calendar cursor to the signed-in account and exact UTC view bounds. Graph expands recurrences; preserve source-zone IDs as opaque metadata. Do not set a response-time-zone preference.
+- Commit each calendar page and its range cursor atomically. Apply sparse changes only to cached occurrences and remove records that no longer overlap the fixed view.
+- Use Jiff at the Linux desktop boundary to format timed instants. Display all-day half-open date ranges as dates without time-zone conversion.
 - Commit each page and its restart checkpoint atomically. Keep each attempt within 1,000 pages and 64 MiB of response data per folder.
 - Share account and folder reservations among sessions from one workflow factory. Acquire the account reservation before listing or replacing folders and hold it through delta sync. Persist a checkpoint revision and accept a page or reset only when its request started from the current revision.
 - If Graph returns `410 Gone` for a message delta request, validate its reset URL and start a durable replacement generation. Keep unseen rows and their bodies until the final replacement page commits. A replacement upsert clears that message's cached body in the page transaction; completion deletes unseen rows and clears bodies for all retained rows atomically with the final cursor. See [ADR 0032](../decisions/0032-recover-expired-message-delta-cursors.md) and [ADR 0034](../decisions/0034-invalidate-cached-message-bodies-after-delta-updates.md).
@@ -52,7 +56,7 @@ The dependency direction is desktop UI → application → domain, with Graph an
 - Fetch bodies only after the user opens a message. Do not download attachments in M2.
 - Keep M2 read-only: the app does not mark messages read, move, archive, flag, delete, or send them on the server.
 
-Synthetic Graph, workflow, persistence, and headless GPUI tests cover pagination, cutoffs, restart checkpoints, offline body reads, and renderer policy. They do not prove live mailbox completeness; see issues #3 and #8.
+Synthetic Graph, workflow, persistence, and headless GPUI tests cover mail and calendar paging, cache checkpoints, offline reads, and renderer and agenda behavior. They do not prove live mailbox completeness or calendar recurrence and all-day semantics; see issues #3, #6, and #8. Issue #22 remains open for manual screen-reader, focus, scrolling, and layout review.
 
 ## Security boundaries
 
@@ -66,4 +70,5 @@ Synthetic Graph, workflow, persistence, and headless GPUI tests cover pagination
 
 - No dedicated Microsoft 365 test tenant or public app registration is available. Live Entra behavior and complete Graph mailbox sync remain unverified under issues #3 and #8.
 - Issue #9 remains open for real-window layout, operating-system clipboard behavior, and system-browser launch. Headless GPUI tests do not establish those behaviors.
+- Calendar recurrence, daylight-saving boundaries, and all-day semantics have synthetic coverage only. Keep issue #6 open for tenant verification; keep issue #22 open for manual Linux accessibility and layout review.
 - GPUI Kit is pre-1.0. Windows and macOS builds and runtime checks are deferred until those platforms enter scope.

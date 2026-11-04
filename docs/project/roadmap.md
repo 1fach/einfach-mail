@@ -26,7 +26,7 @@ M2 work is grouped under the [GitHub milestone](https://github.com/1fach/einfach
 
 Show and synchronize calendar events with correct time-zone and recurrence behavior. The [M3 GitHub milestone](https://github.com/1fach/einfach-mail/milestone/3) tracks this work. Keep [issue #6](https://github.com/1fach/einfach-mail/issues/6) open for live recurrence, time-zone, and all-day verification.
 
-The accepted scope is in [ADR 0014](../decisions/0014-linux-read-only-calendar-workflow.md). Integration on the current M2 head is tracked in [issue #22](https://github.com/1fach/einfach-mail/issues/22); its original implementation needs a clean port to the current account-session and cache boundaries. No live tenant or manual desktop review is claimed.
+The accepted scope is in [ADR 0014](../decisions/0014-linux-read-only-calendar-workflow.md). The [Issue #22](https://github.com/1fach/einfach-mail/issues/22) candidate is ready for stacked review on a clean branch based on PR #47's current head. The full local Linux gate and source review pass. No live tenant or manual desktop review is claimed.
 
 ## M4: Mail and calendar actions — not started
 

@@ -31,13 +31,18 @@ pub(super) enum GraphOperation {
     Messages,
     MessageDelta,
     MessageBody,
+    CalendarViewDelta,
 }
 
 impl GraphOperation {
+    fn requires_json_content_type(self) -> bool {
+        matches!(self, Self::MessageDelta | Self::CalendarViewDelta)
+    }
+
     fn uses_immutable_ids(self) -> bool {
         matches!(
             self,
-            Self::Messages | Self::MessageDelta | Self::MessageBody
+            Self::Messages | Self::MessageDelta | Self::MessageBody | Self::CalendarViewDelta
         )
     }
 }
@@ -450,7 +455,7 @@ async fn send_once(
     let mut outbound = client
         .get(request.url.as_str())
         .header(AUTHORIZATION, authorization);
-    if matches!(request.operation, GraphOperation::MessageDelta) {
+    if request.operation.requires_json_content_type() {
         outbound = outbound.header(CONTENT_TYPE, "application/json");
     }
     if request.operation.uses_immutable_ids() {

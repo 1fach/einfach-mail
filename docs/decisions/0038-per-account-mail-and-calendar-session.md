@@ -12,7 +12,7 @@ The application still needs concrete, testable mail and calendar workflows. Only
 
 ## Decision
 
-Replace the mail-only session boundary with an application-owned `AccountSession` and `AccountSessionFactory`. One account session exposes mail and calendar operations and removes the account cache. The factory opens the cache once, then composes mail and calendar workflows over handles to that same account cache and provider.
+Replace the mail-only session boundary with an application-owned `AccountSession` and `AccountSessionFactory`. One account session returns a focused mail session and calendar session, and owns removal of the shared account cache. The factory opens the cache once, then composes both workflows over handles to that same account cache and provider. The account view owns the account session lifecycle; each child view receives only its workflow-specific application port.
 
 The account cache factory requires a cloneable cache handle whose clones refer to the same account cache. Persistence implements that contract for `SqliteMailCache`; synthetic adapters use shared state. The session factory shares synchronization reservations across sessions created by that factory. GPUI views receive only `AccountSession` and domain values. The desktop composition root remains responsible for connecting the concrete Graph provider and persistence adapter.
 
@@ -29,7 +29,8 @@ The interface continues to return boxed `Send` futures from the standard library
 
 ## Consequences
 
-- Mail and calendar views use one account-owned session and do not name Graph or SQLite types.
+- Mail and calendar views receive workflow-specific session interfaces and do not name Graph or SQLite types.
+- The account view retains the composite session while either child view is active and stops the child view before removing the shared cache.
 - Cache creation and removal remain application and persistence responsibilities.
 - The session composes separate workflows, so mail and calendar domain logic remain independently testable.
 - Shared-cache behavior is verified through cloneable synthetic adapters and persistence integration tests.

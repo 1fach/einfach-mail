@@ -3,6 +3,8 @@
 //! The application layer uses [`SqliteMailCache`] through its provider-independent
 //! cache port and never receives a database or encryption-key handle.
 
+#[cfg(all(test, target_os = "linux"))]
+mod calendar_tests;
 #[cfg(target_os = "linux")]
 mod schema;
 #[cfg(target_os = "linux")]

@@ -16,10 +16,13 @@ use crate::{
     transport::{GraphOperation, GraphResponse, GraphTransportHandle},
 };
 use einfach_mail_application::{
-    MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
+    CalendarDeltaPageResponse, CalendarDeltaRequest, MessageDeltaPageResponse, MessageDeltaRequest,
+    MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, FolderId, FolderReference, MailFolder, MailMessage, Mailbox,
+    AccountId, AccountProfile, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage,
+    CalendarDeltaProgress, CalendarOccurrencePatch, CalendarOccurrenceTimePatch,
+    CalendarViewReference, EventId, FolderId, FolderReference, MailFolder, MailMessage, Mailbox,
     MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
     MessageDeltaProgress, MessageId, MessageMetadata, MessageMetadataPatch, MessageOrigin,
     ReadState,
@@ -144,6 +147,39 @@ impl GraphApi {
         )))
     }
 
+    pub(super) async fn calendar_delta_page(
+        &self,
+        view: &CalendarViewReference,
+        request: CalendarDeltaRequest,
+        token: std::sync::Arc<AccessToken>,
+    ) -> Result<CalendarDeltaPageResponse, GraphError> {
+        let request_url = match request {
+            CalendarDeltaRequest::Initial => {
+                self.authority.calendar_view_delta_path(view.range())?
+            }
+            CalendarDeltaRequest::Continue(link) => self.authority.opaque_link(link.as_str())?,
+        };
+        let response = self
+            .transport
+            .get(GraphOperation::CalendarViewDelta, request_url, token)
+            .await?;
+        let response_bytes = response.len();
+        let page = self.parse_calendar_delta_page(&response)?;
+        Ok(CalendarDeltaPageResponse::new(page, response_bytes))
+    }
+
+    fn parse_calendar_delta_page(&self, response: &[u8]) -> Result<CalendarDeltaPage, GraphError> {
+        let page = serde_json::from_slice::<GraphDeltaPage<WireCalendarEvent>>(response)
+            .map_err(|_| GraphError::InvalidResponse)?;
+        let progress = self.calendar_delta_progress(page.next_link, page.delta_link)?;
+        let changes = page
+            .records
+            .into_iter()
+            .map(WireCalendarEvent::into_change)
+            .collect::<Result<_, _>>()?;
+        Ok(CalendarDeltaPage::new(changes, progress))
+    }
+
     pub(super) async fn fetch_message_body(
         &self,
         message_id: &MessageId,
@@ -175,6 +211,24 @@ impl GraphApi {
             ))),
             (None, Some(link)) => Ok(MessageDeltaProgress::Complete(
                 MessageDeltaLink::from_opaque(
+                    self.authority.opaque_link(&link)?.as_str().to_owned(),
+                ),
+            )),
+            _ => Err(GraphError::InvalidResponse),
+        }
+    }
+
+    fn calendar_delta_progress(
+        &self,
+        next_link: Option<String>,
+        delta_link: Option<String>,
+    ) -> Result<CalendarDeltaProgress, GraphError> {
+        match (next_link, delta_link) {
+            (Some(link), None) => Ok(CalendarDeltaProgress::Next(CalendarDeltaLink::from_opaque(
+                self.authority.opaque_link(&link)?.as_str().to_owned(),
+            ))),
+            (None, Some(link)) => Ok(CalendarDeltaProgress::Complete(
+                CalendarDeltaLink::from_opaque(
                     self.authority.opaque_link(&link)?.as_str().to_owned(),
                 ),
             )),
@@ -440,6 +494,154 @@ struct WireMessageChange {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WireCalendarEvent {
+    id: String,
+    #[serde(default)]
+    subject: WireField<String>,
+    #[serde(default)]
+    location: WireField<WireLocation>,
+    #[serde(default)]
+    start: WireField<WireDateTimeTimeZone>,
+    #[serde(default)]
+    end: WireField<WireDateTimeTimeZone>,
+    #[serde(default)]
+    is_all_day: WireField<bool>,
+    #[serde(default)]
+    original_start_time_zone: WireField<String>,
+    #[serde(default)]
+    original_end_time_zone: WireField<String>,
+    #[serde(rename = "@removed")]
+    removed: Option<WireRemoved>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireLocation {
+    display_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireDateTimeTimeZone {
+    date_time: String,
+    time_zone: String,
+}
+
+impl WireCalendarEvent {
+    fn into_change(self) -> Result<CalendarDeltaChange, GraphError> {
+        let id = EventId::try_from(self.id).map_err(|_| GraphError::InvalidRecord)?;
+        if self.removed.is_some() {
+            return Ok(CalendarDeltaChange::Removed { id });
+        }
+
+        let mut patch = CalendarOccurrencePatch::new();
+        apply_calendar_content_fields(self.subject, self.location, &mut patch);
+        apply_calendar_zone_fields(
+            self.original_start_time_zone,
+            self.original_end_time_zone,
+            &mut patch,
+        );
+        if let Some(time_patch) =
+            calendar_occurrence_time_patch(self.start, self.end, self.is_all_day)?
+        {
+            patch.set_time(time_patch);
+        }
+        Ok(CalendarDeltaChange::Upsert { id, patch })
+    }
+}
+
+fn apply_calendar_content_fields(
+    subject: WireField<String>,
+    location: WireField<WireLocation>,
+    patch: &mut CalendarOccurrencePatch,
+) {
+    match subject {
+        WireField::Missing => {}
+        WireField::Null => patch.set_subject(None),
+        WireField::Value(subject) => patch.set_subject(Some(subject)),
+    }
+    match location {
+        WireField::Missing => {}
+        WireField::Null => patch.set_location(None),
+        WireField::Value(location) => patch.set_location(location.display_name),
+    }
+}
+
+fn apply_calendar_zone_fields(
+    original_start_time_zone: WireField<String>,
+    original_end_time_zone: WireField<String>,
+    patch: &mut CalendarOccurrencePatch,
+) {
+    match original_start_time_zone {
+        WireField::Missing => {}
+        WireField::Null => patch.set_original_start_time_zone(None),
+        WireField::Value(time_zone) => {
+            patch.set_original_start_time_zone(Some(time_zone));
+        }
+    }
+    match original_end_time_zone {
+        WireField::Missing => {}
+        WireField::Null => patch.set_original_end_time_zone(None),
+        WireField::Value(time_zone) => {
+            patch.set_original_end_time_zone(Some(time_zone));
+        }
+    }
+}
+
+fn calendar_occurrence_time_patch(
+    start: WireField<WireDateTimeTimeZone>,
+    end: WireField<WireDateTimeTimeZone>,
+    is_all_day: WireField<bool>,
+) -> Result<Option<CalendarOccurrenceTimePatch>, GraphError> {
+    let mut time_patch = CalendarOccurrenceTimePatch::new();
+    let start = parse_optional_calendar_time(start)?;
+    let end = parse_optional_calendar_time(end)?;
+    if let Some(start) = start {
+        time_patch.set_start(start);
+    }
+    if let Some(end) = end {
+        time_patch.set_end(end);
+    }
+    let has_all_day = apply_calendar_all_day_field(is_all_day, &mut time_patch)?;
+    Ok((start.is_some() || end.is_some() || has_all_day).then_some(time_patch))
+}
+
+fn apply_calendar_all_day_field(
+    field: WireField<bool>,
+    time_patch: &mut CalendarOccurrenceTimePatch,
+) -> Result<bool, GraphError> {
+    match field {
+        WireField::Missing => Ok(false),
+        WireField::Null => Err(GraphError::InvalidRecord),
+        WireField::Value(is_all_day) => {
+            time_patch.set_is_all_day(is_all_day);
+            Ok(true)
+        }
+    }
+}
+
+fn parse_optional_calendar_time(
+    field: WireField<WireDateTimeTimeZone>,
+) -> Result<Option<OffsetDateTime>, GraphError> {
+    match field {
+        WireField::Missing => Ok(None),
+        WireField::Null => Err(GraphError::InvalidRecord),
+        WireField::Value(date_time) => parse_graph_utc_date_time(&date_time).map(Some),
+    }
+}
+
+fn parse_graph_utc_date_time(
+    date_time: &WireDateTimeTimeZone,
+) -> Result<OffsetDateTime, GraphError> {
+    if date_time.time_zone != "UTC" {
+        return Err(GraphError::InvalidRecord);
+    }
+    let date_time_utc = format!("{}Z", date_time.date_time);
+    OffsetDateTime::parse(&date_time_utc, &Rfc3339).map_err(|_| GraphError::InvalidRecord)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WireMessageMetadata {
     #[serde(default)]
     subject: WireField<String>,
@@ -614,14 +816,201 @@ struct WireBodyContent {
 
 #[cfg(test)]
 mod tests {
-    use einfach_mail_domain::{AccountId, FolderId, FolderReference};
+    use std::{sync::Arc, time::SystemTime};
+
+    use httpmock::{Method::GET, MockServer};
+    use huskarl::{
+        core::secrets::SecretString,
+        token::{AccessToken, BearerAccessToken},
+    };
     use serde_json::json;
+    use time::{Date, Month};
+    use url::Url;
+
+    use einfach_mail_application::CalendarDeltaRequest;
+    use einfach_mail_domain::{
+        AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarOccurrence,
+        CalendarOccurrenceTime, CalendarViewRange, CalendarViewReference, FolderId,
+        FolderReference,
+    };
 
     use super::{
-        MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget, WireFolder,
-        WireMessage,
+        GraphApi, MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget,
+        WireCalendarEvent, WireFolder, WireMessage,
     };
-    use crate::error::GraphError;
+    use crate::{
+        error::GraphError,
+        graph_url::GraphAuthority,
+        transport::{GraphTransport, GraphTransportHandle},
+    };
+
+    fn synthetic_access_token() -> Arc<AccessToken> {
+        Arc::new(AccessToken::Bearer(BearerAccessToken::new(
+            SecretString::new("synthetic-calendar-access-token"),
+            SystemTime::now(),
+            Some(std::time::Duration::from_secs(3600)),
+        )))
+    }
+
+    fn synthetic_view() -> CalendarViewReference {
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let start_date = Date::from_calendar_date(2030, Month::January, 7)
+            .expect("synthetic week start date is valid");
+        let end_date = Date::from_calendar_date(2030, Month::January, 14)
+            .expect("synthetic week end date is valid");
+        let range = CalendarViewRange::new(
+            start_date.midnight().assume_utc(),
+            end_date.midnight().assume_utc(),
+            start_date,
+            end_date,
+        )
+        .expect("synthetic calendar range is valid");
+        CalendarViewReference::new(account, range)
+    }
+
+    fn synthetic_graph_api(server: &MockServer) -> (GraphApi, GraphTransport) {
+        let endpoint =
+            Url::parse(&server.url("/v1.0/me")).expect("synthetic Graph profile endpoint is valid");
+        let authority = GraphAuthority::from_profile_endpoint(&endpoint)
+            .expect("synthetic Graph authority is valid");
+        let transport =
+            GraphTransport::start_for_fixtures().expect("synthetic Graph transport worker starts");
+        let handle: GraphTransportHandle = transport.handle();
+        (GraphApi::new(authority, handle), transport)
+    }
+
+    #[tokio::test]
+    async fn calendar_delta_uses_exact_week_bounds_and_maps_sparse_followup_changes() {
+        let server = MockServer::start_async().await;
+        let next_link = server.url("/v1.0/me/calendarView/delta?$skiptoken=synthetic-next");
+        let final_link = server.url("/v1.0/me/calendarView/delta?$deltatoken=synthetic-final");
+        let initial_page = json!({
+            "value": [{
+                "id": "synthetic-event",
+                "subject": "Synthetic all-day appointment",
+                "location": {"displayName": "Room 4"},
+                "start": {
+                    "dateTime": "2030-01-07T00:00:00.0000000",
+                    "timeZone": "UTC"
+                },
+                "end": {
+                    "dateTime": "2030-01-08T00:00:00.0000000",
+                    "timeZone": "UTC"
+                },
+                "isAllDay": true,
+                "originalStartTimeZone": "Pacific Standard Time",
+                "originalEndTimeZone": "Pacific Standard Time"
+            }],
+            "@odata.nextLink": next_link.clone()
+        });
+        let continuation_page = json!({
+            "value": [{
+                "id": "synthetic-event",
+                "location": null
+            }],
+            "@odata.deltaLink": final_link.clone()
+        });
+        let first_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/calendarView/delta")
+                    .query_param("startDateTime", "2030-01-07T00:00:00Z")
+                    .query_param("endDateTime", "2030-01-14T00:00:00Z")
+                    .header("content-type", "application/json")
+                    .header("prefer", "IdType=\"ImmutableId\"");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(initial_page.to_string());
+            })
+            .await;
+        let continuation_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/calendarView/delta")
+                    .query_param("$skiptoken", "synthetic-next")
+                    .header("content-type", "application/json")
+                    .header("prefer", "IdType=\"ImmutableId\"");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(continuation_page.to_string());
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+        let view = synthetic_view();
+        let token = synthetic_access_token();
+
+        let initial = api
+            .calendar_delta_page(&view, CalendarDeltaRequest::Initial, Arc::clone(&token))
+            .await
+            .expect("synthetic bounded calendar delta request succeeds");
+        assert!(initial.response_bytes() > 0);
+        let (initial_page, _) = initial.into_parts();
+        let (mut changes, progress) = initial_page.into_parts();
+        let next = match progress {
+            CalendarDeltaProgress::Next(link) => link,
+            CalendarDeltaProgress::Complete(_) => panic!("initial response must have a next link"),
+        };
+        assert_eq!(next.as_str(), next_link);
+        let CalendarDeltaChange::Upsert { id, patch } = changes.remove(0) else {
+            panic!("synthetic event must be an upsert");
+        };
+        let mut occurrence: CalendarOccurrence = patch
+            .into_new(view.clone(), id)
+            .expect("new Graph occurrence includes a complete date range");
+        assert_eq!(occurrence.subject(), Some("Synthetic all-day appointment"));
+        assert_eq!(occurrence.location(), Some("Room 4"));
+        assert_eq!(
+            occurrence.original_start_time_zone(),
+            Some("Pacific Standard Time")
+        );
+        assert!(matches!(
+            occurrence.time(),
+            CalendarOccurrenceTime::AllDay { start, end_exclusive }
+                if *start == Date::from_calendar_date(2030, Month::January, 7).expect("valid date")
+                    && *end_exclusive == Date::from_calendar_date(2030, Month::January, 8).expect("valid date")
+        ));
+
+        let continuation = api
+            .calendar_delta_page(&view, CalendarDeltaRequest::Continue(next), token)
+            .await
+            .expect("synthetic continuation request succeeds");
+        let (continuation_page, _) = continuation.into_parts();
+        let (mut changes, progress) = continuation_page.into_parts();
+        assert!(
+            matches!(progress, CalendarDeltaProgress::Complete(ref link) if link.as_str() == final_link)
+        );
+        let CalendarDeltaChange::Upsert { patch, .. } = changes.remove(0) else {
+            panic!("synthetic sparse update must be an upsert");
+        };
+        patch
+            .apply_to(&mut occurrence)
+            .expect("sparse update preserves the existing occurrence range");
+        assert_eq!(occurrence.subject(), Some("Synthetic all-day appointment"));
+        assert_eq!(occurrence.location(), None);
+        assert!(matches!(
+            occurrence.time(),
+            CalendarOccurrenceTime::AllDay { .. }
+        ));
+
+        first_request.assert_async().await;
+        continuation_request.assert_async().await;
+    }
+
+    #[test]
+    fn rejects_non_utc_and_explicit_offset_calendar_times() {
+        for (date_time, time_zone) in [
+            ("2030-01-07T09:00:00.0000000", "Pacific Standard Time"),
+            ("2030-01-07T09:00:00+01:00", "UTC"),
+        ] {
+            let event: WireCalendarEvent = serde_json::from_value(json!({
+                "id": "synthetic-event",
+                "start": {"dateTime": date_time, "timeZone": time_zone}
+            }))
+            .expect("synthetic event wire fields are valid JSON");
+            assert_eq!(event.into_change(), Err(GraphError::InvalidRecord));
+        }
+    }
 
     #[test]
     fn pagination_budget_accepts_limits_and_rejects_additional_work() {

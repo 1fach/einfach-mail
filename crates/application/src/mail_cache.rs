@@ -305,29 +305,3 @@ pub trait MailCache: Send + Sync {
         account_id: &AccountId,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
 }
-
-/// Opens and removes account-scoped mail caches.
-pub trait MailCacheFactory: Send + Sync {
-    /// The cache implementation opened for each account.
-    type Cache: MailCache + 'static;
-
-    /// Opens or creates the cache owned by `account_id`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a cache error when the account cache or its credential is unavailable.
-    fn open_for_account(
-        &self,
-        account_id: AccountId,
-    ) -> impl Future<Output = Result<Self::Cache, MailCacheError>> + Send + '_;
-
-    /// Removes the cache and encryption key owned by `account_id`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a cache error when the account files or credential cannot be removed.
-    fn remove_for_account<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + 'a;
-}

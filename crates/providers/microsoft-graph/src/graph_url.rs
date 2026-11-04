@@ -1,9 +1,11 @@
 #[cfg(test)]
 use std::net::IpAddr;
 
+use time::format_description::well_known::Rfc3339;
 use url::Url;
 
 use crate::error::GraphError;
+use einfach_mail_domain::CalendarViewRange;
 
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
 const FOLDER_SELECT: &str = "id,displayName,isHidden";
@@ -81,6 +83,28 @@ impl GraphAuthority {
             .pop_if_empty()
             .extend(["me", "messages", message_id]);
         url.query_pairs_mut().append_pair("$select", "body");
+        self.validated_url(url)
+    }
+
+    pub(super) fn calendar_view_delta_path(
+        &self,
+        range: &CalendarViewRange,
+    ) -> Result<GraphUrl, GraphError> {
+        let mut url = self
+            .base_url
+            .join("me/calendarView/delta")
+            .map_err(|_| GraphError::UnsafeLink)?;
+        let start = range
+            .start()
+            .format(&Rfc3339)
+            .map_err(|_| GraphError::InvalidRecord)?;
+        let end = range
+            .end()
+            .format(&Rfc3339)
+            .map_err(|_| GraphError::InvalidRecord)?;
+        url.query_pairs_mut()
+            .append_pair("startDateTime", &start)
+            .append_pair("endDateTime", &end);
         self.validated_url(url)
     }
 
@@ -221,6 +245,8 @@ impl GraphUrl {
 
 #[cfg(test)]
 mod tests {
+    use einfach_mail_domain::CalendarViewRange;
+    use time::{Date, Month};
     use url::Url;
 
     use super::{GraphAuthority, MESSAGE_SELECT};
@@ -248,6 +274,35 @@ mod tests {
                 Err(GraphError::UnsafeLink)
             ));
         }
+    }
+
+    #[test]
+    fn calendar_delta_query_contains_only_the_exact_utc_view_bounds() {
+        let start_date = Date::from_calendar_date(2030, Month::January, 7)
+            .expect("synthetic week start date is valid");
+        let end_date = Date::from_calendar_date(2030, Month::January, 14)
+            .expect("synthetic week end date is valid");
+        let range = CalendarViewRange::new(
+            start_date.midnight().assume_utc(),
+            end_date.midnight().assume_utc(),
+            start_date,
+            end_date,
+        )
+        .expect("synthetic calendar range is valid");
+        let request = authority()
+            .calendar_view_delta_path(&range)
+            .expect("synthetic calendar delta URL is valid");
+        let url = Url::parse(request.as_str()).expect("synthetic Graph URL is valid");
+        let query = url.query_pairs().collect::<Vec<_>>();
+
+        assert_eq!(url.path(), "/v1.0/me/calendarView/delta");
+        assert_eq!(
+            query,
+            [
+                ("startDateTime".into(), "2030-01-07T00:00:00Z".into()),
+                ("endDateTime".into(), "2030-01-14T00:00:00Z".into()),
+            ]
+        );
     }
 
     #[test]
