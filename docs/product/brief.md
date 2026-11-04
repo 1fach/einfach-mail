@@ -15,7 +15,7 @@ Develop and validate the first workflows on Linux for people who use Microsoft 3
 - Connect a Microsoft account with the system browser and see what access the app requests.
 - Read and organize mail without waiting for every screen to make a network request.
 - Read and manage a calendar in the same application.
-- Create and send mail and create or update events with clear success and failure states.
+- Create and send mail and create, update, or delete supported calendar appointments with clear success and failure states.
 - Keep recently synchronized data available when the connection is unavailable.
 - Use keyboard navigation, system notifications, and native window behavior where they improve daily work.
 
@@ -31,7 +31,7 @@ Develop and validate the first workflows on Linux for people who use Microsoft 3
 
 ## First-release scope
 
-The initial release plan covers one signed-in Microsoft account, inbox and folder browsing, message reading, basic message actions, calendar viewing, and event editing. The first calendar write is one explicit timed, non-recurring appointment in the primary calendar, with recoverable pending and confirmed states. Build and verify the first workflows on Linux. Add Windows desktop integration and macOS support in later milestones. The roadmap sequences these workflows. It does not promise all of them in the first runnable prototype.
+The initial release plan covers one signed-in Microsoft account, inbox and folder browsing, message reading, basic message actions, calendar viewing, and supported appointment editing and deletion. Calendar writes are limited to explicit timed, standalone appointments in the primary calendar with recoverable confirmation and sync states. Build and verify the first workflows on Linux. Add Windows desktop integration and macOS support in later milestones. The roadmap sequences these workflows. It does not promise all of them in the first runnable prototype.
 
 ## Out of scope until a decision changes the brief
 

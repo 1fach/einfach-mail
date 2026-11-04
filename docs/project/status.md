@@ -18,6 +18,8 @@ Issue #29's reply implementation is in draft PR #56, stacked on PR #55. Its olde
 
 Issue #33's move and issue #43's account-removal changes are presented in draft PRs #57 and #58. PR #58 retains the account session and shared reservation registry for cache removal, and holds the Linux per-user process lock before GPUI startup. Its synthetic AccountView regression opens Calendar, returns to Accounts, then verifies sign-out retry reuses that session after an active-operation conflict. Final Linux verification of the complete stack is pending. Keep issue #34 open for tenant-only move and immutable-ID verification.
 
+Issue #25's timed appointment creation is ready in draft PR #59, stacked on PR #58. Issue #39's supported appointment editing is ready in draft PR #60, stacked on PR #59. Issue #41's confirmed appointment deletion and shared event-write recovery gate are ready in draft PR #61, stacked on PR #60. The full Linux gate passed locally on 2026-11-04 for the complete stack. Synthetic tests cover Graph requests and response mapping, account reservations, cache recovery, and headless GPUI flows. No test tenant, live Graph request, real mailbox, or GUI was used. Keep issues #25, #39, and #41 open through review. Keep issues #26, #40, and #42 open for tenant verification. Graph's v1.0 OpenAPI does not document conditional `If-Match` for event PATCH, so the final-read-to-update race remains; it declares optional `If-Match` for DELETE, but Exchange Online behavior is unverified.
+
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
 ## Verified state
@@ -34,10 +36,12 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 - Issue #29 adds a native plain-text reply to a cached message. It shares the send marker and uncertain-outcome recovery path; reply bodies are not persisted.
 - Issue #33 adds a native move action for cached messages. It updates the encrypted cache only after exact Graph confirmation and preserves the cached body during reconciliation.
 - Issue #43 serializes cache removal with account, folder, and calendar work, preserves the durable pending-send guard, and prevents a second Linux desktop process from opening the same per-user cache.
+- Calendar event writes now include creation, editing, and deletion for supported timed standalone appointments. Editing and deleting first validate current Graph metadata; writes are not automatically retried. Confirmed results reconcile all applicable encrypted cache views atomically. A stale event, uncertain outcome, or failed cache commit gates later event writes until each previously synchronized view completes a sync. The delete uses the final read's ETag through `If-Match`; live service behavior remains unverified.
 
 ## Active risks
 
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep issue #3 open and leave issue #8's tenant-only sync evidence unverified.
+- Keep issues #26, #40, and #42 open for tenant-only event create, update, and delete evidence. Microsoft's Graph v1.0 OpenAPI documents no conditional precondition for PATCH, leaving a narrow update race; Exchange Online behavior for the documented DELETE `If-Match` precondition still needs verification.
 - Keep Issue #24 open until a dedicated tenant verifies `Mail.ReadWrite` consent and read-state PATCH behavior.
 - Keep issue #31 open through review. Keep issue #32 open until a dedicated tenant verifies follow-up flag delta and PATCH behavior.
 - Issue #9 remains open for real-window layout, operating-system clipboard behavior, and system-browser launch. Do not launch a GUI during this work.

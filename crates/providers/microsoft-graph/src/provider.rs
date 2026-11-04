@@ -488,6 +488,25 @@ impl CalendarProvider for MicrosoftGraphProvider {
             map_calendar_result(&config, &account_id, &token, event).await
         })
     }
+
+    fn delete_event(
+        &self,
+        event: &EditableCalendarEvent,
+    ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let event = event.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = event.occurrence().reference().account_id().clone();
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_calendar)?;
+            let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
+            let result = graph_api
+                .delete_calendar_event(&event, Arc::clone(&token))
+                .await;
+            map_calendar_result(&config, &account_id, &token, result).await
+        })
+    }
 }
 
 async fn ensure_access_token(
@@ -591,6 +610,10 @@ fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
         GraphError::CalendarEventUpdateOutcomeUnknown => {
             CalendarOperationError::UpdateOutcomeUnknown
         }
+        GraphError::CalendarEventDeletionRejected => CalendarOperationError::EventDeletionRejected,
+        GraphError::CalendarEventDeletionOutcomeUnknown => {
+            CalendarOperationError::DeleteOutcomeUnknown
+        }
         GraphError::RateLimited { retry_after } => {
             CalendarOperationError::RateLimited { retry_after }
         }
@@ -663,6 +686,8 @@ fn map_graph_error(error: GraphError) -> MailOperationError {
         | GraphError::CalendarEventCreationRejected
         | GraphError::CalendarEventCreationOutcomeUnknown
         | GraphError::CalendarEventUpdateOutcomeUnknown
+        | GraphError::CalendarEventDeletionRejected
+        | GraphError::CalendarEventDeletionOutcomeUnknown
         | GraphError::CalendarEventNotEditable
         | GraphError::CalendarEventChanged
         | GraphError::InvalidToken => MailOperationError::ServiceUnavailable,
@@ -689,6 +714,8 @@ fn map_profile_graph_error(error: GraphError) -> AccountOperationError {
         | GraphError::CalendarEventCreationRejected
         | GraphError::CalendarEventCreationOutcomeUnknown
         | GraphError::CalendarEventUpdateOutcomeUnknown
+        | GraphError::CalendarEventDeletionRejected
+        | GraphError::CalendarEventDeletionOutcomeUnknown
         | GraphError::CalendarEventNotEditable
         | GraphError::CalendarEventChanged
         | GraphError::RateLimited { .. } => AccountOperationError::ServiceUnavailable,
@@ -734,6 +761,8 @@ fn map_send_graph_error(error: GraphError) -> MailSendProviderError {
         | GraphError::CalendarEventCreationRejected
         | GraphError::CalendarEventCreationOutcomeUnknown
         | GraphError::CalendarEventUpdateOutcomeUnknown
+        | GraphError::CalendarEventDeletionRejected
+        | GraphError::CalendarEventDeletionOutcomeUnknown
         | GraphError::CalendarEventNotEditable
         | GraphError::CalendarEventChanged => MailSendProviderError::ServiceUnavailable,
     }

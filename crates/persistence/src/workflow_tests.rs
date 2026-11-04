@@ -502,6 +502,13 @@ impl CalendarProvider for FixtureProvider {
         ready(Err(CalendarOperationError::ServiceUnavailable))
     }
 
+    fn delete_event(
+        &self,
+        _: &EditableCalendarEvent,
+    ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
+        ready(Err(CalendarOperationError::ServiceUnavailable))
+    }
+
     fn calendar_delta_page(
         &self,
         view: &CalendarViewReference,

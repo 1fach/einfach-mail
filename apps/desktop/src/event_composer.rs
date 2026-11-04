@@ -2,39 +2,53 @@ use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike, Weekday};
 use einfach_mail_application::{
-    CalendarCacheError, CalendarEventCreationOutcome, CalendarEventUpdateOutcome,
-    CalendarOperationError, CalendarSession, CalendarWorkflowError,
+    CalendarCacheError, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
+    CalendarEventUpdateOutcome, CalendarOperationError, CalendarSession, CalendarWorkflowError,
 };
 use einfach_mail_domain::{
     CalendarEventCreation, CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft,
     CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId, CalendarViewRange,
     CalendarViewReference, EditableCalendarEvent, PendingCalendarEventCreation,
 };
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
     date_picker::{DatePicker, DatePickerState},
+    dialog::{DialogAction, DialogClose, DialogFooter},
     input::{Input, InputState},
     time_field::TimePrecision,
 };
 use gpui_kit::{
-    AnyElement, App, AsyncApp, Context, Entity, EventEmitter, IntoElement, Render, Role, Task,
-    Window, div, prelude::*,
+    AnyElement, App, AsyncApp, Context, Entity, EventEmitter, IntoElement, KeyBinding, Render,
+    Role, Task, Window, div, prelude::*,
 };
 use jiff::{Timestamp, civil, tz::TimeZone};
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
+const EVENT_COMPOSER_WRITE_PENDING_CONTEXT: &str = "CalendarEventWritePending";
+
+pub(crate) fn bind_event_composer_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        "escape",
+        gpui_kit::NoAction,
+        Some(EVENT_COMPOSER_WRITE_PENDING_CONTEXT),
+    )]);
+}
+
 /// Reports a change made through the event composer.
 pub(crate) enum EventComposerEvent {
-    /// Reloads cached occurrences after an event update.
+    /// Reloads cached occurrences after an event write.
     CalendarChanged,
+    /// Blocks further event writes until a successful sync reconciles an uncertain outcome.
+    CalendarWriteSyncRequired,
     /// Reloads the saved creation operation after a create attempt or cleanup.
     PendingOperationUpdated,
     /// Opens the account's calendar write permission review.
     ReviewCalendarWritePermission,
 }
 
-/// Selects a new event, a saved creation retry, or an existing event to edit.
+/// Selects a new event, a saved creation retry, or an existing event to change.
 pub(super) enum EventComposerIntent {
     /// Creates an event or resumes the account's saved creation.
     Create {
@@ -50,7 +64,7 @@ pub(super) enum EventComposerIntent {
 
 /// Provides the account, view, and local-time context for the composer.
 pub(crate) struct EventComposerSetup<S: CalendarSession + ?Sized + 'static> {
-    /// Account-scoped calendar session used to create or update the event.
+    /// Account-scoped calendar session used to create, update, or delete the event.
     pub(super) session: Arc<S>,
     /// Calendar week that must contain both event endpoints.
     pub(super) view: CalendarViewReference,
@@ -110,6 +124,11 @@ enum ComposerStatus {
     Updated,
     UpdatedButNotCached,
     UpdateOutcomeUnknown,
+    Deleting,
+    Deleted,
+    DeletedButNotCached,
+    DeleteOutcomeUnknown,
+    DeletionFailed(CalendarWorkflowError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,6 +300,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             ComposerStatus::Submitting
                 | ComposerStatus::DiscardingRejected
                 | ComposerStatus::LoadingEditableEvent
+                | ComposerStatus::Deleting
                 | ComposerStatus::Confirmed
                 | ComposerStatus::PendingResolutionRequired(_)
         ) {
@@ -367,6 +387,130 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         CalendarEventUpdate::new(editable_event.clone(), draft).map_err(|_| DraftError::NoChanges)
     }
 
+    pub(crate) fn edit_write_in_progress(&self) -> bool {
+        matches!(
+            (&self.mode, self.status),
+            (
+                ComposerMode::Edit {
+                    editable_event: Some(_)
+                },
+                ComposerStatus::Submitting
+            )
+        ) || matches!(
+            (&self.mode, self.status),
+            (
+                ComposerMode::Edit {
+                    editable_event: Some(_)
+                },
+                ComposerStatus::Deleting
+            )
+        )
+    }
+
+    fn editable_event(&self) -> Option<&EditableCalendarEvent> {
+        match &self.mode {
+            ComposerMode::Edit { editable_event } => editable_event.as_deref(),
+            ComposerMode::Create => None,
+        }
+    }
+
+    fn confirm_deletion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_delete() {
+            return;
+        }
+        let Some(event) = self.editable_event() else {
+            return;
+        };
+        let subject = event
+            .occurrence()
+            .subject()
+            .unwrap_or("this appointment")
+            .to_owned();
+        let composer = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let composer = composer.clone();
+            alert
+                .title(format!("Delete “{subject}”?"))
+                .description("This removes the appointment from your Microsoft calendar. This cannot be undone.")
+                .footer(
+                    DialogFooter::new()
+                        .child(DialogClose::new().trigger(|button| {
+                            button
+                                .debug_selector(|| "event-delete-dialog-cancel".to_owned())
+                                .label("Cancel")
+                        }))
+                        .child(
+                            DialogAction::new().child(
+                                Button::new("event-delete-dialog-confirm")
+                                    .debug_selector(|| "event-delete-dialog-confirm".to_owned())
+                                    .danger()
+                                    .label("Delete"),
+                            ),
+                        ),
+                )
+                .on_ok(move |_, _, cx| {
+                    let _ = composer.update(cx, |composer, cx| composer.start_deletion(cx));
+                    true
+                })
+        });
+    }
+
+    fn can_delete(&self) -> bool {
+        self.editable_event().is_some()
+            && !self.edit_write_in_progress()
+            && !is_terminal_edit_status(self.status)
+    }
+
+    fn start_deletion(&mut self, cx: &mut Context<Self>) {
+        let Some(event) = self.editable_event().cloned() else {
+            return;
+        };
+        if !self.can_delete() {
+            return;
+        }
+        self.status = ComposerStatus::Deleting;
+        let session = Arc::clone(&self.session);
+        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let outcome = session.delete_event(&event).await;
+            let _ = this.update(cx, |composer, cx| composer.apply_deletion(outcome, cx));
+        }));
+        cx.notify();
+    }
+
+    fn apply_deletion(
+        &mut self,
+        outcome: Result<CalendarEventDeletionOutcome, CalendarWorkflowError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.task = None;
+        let sync_required = matches!(
+            &outcome,
+            Ok(CalendarEventDeletionOutcome::DeletedButNotCached { .. })
+                | Err(CalendarWorkflowError::Provider(
+                    CalendarOperationError::DeleteOutcomeUnknown
+                ))
+                | Err(CalendarWorkflowError::Provider(
+                    CalendarOperationError::EventChanged
+                ))
+                | Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+        self.status = match outcome {
+            Ok(CalendarEventDeletionOutcome::Deleted) => ComposerStatus::Deleted,
+            Ok(CalendarEventDeletionOutcome::DeletedButNotCached { .. }) => {
+                ComposerStatus::DeletedButNotCached
+            }
+            Err(CalendarWorkflowError::Provider(CalendarOperationError::DeleteOutcomeUnknown)) => {
+                ComposerStatus::DeleteOutcomeUnknown
+            }
+            Err(error) => ComposerStatus::DeletionFailed(error),
+        };
+        if sync_required {
+            cx.emit(EventComposerEvent::CalendarWriteSyncRequired);
+        }
+        cx.emit(EventComposerEvent::CalendarChanged);
+        cx.notify();
+    }
+
     fn submit_update(&mut self, update: CalendarEventUpdate, cx: &mut Context<Self>) {
         self.status = ComposerStatus::Submitting;
         let session = Arc::clone(&self.session);
@@ -383,6 +527,18 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         cx: &mut Context<Self>,
     ) {
         self.task = None;
+        let update_sync_required = matches!(
+            &outcome,
+            Ok(CalendarEventUpdateOutcome::ConfirmedButNotCached { .. })
+                | Err(CalendarWorkflowError::Provider(
+                    CalendarOperationError::UpdateOutcomeUnknown
+                ))
+                | Err(CalendarWorkflowError::Provider(
+                    CalendarOperationError::EventChanged
+                ))
+                | Err(CalendarWorkflowError::InvalidUpdateConfirmation)
+                | Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
         self.status = match outcome {
             Ok(CalendarEventUpdateOutcome::Cached(_)) => ComposerStatus::Updated,
             Ok(CalendarEventUpdateOutcome::ConfirmedButNotCached { .. }) => {
@@ -394,6 +550,9 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             }
             Err(error) => ComposerStatus::Failed(error),
         };
+        if update_sync_required {
+            cx.emit(EventComposerEvent::CalendarWriteSyncRequired);
+        }
         cx.emit(EventComposerEvent::CalendarChanged);
         cx.notify();
     }
@@ -631,7 +790,14 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         }
         let status_text = match &self.mode {
             ComposerMode::Create => creation_status_text(self.status),
-            ComposerMode::Edit { .. } => update_status_text(self.status),
+            ComposerMode::Edit { .. } => match self.status {
+                ComposerStatus::Deleting
+                | ComposerStatus::Deleted
+                | ComposerStatus::DeletedButNotCached
+                | ComposerStatus::DeleteOutcomeUnknown
+                | ComposerStatus::DeletionFailed(_) => deletion_status_text(self.status),
+                _ => update_status_text(self.status),
+            },
         }?;
         let message = render_status_message(status_text, self.status, colors);
         if self.requires_calendar_write_permission_review() {
@@ -646,6 +812,8 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             self.status,
             ComposerStatus::Failed(CalendarWorkflowError::Provider(
                 CalendarOperationError::AccessDenied
+            )) | ComposerStatus::DeletionFailed(CalendarWorkflowError::Provider(
+                CalendarOperationError::AccessDenied
             ))
         )
     }
@@ -654,7 +822,27 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         if self.action_is_terminal() {
             return render_close_action();
         }
-        self.render_submit_action(cx)
+        if matches!(&self.mode, ComposerMode::Edit { .. }) {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    Button::new("event-composer-delete")
+                        .debug_selector(|| "event-composer-delete".to_owned())
+                        .danger()
+                        .label("Delete…")
+                        .disabled(!self.can_delete())
+                        .on_click(cx.listener(|composer, _, window, cx| {
+                            composer.confirm_deletion(window, cx);
+                        })),
+                )
+                .child(self.render_submit_action(cx))
+                .into_any_element()
+        } else {
+            self.render_submit_action(cx)
+        }
     }
 
     fn action_is_terminal(&self) -> bool {
@@ -710,6 +898,7 @@ impl<S: CalendarSession + ?Sized + 'static> Render for EventComposer<S> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().semantic_tokens().colors;
         let has_pending_creation = self.creation.is_some();
+        let write_in_progress = self.edit_write_in_progress();
         let show_fields = match &self.mode {
             ComposerMode::Create => !has_pending_creation,
             ComposerMode::Edit { editable_event } => {
@@ -718,6 +907,9 @@ impl<S: CalendarSession + ?Sized + 'static> Render for EventComposer<S> {
         };
         div()
             .id("calendar-event-composer")
+            .when(write_in_progress, |element| {
+                element.key_context(EVENT_COMPOSER_WRITE_PENDING_CONTEXT)
+            })
             .flex()
             .flex_col()
             .gap_4()
@@ -1001,6 +1193,55 @@ fn update_status_text(status: ComposerStatus) -> Option<&'static str> {
     }
 }
 
+fn deletion_status_text(status: ComposerStatus) -> Option<&'static str> {
+    match status {
+        ComposerStatus::Deleting => Some("Deleting the appointment…"),
+        ComposerStatus::Deleted => Some("Appointment deleted from the calendar."),
+        ComposerStatus::DeletedButNotCached => Some(
+            "Microsoft confirmed the deletion, but the local calendar could not be updated. Sync this week before making another calendar change.",
+        ),
+        ComposerStatus::DeleteOutcomeUnknown => Some(
+            "Microsoft may have deleted this appointment. Sync the calendar before making another change.",
+        ),
+        ComposerStatus::DeletionFailed(error) => Some(deletion_error_text(error)),
+        _ => None,
+    }
+}
+
+fn deletion_error_text(error: CalendarWorkflowError) -> &'static str {
+    match error {
+        CalendarWorkflowError::Provider(CalendarOperationError::EventDeletionRejected) => {
+            "Microsoft rejected the deletion. The appointment was not removed."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::EventChanged) => {
+            "This appointment changed while the editor was open. Sync the calendar, then review it again."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::EventNotEditable)
+        | CalendarWorkflowError::InvalidEditableEvent => {
+            "Microsoft did not confirm that this appointment can be deleted here."
+        }
+        CalendarWorkflowError::CalendarWriteSyncRequired => {
+            "Sync the calendar successfully before deleting this appointment."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::AccessDenied) => {
+            "Microsoft denied access to delete this appointment. Review the requested permission or your organization's consent policy."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::SignInRequired) => {
+            "Your Microsoft sign-in needs attention. Return to Accounts and connect again."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::RateLimited { .. }) => {
+            "Microsoft is limiting calendar requests. Wait a moment, then try again."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::ServiceUnavailable) => {
+            "The calendar service is unavailable. Check your connection, then try again."
+        }
+        CalendarWorkflowError::OperationInProgress => {
+            "The calendar is syncing. Try deleting this appointment when sync finishes."
+        }
+        _ => "The appointment could not be deleted. Check the calendar and try again.",
+    }
+}
+
 fn render_status_message(
     message: &'static str,
     status: ComposerStatus,
@@ -1047,7 +1288,10 @@ fn render_calendar_permission_review<S: CalendarSession + ?Sized + 'static>(
 }
 
 fn status_role(status: ComposerStatus) -> Role {
-    if matches!(status, ComposerStatus::Confirmed | ComposerStatus::Updated) {
+    if matches!(
+        status,
+        ComposerStatus::Confirmed | ComposerStatus::Updated | ComposerStatus::Deleted
+    ) {
         Role::Status
     } else {
         Role::Alert
@@ -1070,9 +1314,22 @@ fn is_terminal_edit_status(status: ComposerStatus) -> bool {
         ComposerStatus::Updated
             | ComposerStatus::UpdatedButNotCached
             | ComposerStatus::UpdateOutcomeUnknown
+            | ComposerStatus::Deleted
+            | ComposerStatus::DeletedButNotCached
+            | ComposerStatus::DeleteOutcomeUnknown
+            | ComposerStatus::DeletionFailed(
+                CalendarWorkflowError::InvalidEditableEvent
+                    | CalendarWorkflowError::CalendarWriteSyncRequired
+                    | CalendarWorkflowError::Provider(
+                        CalendarOperationError::EventChanged
+                            | CalendarOperationError::EventNotEditable
+                            | CalendarOperationError::DeleteOutcomeUnknown
+                    )
+            )
             | ComposerStatus::Failed(
                 CalendarWorkflowError::InvalidEditableEvent
                     | CalendarWorkflowError::InvalidUpdateConfirmation
+                    | CalendarWorkflowError::CalendarWriteSyncRequired
                     | CalendarWorkflowError::Provider(
                         CalendarOperationError::EventChanged
                             | CalendarOperationError::EventNotEditable
@@ -1257,6 +1514,9 @@ fn creation_error_text(error: CalendarWorkflowError) -> &'static str {
 
 fn update_error_text(error: CalendarWorkflowError) -> &'static str {
     match error {
+        CalendarWorkflowError::CalendarWriteSyncRequired => {
+            "Sync the calendar successfully before editing this event."
+        }
         CalendarWorkflowError::Provider(CalendarOperationError::EventNotEditable) => {
             "Microsoft did not confirm that this event is a standalone appointment that can be edited here."
         }

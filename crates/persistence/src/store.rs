@@ -28,11 +28,11 @@ use einfach_mail_domain::{
     CalendarEventCreation, CalendarEventCreationId, CalendarEventDraft, CalendarEventUpdate,
     CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
     CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange, CalendarViewReference,
-    FolderId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, MailRecipient,
-    MailReplySource, MailSendOperationId, MailSendTarget, MailSubject, Mailbox, MessageBody,
-    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
-    MessageId, MessageMetadata, MessageOrigin, PendingCalendarEventCreation, PendingMailSend,
-    ReadState,
+    EditableCalendarEvent, FolderId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage,
+    MailRecipient, MailReplySource, MailSendOperationId, MailSendTarget, MailSubject, Mailbox,
+    MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+    MessageDeltaProgress, MessageId, MessageMetadata, MessageOrigin, PendingCalendarEventCreation,
+    PendingMailSend, ReadState,
 };
 use thiserror::Error;
 use time::{Date, OffsetDateTime, PrimitiveDateTime};
@@ -1400,6 +1400,33 @@ impl CalendarCache for SqliteMailCache {
         }
     }
 
+    fn commit_event_deletion(
+        &self,
+        event: &EditableCalendarEvent,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(event.occurrence().reference());
+        let event = event.clone();
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            let account_id = event
+                .occurrence()
+                .reference()
+                .account_id()
+                .as_str()
+                .to_owned();
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    commit_calendar_event_deletion(&transaction, &account_id, scope, &event)?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
     fn remove_account(
         &self,
         account_id: &AccountId,
@@ -1949,6 +1976,20 @@ fn commit_calendar_event_update(
         params![account_id, event.id().as_str()],
     )?;
     write_event_to_cached_scopes(transaction, account_id, scopes, event)
+}
+
+fn commit_calendar_event_deletion(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    source_range: CalendarScope,
+    event: &EditableCalendarEvent,
+) -> CacheResult<()> {
+    require_cached_source_view(transaction, account_id, source_range)?;
+    transaction.execute(
+        "DELETE FROM calendar_events WHERE account_id = ?1 AND event_id = ?2",
+        params![account_id, event.occurrence().id().as_str(),],
+    )?;
+    Ok(())
 }
 
 fn require_cached_source_view(

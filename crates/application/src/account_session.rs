@@ -10,12 +10,12 @@ use einfach_mail_domain::{
 };
 
 use crate::{
-    CalendarCache, CalendarEventCreationOutcome, CalendarEventUpdateOutcome, CalendarProvider,
-    CalendarSnapshot, CalendarSyncReport, CalendarWorkflow, CalendarWorkflowError,
-    FollowUpFlagUpdateOutcome, MailCache, MailCacheError, MailProvider, MailSendOutcome,
-    MailSendResolutionError, MailSendWorkflowError, MailSyncProgress, MailSyncReport,
-    MailSyncState, MailWorkflow, MailWorkflowError, MessageMoveOutcome, OpenedMessage,
-    ReadStateUpdateOutcome,
+    CalendarCache, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
+    CalendarEventUpdateOutcome, CalendarProvider, CalendarSnapshot, CalendarSyncReport,
+    CalendarWorkflow, CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCache, MailCacheError,
+    MailProvider, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError,
+    MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError,
+    MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -256,6 +256,19 @@ pub trait CalendarSession: Send + Sync {
         &'a self,
         update: &'a CalendarEventUpdate,
     ) -> AccountSessionFuture<'a, Result<CalendarEventUpdateOutcome, CalendarWorkflowError>>;
+
+    /// Deletes one confirmed standalone event and removes every cached view copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workflow error when Graph rejects the deletion, the event is
+    /// stale, another operation owns the account, or a successful sync is
+    /// required. A cache failure after Graph confirms deletion is returned as
+    /// [`CalendarEventDeletionOutcome::DeletedButNotCached`].
+    fn delete_event<'a>(
+        &'a self,
+        event: &'a EditableCalendarEvent,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>>;
 }
 
 /// Mail and calendar sessions that share one account cache and removal lifecycle.
@@ -541,5 +554,12 @@ where
         update: &'a CalendarEventUpdate,
     ) -> AccountSessionFuture<'a, Result<CalendarEventUpdateOutcome, CalendarWorkflowError>> {
         Box::pin(CalendarWorkflow::update_event(self, update))
+    }
+
+    fn delete_event<'a>(
+        &'a self,
+        event: &'a EditableCalendarEvent,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::delete_event(self, event))
     }
 }

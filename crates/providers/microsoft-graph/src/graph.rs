@@ -194,7 +194,10 @@ impl GraphApi {
         event: &CalendarOccurrence,
         token: Arc<AccessToken>,
     ) -> Result<EditableCalendarEvent, GraphError> {
-        let editable = self.fetch_editable_calendar_event(event, token).await?;
+        let editable = self
+            .fetch_editable_calendar_event(event, token)
+            .await?
+            .editable;
         if editable.occurrence().reference() != event.reference()
             || editable.occurrence().id() != event.id()
         {
@@ -207,7 +210,7 @@ impl GraphApi {
         &self,
         event: &CalendarOccurrence,
         token: Arc<AccessToken>,
-    ) -> Result<EditableCalendarEvent, GraphError> {
+    ) -> Result<CheckedEditableCalendarEvent, GraphError> {
         let view = event.reference().clone();
         let url = self
             .authority
@@ -218,7 +221,7 @@ impl GraphApi {
             .await?;
         let event = serde_json::from_slice::<WireCalendarEvent>(&response)
             .map_err(|_| GraphError::InvalidResponse)?;
-        event.into_editable(view)
+        event.into_checked_editable(view)
     }
 
     pub(super) async fn update_calendar_event(
@@ -227,17 +230,32 @@ impl GraphApi {
         token: Arc<AccessToken>,
     ) -> Result<CalendarOccurrence, GraphError> {
         let current = self
-            .current_editable_calendar_event(update, Arc::clone(&token))
+            .current_editable_calendar_event(update.source(), Arc::clone(&token))
             .await?;
-        self.patch_calendar_event(update, &current, token).await
+        self.patch_calendar_event(update, &current.editable, token)
+            .await
+    }
+
+    pub(super) async fn delete_calendar_event(
+        &self,
+        event: &EditableCalendarEvent,
+        token: Arc<AccessToken>,
+    ) -> Result<(), GraphError> {
+        let current = self
+            .current_editable_calendar_event(event, Arc::clone(&token))
+            .await?;
+        let etag = current.etag.as_deref().ok_or(GraphError::InvalidResponse)?;
+        let url = self
+            .authority
+            .calendar_event_path(event.occurrence().id().as_str())?;
+        self.transport.delete_calendar_event(url, token, etag).await
     }
 
     async fn current_editable_calendar_event(
         &self,
-        update: &CalendarEventUpdate,
+        source: &EditableCalendarEvent,
         token: Arc<AccessToken>,
-    ) -> Result<EditableCalendarEvent, GraphError> {
-        let source = update.source();
+    ) -> Result<CheckedEditableCalendarEvent, GraphError> {
         let source_event = source.occurrence();
         let current = self
             .fetch_editable_calendar_event(source_event, Arc::clone(&token))
@@ -246,9 +264,9 @@ impl GraphApi {
                 GraphError::CalendarEventNotEditable => GraphError::CalendarEventChanged,
                 other => other,
             })?;
-        if current.occurrence().reference() != source_event.reference()
-            || current.occurrence().id() != source_event.id()
-            || current.version() != source.version()
+        if current.editable.occurrence().reference() != source_event.reference()
+            || current.editable.occurrence().id() != source_event.id()
+            || current.editable.version() != source.version()
         {
             return Err(GraphError::CalendarEventChanged);
         }
@@ -791,8 +809,15 @@ struct WireCalendarEvent {
     attendees: Option<Vec<serde::de::IgnoredAny>>,
     is_online_meeting: Option<bool>,
     change_key: Option<String>,
+    #[serde(rename = "@odata.etag")]
+    odata_etag: Option<String>,
     #[serde(rename = "@removed")]
     removed: Option<WireRemoved>,
+}
+
+struct CheckedEditableCalendarEvent {
+    editable: EditableCalendarEvent,
+    etag: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -809,6 +834,15 @@ struct WireDateTimeTimeZone {
 }
 
 impl WireCalendarEvent {
+    fn into_checked_editable(
+        self,
+        view: CalendarViewReference,
+    ) -> Result<CheckedEditableCalendarEvent, GraphError> {
+        let etag = self.odata_etag.clone();
+        let editable = self.into_editable(view)?;
+        Ok(CheckedEditableCalendarEvent { editable, etag })
+    }
+
     fn into_editable(
         self,
         view: CalendarViewReference,
@@ -1413,7 +1447,7 @@ mod tests {
     use std::{sync::Arc, time::SystemTime};
 
     use httpmock::{
-        Method::{GET, PATCH, POST},
+        Method::{DELETE, GET, PATCH, POST},
         MockServer,
     };
     use huskarl::{
@@ -1518,7 +1552,8 @@ mod tests {
             "isOrganizer": true,
             "attendees": [],
             "isOnlineMeeting": false,
-            "changeKey": version
+            "changeKey": version,
+            "@odata.etag": "W/\"synthetic-etag-1\""
         })
     }
 
@@ -2136,6 +2171,124 @@ mod tests {
         );
         read.assert_calls_async(1).await;
         patch.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn event_delete_rechecks_version_and_sends_the_current_etag() {
+        let server = MockServer::start_async().await;
+        let event = editable_event("synthetic-version-1");
+        let read = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/events/synthetic-event")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .query_param("$select", CALENDAR_EVENT_EDIT_SELECT);
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        editable_event_json(
+                            "synthetic-version-1",
+                            "Planning",
+                            "2030-01-08T09:00:00.0000000",
+                            "2030-01-08T10:00:00.0000000",
+                        )
+                        .to_string(),
+                    );
+            })
+            .await;
+        let delete = server
+            .mock_async(|when, then| {
+                when.method(DELETE)
+                    .path("/v1.0/me/events/synthetic-event")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .header("if-match", "W/\"synthetic-etag-1\"");
+                then.status(204);
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+
+        api.delete_calendar_event(&event, synthetic_access_token())
+            .await
+            .expect("Graph confirms the conditional delete");
+
+        read.assert_calls_async(1).await;
+        delete.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn event_delete_refuses_a_changed_version_without_deleting() {
+        let server = MockServer::start_async().await;
+        let event = editable_event("synthetic-version-1");
+        let read = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/v1.0/me/events/synthetic-event");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        editable_event_json(
+                            "synthetic-version-2",
+                            "Changed planning",
+                            "2030-01-08T09:00:00.0000000",
+                            "2030-01-08T10:00:00.0000000",
+                        )
+                        .to_string(),
+                    );
+            })
+            .await;
+        let delete = server
+            .mock_async(|when, then| {
+                when.method(DELETE).path("/v1.0/me/events/synthetic-event");
+                then.status(204);
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+
+        assert_eq!(
+            api.delete_calendar_event(&event, synthetic_access_token())
+                .await,
+            Err(GraphError::CalendarEventChanged)
+        );
+        read.assert_calls_async(1).await;
+        delete.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn event_delete_requires_an_etag_before_sending() {
+        let server = MockServer::start_async().await;
+        let event = editable_event("synthetic-version-1");
+        let mut current = editable_event_json(
+            "synthetic-version-1",
+            "Planning",
+            "2030-01-08T09:00:00.0000000",
+            "2030-01-08T10:00:00.0000000",
+        );
+        current
+            .as_object_mut()
+            .expect("synthetic event JSON is an object")
+            .remove("@odata.etag");
+        let read = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/v1.0/me/events/synthetic-event");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(current.to_string());
+            })
+            .await;
+        let delete = server
+            .mock_async(|when, then| {
+                when.method(DELETE).path("/v1.0/me/events/synthetic-event");
+                then.status(204);
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+
+        assert_eq!(
+            api.delete_calendar_event(&event, synthetic_access_token())
+                .await,
+            Err(GraphError::InvalidResponse)
+        );
+        read.assert_calls_async(1).await;
+        delete.assert_calls_async(0).await;
     }
 
     #[tokio::test]
