@@ -970,6 +970,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct TestProvider {
         signed_out: Arc<AtomicBool>,
+        fail_next_sign_out: Arc<AtomicBool>,
         pause_connection: Arc<AtomicBool>,
         pause_permission_update: Arc<AtomicBool>,
         connection_commit: Arc<Mutex<Option<CommitGate>>>,
@@ -1091,6 +1092,9 @@ mod tests {
         }
 
         fn sign_out(&self) -> impl Future<Output = Result<(), AccountOperationError>> + Send + '_ {
+            if self.fail_next_sign_out.swap(false, Ordering::SeqCst) {
+                return ready(Err(AccountOperationError::CredentialStoreUnavailable));
+            }
             self.signed_out.store(true, Ordering::SeqCst);
             ready(Ok(()))
         }
@@ -1124,6 +1128,7 @@ mod tests {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
         let signed_out = provider.signed_out.clone();
+        provider.fail_next_sign_out.store(true, Ordering::SeqCst);
         let workflow = Arc::new(AccountWorkflow::new(provider));
         let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), None, cx));
 
@@ -1144,12 +1149,21 @@ mod tests {
         });
         assert!(connected);
 
-        let sign_out_bounds = context
-            .debug_bounds("sign-out")
-            .expect("sign-out button is rendered");
-        context.simulate_click(sign_out_bounds.center(), Modifiers::default());
-        context.run_until_parked();
-        draw_account_view(context);
+        click(context, "sign-out");
+        let retryable_failure = context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).status,
+                super::AccountStatus::Failed {
+                    error: AccountOperationError::CredentialStoreUnavailable,
+                    saved_credential_may_exist: true,
+                }
+            )
+        });
+        assert!(retryable_failure);
+        assert!(context.debug_bounds("sign-out").is_some());
+        assert!(!signed_out.load(Ordering::SeqCst));
+
+        click(context, "sign-out");
         let disconnected = context
             .cx
             .update(|cx| matches!(&view.read(cx).status, super::AccountStatus::Disconnected));

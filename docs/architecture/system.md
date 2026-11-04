@@ -65,6 +65,7 @@ Synthetic Graph, workflow, persistence, and headless GPUI tests cover mail and c
 - Treat message HTML as untrusted. Ammonia applies the allowlist in `crates/application`. Remote images, scripts, styles, frames, and other active content are removed. The view revalidates links when activated and supplies a non-networking image resolver.
 - Keep the main interface native GPUI. A browser engine for email would require a separate security decision and must remain a body-only leaf without app commands, tokens, IPC, or mailbox access.
 - Store cache files under the Linux XDG data home with private permissions. Encrypt them with SQLCipher and keep the cache key in Secret Service. Never replace a missing key automatically.
+- During account removal, close the SQLCipher client, remove the `-wal` and `-shm` sidecars, then remove the main database. Keep the cache key and provider refresh token when cache-file removal fails; the desktop asks the provider to sign out only after cache removal succeeds. See [ADR 0029](../decisions/0029-retry-cache-removal-after-sidecar-failure.md).
 
 ## Design risks
 

@@ -8,6 +8,8 @@ M2 read-only mail remains in draft review in PR #47. Its current head, `c09ccdd9
 
 M3 read-only calendar integration remains in draft PR #50 on branch `candidate/issue-22-calendar-sync`, based on PR #47 head `c09ccdd92fc4597b4130e86a957b28f7fdac624f`. On 2026-11-05, the native agenda gained one listbox focus stop, no-wrap Up and Down navigation, Home and End selection, selected-option accessibility state, and scroll-to-selection behavior. The headless test covers focus, key boundaries, click-to-focus, and selected-row visibility. All checks in `scripts/check-linux-local.sh` passed locally. RustSec loaded 1,409 advisories and found no vulnerable or yanked locked crates; eight allowed unmaintained-crate advisories remain. ADRs 0014, 0038, and 0039 record the calendar scope, shared per-account session, and agenda interaction. Manual Linux screen-reader, focus, scrolling, and layout review remains open. No calendar window or live Graph request has been used.
 
+Issue #44's retryable cache-removal fix passed source review and the full Linux gate on 2026-11-04 on clean branch `candidate/issue-44-retryable-cache-removal`. Draft PR #52 presents it as an independent child of PR #50, alongside PR #51. Synthetic coverage exercises SQLCipher recovery after either sidecar fails and retry after provider credential deletion fails. Three environment-dependent Secret Service tests remain ignored; no real account, live Graph request, or GUI was used. Keep Issue #44 open until review and merge.
+
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
 ## Verified state
@@ -34,6 +36,7 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 2. Keep issue #8 open until initial-sync completeness is verified against a Microsoft 365 test tenant.
 3. Keep issue #9 open until layout, clipboard behavior, and browser launch are verified in a safe Linux session.
 4. Keep PR #50 in draft and issue #22 open until PR #47 is eligible and the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
+5. After PR #50 merges, review the independent M3 follow-ups in PRs #51 and #52 for merge.
 
 ## Update rule
 
