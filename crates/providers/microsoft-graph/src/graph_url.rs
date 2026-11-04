@@ -10,6 +10,7 @@ use einfach_mail_domain::CalendarViewRange;
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
 const FOLDER_SELECT: &str = "id,displayName,isHidden";
 const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead,flag";
+pub(super) const CALENDAR_EVENT_EDIT_SELECT: &str = "id,subject,location,start,end,isAllDay,originalStartTimeZone,originalEndTimeZone,type,isOrganizer,attendees,isOnlineMeeting,changeKey";
 
 #[derive(Clone)]
 pub(super) struct GraphAuthority {
@@ -135,6 +136,32 @@ impl GraphAuthority {
             .join("me/calendar/events")
             .map_err(|_| GraphError::UnsafeLink)?;
         self.validated_url(url)
+    }
+
+    pub(super) fn calendar_event_path(&self, event_id: &str) -> Result<GraphUrl, GraphError> {
+        self.validated_url(self.calendar_event_url(event_id)?)
+    }
+
+    pub(super) fn editable_calendar_event_path(
+        &self,
+        event_id: &str,
+    ) -> Result<GraphUrl, GraphError> {
+        let mut url = self.calendar_event_url(event_id)?;
+        url.query_pairs_mut()
+            .append_pair("$select", CALENDAR_EVENT_EDIT_SELECT);
+        self.validated_url(url)
+    }
+
+    fn calendar_event_url(&self, event_id: &str) -> Result<Url, GraphError> {
+        if event_id.is_empty() {
+            return Err(GraphError::InvalidRecord);
+        }
+        let mut url = self.base_url.clone();
+        url.path_segments_mut()
+            .map_err(|()| GraphError::UnsafeLink)?
+            .pop_if_empty()
+            .extend(["me", "events", event_id]);
+        Ok(url)
     }
 
     pub(super) fn opaque_link(&self, link: &str) -> Result<GraphUrl, GraphError> {
@@ -290,7 +317,7 @@ mod tests {
     use time::{Date, Month};
     use url::Url;
 
-    use super::{GraphAuthority, MESSAGE_SELECT};
+    use super::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority, MESSAGE_SELECT, WellKnownMailFolder};
     use crate::error::GraphError;
 
     fn authority() -> GraphAuthority {
@@ -354,6 +381,42 @@ mod tests {
         let url = Url::parse(request.as_str()).expect("synthetic Graph URL is valid");
 
         assert_eq!(url.path(), "/v1.0/me/calendar/events");
+        assert!(url.query().is_none());
+    }
+
+    #[test]
+    fn calendar_event_path_escapes_opaque_ids_without_query_options() {
+        let request = authority()
+            .calendar_event_path("event/id+1")
+            .expect("synthetic event ID is safely encoded");
+        let url = Url::parse(request.as_str()).expect("synthetic Graph URL is valid");
+
+        assert_eq!(url.path(), "/v1.0/me/events/event%2Fid+1");
+        assert!(url.query().is_none());
+    }
+
+    #[test]
+    fn editable_calendar_event_path_selects_only_edit_data() {
+        let request = authority()
+            .editable_calendar_event_path("event/id+1")
+            .expect("synthetic event ID is safely encoded");
+        let url = Url::parse(request.as_str()).expect("synthetic Graph URL is valid");
+
+        assert_eq!(url.path(), "/v1.0/me/events/event%2Fid+1");
+        assert_eq!(
+            url.query_pairs().collect::<Vec<_>>(),
+            [("$select".into(), CALENDAR_EVENT_EDIT_SELECT.into())]
+        );
+    }
+
+    #[test]
+    fn mail_send_path_targets_the_signed_in_users_mailbox() {
+        let request = authority()
+            .mail_send_path()
+            .expect("synthetic send mail URL is valid");
+        let url = Url::parse(request.as_str()).expect("synthetic Graph URL is valid");
+
+        assert_eq!(url.path(), "/v1.0/me/sendMail");
         assert!(url.query().is_none());
     }
 

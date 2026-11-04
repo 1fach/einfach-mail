@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike, Weekday};
 use einfach_mail_application::{
-    CalendarCacheError, CalendarEventCreationOutcome, CalendarOperationError, CalendarSession,
-    CalendarWorkflowError,
+    CalendarCacheError, CalendarEventCreationOutcome, CalendarEventUpdateOutcome,
+    CalendarOperationError, CalendarSession, CalendarWorkflowError,
 };
 use einfach_mail_domain::{
-    CalendarEventCreation, CalendarEventDraft, CalendarTimeZoneId, CalendarViewRange,
-    CalendarViewReference, PendingCalendarEventCreation,
+    CalendarEventCreation, CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft,
+    CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId, CalendarViewRange,
+    CalendarViewReference, EditableCalendarEvent, PendingCalendarEventCreation,
 };
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
@@ -23,17 +24,33 @@ use gpui_kit::{
 use jiff::{Timestamp, civil, tz::TimeZone};
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
-/// Requests a calendar reload after an event creation attempt.
+/// Reports a change made through the event composer.
 pub(crate) enum EventComposerEvent {
-    /// Reloads cached events and the unresolved creation operation.
+    /// Reloads cached occurrences after an event update.
+    CalendarChanged,
+    /// Reloads the saved creation operation after a create attempt or cleanup.
     PendingOperationUpdated,
     /// Opens the account's calendar write permission review.
     ReviewCalendarWritePermission,
 }
 
+/// Selects a new event, a saved creation retry, or an existing event to edit.
+pub(super) enum EventComposerIntent {
+    /// Creates an event or resumes the account's saved creation.
+    Create {
+        /// A persisted operation to retry with its existing id, when present.
+        pending_creation: Option<PendingCalendarEventCreation>,
+    },
+    /// Loads a fresh provider snapshot before allowing an edit.
+    Edit {
+        /// The cached occurrence used to locate the current provider event.
+        cached_event: CalendarOccurrence,
+    },
+}
+
 /// Provides the account, view, and local-time context for the composer.
 pub(crate) struct EventComposerSetup<S: CalendarSession + ?Sized + 'static> {
-    /// Account-scoped calendar session used to stage and create the event.
+    /// Account-scoped calendar session used to create or update the event.
     pub(super) session: Arc<S>,
     /// Calendar week that must contain both event endpoints.
     pub(super) view: CalendarViewReference,
@@ -41,8 +58,8 @@ pub(crate) struct EventComposerSetup<S: CalendarSession + ?Sized + 'static> {
     pub(super) time_zone: TimeZone,
     /// User-facing label for the selected time zone.
     pub(super) time_zone_label: String,
-    /// Persisted operation to retry with the same creation ID, when present.
-    pub(super) pending_creation: Option<PendingCalendarEventCreation>,
+    /// Calendar action the composer should perform.
+    pub(super) intent: EventComposerIntent,
     /// First date in the displayed calendar week.
     pub(super) week_start: civil::Date,
 }
@@ -57,37 +74,56 @@ pub(crate) struct EventComposer<S: CalendarSession + ?Sized + 'static> {
     subject: Entity<InputState>,
     start: Entity<DatePickerState>,
     end: Entity<DatePickerState>,
+    mode: ComposerMode,
     creation: Option<CalendarEventCreation>,
-    status: CreationStatus,
+    status: ComposerStatus,
     task: Option<Task<()>>,
 }
 
-#[derive(Clone, Copy)]
-enum CreationStatus {
-    Editing,
-    Pending,
-    InvalidDraft(DraftError),
-    Submitting,
-    Failed(CalendarWorkflowError),
-    DiscardingRejected,
-    RejectedPendingCleanup(Option<CalendarWorkflowError>),
-    Rejected,
-    PendingResolutionRequired(Option<CalendarWorkflowError>),
-    Confirmed,
-    ConfirmedButNotCached,
+enum ComposerMode {
+    Create,
+    Edit {
+        editable_event: Option<Box<EditableCalendarEvent>>,
+    },
+}
+
+struct EditableEventFormValues {
+    subject: String,
+    start: NaiveDateTime,
+    end: NaiveDateTime,
 }
 
 #[derive(Clone, Copy)]
+enum ComposerStatus {
+    Editing,
+    Pending,
+    LoadingEditableEvent,
+    InvalidDraft(DraftError),
+    Submitting,
+    Failed(CalendarWorkflowError),
+    PendingResolutionRequired(Option<CalendarWorkflowError>),
+    DiscardingRejected,
+    RejectedPendingCleanup(Option<CalendarWorkflowError>),
+    Rejected,
+    Confirmed,
+    ConfirmedButNotCached,
+    Updated,
+    UpdatedButNotCached,
+    UpdateOutcomeUnknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DraftError {
     MissingSubject,
     MissingDate,
     InvalidTime,
     AmbiguousLocalTime,
     OutsideSelectedWeek,
+    NoChanges,
 }
 
 impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
-    /// Creates a composer that retries or resolves a saved operation.
+    /// Creates a composer for event creation, recovery, or editing.
     ///
     /// # Panics
     ///
@@ -101,17 +137,35 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         let time_zone_id =
             CalendarTimeZoneId::try_from(setup.time_zone.iana_name().unwrap_or("UTC").to_owned())
                 .expect("the fixed time-zone identifier is valid");
+        let (mode, pending_creation, cached_event) = match setup.intent {
+            EventComposerIntent::Create { pending_creation } => {
+                (ComposerMode::Create, pending_creation, None)
+            }
+            EventComposerIntent::Edit { cached_event } => (
+                ComposerMode::Edit {
+                    editable_event: None,
+                },
+                None,
+                Some(cached_event),
+            ),
+        };
         let (subject, start, end) = new_composer_inputs(setup.week_start, window, cx);
-        let (creation, status) = match setup.pending_creation {
+        let (creation, status) = match pending_creation {
             Some(PendingCalendarEventCreation::Unresolved(creation)) => {
-                (Some(creation), CreationStatus::Pending)
+                (Some(creation), ComposerStatus::Pending)
             }
             Some(PendingCalendarEventCreation::Rejected(creation)) => {
-                (Some(creation), CreationStatus::RejectedPendingCleanup(None))
+                (Some(creation), ComposerStatus::RejectedPendingCleanup(None))
             }
-            None => (None, CreationStatus::Editing),
+            None if cached_event.is_some() => (None, ComposerStatus::LoadingEditableEvent),
+            None => (None, ComposerStatus::Editing),
         };
-        Self {
+        let status = if cached_event.is_some() {
+            ComposerStatus::LoadingEditableEvent
+        } else {
+            status
+        };
+        let mut composer = Self {
             session: setup.session,
             view: setup.view,
             time_zone: setup.time_zone,
@@ -120,46 +174,163 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             subject,
             start,
             end,
+            mode,
             status,
             creation,
             task: None,
+        };
+        if let Some(cached_event) = cached_event {
+            composer.start_edit_load(cached_event, window, cx);
         }
+        composer
+    }
+
+    fn start_edit_load(
+        &mut self,
+        cached_event: CalendarOccurrence,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = Arc::clone(&self.session);
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let editable_event = session.editable_event(&cached_event).await;
+            let _ = this.update_in(cx, |composer, window, cx| {
+                composer.apply_editable_event(editable_event, window, cx);
+            });
+        }));
+    }
+
+    fn apply_editable_event(
+        &mut self,
+        editable_result: Result<EditableCalendarEvent, CalendarWorkflowError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.task = None;
+        match editable_result {
+            Ok(editable_event) => self.load_edit_fields(editable_event, window, cx),
+            Err(error) => self.status = ComposerStatus::Failed(error),
+        }
+        cx.notify();
+    }
+
+    fn load_edit_fields(
+        &mut self,
+        editable_event: EditableCalendarEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form_values) = editable_event_picker_values(&editable_event, &self.time_zone)
+        else {
+            self.status = ComposerStatus::Failed(CalendarWorkflowError::InvalidEditableEvent);
+            return;
+        };
+        self.set_edit_form_values(form_values, window, cx);
+        self.mode = ComposerMode::Edit {
+            editable_event: Some(Box::new(editable_event)),
+        };
+        self.status = ComposerStatus::Editing;
+    }
+
+    fn set_edit_form_values(
+        &mut self,
+        form_values: EditableEventFormValues,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.subject.update(cx, |input, cx| {
+            input.set_value(form_values.subject, window, cx);
+        });
+        self.start.update(cx, |picker, cx| {
+            picker.set_date_time(form_values.start, window, cx);
+        });
+        self.end.update(cx, |picker, cx| {
+            picker.set_date_time(form_values.end, window, cx);
+        });
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
         if !self.can_submit() {
             return;
         }
-        if matches!(self.status, CreationStatus::RejectedPendingCleanup(_)) {
-            self.discard_rejected_creation(cx);
-            return;
-        }
-        match self.creation_for_submission(cx) {
-            Ok(creation) => self.submit_creation(creation, cx),
-            Err(error) => {
-                self.show_draft_error(error, cx);
+        match &self.mode {
+            ComposerMode::Create
+                if matches!(self.status, ComposerStatus::RejectedPendingCleanup(_)) =>
+            {
+                self.discard_rejected_creation(cx);
             }
+            ComposerMode::Create => match self.creation_for_submission(cx) {
+                Ok(creation) => self.submit_creation(creation, cx),
+                Err(error) => self.show_draft_error(error, cx),
+            },
+            ComposerMode::Edit {
+                editable_event: Some(editable_event),
+            } => match self.update_for_submission(editable_event, cx) {
+                Ok(update) => self.submit_update(update, cx),
+                Err(error) => self.show_draft_error(error, cx),
+            },
+            ComposerMode::Edit {
+                editable_event: None,
+            } => {}
         }
     }
 
     fn can_submit(&self) -> bool {
-        !matches!(
+        if matches!(
             self.status,
-            CreationStatus::Submitting
-                | CreationStatus::Confirmed
-                | CreationStatus::PendingResolutionRequired(_)
-        )
+            ComposerStatus::Submitting
+                | ComposerStatus::DiscardingRejected
+                | ComposerStatus::LoadingEditableEvent
+                | ComposerStatus::Confirmed
+                | ComposerStatus::PendingResolutionRequired(_)
+        ) {
+            return false;
+        }
+        match &self.mode {
+            ComposerMode::Create => true,
+            ComposerMode::Edit { editable_event } => {
+                editable_event.is_some() && !is_terminal_edit_status(self.status)
+            }
+        }
     }
 
     fn show_draft_error(&mut self, draft_error: DraftError, cx: &mut Context<Self>) {
-        self.status = CreationStatus::InvalidDraft(draft_error);
+        self.status = ComposerStatus::InvalidDraft(draft_error);
         cx.notify();
     }
 
     fn submit_creation(&mut self, creation: CalendarEventCreation, cx: &mut Context<Self>) {
         self.creation = Some(creation.clone());
-        self.status = CreationStatus::Submitting;
+        self.status = ComposerStatus::Submitting;
         self.start_submission(creation, cx);
+        cx.notify();
+    }
+
+    fn discard_rejected_creation(&mut self, cx: &mut Context<Self>) {
+        let Some(creation) = self.creation.clone() else {
+            self.status = ComposerStatus::PendingResolutionRequired(None);
+            cx.notify();
+            return;
+        };
+        self.status = ComposerStatus::DiscardingRejected;
+        let session = Arc::clone(&self.session);
+        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let result = session.discard_rejected_event_creation(&creation).await;
+            let _ = this.update(cx, |composer, cx| {
+                composer.task = None;
+                match result {
+                    Ok(()) => {
+                        composer.creation = None;
+                        composer.status = ComposerStatus::Rejected;
+                        cx.emit(EventComposerEvent::PendingOperationUpdated);
+                    }
+                    Err(error) => {
+                        composer.status = ComposerStatus::RejectedPendingCleanup(Some(error));
+                    }
+                }
+                cx.notify();
+            });
+        }));
         cx.notify();
     }
 
@@ -175,6 +346,58 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         }));
     }
 
+    fn update_for_submission(
+        &self,
+        editable_event: &EditableCalendarEvent,
+        cx: &App,
+    ) -> Result<CalendarEventUpdate, DraftError> {
+        let subject = self.event_subject(cx)?;
+        let (selected_start, selected_end) = self.selected_local_times(cx)?;
+        let CalendarOccurrenceTime::Timed {
+            start: source_start,
+            end: source_end,
+        } = editable_event.occurrence().time()
+        else {
+            return Err(DraftError::InvalidTime);
+        };
+        let start = selected_event_time(selected_start, *source_start, &self.time_zone)?;
+        let end = selected_event_time(selected_end, *source_end, &self.time_zone)?;
+        let draft = CalendarEventUpdateDraft::timed(subject, start, end)
+            .map_err(|_| DraftError::InvalidTime)?;
+        CalendarEventUpdate::new(editable_event.clone(), draft).map_err(|_| DraftError::NoChanges)
+    }
+
+    fn submit_update(&mut self, update: CalendarEventUpdate, cx: &mut Context<Self>) {
+        self.status = ComposerStatus::Submitting;
+        let session = Arc::clone(&self.session);
+        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let outcome = session.update_event(&update).await;
+            let _ = this.update(cx, |composer, cx| composer.apply_update(outcome, cx));
+        }));
+        cx.notify();
+    }
+
+    fn apply_update(
+        &mut self,
+        outcome: Result<CalendarEventUpdateOutcome, CalendarWorkflowError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.task = None;
+        self.status = match outcome {
+            Ok(CalendarEventUpdateOutcome::Cached(_)) => ComposerStatus::Updated,
+            Ok(CalendarEventUpdateOutcome::ConfirmedButNotCached { .. }) => {
+                ComposerStatus::UpdatedButNotCached
+            }
+            Err(CalendarWorkflowError::Provider(CalendarOperationError::UpdateOutcomeUnknown))
+            | Err(CalendarWorkflowError::InvalidUpdateConfirmation) => {
+                ComposerStatus::UpdateOutcomeUnknown
+            }
+            Err(error) => ComposerStatus::Failed(error),
+        };
+        cx.emit(EventComposerEvent::CalendarChanged);
+        cx.notify();
+    }
+
     fn apply_submission(
         &mut self,
         creation_outcome: Result<CalendarEventCreationOutcome, CalendarWorkflowError>,
@@ -186,6 +409,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         self.task = None;
         self.apply_creation_outcome(creation_outcome, conflict_recovery);
         cx.emit(EventComposerEvent::PendingOperationUpdated);
+        cx.emit(EventComposerEvent::CalendarChanged);
         cx.notify();
     }
 
@@ -199,24 +423,24 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         self.status = match creation_outcome {
             Ok(CalendarEventCreationOutcome::Cached(_)) => {
                 self.creation = None;
-                CreationStatus::Confirmed
+                ComposerStatus::Confirmed
             }
             Ok(CalendarEventCreationOutcome::ConfirmedButNotCached { .. }) => {
-                CreationStatus::ConfirmedButNotCached
+                ComposerStatus::ConfirmedButNotCached
             }
             Ok(CalendarEventCreationOutcome::Rejected) => {
                 self.creation = None;
-                CreationStatus::Rejected
+                ComposerStatus::Rejected
             }
             Ok(CalendarEventCreationOutcome::RejectedButPending { cache_error }) => {
-                CreationStatus::RejectedPendingCleanup(Some(CalendarWorkflowError::Cache(
+                ComposerStatus::RejectedPendingCleanup(Some(CalendarWorkflowError::Cache(
                     cache_error,
                 )))
             }
             Err(CalendarWorkflowError::Cache(CalendarCacheError::CreationAlreadyPending)) => {
                 self.resolve_pending_conflict(conflict_recovery)
             }
-            Err(error) => CreationStatus::Failed(error),
+            Err(error) => ComposerStatus::Failed(error),
         };
     }
 
@@ -225,54 +449,26 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         conflict_recovery: Option<
             Result<Option<PendingCalendarEventCreation>, CalendarWorkflowError>,
         >,
-    ) -> CreationStatus {
+    ) -> ComposerStatus {
         match conflict_recovery {
             Some(Ok(Some(PendingCalendarEventCreation::Unresolved(creation)))) => {
                 self.creation = Some(creation);
-                CreationStatus::Pending
+                ComposerStatus::Pending
             }
             Some(Ok(Some(PendingCalendarEventCreation::Rejected(creation)))) => {
                 self.creation = Some(creation);
-                CreationStatus::RejectedPendingCleanup(None)
+                ComposerStatus::RejectedPendingCleanup(None)
             }
             Some(Ok(None)) => {
                 self.creation = None;
-                CreationStatus::PendingResolutionRequired(None)
+                ComposerStatus::PendingResolutionRequired(None)
             }
             Some(Err(error)) => {
                 self.creation = None;
-                CreationStatus::PendingResolutionRequired(Some(error))
+                ComposerStatus::PendingResolutionRequired(Some(error))
             }
-            None => CreationStatus::PendingResolutionRequired(None),
+            None => ComposerStatus::PendingResolutionRequired(None),
         }
-    }
-
-    fn discard_rejected_creation(&mut self, cx: &mut Context<Self>) {
-        let Some(creation) = self.creation.clone() else {
-            self.status = CreationStatus::PendingResolutionRequired(None);
-            cx.notify();
-            return;
-        };
-        self.status = CreationStatus::DiscardingRejected;
-        let session = Arc::clone(&self.session);
-        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let result = session.discard_rejected_event_creation(&creation).await;
-            let _ = this.update(cx, |composer, cx| {
-                composer.task = None;
-                match result {
-                    Ok(()) => {
-                        composer.creation = None;
-                        composer.status = CreationStatus::Rejected;
-                        cx.emit(EventComposerEvent::PendingOperationUpdated);
-                    }
-                    Err(error) => {
-                        composer.status = CreationStatus::RejectedPendingCleanup(Some(error));
-                    }
-                }
-                cx.notify();
-            });
-        }));
-        cx.notify();
     }
 
     fn creation_for_submission(&self, cx: &App) -> Result<CalendarEventCreation, DraftError> {
@@ -292,7 +488,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             return Err(DraftError::OutsideSelectedWeek);
         }
         CalendarEventCreation::try_new(self.view.clone(), draft)
-            .map_err(|_| DraftError::OutsideSelectedWeek)
+            .map_err(|_| DraftError::InvalidTime)
     }
 
     fn build_draft(&self, cx: &App) -> Result<CalendarEventDraft, DraftError> {
@@ -382,7 +578,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     }
 
     fn render_draft_validation(&self, colors: ColorTokens) -> Option<AnyElement> {
-        let CreationStatus::InvalidDraft(draft_error) = self.status else {
+        let ComposerStatus::InvalidDraft(draft_error) = self.status else {
             return None;
         };
         Some(render_draft_error(draft_error, colors).into_any_element())
@@ -410,7 +606,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .when(
                 matches!(
                     self.status,
-                    CreationStatus::Submitting | CreationStatus::DiscardingRejected
+                    ComposerStatus::Submitting | ComposerStatus::DiscardingRejected
                 ),
                 |element| element.child(render_creation_submitting(self.status, colors)),
             )
@@ -419,61 +615,92 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
 
     fn render_status(&self, colors: ColorTokens, cx: &mut Context<Self>) -> Option<AnyElement> {
         match self.status {
-            CreationStatus::InvalidDraft(draft_error) => {
+            ComposerStatus::InvalidDraft(draft_error) => {
                 return Some(render_draft_error(draft_error, colors).into_any_element());
             }
-            CreationStatus::PendingResolutionRequired(Some(error)) => {
+            ComposerStatus::PendingResolutionRequired(Some(error)) => {
                 return Some(render_pending_resolution_failure(error, colors).into_any_element());
             }
-            CreationStatus::PendingResolutionRequired(None) => {
+            ComposerStatus::PendingResolutionRequired(None) => {
                 return Some(render_pending_operation_missing(colors).into_any_element());
             }
-            CreationStatus::RejectedPendingCleanup(Some(error)) => {
+            ComposerStatus::RejectedPendingCleanup(Some(error)) => {
                 return Some(render_rejected_cleanup_failure(error, colors).into_any_element());
             }
             _ => {}
         }
-        let status_text = status_text(self.status)?;
-        let status_message = render_status_message(status_text, self.status, colors);
+        let status_text = match &self.mode {
+            ComposerMode::Create => creation_status_text(self.status),
+            ComposerMode::Edit { .. } => update_status_text(self.status),
+        }?;
+        let message = render_status_message(status_text, self.status, colors);
         if self.requires_calendar_write_permission_review() {
-            Some(render_calendar_permission_review(status_message, cx))
+            Some(render_calendar_permission_review(message, cx))
         } else {
-            Some(status_message)
+            Some(message)
         }
     }
 
     fn requires_calendar_write_permission_review(&self) -> bool {
         matches!(
             self.status,
-            CreationStatus::Failed(CalendarWorkflowError::Provider(
-                einfach_mail_application::CalendarOperationError::AccessDenied
+            ComposerStatus::Failed(CalendarWorkflowError::Provider(
+                CalendarOperationError::AccessDenied
             ))
         )
     }
 
     fn render_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if matches!(
-            self.status,
-            CreationStatus::Confirmed
-                | CreationStatus::Rejected
-                | CreationStatus::PendingResolutionRequired(_)
-        ) {
+        if self.action_is_terminal() {
             return render_close_action();
         }
         self.render_submit_action(cx)
     }
 
+    fn action_is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            ComposerStatus::Confirmed
+                | ComposerStatus::Rejected
+                | ComposerStatus::Updated
+                | ComposerStatus::UpdatedButNotCached
+                | ComposerStatus::UpdateOutcomeUnknown
+                | ComposerStatus::PendingResolutionRequired(_)
+        ) || matches!(
+            &self.mode,
+            ComposerMode::Edit {
+                editable_event: None
+            }
+        ) || matches!(&self.mode, ComposerMode::Edit { .. }) && is_terminal_edit_status(self.status)
+    }
+
     fn render_submit_action(&self, cx: &mut Context<Self>) -> AnyElement {
-        let retrying = self.creation.is_some();
-        let submitting = matches!(self.status, CreationStatus::Submitting);
+        let submitting = matches!(
+            self.status,
+            ComposerStatus::Submitting | ComposerStatus::DiscardingRejected
+        );
         Button::new("event-composer-submit")
             .debug_selector(|| "event-composer-submit".to_owned())
             .primary()
-            .label(submit_label(self.status, submitting, retrying))
-            .loading(submitting || matches!(self.status, CreationStatus::DiscardingRejected))
-            .disabled(submitting || matches!(self.status, CreationStatus::DiscardingRejected))
+            .label(self.submit_label())
+            .loading(submitting)
+            .disabled(submitting || !self.can_submit())
             .on_click(cx.listener(|composer, _, _, cx| composer.submit(cx)))
             .into_any_element()
+    }
+
+    fn submit_label(&self) -> &'static str {
+        match (&self.mode, self.status) {
+            (ComposerMode::Edit { .. }, ComposerStatus::Submitting) => "Saving changes…",
+            (ComposerMode::Edit { .. }, _) => "Save changes",
+            (ComposerMode::Create, ComposerStatus::DiscardingRejected) => "Clearing draft…",
+            (ComposerMode::Create, ComposerStatus::RejectedPendingCleanup(_)) => {
+                "Clear rejected draft"
+            }
+            (ComposerMode::Create, ComposerStatus::Submitting) => "Creating event…",
+            (ComposerMode::Create, _) if self.creation.is_some() => "Retry event creation",
+            (ComposerMode::Create, _) => "Create event",
+        }
     }
 }
 
@@ -483,6 +710,12 @@ impl<S: CalendarSession + ?Sized + 'static> Render for EventComposer<S> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().semantic_tokens().colors;
         let has_pending_creation = self.creation.is_some();
+        let show_fields = match &self.mode {
+            ComposerMode::Create => !has_pending_creation,
+            ComposerMode::Edit { editable_event } => {
+                editable_event.is_some() && !is_terminal_edit_status(self.status)
+            }
+        };
         div()
             .id("calendar-event-composer")
             .flex()
@@ -493,8 +726,14 @@ impl<S: CalendarSession + ?Sized + 'static> Render for EventComposer<S> {
                 element.child(self.render_pending(colors))
             })
             .when(!has_pending_creation, |element| {
-                element.child(self.render_fields(colors))
+                element.when(show_fields, |element| {
+                    element.child(self.render_fields(colors))
+                })
             })
+            .when(
+                matches!(self.status, ComposerStatus::LoadingEditableEvent),
+                |element| element.child(render_edit_loading(colors)),
+            )
             .when_some(self.render_status(colors, cx), |element, status| {
                 element.child(status)
             })
@@ -572,6 +811,45 @@ fn selected_picker_time(
         .ok_or(DraftError::MissingDate)
 }
 
+fn editable_event_picker_values(
+    event: &EditableCalendarEvent,
+    time_zone: &TimeZone,
+) -> Option<EditableEventFormValues> {
+    let CalendarOccurrenceTime::Timed { start, end } = event.occurrence().time() else {
+        return None;
+    };
+    Some(EditableEventFormValues {
+        subject: event.occurrence().subject().unwrap_or_default().to_owned(),
+        start: picker_value_for_offset(*start, time_zone)?,
+        end: picker_value_for_offset(*end, time_zone)?,
+    })
+}
+
+fn picker_value_for_offset(value: OffsetDateTime, time_zone: &TimeZone) -> Option<NaiveDateTime> {
+    let timestamp = Timestamp::new(
+        value.unix_timestamp(),
+        i32::try_from(value.nanosecond()).ok()?,
+    )
+    .ok()?;
+    let local_datetime = timestamp.to_zoned(time_zone.clone()).datetime();
+    picker_value(
+        local_datetime.date(),
+        u32::try_from(local_datetime.hour()).ok()?,
+        u32::try_from(local_datetime.minute()).ok()?,
+    )
+}
+
+fn selected_event_time(
+    selected: NaiveDateTime,
+    original: OffsetDateTime,
+    time_zone: &TimeZone,
+) -> Result<OffsetDateTime, DraftError> {
+    if picker_value_for_offset(original, time_zone) == Some(selected) {
+        return Ok(original);
+    }
+    resolve_local_datetime(selected, time_zone).ok_or(DraftError::AmbiguousLocalTime)
+}
+
 fn render_pending_subject(creation: &CalendarEventCreation) -> impl IntoElement {
     div()
         .text_sm()
@@ -583,11 +861,16 @@ fn render_pending_range(creation: &CalendarEventCreation) -> impl IntoElement {
     div().text_sm().child(format_local_range(creation.draft()))
 }
 
-fn render_pending_explanation(status: CreationStatus, colors: ColorTokens) -> impl IntoElement {
-    let message = if matches!(status, CreationStatus::RejectedPendingCleanup(_)) {
-        "Microsoft rejected this event. Clear the saved draft locally before submitting a corrected event."
-    } else {
-        "This event may already exist in Microsoft. Retrying uses the same operation ID."
+fn render_pending_explanation(status: ComposerStatus, colors: ColorTokens) -> impl IntoElement {
+    let message = match status {
+        ComposerStatus::RejectedPendingCleanup(Some(_)) => {
+            "The rejected event stays saved until local cleanup succeeds."
+        }
+        ComposerStatus::RejectedPendingCleanup(None) => {
+            "Microsoft rejected this event. Clear the saved draft locally before submitting a corrected event."
+        }
+        ComposerStatus::DiscardingRejected => "Clearing the rejected draft locally…",
+        _ => "This event may already exist in Microsoft. Retrying uses the same operation ID.",
     };
     div()
         .text_sm()
@@ -595,8 +878,8 @@ fn render_pending_explanation(status: CreationStatus, colors: ColorTokens) -> im
         .child(message)
 }
 
-fn render_creation_submitting(status: CreationStatus, colors: ColorTokens) -> impl IntoElement {
-    let message = if matches!(status, CreationStatus::DiscardingRejected) {
+fn render_creation_submitting(status: ComposerStatus, colors: ColorTokens) -> impl IntoElement {
+    let message = if matches!(status, ComposerStatus::DiscardingRejected) {
         "Clearing rejected event draft…"
     } else {
         "Creating event…"
@@ -624,11 +907,28 @@ fn render_rejected_cleanup_failure(
             "Microsoft rejected this event, but its saved draft could not be cleared: {}",
             match error {
                 CalendarWorkflowError::Cache(cache_error) => {
-                    cache_creation_error_text(cache_error)
+                    rejected_cleanup_error_text(cache_error)
                 }
                 _ => "the calendar recovery action is unavailable.",
             }
         ))
+}
+
+fn rejected_cleanup_error_text(error: CalendarCacheError) -> &'static str {
+    match error {
+        CalendarCacheError::Unavailable => {
+            "The encrypted calendar cache is unavailable. Restore cache access, then clear the rejected draft."
+        }
+        CalendarCacheError::AccountMismatch => {
+            "The rejected draft belongs to another account. Return to that account before clearing it."
+        }
+        CalendarCacheError::InvalidData | CalendarCacheError::CreationAlreadyPending => {
+            "The saved event draft could not be verified. Refresh the calendar before clearing it."
+        }
+        CalendarCacheError::PendingMailSend | CalendarCacheError::UnresolvedEventCreation => {
+            "Another account operation must be resolved before this draft can be cleared."
+        }
+    }
 }
 
 fn render_pending_resolution_failure(
@@ -671,22 +971,54 @@ fn render_pending_operation_missing(colors: ColorTokens) -> impl IntoElement {
         )
 }
 
-fn status_text(status: CreationStatus) -> Option<&'static str> {
+fn creation_status_text(status: ComposerStatus) -> Option<&'static str> {
     match status {
-        CreationStatus::Failed(error) => Some(creation_error_text(error)),
-        CreationStatus::Confirmed => Some("Event created and saved to the calendar."),
-        CreationStatus::ConfirmedButNotCached => Some(
+        ComposerStatus::Failed(error) => Some(creation_error_text(error)),
+        ComposerStatus::Confirmed => Some("Event created and saved to the calendar."),
+        ComposerStatus::ConfirmedButNotCached => Some(
             "Microsoft confirmed the event, but it could not be saved locally. Retry to recover it safely.",
         ),
-        CreationStatus::Rejected => {
+        ComposerStatus::Rejected => {
             Some("Microsoft rejected this event. Correct the details and submit a new event.")
         }
-        CreationStatus::RejectedPendingCleanup(None) => Some(
-            "Microsoft rejected this event. Clear the saved draft locally before submitting a corrected event.",
-        ),
-        CreationStatus::DiscardingRejected => Some("Clearing the rejected event draft…"),
+        ComposerStatus::RejectedPendingCleanup(_) => None,
+        ComposerStatus::DiscardingRejected => Some("Clearing the rejected event draft…"),
         _ => None,
     }
+}
+
+fn update_status_text(status: ComposerStatus) -> Option<&'static str> {
+    match status {
+        ComposerStatus::Failed(error) => Some(update_error_text(error)),
+        ComposerStatus::Updated => Some("Event changes were saved to the calendar."),
+        ComposerStatus::UpdatedButNotCached => Some(
+            "Microsoft confirmed the changes, but they could not be saved locally. Sync the calendar before editing this event again.",
+        ),
+        ComposerStatus::UpdateOutcomeUnknown => Some(
+            "Microsoft may have applied these changes. Sync the calendar before editing this event again.",
+        ),
+        _ => None,
+    }
+}
+
+fn render_status_message(
+    message: &'static str,
+    status: ComposerStatus,
+    colors: ColorTokens,
+) -> AnyElement {
+    let color = if matches!(status, ComposerStatus::Confirmed | ComposerStatus::Updated) {
+        colors.foreground
+    } else {
+        colors.destructive
+    };
+    div()
+        .id("event-creation-status")
+        .debug_selector(|| "event-creation-status".to_owned())
+        .role(status_role(status))
+        .text_sm()
+        .text_color(color)
+        .child(message)
+        .into_any_element()
 }
 
 fn render_calendar_permission_review<S: CalendarSession + ?Sized + 'static>(
@@ -714,28 +1046,8 @@ fn render_calendar_permission_review<S: CalendarSession + ?Sized + 'static>(
         .into_any_element()
 }
 
-fn render_status_message(
-    message: &'static str,
-    status: CreationStatus,
-    colors: ColorTokens,
-) -> AnyElement {
-    let color = if matches!(status, CreationStatus::Confirmed) {
-        colors.foreground
-    } else {
-        colors.destructive
-    };
-    div()
-        .id("event-creation-status")
-        .debug_selector(|| "event-creation-status".to_owned())
-        .role(status_role(status))
-        .text_sm()
-        .text_color(color)
-        .child(message)
-        .into_any_element()
-}
-
-fn status_role(status: CreationStatus) -> Role {
-    if matches!(status, CreationStatus::Confirmed) {
+fn status_role(status: ComposerStatus) -> Role {
+    if matches!(status, ComposerStatus::Confirmed | ComposerStatus::Updated) {
         Role::Status
     } else {
         Role::Alert
@@ -752,18 +1064,32 @@ fn render_close_action() -> AnyElement {
         .into_any_element()
 }
 
-fn submit_label(status: CreationStatus, submitting: bool, retrying: bool) -> &'static str {
-    if submitting {
-        "Creating event…"
-    } else if matches!(status, CreationStatus::RejectedPendingCleanup(_)) {
-        "Clear rejected draft"
-    } else if matches!(status, CreationStatus::DiscardingRejected) {
-        "Clearing draft…"
-    } else if retrying {
-        "Retry event creation"
-    } else {
-        "Create event"
-    }
+fn is_terminal_edit_status(status: ComposerStatus) -> bool {
+    matches!(
+        status,
+        ComposerStatus::Updated
+            | ComposerStatus::UpdatedButNotCached
+            | ComposerStatus::UpdateOutcomeUnknown
+            | ComposerStatus::Failed(
+                CalendarWorkflowError::InvalidEditableEvent
+                    | CalendarWorkflowError::InvalidUpdateConfirmation
+                    | CalendarWorkflowError::Provider(
+                        CalendarOperationError::EventChanged
+                            | CalendarOperationError::EventNotEditable
+                            | CalendarOperationError::UpdateOutcomeUnknown
+                    )
+            )
+    )
+}
+
+fn render_edit_loading(colors: ColorTokens) -> impl IntoElement {
+    div()
+        .id("event-edit-loading")
+        .debug_selector(|| "event-edit-loading".to_owned())
+        .role(Role::Status)
+        .text_sm()
+        .text_color(colors.muted_foreground)
+        .child("Checking event details…")
 }
 
 fn new_date_picker<S: CalendarSession + ?Sized + 'static>(
@@ -891,6 +1217,7 @@ fn render_draft_error(error: DraftError, colors: ColorTokens) -> impl IntoElemen
         DraftError::OutsideSelectedWeek => {
             "Choose start and end dates inside the week currently shown in the calendar."
         }
+        DraftError::NoChanges => "Change the title or event time before saving.",
     };
     div()
         .id("event-composer-validation")
@@ -907,9 +1234,6 @@ fn creation_error_text(error: CalendarWorkflowError) -> &'static str {
             einfach_mail_application::CalendarOperationError::AccessDenied,
         ) => {
             "Microsoft denied access to create this calendar event. Review the requested permission or your organization's consent policy."
-        }
-        CalendarWorkflowError::Provider(CalendarOperationError::EventCreationRejected) => {
-            "Microsoft rejected this event request. Check the event details and try again."
         }
         CalendarWorkflowError::Provider(
             einfach_mail_application::CalendarOperationError::SignInRequired,
@@ -931,6 +1255,42 @@ fn creation_error_text(error: CalendarWorkflowError) -> &'static str {
     }
 }
 
+fn update_error_text(error: CalendarWorkflowError) -> &'static str {
+    match error {
+        CalendarWorkflowError::Provider(CalendarOperationError::EventNotEditable) => {
+            "Microsoft did not confirm that this event is a standalone appointment that can be edited here."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::EventChanged) => {
+            "This event changed while the editor was open. Close this sheet, sync, and open Edit again."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::UpdateOutcomeUnknown) => {
+            "Microsoft may have applied these changes. Sync the calendar before editing this event again."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::AccessDenied) => {
+            "Microsoft denied access to update this event. Review the requested permission or your organization's consent policy."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::SignInRequired) => {
+            "Your Microsoft sign-in needs attention. Return to Accounts and connect again."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::RateLimited { .. }) => {
+            "Microsoft is limiting calendar requests. Wait a moment, then save again."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::ServiceUnavailable) => {
+            "The calendar service is unavailable. Check your connection, then try again."
+        }
+        CalendarWorkflowError::OperationInProgress => {
+            "The calendar is syncing. Save these changes after sync finishes."
+        }
+        CalendarWorkflowError::InvalidEditableEvent => {
+            "The calendar service returned event details that cannot be edited safely."
+        }
+        CalendarWorkflowError::InvalidUpdateConfirmation => {
+            "Microsoft returned an update that did not match the requested changes. Sync the calendar before editing this event again."
+        }
+        _ => "The event could not be updated. Check the calendar and try again.",
+    }
+}
+
 fn cache_creation_error_text(error: CalendarCacheError) -> &'static str {
     match error {
         CalendarCacheError::Unavailable => {
@@ -946,7 +1306,7 @@ fn cache_creation_error_text(error: CalendarCacheError) -> &'static str {
             "Another event creation needs to be resolved before a new event can be created."
         }
         CalendarCacheError::PendingMailSend => {
-            "A pending mail send must be resolved before the account cache can be removed."
+            "A pending mail send must be resolved before the account can be removed."
         }
         CalendarCacheError::UnresolvedEventCreation => {
             "A pending calendar event must be resolved before the account cache can be removed."
@@ -960,9 +1320,12 @@ mod tests {
     use einfach_mail_application::{CalendarCacheError, CalendarWorkflowError};
     use einfach_mail_domain::CalendarViewRange;
     use jiff::tz::TimeZone;
-    use time::{Date, Month, PrimitiveDateTime};
+    use time::{Date, Month, PrimitiveDateTime, Time};
 
-    use super::{creation_error_text, event_endpoints_within_view_week, resolve_local_datetime};
+    use super::{
+        DraftError, creation_error_text, event_endpoints_within_view_week, picker_value_for_offset,
+        resolve_local_datetime, selected_event_time,
+    };
 
     fn local_datetime(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(year, month, day)
@@ -1037,6 +1400,53 @@ mod tests {
                 CalendarCacheError::InvalidData
             )),
             "The event draft could not be saved safely. Microsoft has not received it. Check the event details and retry."
+        );
+    }
+
+    #[test]
+    fn an_unchanged_minute_preserves_hidden_event_seconds() {
+        let time_zone = TimeZone::UTC;
+        let original = Date::from_calendar_date(2030, Month::January, 8)
+            .expect("synthetic date is valid")
+            .with_time(Time::from_hms_nano(9, 30, 45, 123_000_000).expect("valid time"))
+            .assume_utc();
+        let selected = picker_value_for_offset(original, &time_zone)
+            .expect("synthetic time is representable by the minute picker");
+
+        assert_eq!(
+            selected_event_time(selected, original, &time_zone),
+            Ok(original)
+        );
+    }
+
+    #[test]
+    fn a_changed_local_time_resolves_against_the_selected_zone() {
+        let time_zone = TimeZone::get("America/New_York")
+            .expect("the synthetic IANA zone exists in Linux zoneinfo");
+        let original = Date::from_calendar_date(2030, Month::January, 8)
+            .expect("synthetic date is valid")
+            .with_time(Time::from_hms(14, 0, 0).expect("valid time"))
+            .assume_utc();
+        let selected = local_datetime(2030, 1, 8, 10, 0);
+
+        let updated = selected_event_time(selected, original, &time_zone)
+            .expect("synthetic local time resolves");
+
+        assert_eq!(updated.unix_timestamp(), original.unix_timestamp() + 3_600);
+    }
+
+    #[test]
+    fn an_edit_to_a_daylight_saving_gap_is_rejected() {
+        let time_zone = TimeZone::get("America/New_York")
+            .expect("the synthetic IANA zone exists in Linux zoneinfo");
+        let original = Date::from_calendar_date(2030, Month::March, 10)
+            .expect("synthetic date is valid")
+            .with_time(Time::from_hms(6, 30, 0).expect("valid time"))
+            .assume_utc();
+
+        assert_eq!(
+            selected_event_time(local_datetime(2030, 3, 10, 2, 30), original, &time_zone),
+            Err(DraftError::AmbiguousLocalTime)
         );
     }
 

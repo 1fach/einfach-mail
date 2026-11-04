@@ -22,8 +22,9 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage,
-    CalendarDeltaProgress, CalendarEventCreation, CalendarOccurrence, CalendarOccurrencePatch,
-    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarViewReference, EventId, FolderId,
+    CalendarDeltaProgress, CalendarEventCreation, CalendarEventUpdate, CalendarEventVersion,
+    CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
+    CalendarOccurrenceTimePatch, CalendarViewReference, EditableCalendarEvent, EventId, FolderId,
     FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage, MailReplyDraft,
     Mailbox, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
     MessageDeltaProgress, MessageId, MessageMetadata, MessageMetadataPatch, MessageOrigin,
@@ -186,6 +187,92 @@ impl GraphApi {
         event
             .into_new(creation.view().clone())
             .map_err(|_| GraphError::CalendarEventCreationOutcomeUnknown)
+    }
+
+    pub(super) async fn editable_calendar_event(
+        &self,
+        event: &CalendarOccurrence,
+        token: Arc<AccessToken>,
+    ) -> Result<EditableCalendarEvent, GraphError> {
+        let editable = self.fetch_editable_calendar_event(event, token).await?;
+        if editable.occurrence().reference() != event.reference()
+            || editable.occurrence().id() != event.id()
+        {
+            return Err(GraphError::InvalidRecord);
+        }
+        Ok(editable)
+    }
+
+    async fn fetch_editable_calendar_event(
+        &self,
+        event: &CalendarOccurrence,
+        token: Arc<AccessToken>,
+    ) -> Result<EditableCalendarEvent, GraphError> {
+        let view = event.reference().clone();
+        let url = self
+            .authority
+            .editable_calendar_event_path(event.id().as_str())?;
+        let response = self
+            .transport
+            .get(GraphOperation::CalendarEventRead, url, token)
+            .await?;
+        let event = serde_json::from_slice::<WireCalendarEvent>(&response)
+            .map_err(|_| GraphError::InvalidResponse)?;
+        event.into_editable(view)
+    }
+
+    pub(super) async fn update_calendar_event(
+        &self,
+        update: &CalendarEventUpdate,
+        token: Arc<AccessToken>,
+    ) -> Result<CalendarOccurrence, GraphError> {
+        let current = self
+            .current_editable_calendar_event(update, Arc::clone(&token))
+            .await?;
+        self.patch_calendar_event(update, &current, token).await
+    }
+
+    async fn current_editable_calendar_event(
+        &self,
+        update: &CalendarEventUpdate,
+        token: Arc<AccessToken>,
+    ) -> Result<EditableCalendarEvent, GraphError> {
+        let source = update.source();
+        let source_event = source.occurrence();
+        let current = self
+            .fetch_editable_calendar_event(source_event, Arc::clone(&token))
+            .await
+            .map_err(|error| match error {
+                GraphError::CalendarEventNotEditable => GraphError::CalendarEventChanged,
+                other => other,
+            })?;
+        if current.occurrence().reference() != source_event.reference()
+            || current.occurrence().id() != source_event.id()
+            || current.version() != source.version()
+        {
+            return Err(GraphError::CalendarEventChanged);
+        }
+        Ok(current)
+    }
+
+    async fn patch_calendar_event(
+        &self,
+        update: &CalendarEventUpdate,
+        current: &EditableCalendarEvent,
+        token: Arc<AccessToken>,
+    ) -> Result<CalendarOccurrence, GraphError> {
+        let body = calendar_event_update_body(update)?;
+        let event_id = update.source().occurrence().id();
+        let response = self
+            .transport
+            .patch_json(
+                GraphOperation::CalendarEventUpdate,
+                self.authority.calendar_event_path(event_id.as_str())?,
+                token,
+                body.into(),
+            )
+            .await?;
+        confirm_calendar_event_update(update, current, &response)
     }
 
     fn parse_calendar_delta_page(&self, response: &[u8]) -> Result<CalendarDeltaPage, GraphError> {
@@ -698,6 +785,12 @@ struct WireCalendarEvent {
     original_start_time_zone: WireField<String>,
     #[serde(default)]
     original_end_time_zone: WireField<String>,
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    is_organizer: Option<bool>,
+    attendees: Option<Vec<serde::de::IgnoredAny>>,
+    is_online_meeting: Option<bool>,
+    change_key: Option<String>,
     #[serde(rename = "@removed")]
     removed: Option<WireRemoved>,
 }
@@ -716,6 +809,37 @@ struct WireDateTimeTimeZone {
 }
 
 impl WireCalendarEvent {
+    fn into_editable(
+        self,
+        view: CalendarViewReference,
+    ) -> Result<EditableCalendarEvent, GraphError> {
+        if !self.has_supported_editable_shape() {
+            return Err(GraphError::CalendarEventNotEditable);
+        }
+        let version = self
+            .change_key
+            .clone()
+            .ok_or(GraphError::CalendarEventNotEditable)?;
+        let version =
+            CalendarEventVersion::try_from(version).map_err(|_| GraphError::InvalidRecord)?;
+        let occurrence = self.into_new(view)?;
+        EditableCalendarEvent::new(occurrence, version).map_err(|_| GraphError::InvalidRecord)
+    }
+
+    fn has_supported_editable_shape(&self) -> bool {
+        self.event_type.as_deref() == Some("singleInstance")
+            && self.is_organizer == Some(true)
+            && self.attendees.as_ref().is_some_and(Vec::is_empty)
+            && self.is_online_meeting == Some(false)
+            && matches!(self.is_all_day, WireField::Value(false))
+            && matches!(
+                &self.subject,
+                WireField::Value(subject)
+                    if !subject.trim().is_empty()
+                        && !subject.chars().any(char::is_control)
+            )
+    }
+
     fn into_change(self) -> Result<CalendarDeltaChange, GraphError> {
         let id = EventId::try_from(self.id).map_err(|_| GraphError::InvalidRecord)?;
         if self.removed.is_some() {
@@ -761,6 +885,102 @@ struct CreateCalendarEventRequest<'a> {
 struct CreateEventDateTimeTimeZone {
     date_time: String,
     time_zone: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalendarEventUpdateRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start: Option<CreateEventDateTimeTimeZone>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end: Option<CreateEventDateTimeTimeZone>,
+}
+
+fn calendar_event_update_body(update: &CalendarEventUpdate) -> Result<Vec<u8>, GraphError> {
+    let request = calendar_event_update_request(update)?;
+    serde_json::to_vec(&request).map_err(|_| GraphError::InvalidRecord)
+}
+
+fn calendar_event_update_request(
+    update: &CalendarEventUpdate,
+) -> Result<CalendarEventUpdateRequest<'_>, GraphError> {
+    let source = update.source().occurrence();
+    let subject =
+        (source.subject() != Some(update.draft().subject())).then_some(update.draft().subject());
+    let (start, end) = calendar_event_update_times(update, source)?;
+    if subject.is_none() && start.is_none() {
+        return Err(GraphError::InvalidRecord);
+    }
+    Ok(CalendarEventUpdateRequest {
+        subject,
+        start,
+        end,
+    })
+}
+
+fn calendar_event_update_times(
+    update: &CalendarEventUpdate,
+    source: &CalendarOccurrence,
+) -> Result<
+    (
+        Option<CreateEventDateTimeTimeZone>,
+        Option<CreateEventDateTimeTimeZone>,
+    ),
+    GraphError,
+> {
+    if source.time() == update.draft().time() {
+        return Ok((None, None));
+    }
+    let CalendarOccurrenceTime::Timed { start, end } = update.draft().time() else {
+        return Err(GraphError::InvalidRecord);
+    };
+    Ok((
+        Some(CreateEventDateTimeTimeZone {
+            date_time: graph_utc_datetime(*start)?,
+            time_zone: "UTC",
+        }),
+        Some(CreateEventDateTimeTimeZone {
+            date_time: graph_utc_datetime(*end)?,
+            time_zone: "UTC",
+        }),
+    ))
+}
+
+fn confirm_calendar_event_update(
+    update: &CalendarEventUpdate,
+    current: &EditableCalendarEvent,
+    response: &[u8],
+) -> Result<CalendarOccurrence, GraphError> {
+    let event_id = update.source().occurrence().id();
+    let patch = calendar_event_update_patch(response, event_id)?;
+    let mut event = current.occurrence().clone();
+    patch
+        .apply_to(&mut event)
+        .map_err(|_| GraphError::CalendarEventUpdateOutcomeUnknown)?;
+    if update.confirms(&event) {
+        Ok(event)
+    } else {
+        Err(GraphError::CalendarEventUpdateOutcomeUnknown)
+    }
+}
+
+fn calendar_event_update_patch(
+    response: &[u8],
+    expected_event_id: &EventId,
+) -> Result<CalendarOccurrencePatch, GraphError> {
+    let patch = serde_json::from_slice::<WireCalendarEvent>(response)
+        .map_err(|_| GraphError::CalendarEventUpdateOutcomeUnknown)?
+        .into_change()
+        .map_err(|_| GraphError::CalendarEventUpdateOutcomeUnknown)?;
+    let CalendarDeltaChange::Upsert { id, patch } = patch else {
+        return Err(GraphError::CalendarEventUpdateOutcomeUnknown);
+    };
+    if &id != expected_event_id {
+        return Err(GraphError::CalendarEventUpdateOutcomeUnknown);
+    }
+    Ok(patch)
 }
 
 fn create_calendar_event_body(creation: &CalendarEventCreation) -> Result<Vec<u8>, GraphError> {
@@ -1201,28 +1421,29 @@ mod tests {
         token::{AccessToken, BearerAccessToken},
     };
     use serde_json::json;
-    use time::{Date, Month, PrimitiveDateTime, Time};
+    use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
     use url::Url;
 
     use einfach_mail_application::CalendarDeltaRequest;
     use einfach_mail_domain::{
         AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarEventCreation,
-        CalendarEventDraft, CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId,
-        CalendarViewRange, CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus,
-        MailDraft, MailRecipient, MailReplyDraft, MailReplySource, MailSubject, MessageDeltaChange,
-        MessageId, MessageMetadata, MessageOrigin, ReadState,
+        CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft, CalendarOccurrence,
+        CalendarOccurrenceTime, CalendarTimeZoneId, CalendarViewRange, CalendarViewReference,
+        EditableCalendarEvent, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
+        MailRecipient, MailReplyDraft, MailReplySource, MailSubject, MessageDeltaChange, MessageId,
+        MessageMetadata, MessageOrigin, ReadState,
     };
 
     use super::{
         GraphApi, MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget,
-        WireCalendarEvent, WireFolder, WireMessage, WireMessageChange,
-        confirmed_follow_up_flag_status, confirmed_message_move, confirmed_read_state,
-        create_calendar_event_body, follow_up_flag_patch_body, mail_reply_body, message_move_body,
-        read_state_patch_body,
+        WellKnownMailFolder, WireCalendarEvent, WireFolder, WireMessage, WireMessageChange,
+        calendar_event_update_body, confirmed_follow_up_flag_status, confirmed_message_move,
+        confirmed_read_state, create_calendar_event_body, follow_up_flag_patch_body,
+        mail_reply_body, message_move_body, read_state_patch_body, send_mail_body,
     };
     use crate::{
         error::GraphError,
-        graph_url::GraphAuthority,
+        graph_url::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority},
         transport::{GraphTransport, GraphTransportHandle},
     };
 
@@ -1276,6 +1497,49 @@ mod tests {
         assert!(request["message"].get("toRecipients").is_none());
         assert!(request["message"].get("subject").is_none());
         assert!(request.get("comment").is_none());
+    }
+
+    fn editable_event_json(
+        version: &str,
+        subject: &str,
+        start: &str,
+        end: &str,
+    ) -> serde_json::Value {
+        json!({
+            "id": "synthetic-event",
+            "subject": subject,
+            "location": {"displayName": "Room A"},
+            "start": {"dateTime": start, "timeZone": "UTC"},
+            "end": {"dateTime": end, "timeZone": "UTC"},
+            "isAllDay": false,
+            "originalStartTimeZone": "UTC",
+            "originalEndTimeZone": "UTC",
+            "type": "singleInstance",
+            "isOrganizer": true,
+            "attendees": [],
+            "isOnlineMeeting": false,
+            "changeKey": version
+        })
+    }
+
+    fn editable_event(version: &str) -> EditableCalendarEvent {
+        serde_json::from_value::<WireCalendarEvent>(editable_event_json(
+            version,
+            "Planning",
+            "2030-01-08T09:00:00.0000000",
+            "2030-01-08T10:00:00.0000000",
+        ))
+        .expect("synthetic event metadata deserializes")
+        .into_editable(synthetic_view())
+        .expect("synthetic single-instance appointment is editable")
+    }
+
+    fn utc_time(day: u8, hour: u8) -> OffsetDateTime {
+        Date::from_calendar_date(2030, Month::January, day)
+            .expect("synthetic event date is valid")
+            .with_hms(hour, 0, 0)
+            .expect("synthetic event time is valid")
+            .assume_utc()
     }
 
     fn synthetic_graph_api(server: &MockServer) -> (GraphApi, GraphTransport) {
@@ -1601,6 +1865,241 @@ mod tests {
         assert_eq!(body["end"]["dateTime"], "2030-01-08T10:00:00");
         assert_eq!(body["end"]["timeZone"], "UTC");
         assert_eq!(body["transactionId"], creation.id().as_uuid().to_string());
+    }
+
+    #[test]
+    fn event_update_body_contains_only_changed_fields() {
+        let subject_update = CalendarEventUpdate::new(
+            editable_event("synthetic-version-1"),
+            CalendarEventUpdateDraft::timed(
+                "Updated planning".to_owned(),
+                utc_time(8, 9),
+                utc_time(8, 10),
+            )
+            .expect("synthetic subject update is valid"),
+        )
+        .expect("synthetic subject changed");
+        let subject_body: serde_json::Value = serde_json::from_slice(
+            &calendar_event_update_body(&subject_update)
+                .expect("synthetic subject update serializes"),
+        )
+        .expect("subject update is JSON");
+        assert_eq!(subject_body, json!({"subject": "Updated planning"}));
+
+        let time_update = CalendarEventUpdate::new(
+            editable_event("synthetic-version-1"),
+            CalendarEventUpdateDraft::timed(
+                "Planning".to_owned(),
+                utc_time(8, 11),
+                utc_time(8, 12),
+            )
+            .expect("synthetic time update is valid"),
+        )
+        .expect("synthetic time changed");
+        let time_body: serde_json::Value = serde_json::from_slice(
+            &calendar_event_update_body(&time_update).expect("synthetic time update serializes"),
+        )
+        .expect("time update is JSON");
+        assert_eq!(
+            time_body,
+            json!({
+                "start": {"dateTime": "2030-01-08T11:00:00", "timeZone": "UTC"},
+                "end": {"dateTime": "2030-01-08T12:00:00", "timeZone": "UTC"}
+            })
+        );
+    }
+
+    #[test]
+    fn event_edit_boundary_rejects_meetings_recurring_events_and_unknown_metadata() {
+        let valid_event_json = editable_event_json(
+            "synthetic-version-1",
+            "Planning",
+            "2030-01-08T09:00:00.0000000",
+            "2030-01-08T10:00:00.0000000",
+        );
+        for event_json in [
+            {
+                let mut event_json = valid_event_json.clone();
+                event_json["type"] = json!("occurrence");
+                event_json
+            },
+            {
+                let mut event_json = valid_event_json.clone();
+                event_json["isOrganizer"] = json!(false);
+                event_json
+            },
+            {
+                let mut event_json = valid_event_json.clone();
+                event_json["attendees"] = json!([{}]);
+                event_json
+            },
+            {
+                let mut event_json = valid_event_json.clone();
+                event_json["isOnlineMeeting"] = json!(true);
+                event_json
+            },
+            {
+                let mut event_json = valid_event_json.clone();
+                event_json["isAllDay"] = json!(true);
+                event_json
+            },
+            {
+                let mut event_json = valid_event_json.clone();
+                event_json["subject"] = serde_json::Value::Null;
+                event_json
+            },
+            {
+                let mut event_json = valid_event_json.clone();
+                event_json["subject"] = json!("");
+                event_json
+            },
+            {
+                let mut event_json = valid_event_json.clone();
+                event_json["subject"] = json!("Planning\tmeeting");
+                event_json
+            },
+            {
+                let mut event_json = valid_event_json.clone();
+                event_json
+                    .as_object_mut()
+                    .expect("synthetic event is an object")
+                    .remove("changeKey");
+                event_json
+            },
+        ] {
+            let wire = serde_json::from_value::<WireCalendarEvent>(event_json)
+                .expect("synthetic event metadata deserializes");
+            assert_eq!(
+                wire.into_editable(synthetic_view()),
+                Err(GraphError::CalendarEventNotEditable)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn event_update_rechecks_version_and_patches_only_requested_fields() {
+        let server = MockServer::start_async().await;
+        let view = synthetic_view();
+        let source = serde_json::from_value::<WireCalendarEvent>(editable_event_json(
+            "synthetic-version-1",
+            "Planning",
+            "2030-01-08T09:00:00.0000000",
+            "2030-01-08T10:00:00.0000000",
+        ))
+        .expect("synthetic event deserializes")
+        .into_new(view)
+        .expect("synthetic cached event is complete");
+        let updated = editable_event_json(
+            "synthetic-version-2",
+            "Updated planning",
+            "2030-01-08T11:00:00.0000000",
+            "2030-01-08T12:00:00.0000000",
+        );
+        let read = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/events/synthetic-event")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .query_param("$select", CALENDAR_EVENT_EDIT_SELECT);
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        editable_event_json(
+                            "synthetic-version-1",
+                            "Planning",
+                            "2030-01-08T09:00:00.0000000",
+                            "2030-01-08T10:00:00.0000000",
+                        )
+                        .to_string(),
+                    );
+            })
+            .await;
+        let patch = server
+            .mock_async(|when, then| {
+                when.method(PATCH)
+                    .path("/v1.0/me/events/synthetic-event")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .query_param_missing("$select")
+                    .header("content-type", "application/json")
+                    .body(r#"{"subject":"Updated planning","start":{"dateTime":"2030-01-08T11:00:00","timeZone":"UTC"},"end":{"dateTime":"2030-01-08T12:00:00","timeZone":"UTC"}}"#);
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(updated.to_string());
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+        let editable = api
+            .editable_calendar_event(&source, synthetic_access_token())
+            .await
+            .expect("synthetic supported event passes the edit check");
+        let update = CalendarEventUpdate::new(
+            editable,
+            CalendarEventUpdateDraft::timed(
+                "Updated planning".to_owned(),
+                utc_time(8, 11),
+                utc_time(8, 12),
+            )
+            .expect("synthetic update draft is valid"),
+        )
+        .expect("synthetic event values changed");
+
+        let saved = api
+            .update_calendar_event(&update, synthetic_access_token())
+            .await
+            .expect("Graph confirms the exact event update");
+
+        assert_eq!(saved.subject(), Some("Updated planning"));
+        assert_eq!(saved.location(), Some("Room A"));
+        assert_eq!(saved.time(), update.draft().time());
+        read.assert_calls_async(2).await;
+        patch.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn event_update_refuses_a_changed_version_without_patching() {
+        let server = MockServer::start_async().await;
+        let source = editable_event("synthetic-version-1");
+        let update = CalendarEventUpdate::new(
+            source,
+            CalendarEventUpdateDraft::timed(
+                "Updated planning".to_owned(),
+                utc_time(8, 11),
+                utc_time(8, 12),
+            )
+            .expect("synthetic update draft is valid"),
+        )
+        .expect("synthetic event values changed");
+        let read = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/v1.0/me/events/synthetic-event");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        editable_event_json(
+                            "synthetic-version-2",
+                            "Concurrent change",
+                            "2030-01-08T09:00:00.0000000",
+                            "2030-01-08T10:00:00.0000000",
+                        )
+                        .to_string(),
+                    );
+            })
+            .await;
+        let patch = server
+            .mock_async(|when, then| {
+                when.method(PATCH).path("/v1.0/me/events/synthetic-event");
+                then.status(200).body("{}");
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+
+        assert_eq!(
+            api.update_calendar_event(&update, synthetic_access_token())
+                .await,
+            Err(GraphError::CalendarEventChanged)
+        );
+        read.assert_calls_async(1).await;
+        patch.assert_calls_async(0).await;
     }
 
     #[tokio::test]

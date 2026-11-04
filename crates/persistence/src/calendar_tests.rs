@@ -3,8 +3,9 @@ use std::time::{Duration, UNIX_EPOCH};
 use einfach_mail_application::{CalendarCache, CalendarCacheError};
 use einfach_mail_domain::{
     AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
-    CalendarOccurrencePatch, CalendarOccurrenceTime, CalendarOccurrenceTimePatch,
-    CalendarViewRange, CalendarViewReference, EventId,
+    CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion, CalendarOccurrencePatch,
+    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference,
+    EditableCalendarEvent, EventId,
 };
 use tempfile::TempDir;
 use time::{Date, Month, OffsetDateTime, Time};
@@ -48,6 +49,17 @@ fn all_day_event_patch() -> CalendarOccurrencePatch {
     time.set_start(utc_date(2030, Month::January, 8));
     time.set_end(utc_date(2030, Month::January, 10));
     time.set_is_all_day(true);
+    patch.set_time(time);
+    patch
+}
+
+fn timed_event_patch(start: OffsetDateTime, end: OffsetDateTime) -> CalendarOccurrencePatch {
+    let mut patch = CalendarOccurrencePatch::new();
+    patch.set_subject(Some("Synthetic planning".to_owned()));
+    let mut time = CalendarOccurrenceTimePatch::new();
+    time.set_start(start);
+    time.set_end(end);
+    time.set_is_all_day(false);
     patch.set_time(time);
     patch
 }
@@ -282,6 +294,161 @@ fn malformed_delta_page_does_not_commit_events_or_advance_the_cursor() {
                 .expect("prior event rows remain readable")
                 .is_empty()
         );
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn confirmed_event_update_moves_the_cached_copy_between_overlapping_week_views() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let cache = open_cache(&directory, account_id("synthetic-account")).await;
+        let source_view = week(7);
+        let destination_view = week(14);
+        cache
+            .ensure_view(&destination_view)
+            .await
+            .expect("destination range is cached");
+        let (start, end) = timed_range(13, 23, 14, 1);
+        cache
+            .commit_delta_page(
+                &source_view,
+                CalendarDeltaPage::new(
+                    vec![CalendarDeltaChange::Upsert {
+                        id: event_id(),
+                        patch: timed_event_patch(start, end),
+                    }],
+                    CalendarDeltaProgress::Complete(link("synthetic-source")),
+                ),
+                UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+            )
+            .await
+            .expect("source event is cached");
+        let event = cache
+            .list_events(&source_view)
+            .await
+            .expect("source event is readable")
+            .into_iter()
+            .next()
+            .expect("source event exists");
+        let editable = EditableCalendarEvent::new(
+            event,
+            CalendarEventVersion::try_from("synthetic-version-1".to_owned())
+                .expect("synthetic provider version is valid"),
+        )
+        .expect("synthetic event uses timed values");
+        let (updated_start, updated_end) = timed_range(14, 9, 14, 10);
+        let draft = CalendarEventUpdateDraft::timed(
+            "Updated planning".to_owned(),
+            updated_start,
+            updated_end,
+        )
+        .expect("synthetic update is valid");
+        let update = CalendarEventUpdate::new(editable, draft).expect("event values changed");
+        let mut updated_event = update.source().occurrence().clone();
+        let mut patch = CalendarOccurrencePatch::new();
+        patch.set_subject(Some(update.draft().subject().to_owned()));
+        let mut time = CalendarOccurrenceTimePatch::new();
+        time.set_start(updated_start);
+        time.set_end(updated_end);
+        time.set_is_all_day(false);
+        patch.set_time(time);
+        patch
+            .apply_to(&mut updated_event)
+            .expect("synthetic update values are valid");
+
+        cache
+            .commit_event_update(&update, &updated_event)
+            .await
+            .expect("event rows move atomically to the overlapping view");
+        assert!(
+            cache
+                .list_events(&source_view)
+                .await
+                .expect("old range is readable")
+                .is_empty()
+        );
+        let destination_events = cache
+            .list_events(&destination_view)
+            .await
+            .expect("new range is readable");
+        assert_eq!(destination_events.len(), 1);
+        assert_eq!(destination_events[0].subject(), Some("Updated planning"));
+        assert_eq!(destination_events[0].reference(), &destination_view);
+        assert_eq!(destination_events[0].time(), update.draft().time());
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn invalid_event_update_leaves_all_cached_copies_unchanged() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let cache = open_cache(&directory, account_id("synthetic-account")).await;
+        let source_view = week(7);
+        let destination_view = week(14);
+        let (start, end) = timed_range(13, 23, 14, 1);
+        for view in [&source_view, &destination_view] {
+            cache
+                .commit_delta_page(
+                    view,
+                    CalendarDeltaPage::new(
+                        vec![CalendarDeltaChange::Upsert {
+                            id: event_id(),
+                            patch: timed_event_patch(start, end),
+                        }],
+                        CalendarDeltaProgress::Complete(link("synthetic-source")),
+                    ),
+                    UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                )
+                .await
+                .expect("synthetic event is cached in the supplied range");
+        }
+        let original_start = cache
+            .list_events(&source_view)
+            .await
+            .expect("source range is readable")[0]
+            .clone();
+        let editable = EditableCalendarEvent::new(
+            original_start,
+            CalendarEventVersion::try_from("synthetic-version-1".to_owned())
+                .expect("synthetic provider version is valid"),
+        )
+        .expect("synthetic event uses timed values");
+        let draft = CalendarEventUpdateDraft::timed(
+            "Updated planning".to_owned(),
+            timed_range(14, 9, 14, 10).0,
+            timed_range(14, 9, 14, 10).1,
+        )
+        .expect("synthetic update is valid");
+        let update = CalendarEventUpdate::new(editable, draft).expect("event values changed");
+        let mut mismatched_event = update.source().occurrence().clone();
+        let mut patch = CalendarOccurrencePatch::new();
+        patch.set_subject(Some("Unexpected event".to_owned()));
+        patch
+            .apply_to(&mut mismatched_event)
+            .expect("subject update is valid");
+
+        assert_eq!(
+            cache.commit_event_update(&update, &mismatched_event).await,
+            Err(CalendarCacheError::InvalidData)
+        );
+        let source_events = cache
+            .list_events(&source_view)
+            .await
+            .expect("source range remains readable");
+        assert_eq!(source_events.len(), 1);
+        assert_eq!(source_events[0].subject(), Some("Synthetic planning"));
+        assert_eq!(
+            source_events[0].time(),
+            &CalendarOccurrenceTime::Timed { start, end }
+        );
+        let destination_events = cache
+            .list_events(&destination_view)
+            .await
+            .expect("destination range remains readable");
+        assert_eq!(destination_events.len(), 1);
+        assert_eq!(destination_events[0].subject(), Some("Synthetic planning"));
         cache.close_for_tests().await;
     });
 }

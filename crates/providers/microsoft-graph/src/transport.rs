@@ -36,6 +36,8 @@ pub(super) enum GraphOperation {
     MailSend,
     CalendarViewDelta,
     CalendarEventCreate,
+    CalendarEventRead,
+    CalendarEventUpdate,
 }
 
 impl GraphOperation {
@@ -56,6 +58,8 @@ impl GraphOperation {
                 | Self::MessageMove
                 | Self::CalendarViewDelta
                 | Self::CalendarEventCreate
+                | Self::CalendarEventRead
+                | Self::CalendarEventUpdate
         )
     }
 }
@@ -196,6 +200,7 @@ impl GraphTransportHandle {
             GraphOperation::MessageUpdate => GraphError::MessageUpdateOutcomeUnknown,
             GraphOperation::MessageMove => GraphError::MessageMoveOutcomeUnknown,
             GraphOperation::CalendarEventCreate => GraphError::CalendarEventCreationOutcomeUnknown,
+            GraphOperation::CalendarEventUpdate => GraphError::CalendarEventUpdateOutcomeUnknown,
             _ => GraphError::WorkerClosed,
         })?
     }
@@ -437,6 +442,11 @@ async fn request_with_retry(
             {
                 return Some(Err(GraphError::CalendarEventCreationOutcomeUnknown));
             }
+            Err(GraphError::Transport)
+                if matches!(request.operation, GraphOperation::CalendarEventUpdate) =>
+            {
+                return Some(Err(GraphError::CalendarEventUpdateOutcomeUnknown));
+            }
             Err(error) => return Some(Err(error)),
         };
         if matches!(request.operation, GraphOperation::MessageMove) {
@@ -543,6 +553,9 @@ async fn response_result(
     if matches!(operation, GraphOperation::CalendarEventCreate) {
         return calendar_event_create_response_result(response, reply).await;
     }
+    if matches!(operation, GraphOperation::CalendarEventUpdate) {
+        return calendar_event_update_response_result(response, reply).await;
+    }
     if matches!(operation, GraphOperation::MessageDelta) && response.status() == StatusCode::GONE {
         let location = response
             .headers()
@@ -578,6 +591,26 @@ async fn calendar_event_create_response_result(
         },
         status if status.is_client_error() => Some(Err(GraphError::CalendarEventCreationRejected)),
         _ => Some(Err(GraphError::CalendarEventCreationOutcomeUnknown)),
+    }
+}
+
+async fn calendar_event_update_response_result(
+    response: Response,
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
+) -> Option<Result<GraphResponse, GraphError>> {
+    match response.status() {
+        StatusCode::UNAUTHORIZED => Some(Err(GraphError::AccessTokenRejected)),
+        StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
+        StatusCode::TOO_MANY_REQUESTS => Some(Err(rate_limit_error(&response))),
+        StatusCode::REQUEST_TIMEOUT => Some(Err(GraphError::CalendarEventUpdateOutcomeUnknown)),
+        status if status.is_server_error() => {
+            Some(Err(GraphError::CalendarEventUpdateOutcomeUnknown))
+        }
+        StatusCode::OK => match read_limited_body(response, reply).await? {
+            Ok(body) => Some(Ok(body)),
+            Err(_) => Some(Err(GraphError::CalendarEventUpdateOutcomeUnknown)),
+        },
+        _ => Some(Err(GraphError::InvalidResponse)),
     }
 }
 
@@ -683,6 +716,7 @@ async fn send_once(
                     | GraphOperation::MessageUpdate
                     | GraphOperation::MessageMove
                     | GraphOperation::CalendarEventCreate
+                    | GraphOperation::CalendarEventUpdate
             ) =>
         {
             client.get(request.url.as_str())
@@ -696,7 +730,10 @@ async fn send_once(
             .post(request.url.as_str())
             .header(CONTENT_TYPE, "application/json")
             .body(Arc::clone(body).to_vec()),
-        (GraphRequestMethod::PatchJson(body), GraphOperation::MessageUpdate) => client
+        (
+            GraphRequestMethod::PatchJson(body),
+            GraphOperation::MessageUpdate | GraphOperation::CalendarEventUpdate,
+        ) => client
             .patch(request.url.as_str())
             .header(CONTENT_TYPE, "application/json")
             .body(Arc::clone(body).to_vec()),
@@ -1503,6 +1540,42 @@ mod tests {
 
         assert_eq!(result, Err(GraphError::CalendarEventCreationOutcomeUnknown));
         post.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn calendar_event_update_server_failure_is_unknown_and_not_retried() {
+        let server = MockServer::start_async().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let responder_calls = Arc::clone(&calls);
+        let patch = server
+            .mock_async(move |when, then| {
+                when.method(PATCH)
+                    .path("/v1.0/me/events/synthetic-event")
+                    .header("prefer", "IdType=\"ImmutableId\"");
+                then.respond_with(move |_request: &HttpMockRequest| {
+                    responder_calls.fetch_add(1, Ordering::SeqCst);
+                    HttpMockResponse::builder()
+                        .status(503)
+                        .body("synthetic uncertain event update")
+                        .build()
+                });
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+        let result = transport
+            .handle()
+            .patch_json(
+                GraphOperation::CalendarEventUpdate,
+                graph_url(&server.url("/v1.0/me/events/synthetic-event")),
+                synthetic_access_token(),
+                Arc::from(&b"{\"subject\":\"Updated\"}"[..]),
+            )
+            .await;
+
+        assert_eq!(result, Err(GraphError::CalendarEventUpdateOutcomeUnknown));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        patch.assert_calls_async(1).await;
     }
 
     #[tokio::test]

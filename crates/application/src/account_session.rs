@@ -3,17 +3,19 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
 
 use einfach_mail_domain::{
-    AccountId, CalendarEventCreation, CalendarViewReference, FolderReference, FollowUpFlagStatus,
-    MailDraft, MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, MessageId,
-    PendingMailSend, ReadState,
+    AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
+    CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
+    MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend,
+    ReadState,
 };
 
 use crate::{
-    CalendarCache, CalendarEventCreationOutcome, CalendarProvider, CalendarSnapshot,
-    CalendarSyncReport, CalendarWorkflow, CalendarWorkflowError, FollowUpFlagUpdateOutcome,
-    MailCache, MailCacheError, MailProvider, MailSendOutcome, MailSendResolutionError,
-    MailSendWorkflowError, MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflow,
-    MailWorkflowError, MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
+    CalendarCache, CalendarEventCreationOutcome, CalendarEventUpdateOutcome, CalendarProvider,
+    CalendarSnapshot, CalendarSyncReport, CalendarWorkflow, CalendarWorkflowError,
+    FollowUpFlagUpdateOutcome, MailCache, MailCacheError, MailProvider, MailSendOutcome,
+    MailSendResolutionError, MailSendWorkflowError, MailSyncProgress, MailSyncReport,
+    MailSyncState, MailWorkflow, MailWorkflowError, MessageMoveOutcome, OpenedMessage,
+    ReadStateUpdateOutcome,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -203,6 +205,20 @@ pub trait CalendarSession: Send + Sync {
         view: &'a CalendarViewReference,
     ) -> AccountSessionFuture<'a, Result<CalendarSyncReport, CalendarWorkflowError>>;
 
+    /// Loads and validates the current Graph version of a cached event for editing.
+    ///
+    /// The account reservation ends when this method returns so the user can
+    /// edit the form without blocking synchronization.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workflow error when the event cannot be loaded, does not meet
+    /// the supported edit rules, or another account operation is active.
+    fn editable_event<'a>(
+        &'a self,
+        event: &'a CalendarOccurrence,
+    ) -> AccountSessionFuture<'a, Result<EditableCalendarEvent, CalendarWorkflowError>>;
+
     /// Creates a staged event and caches it after Graph confirms the result.
     ///
     /// # Errors
@@ -227,6 +243,19 @@ pub trait CalendarSession: Send + Sync {
         &'a self,
         creation: &'a CalendarEventCreation,
     ) -> AccountSessionFuture<'a, Result<(), CalendarWorkflowError>>;
+
+    /// Updates one event and atomically reconciles its cached calendar views.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workflow error when Graph rejects or cannot confirm the update,
+    /// the event changes, or another account operation is active. A cache failure
+    /// after Graph confirms the update is returned as
+    /// [`CalendarEventUpdateOutcome::ConfirmedButNotCached`].
+    fn update_event<'a>(
+        &'a self,
+        update: &'a CalendarEventUpdate,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventUpdateOutcome, CalendarWorkflowError>>;
 }
 
 /// Mail and calendar sessions that share one account cache and removal lifecycle.
@@ -484,6 +513,13 @@ where
         Box::pin(CalendarWorkflow::sync_view(self, view))
     }
 
+    fn editable_event<'a>(
+        &'a self,
+        event: &'a CalendarOccurrence,
+    ) -> AccountSessionFuture<'a, Result<EditableCalendarEvent, CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::editable_event(self, event))
+    }
+
     fn create_event<'a>(
         &'a self,
         creation: &'a CalendarEventCreation,
@@ -498,5 +534,12 @@ where
         Box::pin(CalendarWorkflow::discard_rejected_event_creation(
             self, creation,
         ))
+    }
+
+    fn update_event<'a>(
+        &'a self,
+        update: &'a CalendarEventUpdate,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventUpdateOutcome, CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::update_event(self, update))
     }
 }

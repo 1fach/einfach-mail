@@ -25,13 +25,14 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
-    CalendarEventCreation, CalendarEventCreationId, CalendarEventDraft, CalendarOccurrence,
-    CalendarOccurrencePatch, CalendarOccurrenceTime, CalendarOccurrenceTimePatch,
-    CalendarTimeZoneId, CalendarViewRange, CalendarViewReference, FolderId, FolderReference,
-    FollowUpFlagStatus, MailFolder, MailMessage, MailRecipient, MailReplySource,
-    MailSendOperationId, MailSendTarget, MailSubject, Mailbox, MessageBody, MessageBodyType,
-    MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
-    MessageMetadata, MessageOrigin, PendingCalendarEventCreation, PendingMailSend, ReadState,
+    CalendarEventCreation, CalendarEventCreationId, CalendarEventDraft, CalendarEventUpdate,
+    CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
+    CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange, CalendarViewReference,
+    FolderId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, MailRecipient,
+    MailReplySource, MailSendOperationId, MailSendTarget, MailSubject, Mailbox, MessageBody,
+    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
+    MessageId, MessageMetadata, MessageOrigin, PendingCalendarEventCreation, PendingMailSend,
+    ReadState,
 };
 use thiserror::Error;
 use time::{Date, OffsetDateTime, PrimitiveDateTime};
@@ -197,6 +198,17 @@ impl CalendarScope {
             local_start_julian_day: range.start_date().to_julian_day(),
             local_end_julian_day: range.end_date_exclusive().to_julian_day(),
         }
+    }
+
+    fn view_range(self) -> CacheResult<CalendarViewRange> {
+        let start = offset_datetime_from_parts(self.start_seconds, self.start_nanoseconds)?;
+        let end = offset_datetime_from_parts(self.end_seconds, self.end_nanoseconds)?;
+        let start_date = Date::from_julian_day(self.local_start_julian_day)
+            .map_err(|_| CacheFailure::InvalidData)?;
+        let end_date = Date::from_julian_day(self.local_end_julian_day)
+            .map_err(|_| CacheFailure::InvalidData)?;
+        CalendarViewRange::new(start, end, start_date, end_date)
+            .map_err(|_| CacheFailure::InvalidData)
     }
 }
 
@@ -1355,6 +1367,39 @@ impl CalendarCache for SqliteMailCache {
         }
     }
 
+    fn commit_event_update(
+        &self,
+        update: &CalendarEventUpdate,
+        event: &CalendarOccurrence,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(update.source().occurrence().reference());
+        let update = update.clone();
+        let event = event.clone();
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            if !update.confirms(&event) {
+                return Err(CalendarCacheError::InvalidData);
+            }
+            let account_id = update
+                .source()
+                .occurrence()
+                .reference()
+                .account_id()
+                .as_str()
+                .to_owned();
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    commit_calendar_event_update(&transaction, &account_id, scope, &event)?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
     fn remove_account(
         &self,
         account_id: &AccountId,
@@ -1888,6 +1933,109 @@ fn delete_calendar_event(
             event_id
         ],
     )?;
+    Ok(())
+}
+
+fn commit_calendar_event_update(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    source_range: CalendarScope,
+    event: &CalendarOccurrence,
+) -> CacheResult<()> {
+    require_cached_source_view(transaction, account_id, source_range)?;
+    let scopes = cached_calendar_scopes(transaction, account_id)?;
+    transaction.execute(
+        "DELETE FROM calendar_events WHERE account_id = ?1 AND event_id = ?2",
+        params![account_id, event.id().as_str()],
+    )?;
+    write_event_to_cached_scopes(transaction, account_id, scopes, event)
+}
+
+fn require_cached_source_view(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    source_range: CalendarScope,
+) -> CacheResult<()> {
+    let source_view_exists = transaction
+        .query_row(
+            "SELECT 1 FROM calendar_view_sync_state
+             WHERE account_id = ?1
+               AND range_start_seconds = ?2
+               AND range_start_nanoseconds = ?3
+               AND range_end_seconds = ?4
+               AND range_end_nanoseconds = ?5
+               AND local_start_julian_day = ?6
+               AND local_end_julian_day = ?7",
+            params![
+                account_id,
+                source_range.start_seconds,
+                source_range.start_nanoseconds,
+                source_range.end_seconds,
+                source_range.end_nanoseconds,
+                source_range.local_start_julian_day,
+                source_range.local_end_julian_day,
+            ],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if source_view_exists {
+        Ok(())
+    } else {
+        Err(CacheFailure::InvalidData)
+    }
+}
+
+fn cached_calendar_scopes(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+) -> CacheResult<Vec<CalendarScope>> {
+    let mut statement = transaction.prepare(
+        "SELECT range_start_seconds, range_start_nanoseconds,
+                range_end_seconds, range_end_nanoseconds,
+                local_start_julian_day, local_end_julian_day
+         FROM calendar_view_sync_state
+         WHERE account_id = ?1",
+    )?;
+    statement
+        .query_map([account_id], calendar_scope_from_row)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn calendar_scope_from_row(
+    row: &async_sqlite::rusqlite::Row<'_>,
+) -> async_sqlite::rusqlite::Result<CalendarScope> {
+    Ok(CalendarScope {
+        start_seconds: row.get(0)?,
+        start_nanoseconds: row.get(1)?,
+        end_seconds: row.get(2)?,
+        end_nanoseconds: row.get(3)?,
+        local_start_julian_day: row.get(4)?,
+        local_end_julian_day: row.get(5)?,
+    })
+}
+
+fn write_event_to_cached_scopes(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    scopes: Vec<CalendarScope>,
+    event: &CalendarOccurrence,
+) -> CacheResult<()> {
+    let account_id =
+        AccountId::try_from(account_id.to_owned()).map_err(|_| CacheFailure::InvalidData)?;
+    for range in scopes {
+        let view_range = range.view_range()?;
+        if !event.time().overlaps(&view_range) {
+            continue;
+        }
+        let view = CalendarViewReference::new(account_id.clone(), view_range);
+        write_calendar_event(
+            transaction,
+            CalendarEventScope { view: &view, range },
+            event,
+        )?;
+    }
     Ok(())
 }
 

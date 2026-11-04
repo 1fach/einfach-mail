@@ -7,14 +7,16 @@ use std::{
 };
 
 use einfach_mail_domain::{
-    AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation, CalendarOccurrence,
-    CalendarViewReference, PendingCalendarEventCreation,
+    AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation, CalendarEventUpdate,
+    CalendarOccurrence, CalendarViewReference, EditableCalendarEvent, PendingCalendarEventCreation,
 };
 use thiserror::Error;
 
 use crate::{
     AccountOperationError,
-    mail_workflow::{AccountReservationError, ActiveOperations, reserve_calendar_view},
+    mail_workflow::{
+        AccountReservationError, ActiveOperations, reserve_account, reserve_calendar_view,
+    },
 };
 
 /// A user-safe category for a calendar provider failure.
@@ -51,6 +53,15 @@ pub enum CalendarOperationError {
     /// The response or traversal exceeded provider resource limits.
     #[error("the calendar request exceeded its resource limits")]
     ResourceLimitExceeded,
+    /// The current event does not satisfy the supported edit rules.
+    #[error("this calendar event cannot be edited by Einfach Mail")]
+    EventNotEditable,
+    /// The event changed or became unsupported while the editor was open.
+    #[error("this calendar event changed; refresh it before editing again")]
+    EventChanged,
+    /// Graph may have applied the update, but the client did not receive confirmation.
+    #[error("the calendar update outcome is unknown")]
+    UpdateOutcomeUnknown,
 }
 
 impl From<AccountOperationError> for CalendarOperationError {
@@ -136,6 +147,36 @@ pub trait CalendarProvider: Send + Sync {
     fn create_event(
         &self,
         creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_;
+
+    /// Loads and validates an event for the supported edit flow.
+    ///
+    /// The provider must reject events outside the accepted editable shape and
+    /// return the event version with its complete current occurrence values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarOperationError::EventNotEditable`] for an unsupported
+    /// event, or a user-safe provider error when the event cannot be read or
+    /// its response cannot be validated.
+    fn editable_event(
+        &self,
+        event: &CalendarOccurrence,
+    ) -> impl Future<Output = Result<EditableCalendarEvent, CalendarOperationError>> + Send + '_;
+
+    /// Rechecks the captured event version and updates its requested fields.
+    ///
+    /// Implementations must not automatically retry the Graph write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarOperationError::EventChanged`] when the version is
+    /// stale, [`CalendarOperationError::UpdateOutcomeUnknown`] when the write
+    /// may have reached Graph without a verifiable response, or another
+    /// user-safe provider error when Graph rejects the request.
+    fn update_event(
+        &self,
+        update: &CalendarEventUpdate,
     ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_;
 }
 
@@ -362,6 +403,23 @@ pub trait CalendarCache: Send + Sync {
         event: &CalendarOccurrence,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
 
+    /// Replaces every cached copy of a Graph-confirmed event in one transaction.
+    ///
+    /// The cache removes the old event from all ranges for its account, then
+    /// writes it to every existing range that the updated occurrence overlaps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::InvalidData`] when the event does not
+    /// confirm the requested update, [`CalendarCacheError::AccountMismatch`]
+    /// for a different cache account, or [`CalendarCacheError::Unavailable`]
+    /// when the transaction fails.
+    fn commit_event_update(
+        &self,
+        update: &CalendarEventUpdate,
+        event: &CalendarOccurrence,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
+
     /// Removes all account data owned by this cache and its local encryption key.
     ///
     /// # Errors
@@ -391,6 +449,12 @@ pub enum CalendarWorkflowError {
     /// Graph did not return the event that was staged for creation.
     #[error("the calendar service returned an unexpected created event")]
     InvalidConfirmation,
+    /// Graph did not return the event and values submitted for update.
+    #[error("the calendar service returned an unexpected updated event")]
+    InvalidUpdateConfirmation,
+    /// The provider returned an edit snapshot for another event or account.
+    #[error("the calendar service returned an unexpected event for editing")]
+    InvalidEditableEvent,
     /// The provider repeated a cursor before completing the current round.
     #[error("the calendar service repeated a synchronization cursor")]
     RepeatedCursor,
@@ -463,6 +527,20 @@ pub enum CalendarEventCreationOutcome {
     Rejected,
     /// Graph rejected the request, but the cache still has the pending operation.
     RejectedButPending {
+        /// The user-safe category returned by the cache boundary.
+        cache_error: CalendarCacheError,
+    },
+}
+
+/// The Graph update was confirmed and whether the encrypted cache committed it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CalendarEventUpdateOutcome {
+    /// Graph confirmed the event and the encrypted cache committed it.
+    Cached(CalendarOccurrence),
+    /// Graph confirmed the event, but the encrypted cache still needs recovery.
+    ConfirmedButNotCached {
+        /// The event returned by Graph.
+        event: CalendarOccurrence,
         /// The user-safe category returned by the cache boundary.
         cache_error: CalendarCacheError,
     },
@@ -699,6 +777,77 @@ where
         self.cache.mark_event_creation_rejected(creation).await?;
         self.cache.discard_event_creation(creation).await?;
         Ok(())
+    }
+
+    /// Loads the current event after reserving its account against calendar writes.
+    ///
+    /// The account reservation ends when this method returns so the user can
+    /// edit the form without blocking calendar synchronization.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the event cannot be read or edited, a
+    /// workflow error when another calendar operation owns the account, or
+    /// [`CalendarWorkflowError::InvalidEditableEvent`] when the provider returns
+    /// a snapshot for another event.
+    pub async fn editable_event(
+        &self,
+        event: &CalendarOccurrence,
+    ) -> Result<EditableCalendarEvent, CalendarWorkflowError> {
+        let account_id = event.reference().account_id();
+        let _reservation =
+            reserve_account(&self.reservations, account_id).map_err(|error| match error {
+                AccountReservationError::OperationInProgress => {
+                    CalendarWorkflowError::OperationInProgress
+                }
+                AccountReservationError::StateUnavailable => {
+                    CalendarWorkflowError::StateUnavailable
+                }
+            })?;
+        let editable = self.provider.editable_event(event).await?;
+        if editable.occurrence().reference() != event.reference()
+            || editable.occurrence().id() != event.id()
+        {
+            return Err(CalendarWorkflowError::InvalidEditableEvent);
+        }
+        Ok(editable)
+    }
+
+    /// Updates one event and atomically reconciles every cached account view.
+    ///
+    /// The account reservation covers the provider write and cache transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error for a rejected, stale, or uncertain update, a
+    /// workflow error when another calendar operation owns the account, or
+    /// [`CalendarWorkflowError::InvalidUpdateConfirmation`] when the provider
+    /// returns different event values. A cache failure after Graph confirmation
+    /// is returned as [`CalendarEventUpdateOutcome::ConfirmedButNotCached`].
+    pub async fn update_event(
+        &self,
+        update: &CalendarEventUpdate,
+    ) -> Result<CalendarEventUpdateOutcome, CalendarWorkflowError> {
+        let account_id = update.source().occurrence().reference().account_id();
+        let _reservation =
+            reserve_account(&self.reservations, account_id).map_err(|error| match error {
+                AccountReservationError::OperationInProgress => {
+                    CalendarWorkflowError::OperationInProgress
+                }
+                AccountReservationError::StateUnavailable => {
+                    CalendarWorkflowError::StateUnavailable
+                }
+            })?;
+        let event = self.provider.update_event(update).await?;
+        if !update.confirms(&event) {
+            return Err(CalendarWorkflowError::InvalidUpdateConfirmation);
+        }
+        match self.cache.commit_event_update(update, &event).await {
+            Ok(()) => Ok(CalendarEventUpdateOutcome::Cached(event)),
+            Err(cache_error) => {
+                Ok(CalendarEventUpdateOutcome::ConfirmedButNotCached { event, cache_error })
+            }
+        }
     }
 
     async fn sync_round(
