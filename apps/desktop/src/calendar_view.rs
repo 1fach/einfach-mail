@@ -5,8 +5,8 @@ use std::{
 
 use einfach_mail_application::{CalendarOperationError, CalendarSession, CalendarWorkflowError};
 use einfach_mail_domain::{
-    AccountProfile, CalendarEventCreation, CalendarOccurrence, CalendarOccurrenceTime,
-    CalendarViewRange, CalendarViewReference, PendingCalendarEventCreation,
+    AccountProfile, CalendarOccurrence, CalendarOccurrenceTime, CalendarViewRange,
+    CalendarViewReference, PendingCalendarEventCreation,
 };
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt, WindowExt,
@@ -304,10 +304,10 @@ where
         }
         self.request_id = self.request_id.saturating_add(1);
         let request_id = self.request_id;
-        let workflow = Arc::clone(&self.workflow);
+        let session = Arc::clone(&self.session);
         let view = self.view.clone();
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let snapshot = workflow.load_cached_view(&view).await;
+            let snapshot = session.load_cached_view(&view).await;
             Self::finish_cache_reload(&this, cx, request_id, snapshot);
         }));
     }
@@ -349,14 +349,14 @@ where
         self.open_event_composer_sheet(composer, window, cx);
     }
 
-    fn event_composer_setup(&self) -> EventComposerSetup<P, C> {
+    fn event_composer_setup(&self) -> EventComposerSetup<S> {
         let time_zone_label = if self.utc_fallback {
             "UTC".to_owned()
         } else {
             self.time_zone.iana_name().unwrap_or("UTC").to_owned()
         };
         EventComposerSetup {
-            workflow: Arc::clone(&self.workflow),
+            session: Arc::clone(&self.session),
             view: self.view.clone(),
             time_zone: self.time_zone.clone(),
             time_zone_label,
@@ -367,7 +367,7 @@ where
 
     fn open_event_composer_sheet(
         &self,
-        composer: Entity<EventComposer<P, C>>,
+        composer: Entity<EventComposer<S>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1023,7 +1023,7 @@ mod tests {
         future::{Future, ready},
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -1034,7 +1034,7 @@ mod tests {
     use einfach_mail_domain::{
         AccountId, AccountProfile, CalendarDeltaPage, CalendarEventCreation, CalendarOccurrence,
         CalendarOccurrencePatch, CalendarOccurrenceTime, CalendarOccurrenceTimePatch,
-        CalendarViewRange, CalendarViewReference, EventId,
+        CalendarViewRange, CalendarViewReference, EventId, PendingCalendarEventCreation,
     };
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};
@@ -1049,6 +1049,7 @@ mod tests {
         requests: Arc<Mutex<Vec<(i64, i64)>>>,
         event_creation_gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
         event_creation_failure: Arc<Mutex<Option<CalendarOperationError>>>,
+        event_creation_count: Arc<AtomicUsize>,
     }
 
     impl TestProvider {
@@ -1106,7 +1107,11 @@ mod tests {
             let gate = self.take_event_creation_gate();
             let failure = self.take_event_creation_failure();
             let creation = creation.clone();
-            async move { create_event_after_wait(creation, gate, failure).await }
+            let event_creation_count = Arc::clone(&self.event_creation_count);
+            async move {
+                event_creation_count.fetch_add(1, Ordering::SeqCst);
+                create_event_after_wait(creation, gate, failure).await
+            }
         }
     }
 
@@ -1153,6 +1158,15 @@ mod tests {
     struct TestCache {
         created_events:
             Arc<Mutex<HashMap<CalendarViewReference, HashMap<String, CalendarOccurrence>>>>,
+        pending_creation: Arc<Mutex<Option<PendingCalendarEventCreation>>>,
+        fail_next_rejected_cleanup: Arc<AtomicBool>,
+    }
+
+    impl TestCache {
+        fn fail_rejected_cleanup_once(&self) {
+            self.fail_next_rejected_cleanup
+                .store(true, Ordering::SeqCst);
+        }
     }
 
     impl CalendarCache for TestCache {
@@ -1213,33 +1227,107 @@ mod tests {
 
         fn stage_event_creation(
             &self,
-            _: &CalendarEventCreation,
+            creation: &CalendarEventCreation,
         ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
-            ready(Ok(()))
+            let pending_creation = Arc::clone(&self.pending_creation);
+            let creation = creation.clone();
+            async move {
+                let mut pending = pending_creation
+                    .lock()
+                    .expect("synthetic pending event mutex is not poisoned");
+                match pending.as_ref() {
+                    Some(PendingCalendarEventCreation::Unresolved(existing))
+                        if existing == &creation =>
+                    {
+                        Ok(())
+                    }
+                    None => {
+                        *pending = Some(PendingCalendarEventCreation::Unresolved(creation));
+                        Ok(())
+                    }
+                    Some(_) => Err(CalendarCacheError::CreationAlreadyPending),
+                }
+            }
         }
 
         fn pending_event_creation(
             &self,
-            _: &AccountId,
+            account_id: &AccountId,
         ) -> impl Future<
             Output = Result<Option<PendingCalendarEventCreation>, CalendarCacheError>,
         > + Send
         + '_ {
-            ready(Ok(None))
+            let pending_creation = Arc::clone(&self.pending_creation);
+            let account_id = account_id.clone();
+            async move {
+                let pending = pending_creation
+                    .lock()
+                    .expect("synthetic pending event mutex is not poisoned")
+                    .clone();
+                if pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.creation().view().account_id() != &account_id)
+                {
+                    Err(CalendarCacheError::AccountMismatch)
+                } else {
+                    Ok(pending)
+                }
+            }
         }
 
         fn mark_event_creation_rejected(
             &self,
-            _: &CalendarEventCreation,
+            creation: &CalendarEventCreation,
         ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
-            ready(Ok(()))
+            let pending_creation = Arc::clone(&self.pending_creation);
+            let creation = creation.clone();
+            async move {
+                let mut pending = pending_creation
+                    .lock()
+                    .expect("synthetic pending event mutex is not poisoned");
+                match pending.as_ref() {
+                    Some(PendingCalendarEventCreation::Unresolved(existing))
+                        if existing == &creation =>
+                    {
+                        *pending = Some(PendingCalendarEventCreation::Rejected(creation));
+                        Ok(())
+                    }
+                    Some(PendingCalendarEventCreation::Rejected(existing))
+                        if existing == &creation =>
+                    {
+                        Ok(())
+                    }
+                    None => Ok(()),
+                    Some(_) => Err(CalendarCacheError::CreationAlreadyPending),
+                }
+            }
         }
 
         fn discard_event_creation(
             &self,
-            _: &CalendarEventCreation,
+            creation: &CalendarEventCreation,
         ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
-            ready(Ok(()))
+            let pending_creation = Arc::clone(&self.pending_creation);
+            let fail_cleanup = Arc::clone(&self.fail_next_rejected_cleanup);
+            let creation = creation.clone();
+            async move {
+                if fail_cleanup.swap(false, Ordering::SeqCst) {
+                    return Err(CalendarCacheError::Unavailable);
+                }
+                let mut pending = pending_creation
+                    .lock()
+                    .expect("synthetic pending event mutex is not poisoned");
+                match pending.as_ref() {
+                    Some(PendingCalendarEventCreation::Rejected(existing))
+                        if existing == &creation =>
+                    {
+                        *pending = None;
+                        Ok(())
+                    }
+                    None => Ok(()),
+                    Some(_) => Err(CalendarCacheError::CreationAlreadyPending),
+                }
+            }
         }
 
         fn commit_event_creation(
@@ -1250,10 +1338,19 @@ mod tests {
             let created_events = Arc::clone(&self.created_events);
             let creation = creation.clone();
             let event = event.clone();
+            let pending_creation = Arc::clone(&self.pending_creation);
             async move {
                 if event.reference() != creation.view()
                     || event.subject() != Some(creation.draft().subject())
                     || event.time() != creation.draft().time()
+                {
+                    return Err(CalendarCacheError::InvalidData);
+                }
+                let mut pending = pending_creation
+                    .lock()
+                    .expect("synthetic pending event mutex is not poisoned");
+                if pending.as_ref()
+                    != Some(&PendingCalendarEventCreation::Unresolved(creation.clone()))
                 {
                     return Err(CalendarCacheError::InvalidData);
                 }
@@ -1263,6 +1360,7 @@ mod tests {
                     .entry(creation.view().clone())
                     .or_default()
                     .insert(event.id().as_str().to_owned(), event);
+                *pending = None;
                 Ok(())
             }
         }
@@ -1465,21 +1563,19 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    async fn native_event_composer_shows_progress_failure_and_retry_confirmation(
+    async fn native_event_composer_recovers_uncertain_and_rejected_creations(
         cx: &mut TestAppContext,
     ) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
-        let workflow = Arc::new(CalendarWorkflow::new(
-            provider.clone(),
-            TestCache::default(),
-        ));
+        let cache = TestCache::default();
+        let workflow = Arc::new(CalendarWorkflow::new(provider.clone(), cache.clone()));
         let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
         let (_, context) = cx.add_window_view(|window, cx| {
             let calendar = cx.new(|cx| {
                 CalendarView::new_for_week(
                     profile(),
-                    workflow,
+                    Arc::clone(&workflow),
                     super::CalendarWeekSelection {
                         week_start,
                         time_zone: TimeZone::UTC,
@@ -1588,6 +1684,91 @@ mod tests {
         assert!(context.debug_bounds("event-creation-pending").is_none());
         assert!(context.debug_bounds("event-creation-status").is_some());
         assert!(context.debug_bounds("event-composer-close").is_some());
+
+        let close = context
+            .debug_bounds("event-composer-close")
+            .expect("confirmed composer can be closed");
+        context.simulate_click(close.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_calendar_view(context);
+
+        let new_event = context
+            .debug_bounds("calendar-new-event")
+            .expect("calendar offers another event creation");
+        context.simulate_click(new_event.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_calendar_view(context);
+        assert!(context.debug_bounds("event-composer-fields").is_some());
+        let title = context
+            .debug_bounds("event-composer-subject-input")
+            .expect("composer exposes the title input");
+        context.simulate_click(title.center(), Modifiers::default());
+        context.simulate_input("Rejected synthetic event");
+        provider.fail_next_event_creation(CalendarOperationError::EventCreationRejected);
+        cache.fail_rejected_cleanup_once();
+
+        let create_event = context
+            .debug_bounds("event-composer-submit")
+            .expect("composer offers create action");
+        context.simulate_click(create_event.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if context.debug_bounds("event-creation-status").is_some() {
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(context.debug_bounds("event-creation-pending").is_some());
+        assert!(context.debug_bounds("event-creation-status").is_some());
+        let rejected_marker = workflow
+            .load_cached_view(
+                &view_for_week(profile().id(), week_start, &TimeZone::UTC)
+                    .expect("synthetic calendar week is valid")
+                    .0,
+            )
+            .await
+            .expect("rejected operation remains available for cleanup");
+        assert!(matches!(
+            rejected_marker.pending_creation(),
+            Some(PendingCalendarEventCreation::Rejected(_))
+        ));
+        assert_eq!(provider.event_creation_count.load(Ordering::SeqCst), 3);
+
+        let clear_rejected = context
+            .debug_bounds("event-composer-submit")
+            .expect("rejected operation offers local cleanup");
+        context.simulate_click(clear_rejected.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if context.debug_bounds("event-composer-close").is_some()
+                && context.debug_bounds("event-creation-pending").is_none()
+            {
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(context.debug_bounds("event-creation-pending").is_none());
+        assert!(context.debug_bounds("event-composer-close").is_some());
+        assert_eq!(provider.event_creation_count.load(Ordering::SeqCst), 3);
+        let cleared_marker = workflow
+            .load_cached_view(
+                &view_for_week(profile().id(), week_start, &TimeZone::UTC)
+                    .expect("synthetic calendar week is valid")
+                    .0,
+            )
+            .await
+            .expect("calendar view can read its cache");
+        assert!(cleared_marker.pending_creation().is_none());
     }
 
     #[gpui_kit::test]

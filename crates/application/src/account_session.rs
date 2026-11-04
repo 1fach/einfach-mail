@@ -3,16 +3,17 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
 
 use einfach_mail_domain::{
-    AccountId, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MailMessage, MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend, ReadState,
+    AccountId, CalendarEventCreation, CalendarViewReference, FolderReference, FollowUpFlagStatus,
+    MailDraft, MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, MessageId,
+    PendingMailSend, ReadState,
 };
 
 use crate::{
-    CalendarCache, CalendarProvider, CalendarSnapshot, CalendarSyncReport, CalendarWorkflow,
-    CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCache, MailCacheError, MailProvider,
-    MailSendOutcome, MailSendResolutionError, MailSendWorkflowError, MailSyncProgress,
-    MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError, MessageMoveOutcome,
-    OpenedMessage, ReadStateUpdateOutcome,
+    CalendarCache, CalendarEventCreationOutcome, CalendarProvider, CalendarSnapshot,
+    CalendarSyncReport, CalendarWorkflow, CalendarWorkflowError, FollowUpFlagUpdateOutcome,
+    MailCache, MailCacheError, MailProvider, MailSendOutcome, MailSendResolutionError,
+    MailSendWorkflowError, MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflow,
+    MailWorkflowError, MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -201,6 +202,31 @@ pub trait CalendarSession: Send + Sync {
         &'a self,
         view: &'a CalendarViewReference,
     ) -> AccountSessionFuture<'a, Result<CalendarSyncReport, CalendarWorkflowError>>;
+
+    /// Creates a staged event and caches it after Graph confirms the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workflow error when creation could not be staged or when
+    /// another account operation is active. Unknown provider outcomes keep the
+    /// same operation available for recovery. A definitive rejection and
+    /// cleanup failure are returned as
+    /// [`CalendarEventCreationOutcome::RejectedButPending`].
+    fn create_event<'a>(
+        &'a self,
+        creation: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>>;
+
+    /// Clears a creation after Graph definitively rejected it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workflow error when the rejection cannot be recorded or the
+    /// local marker cannot be removed.
+    fn discard_rejected_event_creation<'a>(
+        &'a self,
+        creation: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<(), CalendarWorkflowError>>;
 }
 
 /// Mail and calendar sessions that share one account cache and removal lifecycle.
@@ -456,5 +482,21 @@ where
         view: &'a CalendarViewReference,
     ) -> AccountSessionFuture<'a, Result<CalendarSyncReport, CalendarWorkflowError>> {
         Box::pin(CalendarWorkflow::sync_view(self, view))
+    }
+
+    fn create_event<'a>(
+        &'a self,
+        creation: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::create_event(self, creation))
+    }
+
+    fn discard_rejected_event_creation<'a>(
+        &'a self,
+        creation: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<(), CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::discard_rejected_event_creation(
+            self, creation,
+        ))
     }
 }

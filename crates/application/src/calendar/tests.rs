@@ -267,16 +267,8 @@ impl CalendarCache for FixtureCache {
         creation: &CalendarEventCreation,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
         let pending = Arc::clone(&self.pending);
-        let rejection_mark_error = Arc::clone(&self.rejection_mark_error);
         let creation = creation.clone();
         async move {
-            if let Some(error) = rejection_mark_error
-                .lock()
-                .expect("synthetic cache error mutex is not poisoned")
-                .take()
-            {
-                return Err(error);
-            }
             let mut pending = pending
                 .lock()
                 .expect("synthetic cache mutex is not poisoned");

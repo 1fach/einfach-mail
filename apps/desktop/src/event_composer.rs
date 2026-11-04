@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike, Weekday};
 use einfach_mail_application::{
-    CalendarCache, CalendarCacheError, CalendarEventCreationOutcome, CalendarOperationError,
-    CalendarProvider, CalendarWorkflow, CalendarWorkflowError,
+    CalendarCacheError, CalendarEventCreationOutcome, CalendarOperationError, CalendarSession,
+    CalendarWorkflowError,
 };
 use einfach_mail_domain::{
     CalendarEventCreation, CalendarEventDraft, CalendarTimeZoneId, CalendarViewRange,
@@ -32,13 +32,9 @@ pub(crate) enum EventComposerEvent {
 }
 
 /// Provides the account, view, and local-time context for the composer.
-pub(crate) struct EventComposerSetup<P, C>
-where
-    P: CalendarProvider + 'static,
-    C: CalendarCache + 'static,
-{
-    /// Account-scoped calendar workflows used to stage and create the event.
-    pub(super) workflow: Arc<CalendarWorkflow<P, C>>,
+pub(crate) struct EventComposerSetup<S: CalendarSession + ?Sized + 'static> {
+    /// Account-scoped calendar session used to stage and create the event.
+    pub(super) session: Arc<S>,
     /// Calendar week that must contain both event endpoints.
     pub(super) view: CalendarViewReference,
     /// IANA or UTC time zone used to resolve the selected local times.
@@ -52,12 +48,8 @@ where
 }
 
 /// Shows and submits a single timed event for a calendar week.
-pub(crate) struct EventComposer<P, C>
-where
-    P: CalendarProvider + 'static,
-    C: CalendarCache + 'static,
-{
-    workflow: Arc<CalendarWorkflow<P, C>>,
+pub(crate) struct EventComposer<S: CalendarSession + ?Sized + 'static> {
+    session: Arc<S>,
     view: CalendarViewReference,
     time_zone: TimeZone,
     time_zone_id: CalendarTimeZoneId,
@@ -94,11 +86,7 @@ enum DraftError {
     OutsideSelectedWeek,
 }
 
-impl<P, C> EventComposer<P, C>
-where
-    P: CalendarProvider + 'static,
-    C: CalendarCache + 'static,
-{
+impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     /// Creates a composer that retries or resolves a saved operation.
     ///
     /// # Panics
@@ -106,7 +94,7 @@ where
     /// Panics if Jiff's IANA or UTC time-zone identifier violates the domain's
     /// time-zone identifier constraints.
     pub(crate) fn new(
-        setup: EventComposerSetup<P, C>,
+        setup: EventComposerSetup<S>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -124,7 +112,7 @@ where
             None => (None, CreationStatus::Editing),
         };
         Self {
-            workflow: setup.workflow,
+            session: setup.session,
             view: setup.view,
             time_zone: setup.time_zone,
             time_zone_id,
@@ -176,11 +164,11 @@ where
     }
 
     fn start_submission(&mut self, creation: CalendarEventCreation, cx: &mut Context<Self>) {
-        let workflow = Arc::clone(&self.workflow);
+        let session = Arc::clone(&self.session);
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let creation_outcome = workflow.create_event(&creation).await;
+            let creation_outcome = session.create_event(&creation).await;
             let conflict_recovery =
-                recover_pending_conflict(&workflow, &creation, &creation_outcome).await;
+                recover_pending_conflict(session.as_ref(), &creation, &creation_outcome).await;
             let _ = this.update(cx, |composer, cx| {
                 composer.apply_submission(creation_outcome, conflict_recovery, cx);
             });
@@ -266,9 +254,9 @@ where
             return;
         };
         self.status = CreationStatus::DiscardingRejected;
-        let workflow = Arc::clone(&self.workflow);
+        let session = Arc::clone(&self.session);
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let result = workflow.discard_rejected_event_creation(&creation).await;
+            let result = session.discard_rejected_event_creation(&creation).await;
             let _ = this.update(cx, |composer, cx| {
                 composer.task = None;
                 match result {
@@ -489,18 +477,9 @@ where
     }
 }
 
-impl<P, C> EventEmitter<EventComposerEvent> for EventComposer<P, C>
-where
-    P: CalendarProvider + 'static,
-    C: CalendarCache + 'static,
-{
-}
+impl<S: CalendarSession + ?Sized + 'static> EventEmitter<EventComposerEvent> for EventComposer<S> {}
 
-impl<P, C> Render for EventComposer<P, C>
-where
-    P: CalendarProvider + 'static,
-    C: CalendarCache + 'static,
-{
+impl<S: CalendarSession + ?Sized + 'static> Render for EventComposer<S> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().semantic_tokens().colors;
         let has_pending_creation = self.creation.is_some();
@@ -533,15 +512,11 @@ fn picker_value(date: civil::Date, hour: u32, minute: u32) -> Option<NaiveDateTi
     .and_hms_opt(hour, minute, 0)
 }
 
-async fn recover_pending_conflict<P, C>(
-    workflow: &CalendarWorkflow<P, C>,
+async fn recover_pending_conflict<S: CalendarSession + ?Sized>(
+    session: &S,
     creation: &CalendarEventCreation,
     creation_outcome: &Result<CalendarEventCreationOutcome, CalendarWorkflowError>,
-) -> Option<Result<Option<PendingCalendarEventCreation>, CalendarWorkflowError>>
-where
-    P: CalendarProvider + 'static,
-    C: CalendarCache + 'static,
-{
+) -> Option<Result<Option<PendingCalendarEventCreation>, CalendarWorkflowError>> {
     if !matches!(
         creation_outcome,
         Err(CalendarWorkflowError::Cache(
@@ -551,7 +526,7 @@ where
         return None;
     }
     Some(
-        workflow
+        session
             .load_cached_view(creation.view())
             .await
             .map(|snapshot| snapshot.pending_creation().cloned()),
@@ -714,14 +689,10 @@ fn status_text(status: CreationStatus) -> Option<&'static str> {
     }
 }
 
-fn render_calendar_permission_review<P, C>(
+fn render_calendar_permission_review<S: CalendarSession + ?Sized + 'static>(
     status_message: AnyElement,
-    cx: &mut Context<EventComposer<P, C>>,
-) -> AnyElement
-where
-    P: CalendarProvider + 'static,
-    C: CalendarCache + 'static,
-{
+    cx: &mut Context<EventComposer<S>>,
+) -> AnyElement {
     div()
         .flex()
         .flex_col()
@@ -795,15 +766,11 @@ fn submit_label(status: CreationStatus, submitting: bool, retrying: bool) -> &'s
     }
 }
 
-fn new_date_picker<P, C>(
+fn new_date_picker<S: CalendarSession + ?Sized + 'static>(
     selected_date_time: NaiveDateTime,
     window: &mut Window,
-    cx: &mut Context<EventComposer<P, C>>,
-) -> Entity<DatePickerState>
-where
-    P: CalendarProvider + 'static,
-    C: CalendarCache + 'static,
-{
+    cx: &mut Context<EventComposer<S>>,
+) -> Entity<DatePickerState> {
     cx.new(|cx| {
         let mut state = DatePickerState::new(window, cx)
             .time_precision(TimePrecision::Minute)
@@ -813,19 +780,15 @@ where
     })
 }
 
-fn new_composer_inputs<P, C>(
+fn new_composer_inputs<S: CalendarSession + ?Sized + 'static>(
     week_start: civil::Date,
     window: &mut Window,
-    cx: &mut Context<EventComposer<P, C>>,
+    cx: &mut Context<EventComposer<S>>,
 ) -> (
     Entity<InputState>,
     Entity<DatePickerState>,
     Entity<DatePickerState>,
-)
-where
-    P: CalendarProvider + 'static,
-    C: CalendarCache + 'static,
-{
+) {
     let subject = cx.new(|cx| InputState::new(window, cx).placeholder("Event title"));
     let start = picker_value(week_start, 9, 0).unwrap_or_else(|| fallback_picker_value(9, 0));
     let end = picker_value(week_start, 9, 30).unwrap_or_else(|| fallback_picker_value(9, 30));
