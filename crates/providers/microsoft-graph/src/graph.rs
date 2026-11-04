@@ -2,6 +2,7 @@
 
 use std::{
     collections::{HashSet, VecDeque},
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -874,6 +875,33 @@ struct WireMessageBody {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WireMessageReadState {
+    is_read: bool,
+}
+
+fn read_state_patch_body(read_state: ReadState) -> Arc<[u8]> {
+    match read_state {
+        ReadState::Read => Arc::from(&b"{\"isRead\":true}"[..]),
+        ReadState::Unread => Arc::from(&b"{\"isRead\":false}"[..]),
+    }
+}
+
+fn confirmed_read_state(response: &[u8], requested: ReadState) -> Result<ReadState, GraphError> {
+    let message = serde_json::from_slice::<WireMessageReadState>(response)
+        .map_err(|_| GraphError::MessageUpdateOutcomeUnknown)?;
+    let confirmed = if message.is_read {
+        ReadState::Read
+    } else {
+        ReadState::Unread
+    };
+    if confirmed != requested {
+        return Err(GraphError::MessageUpdateOutcomeUnknown);
+    }
+    Ok(confirmed)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WireBodyContent {
     content_type: String,
     content: String,
@@ -904,7 +932,7 @@ mod tests {
 
     use super::{
         GraphApi, MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget,
-        WireCalendarEvent, WireFolder, WireMessage,
+        WireCalendarEvent, WireFolder, WireMessage, confirmed_read_state, read_state_patch_body,
     };
     use crate::{
         error::GraphError,
@@ -946,6 +974,30 @@ mod tests {
             GraphTransport::start_for_fixtures().expect("synthetic Graph transport worker starts");
         let handle: GraphTransportHandle = transport.handle();
         (GraphApi::new(authority, handle), transport)
+    }
+
+    #[test]
+    fn read_state_patch_is_minimal_and_requires_server_confirmation() {
+        assert_eq!(
+            read_state_patch_body(ReadState::Read).as_ref(),
+            br#"{"isRead":true}"#
+        );
+        assert_eq!(
+            read_state_patch_body(ReadState::Unread).as_ref(),
+            br#"{"isRead":false}"#
+        );
+        assert_eq!(
+            confirmed_read_state(br#"{"isRead":true}"#, ReadState::Read),
+            Ok(ReadState::Read)
+        );
+        assert_eq!(
+            confirmed_read_state(br#"{"isRead":false}"#, ReadState::Read),
+            Err(GraphError::MessageUpdateOutcomeUnknown)
+        );
+        assert_eq!(
+            confirmed_read_state(br#"{}"#, ReadState::Read),
+            Err(GraphError::MessageUpdateOutcomeUnknown)
+        );
     }
 
     #[tokio::test]

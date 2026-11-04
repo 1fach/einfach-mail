@@ -161,6 +161,15 @@ enum AccountOperationPhase {
     CredentialCommitStarted,
 }
 
+/// Delegated Microsoft Graph permission requested during same-account renewal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountPermissionRequest {
+    /// Repeats the permissions used by the connected account.
+    ReadOnly,
+    /// Adds permission to create, read, update, and delete mail for the user.
+    MailReadWrite,
+}
+
 /// Operations the application needs from a connected-account provider.
 pub trait AccountProvider: Send + Sync {
     /// Restores the saved account, if the provider has a refresh credential.

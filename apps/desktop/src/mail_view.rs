@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     rc::Rc,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -50,6 +51,7 @@ pub(crate) fn bind_message_navigation_keys(cx: &mut App) {
 
 pub(crate) enum MailViewEvent {
     BackToAccount,
+    ReviewMailWritePermission,
 }
 
 pub(crate) struct MailView {
@@ -73,6 +75,9 @@ pub(crate) struct MailView {
     selected_message_id: Option<MessageId>,
     message_state: MessageState,
     message_task: Option<Task<()>>,
+    read_state_update: ReadStateUpdateStatus,
+    read_state_task: Option<Task<()>>,
+    read_state_reconciliation_required: HashSet<FolderReference>,
 }
 
 enum SyncStatus {
@@ -118,6 +123,33 @@ enum MessageState {
     Failed(MailWorkflowError),
 }
 
+enum ReadStateUpdateStatus {
+    Idle,
+    Pending {
+        message_id: MessageId,
+        requested: ReadState,
+    },
+    Confirmed {
+        message_id: MessageId,
+        state: ReadState,
+    },
+    ConfirmedNeedsSync {
+        message_id: MessageId,
+        state: ReadState,
+    },
+    Failed {
+        message_id: MessageId,
+        requested: ReadState,
+        error: MailWorkflowError,
+    },
+}
+
+struct ReadStateUpdateRequest {
+    folder: FolderReference,
+    message_id: MessageId,
+    requested: ReadState,
+}
+
 struct MailSnapshot {
     folders: Vec<MailFolder>,
     selected_folder: Option<FolderReference>,
@@ -154,6 +186,9 @@ impl MailView {
             selected_message_id: None,
             message_state: MessageState::Empty,
             message_task: None,
+            read_state_update: ReadStateUpdateStatus::Idle,
+            read_state_task: None,
+            read_state_reconciliation_required: HashSet::new(),
         };
         view.load_cache_and_sync(cx);
         view
@@ -226,6 +261,7 @@ impl MailView {
         self.selected_message_id = None;
         self.message_state = MessageState::Empty;
         self.message_task = None;
+        self.read_state_update = ReadStateUpdateStatus::Idle;
     }
 
     fn set_messages(&mut self, messages: Vec<MailMessage>) {
@@ -246,6 +282,7 @@ impl MailView {
         sync_result: Result<(), MailWorkflowError>,
         snapshot: Result<MailSnapshot, MailWorkflowError>,
     ) {
+        let sync_reconciled = sync_result.is_ok() && snapshot.is_ok();
         let (status, snapshot) = match (sync_result, snapshot) {
             (_, Err(error)) => (SyncStatus::Failed(error), None),
             (Err(error), Ok(snapshot)) => (SyncStatus::Failed(error), Some(snapshot)),
@@ -254,12 +291,16 @@ impl MailView {
         if let Some(snapshot) = snapshot {
             self.apply_snapshot(snapshot);
         }
+        if sync_reconciled {
+            self.read_state_reconciliation_required.clear();
+        }
         self.sync_status = status;
     }
 
     pub(crate) fn stop_pending_work(&mut self) {
         drop(self.sync_task.take());
         drop(self.message_task.take());
+        drop(self.read_state_task.take());
         self.sync_running = false;
         self.selected_folder = None;
         self.selected_message_id = None;
@@ -267,9 +308,13 @@ impl MailView {
         self.folders.clear();
         self.messages.clear();
         self.message_state = MessageState::Empty;
+        self.read_state_update = ReadStateUpdateStatus::Idle;
     }
 
     fn select_folder(&mut self, folder: FolderReference, cx: &mut Context<Self>) {
+        if self.read_state_task.is_some() {
+            return;
+        }
         if self.selected_folder.as_ref() == Some(&folder) {
             return;
         }
@@ -277,6 +322,7 @@ impl MailView {
         self.sync_state = None;
         self.selected_message_id = None;
         self.message_state = MessageState::Loading;
+        self.read_state_update = ReadStateUpdateStatus::Idle;
         self.set_messages(Vec::new());
         let workflow = Arc::clone(&self.workflow);
         self.message_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -304,6 +350,9 @@ impl MailView {
     }
 
     fn select_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        if self.read_state_task.is_some() {
+            return;
+        }
         if !self
             .messages
             .iter()
@@ -340,7 +389,7 @@ impl MailView {
     }
 
     fn navigate_message(&mut self, navigation: MessageNavigation, cx: &mut Context<Self>) {
-        if self.sync_running {
+        if self.sync_running || self.read_state_task.is_some() {
             return;
         }
         let selected_index = self.selected_message_id.as_ref().and_then(|selected| {
@@ -414,7 +463,7 @@ impl MailView {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.sync_running {
+        if self.sync_running || self.read_state_task.is_some() {
             return;
         }
         self.sync_running = true;
@@ -546,13 +595,15 @@ impl MailView {
                             .ghost()
                             .label("Sync")
                             .loading(self.sync_running)
-                            .disabled(self.sync_running)
+                            .disabled(self.sync_running || self.read_state_task.is_some())
                             .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
                     )
                     .child(
                         Button::new("account")
+                            .debug_selector(|| "mail-account-navigation".to_owned())
                             .ghost()
                             .label("Account")
+                            .disabled(self.read_state_task.is_some())
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(MailViewEvent::BackToAccount);
                             })),
@@ -625,6 +676,7 @@ impl MailView {
                     .ghost()
                     .selected(self.selected_folder.as_ref() == Some(&reference))
                     .label(folder.display_name().to_owned())
+                    .disabled(self.sync_running || self.read_state_task.is_some())
                     .on_click(cx.listener(move |view, _, _, cx| {
                         view.select_folder(reference.clone(), cx);
                     })),
@@ -737,7 +789,13 @@ impl MailView {
                                                 .rounded_md()
                                                 .text_color(colors.foreground)
                                                 .role(Role::ListBoxOption)
-                                                .aria_label(accessible_label)
+                                                .aria_label(if view.read_state_task.is_some() {
+                                                    format!(
+                                                        "{accessible_label}, read-state update pending"
+                                                    )
+                                                } else {
+                                                    accessible_label
+                                                })
                                                 .aria_position_in_set(index + 1)
                                                 .aria_size_of_set(list_size)
                                                 .aria_selected(selected)
@@ -771,16 +829,18 @@ impl MailView {
                                                             div().w_full().text_sm().child(subject),
                                                         ),
                                                 )
-                                                .on_click(cx.listener(
-                                                    move |view, _, window, cx| {
-                                                        view.select_message_from_option(
-                                                            message_id.clone(),
-                                                            &expected_folder,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
+                                                .when(view.read_state_task.is_none(), |option| {
+                                                    option.on_click(cx.listener(
+                                                        move |view, _, window, cx| {
+                                                            view.select_message_from_option(
+                                                                message_id.clone(),
+                                                                &expected_folder,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
+                                                }),
                                         )
                                     })
                                     .collect()
@@ -793,7 +853,11 @@ impl MailView {
             .into_any_element()
     }
 
-    fn render_message_detail(&self, colors: ColorTokens) -> impl IntoElement {
+    fn render_message_detail(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         match &self.message_state {
             MessageState::Empty => div()
                 .flex_1()
@@ -824,6 +888,7 @@ impl MailView {
                 .into_any_element(),
             MessageState::Opened(opened) => {
                 let metadata = opened.message().metadata();
+                let message_id = opened.message().id();
                 let body = render_message_body(opened.body(), colors);
                 div()
                     .flex_1()
@@ -841,21 +906,172 @@ impl MailView {
                             .border_color(colors.border)
                             .child(
                                 div()
-                                    .text_lg()
-                                    .font_bold()
-                                    .child(metadata.subject().unwrap_or("(No subject)").to_owned()),
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(div().text_lg().font_bold().child(
+                                        metadata.subject().unwrap_or("(No subject)").to_owned(),
+                                    ))
+                                    .child(self.render_read_state_action(message_id, cx)),
                             )
                             .child(
                                 div()
                                     .text_sm()
                                     .text_color(colors.muted_foreground)
                                     .child(message_sender(opened.message())),
-                            ),
+                            )
+                            .children(self.render_read_state_feedback(message_id, cx))
+                            .children(self.render_read_state_reconciliation_notice()),
                     )
                     .child(body)
                     .into_any_element()
             }
         }
+    }
+
+    fn render_read_state_action(
+        &self,
+        message_id: &MessageId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let read_state = self
+            .messages
+            .iter()
+            .find(|message| message.id() == message_id)
+            .map(|message| message.metadata().read_state());
+        let pending = matches!(
+            &self.read_state_update,
+            ReadStateUpdateStatus::Pending {
+                message_id: pending_id,
+                ..
+            } if pending_id == message_id
+        );
+        let label = match (pending, read_state) {
+            (true, _) => "Updating…",
+            (false, Some(ReadState::Read)) => "Mark unread",
+            (false, Some(ReadState::Unread)) => "Mark read",
+            (false, None) => "Mark read",
+        };
+        let reconciliation_required = self
+            .selected_folder
+            .as_ref()
+            .is_some_and(|folder| self.read_state_reconciliation_required.contains(folder));
+        let sync_failed = matches!(&self.sync_status, SyncStatus::Failed(_));
+        Button::new("message-read-state")
+            .ghost()
+            .debug_selector(|| "message-read-state".to_owned())
+            .label(label)
+            .loading(pending)
+            .disabled(
+                self.sync_running
+                    || self.read_state_task.is_some()
+                    || reconciliation_required
+                    || sync_failed
+                    || read_state.is_none(),
+            )
+            .on_click(cx.listener(|view, _, _, cx| view.update_selected_read_state(cx)))
+            .into_any_element()
+    }
+
+    fn render_read_state_feedback(
+        &self,
+        message_id: &MessageId,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (message, role) = match &self.read_state_update {
+            ReadStateUpdateStatus::Idle => return None,
+            ReadStateUpdateStatus::Pending {
+                message_id: pending_id,
+                requested,
+            } if pending_id == message_id => {
+                (read_state_progress_message(*requested), Role::Status)
+            }
+            ReadStateUpdateStatus::Confirmed {
+                message_id: confirmed_id,
+                state,
+            } if confirmed_id == message_id => (
+                read_state_confirmed_message(*state).to_owned(),
+                Role::Status,
+            ),
+            ReadStateUpdateStatus::ConfirmedNeedsSync {
+                message_id: confirmed_id,
+                state,
+            } if confirmed_id == message_id => (
+                read_state_cache_sync_message(*state).to_owned(),
+                Role::Status,
+            ),
+            ReadStateUpdateStatus::Failed {
+                message_id: failed_id,
+                requested,
+                error,
+            } if failed_id == message_id => {
+                (read_state_failure_message(*requested, *error), Role::Alert)
+            }
+            _ => return None,
+        };
+        let colors = cx.theme().semantic_tokens().colors;
+        let feedback = div()
+            .id("message-read-state-feedback")
+            .debug_selector(|| "message-read-state-feedback".to_owned())
+            .role(role)
+            .text_sm()
+            .text_color(if role == Role::Alert {
+                colors.destructive
+            } else {
+                colors.muted_foreground
+            })
+            .child(message);
+        if matches!(
+            &self.read_state_update,
+            ReadStateUpdateStatus::Failed {
+                message_id: failed_id,
+                error: MailWorkflowError::Provider(MailOperationError::AccessDenied),
+                ..
+            } if failed_id == message_id
+        ) {
+            Some(
+                feedback
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        Button::new("review-mail-permissions-from-message")
+                            .ghost()
+                            .debug_selector(|| "review-mail-permissions-from-message".to_owned())
+                            .label("Review mail permissions…")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(MailViewEvent::ReviewMailWritePermission);
+                            })),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            Some(feedback.into_any_element())
+        }
+    }
+
+    fn render_read_state_reconciliation_notice(&self) -> Option<AnyElement> {
+        let folder = self.selected_folder.as_ref()?;
+        let reconciliation_required = self.read_state_reconciliation_required.contains(folder);
+        let sync_failed = matches!(&self.sync_status, SyncStatus::Failed(_));
+        if !reconciliation_required && !sync_failed {
+            return None;
+        }
+        let message = if reconciliation_required {
+            "Microsoft may have changed a message, but Einfach Mail could not confirm its read state. Sync mail before changing messages in this folder again."
+        } else {
+            "Mail sync failed. Sync successfully before changing a message's read state."
+        };
+        Some(
+            div()
+                .id("read-state-reconciliation")
+                .debug_selector(|| "read-state-reconciliation".to_owned())
+                .role(Role::Alert)
+                .text_sm()
+                .child(message)
+                .into_any_element(),
+        )
     }
 }
 
@@ -1008,8 +1224,65 @@ impl Render for MailView {
                     .flex()
                     .child(self.render_folder_sidebar(colors, cx))
                     .child(self.render_message_list(colors, cx))
-                    .child(self.render_message_detail(colors)),
+                    .child(self.render_message_detail(colors, cx)),
             )
+    }
+}
+
+fn read_state_progress_message(state: ReadState) -> String {
+    match state {
+        ReadState::Read => "Marking the message as read…".to_owned(),
+        ReadState::Unread => "Marking the message as unread…".to_owned(),
+    }
+}
+
+fn read_state_confirmed_message(state: ReadState) -> &'static str {
+    match state {
+        ReadState::Read => "Marked read",
+        ReadState::Unread => "Marked unread",
+    }
+}
+
+fn read_state_cache_sync_message(state: ReadState) -> &'static str {
+    match state {
+        ReadState::Read => {
+            "Microsoft marked this message read. Sync mail to update the encrypted cache."
+        }
+        ReadState::Unread => {
+            "Microsoft marked this message unread. Sync mail to update the encrypted cache."
+        }
+    }
+}
+
+fn read_state_failure_message(state: ReadState, error: MailWorkflowError) -> String {
+    match error {
+        MailWorkflowError::Provider(MailOperationError::AccessDenied) => {
+            "Microsoft denied the change. Review mail permissions or check your organization's consent policies.".to_owned()
+        }
+        MailWorkflowError::Provider(MailOperationError::SignInRequired) => {
+            "Your Microsoft sign-in needs attention. Return to Accounts and reconnect.".to_owned()
+        }
+        MailWorkflowError::Provider(MailOperationError::RateLimited { .. }) => {
+            "Microsoft asked Einfach Mail to wait before retrying. Try again later.".to_owned()
+        }
+        MailWorkflowError::Provider(MailOperationError::MessageUpdateOutcomeUnknown) => {
+            "Microsoft may have changed this message's read state, but Einfach Mail could not confirm it. Sync mail before trying again.".to_owned()
+        }
+        MailWorkflowError::Provider(MailOperationError::ServiceUnavailable) => format!(
+            "Couldn’t mark the message {}. Check your connection and try again.",
+            read_state_word(state)
+        ),
+        _ => format!(
+            "Couldn’t mark the message {}. Sync mail and try again.",
+            read_state_word(state)
+        ),
+    }
+}
+
+fn read_state_word(state: ReadState) -> &'static str {
+    match state {
+        ReadState::Read => "read",
+        ReadState::Unread => "unread",
     }
 }
 
@@ -1462,11 +1735,43 @@ mod tests {
         fn commit_delta_page(
             &self,
             _: &FolderReference,
-            _: &MailSyncState,
-            _: MessageDeltaPage,
-            _: SystemTime,
+            expected_state: &MailSyncState,
+            page: MessageDeltaPage,
+            completed_at: SystemTime,
         ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_ {
-            ready(Err(MailCacheError::InvalidData))
+            let changes_empty = page.changes().is_empty();
+            let progress = page.into_parts().1;
+            let mut data = self.0.lock().expect("fixture cache mutex is healthy");
+            let Some(current) = data.sync_state.as_ref() else {
+                return ready(Err(MailCacheError::InvalidData));
+            };
+            if current != expected_state {
+                return ready(Err(MailCacheError::SyncStateChanged));
+            }
+            let MessageDeltaProgress::Complete(delta_link) = progress else {
+                return ready(Err(MailCacheError::InvalidData));
+            };
+            if !changes_empty {
+                return ready(Err(MailCacheError::InvalidData));
+            }
+            let Some(checkpoint_revision) = current.checkpoint_revision().checked_add(1) else {
+                return ready(Err(MailCacheError::InvalidData));
+            };
+            let state = MailSyncState::from_checkpoint(
+                current.cutoff(),
+                Some(delta_link),
+                None,
+                Some(completed_at),
+                current.full_sync_generation(),
+                checkpoint_revision,
+            );
+            match state {
+                Ok(state) => {
+                    data.sync_state = Some(state.clone());
+                    ready(Ok(state))
+                }
+                Err(error) => ready(Err(error)),
+            }
         }
 
         fn begin_full_resync(
@@ -1553,6 +1858,57 @@ mod tests {
                     .find(|message| message.id() == &message_id)
                     .cloned()
                     .map(|message| (message, data.body.clone())))
+            }
+        }
+
+        fn message_read_state(
+            &self,
+            folder: &FolderReference,
+            message_id: &MessageId,
+        ) -> impl Future<Output = Result<Option<ReadState>, MailCacheError>> + Send + '_ {
+            let folder = folder.clone();
+            let message_id = message_id.clone();
+            async move {
+                let data = self.0.lock().expect("fixture cache mutex is healthy");
+                if data
+                    .account_id
+                    .as_ref()
+                    .is_some_and(|account_id| account_id != folder.account_id())
+                {
+                    return Err(MailCacheError::AccountMismatch);
+                }
+                Ok(data
+                    .messages
+                    .iter()
+                    .find(|message| message.folder() == &folder && message.id() == &message_id)
+                    .map(|message| message.metadata().read_state()))
+            }
+        }
+
+        fn set_message_read_state(
+            &self,
+            folder: &FolderReference,
+            message_id: &MessageId,
+            read_state: ReadState,
+        ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+            let folder = folder.clone();
+            let message_id = message_id.clone();
+            async move {
+                let mut data = self.0.lock().expect("fixture cache mutex is healthy");
+                if let Some(error) = data.read_state_write_error {
+                    return Err(error);
+                }
+                let Some(message) = data
+                    .messages
+                    .iter_mut()
+                    .find(|message| message.folder() == &folder && message.id() == &message_id)
+                else {
+                    return Err(MailCacheError::MessageNotCached);
+                };
+                let mut patch = MessageMetadataPatch::new();
+                patch.set_read_state(read_state);
+                message.apply_patch(patch);
+                Ok(())
             }
         }
 
@@ -1897,6 +2253,355 @@ mod tests {
         });
         assert!(opened_offline);
         assert_eq!(body_fetches.load(Ordering::Relaxed), 0);
+    }
+
+    #[gpui_kit::test]
+    async fn confirmed_read_state_updates_the_view_and_encrypted_cache(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let folder = FolderReference::new(
+            account.clone(),
+            FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let (profile, cache, message_id) = fixture(account);
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Arc::new(MailWorkflow::new(
+            ReadStateProvider::new(ReadStateActionResponse::Confirm, Arc::clone(&updates)),
+            cache.clone(),
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+
+        open_cached_message_and_click_read_state(context);
+
+        assert_eq!(
+            context.cx.update(|cx| {
+                view.read(cx)
+                    .messages
+                    .iter()
+                    .find(|message| message.id() == &message_id)
+                    .map(|message| message.metadata().read_state())
+            }),
+            Some(ReadState::Read)
+        );
+        assert!(context.cx.update(|cx| matches!(
+            &view.read(cx).read_state_update,
+            ReadStateUpdateStatus::Confirmed {
+                state: ReadState::Read,
+                ..
+            }
+        )));
+        assert_eq!(
+            updates
+                .lock()
+                .expect("fixture read-state log mutex is healthy")
+                .as_slice(),
+            [(message_id.clone(), ReadState::Read)]
+        );
+        assert_eq!(
+            cache
+                .message_read_state(&folder, &message_id)
+                .await
+                .expect("confirmed state is readable from the cache"),
+            Some(ReadState::Read)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn failed_initial_mail_sync_keeps_read_state_changes_disabled(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, message_id) = fixture(account);
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Arc::new(MailWorkflow::new(
+            ReadStateProvider::new(ReadStateActionResponse::Confirm, Arc::clone(&updates))
+                .with_sync_failure(),
+            cache,
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+
+        context.run_until_parked();
+        draw_mail_view(context);
+        let row_bounds = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached message remains visible after sync failure");
+        context.simulate_click(row_bounds.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+        let action_bounds = context
+            .debug_bounds("message-read-state")
+            .expect("read-state action remains visible after sync failure");
+        context.simulate_click(action_bounds.center(), Modifiers::default());
+        context.run_until_parked();
+
+        assert!(context.cx.update(|cx| {
+            let view = view.read(cx);
+            view.selected_read_state_request().is_none()
+                && matches!(&view.read_state_update, ReadStateUpdateStatus::Idle)
+        }));
+        assert!(context.debug_bounds("read-state-reconciliation").is_some());
+        assert!(
+            updates
+                .lock()
+                .expect("fixture read-state log mutex is healthy")
+                .is_empty()
+        );
+        let state = context.cx.update(|cx| {
+            view.read(cx)
+                .messages
+                .iter()
+                .find(|message| message.id() == &message_id)
+                .map(|message| message.metadata().read_state())
+        });
+        assert_eq!(state, Some(ReadState::Unread));
+    }
+
+    #[gpui_kit::test]
+    async fn confirmed_read_state_stays_visible_when_cache_write_fails(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let folder = FolderReference::new(
+            account.clone(),
+            FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let (profile, cache, message_id) = fixture(account);
+        cache
+            .0
+            .lock()
+            .expect("fixture cache mutex is healthy")
+            .read_state_write_error = Some(MailCacheError::Unavailable);
+        let workflow = Arc::new(MailWorkflow::new(
+            ReadStateProvider::new(
+                ReadStateActionResponse::Confirm,
+                Arc::new(Mutex::new(Vec::new())),
+            ),
+            cache.clone(),
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+
+        open_cached_message_and_click_read_state(context);
+
+        let (visible_state, needs_sync) = context.cx.update(|cx| {
+            let view = view.read(cx);
+            let visible_state = view
+                .messages
+                .iter()
+                .find(|message| message.id() == &message_id)
+                .map(|message| message.metadata().read_state());
+            let needs_sync = matches!(
+                &view.read_state_update,
+                ReadStateUpdateStatus::ConfirmedNeedsSync {
+                    state: ReadState::Read,
+                    ..
+                }
+            );
+            (visible_state, needs_sync)
+        });
+        assert_eq!(visible_state, Some(ReadState::Read));
+        assert!(needs_sync);
+        assert_eq!(
+            cache
+                .message_read_state(&folder, &message_id)
+                .await
+                .expect("cache remains readable after a failed write"),
+            Some(ReadState::Unread)
+        );
+        assert!(
+            context
+                .debug_bounds("message-read-state-feedback")
+                .is_some()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn uncertain_read_state_shows_sync_guidance_and_blocks_another_write(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, message_id) = fixture(account);
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Arc::new(MailWorkflow::new(
+            ReadStateProvider::new(ReadStateActionResponse::Unconfirmed, Arc::clone(&updates)),
+            cache,
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+
+        open_cached_message_and_click_read_state(context);
+
+        let (state, request_blocked) = context.cx.update(|cx| {
+            let view = view.read(cx);
+            let state = view
+                .messages
+                .iter()
+                .find(|message| message.id() == &message_id)
+                .map(|message| message.metadata().read_state());
+            let request_blocked = view.selected_read_state_request().is_none();
+            (state, request_blocked)
+        });
+        assert_eq!(state, Some(ReadState::Unread));
+        assert!(request_blocked);
+        assert!(
+            context
+                .debug_bounds("message-read-state-feedback")
+                .is_some()
+        );
+        assert!(context.debug_bounds("read-state-reconciliation").is_some());
+
+        let action_bounds = context
+            .debug_bounds("message-read-state")
+            .expect("read-state action remains visible");
+        context.simulate_click(action_bounds.center(), Modifiers::default());
+        context.run_until_parked();
+        assert_eq!(
+            updates
+                .lock()
+                .expect("fixture read-state log mutex is healthy")
+                .as_slice(),
+            [(message_id, ReadState::Read)]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn pending_read_state_keeps_account_navigation_open(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, _) = fixture(account);
+        let workflow = Arc::new(MailWorkflow::new(
+            ReadStateProvider::new(
+                ReadStateActionResponse::Pending,
+                Arc::new(Mutex::new(Vec::new())),
+            ),
+            cache,
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        let navigation_requested = Arc::new(AtomicBool::new(false));
+        let observed_navigation = Arc::clone(&navigation_requested);
+        let _subscription = context.cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &MailViewEvent, _| {
+                if matches!(event, MailViewEvent::BackToAccount) {
+                    observed_navigation.store(true, Ordering::Relaxed);
+                }
+            })
+        });
+
+        context.run_until_parked();
+        draw_mail_view(context);
+        let row_bounds = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached message row is rendered");
+        context.simulate_click(row_bounds.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+        let action_bounds = context
+            .debug_bounds("message-read-state")
+            .expect("opened message exposes its read-state action");
+        context.simulate_click(action_bounds.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+        assert!(context.cx.update(|cx| matches!(
+            &view.read(cx).read_state_update,
+            ReadStateUpdateStatus::Pending {
+                requested: ReadState::Read,
+                ..
+            }
+        )));
+
+        let account_bounds = context
+            .debug_bounds("mail-account-navigation")
+            .expect("account navigation remains visible while the write is pending");
+        context.simulate_click(account_bounds.center(), Modifiers::default());
+        context.run_until_parked();
+        assert!(!navigation_requested.load(Ordering::Relaxed));
+    }
+
+    #[gpui_kit::test]
+    fn denied_read_state_offers_account_permission_review(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, message_id) = fixture(account);
+        let workflow = Arc::new(MailWorkflow::new(
+            ReadStateProvider::new(
+                ReadStateActionResponse::Deny,
+                Arc::new(Mutex::new(Vec::new())),
+            ),
+            cache.clone(),
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        let permission_review_requested = Arc::new(AtomicBool::new(false));
+        let observed_review = Arc::clone(&permission_review_requested);
+        let _subscription = context.cx.update(|cx| {
+            cx.subscribe(&view, move |_, event: &MailViewEvent, _| {
+                if matches!(event, MailViewEvent::ReviewMailWritePermission) {
+                    observed_review.store(true, Ordering::Relaxed);
+                }
+            })
+        });
+
+        open_cached_message_and_click_read_state(context);
+
+        let review_bounds = context
+            .debug_bounds("review-mail-permissions-from-message")
+            .expect("denied write offers permission review");
+        context.simulate_click(review_bounds.center(), Modifiers::default());
+        context.run_until_parked();
+        assert!(permission_review_requested.load(Ordering::Relaxed));
+        assert_eq!(
+            cache
+                .0
+                .lock()
+                .expect("fixture cache mutex is healthy")
+                .messages
+                .iter()
+                .find(|message| message.id() == &message_id)
+                .map(|message| message.metadata().read_state()),
+            Some(ReadState::Unread)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn offline_read_state_shows_retry_guidance(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, _) = fixture(account);
+        let workflow = Arc::new(MailWorkflow::new(
+            ReadStateProvider::new(
+                ReadStateActionResponse::Offline,
+                Arc::new(Mutex::new(Vec::new())),
+            ),
+            cache,
+        ));
+        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+
+        open_cached_message_and_click_read_state(context);
+
+        assert!(context.cx.update(|cx| matches!(
+            &view.read(cx).read_state_update,
+            ReadStateUpdateStatus::Failed {
+                error: MailWorkflowError::Provider(MailOperationError::ServiceUnavailable),
+                ..
+            }
+        )));
+        assert!(
+            context
+                .debug_bounds("message-read-state-feedback")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn offline_read_state_failure_explains_how_to_retry() {
+        assert_eq!(
+            read_state_failure_message(
+                ReadState::Read,
+                MailWorkflowError::Provider(MailOperationError::ServiceUnavailable),
+            ),
+            "Couldn’t mark the message read. Check your connection and try again."
+        );
     }
 
     #[gpui_kit::test]

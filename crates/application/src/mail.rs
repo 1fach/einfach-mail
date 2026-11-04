@@ -29,6 +29,9 @@ pub enum MailOperationError {
         /// The advised delay, or `None` when the provider could not represent it.
         retry_after: Option<Duration>,
     },
+    /// The read-state change may have reached the provider without exact confirmation.
+    #[error("the message read-state update outcome is unknown")]
+    MessageUpdateOutcomeUnknown,
     /// The Linux credential service could not read or rotate a token.
     #[error("the Linux credential service is unavailable")]
     CredentialStoreUnavailable,

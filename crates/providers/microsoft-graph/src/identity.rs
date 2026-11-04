@@ -20,7 +20,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::CallbackPort;
-use einfach_mail_application::AccountOperationError;
+use einfach_mail_application::{AccountOperationError, AccountPermissionRequest};
 
 const CALLBACK_PATH: &str = "/callback";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(600);
@@ -292,6 +292,13 @@ impl AuthorizationParameters {
     }
 }
 
+fn authorization_scopes(request: AccountPermissionRequest) -> &'static [&'static str] {
+    match request {
+        AccountPermissionRequest::ReadOnly => &READ_ONLY_AUTHORIZATION_SCOPES,
+        AccountPermissionRequest::MailReadWrite => &MAIL_READ_WRITE_AUTHORIZATION_SCOPES,
+    }
+}
+
 fn unique_query_value(url: &Url, expected_name: &str) -> Option<String> {
     let mut matching_values = url.query_pairs().filter_map(|(query_name, query_value)| {
         (query_name == expected_name).then(|| query_value.into_owned())
@@ -457,6 +464,16 @@ mod tests {
                 &BASE_AUTHORIZATION_SCOPES,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn requests_mail_write_scope_only_for_the_explicit_permission_update() {
+        let requested = authorization_scopes(AccountPermissionRequest::MailReadWrite);
+        assert_eq!(requested, &MAIL_READ_WRITE_AUTHORIZATION_SCOPES);
+        assert!(requested.contains(&"Mail.ReadWrite"));
+        assert!(
+            !authorization_scopes(AccountPermissionRequest::ReadOnly).contains(&"Mail.ReadWrite")
         );
     }
 }

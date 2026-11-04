@@ -292,6 +292,34 @@ pub trait MailCache: Send + Sync {
     + Send
     + '_;
 
+    /// Returns the cached read state for a message in `folder`.
+    ///
+    /// `Ok(None)` means the message is not cached under this folder identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account or
+    /// [`MailCacheError::Unavailable`] when the cache cannot be read.
+    fn message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> impl Future<Output = Result<Option<ReadState>, MailCacheError>> + Send + '_;
+
+    /// Stores a confirmed read state for a message that remains in `folder`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::MessageNotCached`] when the message is absent,
+    /// [`MailCacheError::Unavailable`] when the write fails.
+    fn set_message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        read_state: ReadState,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
     /// Stores an opened raw body only when its message remains in the folder cache.
     ///
     /// # Errors

@@ -11,6 +11,7 @@ use einfach_mail_domain::AccountProfile;
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
+    scroll::ScrollableElement,
 };
 use gpui_kit::{
     AsyncApp, Context, Entity, IntoElement, Render, Role, Subscription, Task, Window, div,
@@ -159,6 +160,7 @@ pub(super) struct AccountView<P: AccountProvider + 'static> {
     account_session: Option<Arc<dyn AccountSession>>,
     setup_issue: Option<SetupIssue>,
     status: AccountStatus,
+    pending_permission_review: Option<AccountPermissionRequest>,
     opening_content: Option<OpeningContent>,
     session_open_error: Option<MailCacheError>,
     mail_view: Option<Entity<MailView>>,
@@ -172,6 +174,17 @@ pub(super) struct AccountView<P: AccountProvider + 'static> {
 enum OpeningContent {
     Mail,
     Calendar,
+}
+
+fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static str {
+    match request {
+        AccountPermissionRequest::ReadOnly => {
+            "Microsoft will review the existing delegated access: User.Read, Mail.Read, Calendars.Read, and offline_access."
+        }
+        AccountPermissionRequest::MailReadWrite => {
+            "Microsoft grants Mail.ReadWrite the ability to create, read, update, and delete mail in this account. Einfach Mail requests it to set messages read or unread after Microsoft denied that action. The app does not request Mail.Send, and this permission review does not send or change a message. Continue opens Microsoft in your system browser."
+        }
+    }
 }
 
 impl<P: AccountProvider + 'static> AccountView<P> {
@@ -190,6 +203,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             account_session: None,
             setup_issue,
             status,
+            pending_permission_review: None,
             opening_content: None,
             session_open_error: None,
             mail_view: None,
@@ -286,7 +300,31 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         cx.notify();
     }
 
-    fn reauthorize(&mut self, cx: &mut Context<Self>) {
+    fn prepare_permission_review(
+        &mut self,
+        request: AccountPermissionRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if self.opening_content.is_some() || self.status.connected_profile().is_none() {
+            return;
+        }
+        self.pending_permission_review = Some(request);
+        cx.notify();
+    }
+
+    fn continue_permission_review(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self.pending_permission_review.take() else {
+            return;
+        };
+        self.reauthorize(request, cx);
+    }
+
+    fn cancel_permission_review(&mut self, cx: &mut Context<Self>) {
+        self.pending_permission_review = None;
+        cx.notify();
+    }
+
+    fn reauthorize(&mut self, request: AccountPermissionRequest, cx: &mut Context<Self>) {
         let Some(workflow) = self.workflow.clone() else {
             return;
         };
@@ -294,17 +332,25 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         };
         let cancellation = AccountOperationCancellation::new();
+        self.pending_permission_review = None;
         self.status = AccountStatus::Reauthorizing {
             profile: profile.clone(),
             cancellation: cancellation.clone(),
         };
-        self.task = Some(Self::reauthorize_task(workflow, profile, cancellation, cx));
+        self.task = Some(Self::reauthorize_task(
+            workflow,
+            profile,
+            request,
+            cancellation,
+            cx,
+        ));
         cx.notify();
     }
 
     fn reauthorize_task(
         workflow: Arc<AccountWorkflow<P>>,
         profile: AccountProfile,
+        request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
         cx: &mut Context<Self>,
     ) -> Task<()> {
@@ -318,6 +364,9 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.task = None;
+                if reauthorization_result.is_err() {
+                    view.pending_permission_review = Some(request);
+                }
                 view.status = match reauthorization_result {
                     Ok(profile) => AccountStatus::Connected(profile),
                     Err(error) => AccountStatus::ReauthorizationFailed { profile, error },
@@ -439,6 +488,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                                     MailViewEvent::BackToAccount => {
                                         drop(view.close_mail_view(cx));
                                         cx.notify();
+                                    }
+                                    MailViewEvent::ReviewMailWritePermission => {
+                                        drop(view.close_mail_view(cx));
+                                        view.prepare_permission_review(
+                                            AccountPermissionRequest::MailReadWrite,
+                                            cx,
+                                        );
                                     }
                                 }
                             });
@@ -624,7 +680,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 div()
                     .text_sm()
                     .text_color(colors.muted_foreground)
-                    .child("User.Read lets Einfach Mail display your account identity. Mail.Read lets it read your mail. Calendars.Read lets it read your primary calendar. offline_access lets it refresh your sign-in. Einfach Mail cannot send mail or change calendar events."),
+                    .child("Initial sign-in requests User.Read, Mail.Read, Calendars.Read, and offline_access. Mail.Read lets Einfach Mail read your mail, and Calendars.Read lets it read your primary calendar. If Microsoft denies a read-state change, a separate review can request Mail.ReadWrite, which permits creating, reading, updating, and deleting mail. The app uses the resulting access for its existing mail-reading features and to set messages read or unread. It does not request Mail.Send or calendar-write permissions."),
             )
     }
 
@@ -724,16 +780,57 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn render_permission_review(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .justify_center()
-            .debug_selector(|| "review-app-permissions".to_owned())
-            .child(
-                Button::new("review-app-permissions")
-                    .label("Review sign-in permissions")
-                    .disabled(self.opening_content.is_some())
-                    .on_click(cx.listener(|view, _, _, cx| view.reauthorize(cx))),
-            )
+        if let Some(request) = self.pending_permission_review {
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .id("permission-review-disclosure")
+                .debug_selector(|| "permission-review-disclosure".to_owned())
+                .role(Role::Alert)
+                .child(permission_review_disclosure(request))
+                .child(
+                    div()
+                        .flex()
+                        .justify_center()
+                        .gap_2()
+                        .child(
+                            Button::new("continue-permission-review")
+                                .debug_selector(|| "continue-permission-review".to_owned())
+                                .primary()
+                                .label("Continue to Microsoft")
+                                .disabled(self.task.is_some() || self.opening_content.is_some())
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.continue_permission_review(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("cancel-permission-review")
+                                .debug_selector(|| "cancel-permission-review".to_owned())
+                                .ghost()
+                                .label("Cancel")
+                                .disabled(self.task.is_some())
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.cancel_permission_review(cx);
+                                })),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .justify_center()
+                .child(
+                    Button::new("review-app-permissions")
+                        .debug_selector(|| "review-app-permissions".to_owned())
+                        .label("Review sign-in permissions")
+                        .disabled(self.opening_content.is_some() || self.task.is_some())
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.prepare_permission_review(AccountPermissionRequest::ReadOnly, cx);
+                        })),
+                )
+                .into_any_element()
+        }
     }
 
     fn render_progress_action(label: &'static str) -> gpui_kit::Div {
@@ -885,9 +982,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             &self.status,
             AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. }
         ) {
-            content = content
-                .child(self.render_permission_review(cx))
-                .child(self.render_saved_sign_out(cx, "Sign out"));
+            content = content.child(self.render_permission_review(cx));
+            if self.pending_permission_review.is_none() {
+                content = content.child(self.render_saved_sign_out(cx, "Sign out"));
+            }
         }
         if matches!(
             &self.status,
@@ -919,12 +1017,18 @@ impl<P: AccountProvider + 'static> Render for AccountView<P> {
         let colors = cx.theme().semantic_tokens().colors;
         div()
             .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_8()
+            .overflow_y_scrollbar()
+            .id("account-scroll-viewport")
             .bg(colors.background)
-            .child(self.render_account_content(colors, cx))
+            .child(
+                div()
+                    .min_h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_8()
+                    .child(self.render_account_content(colors, cx)),
+            )
             .into_any_element()
     }
 }
@@ -970,7 +1074,10 @@ mod tests {
 
     use tokio::sync::oneshot;
 
-    use gpui_kit::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};
+    use gpui_kit::{
+        AppContext as _, Modifiers, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext,
+        point, px, size,
+    };
 
     use super::{AccountStatus, AccountView, SetupIssue};
     use einfach_mail_application::{
@@ -987,6 +1094,7 @@ mod tests {
         pause_permission_update: Arc<AtomicBool>,
         connection_commit: Arc<Mutex<Option<CommitGate>>>,
         permission_commit: Arc<Mutex<Option<CommitGate>>>,
+        last_permission_request: Arc<Mutex<Option<AccountPermissionRequest>>>,
     }
 
     struct CommitGate {
@@ -1069,6 +1177,10 @@ mod tests {
             cancellation: AccountOperationCancellation,
         ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
         {
+            *self
+                .last_permission_request
+                .lock()
+                .expect("synthetic permission request mutex is not poisoned") = Some(request);
             let pause_permission_update = Arc::clone(&self.pause_permission_update);
             let commit_gate = self
                 .permission_commit
@@ -1119,12 +1231,48 @@ mod tests {
         });
     }
 
+    fn scroll_account_action_into_view(context: &mut VisualTestContext, selector: &'static str) {
+        let Some(mut bounds) = context.debug_bounds(selector) else {
+            panic!("account action `{selector}` is not rendered");
+        };
+        let viewport = context.update(|window, _| window.bounds());
+        for _ in 0..4 {
+            if bounds.top() >= viewport.top() && bounds.bottom() <= viewport.bottom() {
+                break;
+            }
+            let delta_y = if bounds.top() < viewport.top() {
+                1_200.
+            } else {
+                -1_200.
+            };
+            scroll_account_view(context, delta_y);
+            bounds = context
+                .debug_bounds(selector)
+                .expect("account action remains rendered while scrolling");
+        }
+        assert!(
+            bounds.top() >= viewport.top() && bounds.bottom() <= viewport.bottom(),
+            "account action `{selector}` can be scrolled into view"
+        );
+    }
+
     fn click(context: &mut VisualTestContext, selector: &'static str) {
+        scroll_account_action_into_view(context, selector);
         let bounds = context
             .debug_bounds(selector)
-            .expect("requested account action is rendered");
+            .expect("visible account action remains rendered");
         context.simulate_click(bounds.center(), Modifiers::default());
         context.run_until_parked();
+        draw_account_view(context);
+    }
+
+    fn scroll_account_view(context: &mut VisualTestContext, delta_y: f32) {
+        let viewport = context.update(|window, _| window.bounds());
+        context.simulate_event(ScrollEvent {
+            position: viewport.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(delta_y))),
+            ..Default::default()
+        });
         draw_account_view(context);
     }
 
@@ -1157,12 +1305,7 @@ mod tests {
         context.run_until_parked();
         draw_account_view(context);
         assert!(context.debug_bounds("connect-account").is_some());
-        let connect_bounds = context
-            .debug_bounds("connect-account")
-            .expect("connect button is rendered");
-        context.simulate_click(connect_bounds.center(), Modifiers::default());
-        context.run_until_parked();
-        draw_account_view(context);
+        click(context, "connect-account");
         let connected = context.cx.update(|cx| {
             matches!(
                 &view.read(cx).status,
@@ -1275,6 +1418,7 @@ mod tests {
         draw_account_view(context);
         click(context, "connect-account");
         click(context, "review-app-permissions");
+        click(context, "continue-permission-review");
         click(context, "cancel-permission-update");
 
         let cancelled_with_profile = context.cx.update(|cx| {
@@ -1292,7 +1436,7 @@ mod tests {
             .pause_permission_update
             .store(false, Ordering::SeqCst);
         let (commit_started, finish_commit) = provider.pause_next_permission_commit();
-        click(context, "review-app-permissions");
+        click(context, "continue-permission-review");
         commit_started
             .recv_timeout(Duration::from_secs(1))
             .expect("permission retry reaches the credential commit");
@@ -1321,6 +1465,85 @@ mod tests {
             )
         });
         assert!(connected);
+    }
+
+    #[gpui::test]
+    fn mail_write_scope_requires_review_before_the_browser_flow(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        let permission_request = Arc::clone(&provider.last_permission_request);
+        let workflow = Arc::new(AccountWorkflow::new(provider));
+        let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), None, cx));
+
+        context.run_until_parked();
+        draw_account_view(context);
+        click(context, "connect-account");
+        assert!(
+            context
+                .cx
+                .update(|cx| matches!(&view.read(cx).status, AccountStatus::Connected(_)))
+        );
+        context.simulate_resize(size(px(800.), px(600.)));
+        draw_account_view(context);
+        let viewport = context.update(|window, _| window.bounds());
+        context.cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.prepare_permission_review(AccountPermissionRequest::MailReadWrite, cx);
+            });
+        });
+        draw_account_view(context);
+
+        assert_eq!(
+            context
+                .cx
+                .update(|cx| view.read(cx).pending_permission_review),
+            Some(AccountPermissionRequest::MailReadWrite)
+        );
+        let can_continue = context.cx.update(|cx| {
+            let view = view.read(cx);
+            view.task.is_none() && view.opening_content.is_none()
+        });
+        assert!(can_continue);
+        let disclosure =
+            super::permission_review_disclosure(AccountPermissionRequest::MailReadWrite);
+        assert!(disclosure.contains("create, read, update, and delete mail"));
+        assert!(disclosure.contains("does not request Mail.Send"));
+        assert_eq!(
+            *permission_request
+                .lock()
+                .expect("synthetic permission request mutex is not poisoned"),
+            None
+        );
+        assert!(context.debug_bounds("continue-permission-review").is_some());
+        assert!(
+            context
+                .debug_bounds("continue-permission-review")
+                .expect("continue action is rendered")
+                .bottom()
+                > viewport.bottom()
+        );
+
+        scroll_account_action_into_view(context, "continue-permission-review");
+        let continue_bounds = context
+            .debug_bounds("continue-permission-review")
+            .expect("continue action remains rendered after scrolling");
+        assert!(continue_bounds.top() >= viewport.top());
+        assert!(continue_bounds.bottom() <= viewport.bottom());
+
+        click(context, "continue-permission-review");
+
+        assert!(
+            context
+                .cx
+                .update(|cx| matches!(&view.read(cx).status, AccountStatus::Connected(_)))
+        );
+
+        assert_eq!(
+            *permission_request
+                .lock()
+                .expect("synthetic permission request mutex is not poisoned"),
+            Some(AccountPermissionRequest::MailReadWrite)
+        );
     }
 
     #[gpui::test]

@@ -74,14 +74,7 @@ impl GraphAuthority {
     }
 
     pub(super) fn message_body_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
-        if message_id.is_empty() {
-            return Err(GraphError::InvalidRecord);
-        }
-        let mut url = self.base_url.clone();
-        url.path_segments_mut()
-            .map_err(|()| GraphError::UnsafeLink)?
-            .pop_if_empty()
-            .extend(["me", "messages", message_id]);
+        let mut url = self.message_path(message_id)?;
         url.query_pairs_mut().append_pair("$select", "body");
         self.validated_url(url)
     }
@@ -164,6 +157,18 @@ impl GraphAuthority {
             .map_err(|()| GraphError::UnsafeLink)?
             .pop_if_empty()
             .extend(["me", "mailFolders", folder_id, tail]);
+        Ok(url)
+    }
+
+    fn message_path(&self, message_id: &str) -> Result<Url, GraphError> {
+        if message_id.is_empty() {
+            return Err(GraphError::InvalidRecord);
+        }
+        let mut url = self.base_url.clone();
+        url.path_segments_mut()
+            .map_err(|()| GraphError::UnsafeLink)?
+            .pop_if_empty()
+            .extend(["me", "messages", message_id]);
         Ok(url)
     }
 
@@ -370,6 +375,9 @@ mod tests {
         let body_url = authority
             .message_body_path("message/id with space")
             .expect("message ID forms an encoded Graph body path");
+        let read_state_url = authority
+            .message_read_state_path("message/id with space")
+            .expect("message ID forms an encoded Graph update path");
 
         assert!(
             delta_url
@@ -377,6 +385,17 @@ mod tests {
                 .contains("folder%2Fid%20with%20space/messages/delta")
         );
         assert!(body_url.as_str().contains("message%2Fid%20with%20space"));
+        assert!(
+            read_state_url
+                .as_str()
+                .contains("message%2Fid%20with%20space")
+        );
+        assert!(
+            Url::parse(read_state_url.as_str())
+                .expect("synthetic Graph update URL is valid")
+                .query()
+                .is_none()
+        );
         let body_query = Url::parse(body_url.as_str())
             .expect("synthetic Graph body URL is valid")
             .query_pairs()

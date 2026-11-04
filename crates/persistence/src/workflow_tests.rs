@@ -30,6 +30,7 @@ use crate::{security, store::SqliteMailCache};
 const DATABASE_KEY_BYTE: u8 = 0x62;
 
 type PageQueue = VecDeque<Result<MessageDeltaResponse, MailOperationError>>;
+type ReadStateGate = Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
 
 #[derive(Clone)]
 struct FixtureProvider {
@@ -372,6 +373,99 @@ async fn open_cache(directory: &TempDir, account_id: AccountId) -> SqliteMailCac
         DATABASE_KEY_BYTE,
     )
     .await
+}
+
+#[test]
+fn read_state_write_reserves_folder_until_graph_confirmation_and_cache_commit() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let folder_reference = cached_folder.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let page = MessageDeltaPage::new(
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Synthetic message".to_owned(), started_at),
+            }],
+            MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(
+                "https://graph.microsoft.com/v1.0/messages?$deltatoken=synthetic-initial"
+                    .to_owned(),
+            )),
+        );
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![cached_folder],
+            [Ok(page_response(page))],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let (update_started, release_update) = provider.hold_next_read_state();
+        let updates = Arc::clone(&provider.read_state_updates);
+        let requests = Arc::clone(&provider.requests);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic message is cached before its read-state action");
+
+        let executor = smol::Executor::new();
+        let update_workflow = Arc::clone(&workflow);
+        let update_folder = folder_reference.clone();
+        let (update_result, sync_result) = smol::block_on(executor.run(async {
+            let update_task = executor.spawn(async move {
+                update_workflow
+                    .set_message_read_state(&update_folder, &message_id(), ReadState::Read)
+                    .await
+            });
+            update_started
+                .recv()
+                .await
+                .expect("synthetic provider waits before confirming the write");
+            let sync_result = workflow
+                .synchronize_account(
+                    &account,
+                    started_at + Duration::from_secs(1),
+                    &ignore_sync_progress,
+                )
+                .await;
+            release_update
+                .send(())
+                .await
+                .expect("synthetic provider releases its confirmation");
+            (update_task.await, sync_result)
+        }));
+
+        assert_eq!(
+            update_result.expect("read-state write completes"),
+            einfach_mail_application::ReadStateUpdateOutcome::ConfirmedAndCached(ReadState::Read)
+        );
+        assert_eq!(sync_result, Err(MailWorkflowError::OperationInProgress));
+        assert_eq!(
+            requests
+                .lock()
+                .expect("synthetic request log mutex is healthy")
+                .len(),
+            1
+        );
+        assert_eq!(
+            updates
+                .lock()
+                .expect("synthetic read-state log mutex is healthy")
+                .as_slice(),
+            [(message_id(), ReadState::Read)]
+        );
+        assert_eq!(
+            cache
+                .message_read_state(&folder_reference, &message_id())
+                .await
+                .expect("confirmed state can be read from the encrypted cache"),
+            Some(ReadState::Read)
+        );
+
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
 }
 
 #[test]

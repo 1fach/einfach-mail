@@ -448,6 +448,7 @@ fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
             CalendarOperationError::InvalidResponse
         }
         GraphError::WorkerStart
+        | GraphError::MessageUpdateOutcomeUnknown
         | GraphError::WorkerClosed
         | GraphError::Transport
         | GraphError::SendRejected
@@ -480,6 +481,7 @@ fn map_graph_error(error: GraphError) -> MailOperationError {
         GraphError::AccessTokenRejected => MailOperationError::SignInRequired,
         GraphError::AccessDenied => MailOperationError::AccessDenied,
         GraphError::RateLimited { retry_after } => MailOperationError::RateLimited { retry_after },
+        GraphError::MessageUpdateOutcomeUnknown => MailOperationError::MessageUpdateOutcomeUnknown,
         GraphError::ResponseTooLarge | GraphError::PaginationLimitExceeded => {
             MailOperationError::ResourceLimitExceeded
         }
@@ -504,7 +506,8 @@ fn map_profile_graph_error(error: GraphError) -> AccountOperationError {
         | GraphError::InvalidRecord
         | GraphError::ResponseTooLarge
         | GraphError::PaginationLimitExceeded => AccountOperationError::ProfileUnavailable,
-        GraphError::WorkerStart
+        GraphError::MessageUpdateOutcomeUnknown
+        | GraphError::WorkerStart
         | GraphError::WorkerClosed
         | GraphError::Transport
         | GraphError::InvalidToken
@@ -1511,7 +1514,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-renewed-refresh","scope":"User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-renewed-refresh","scope":"Calendars.Read Mail.ReadWrite User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -1534,7 +1537,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-restored-access","expires_in":3600,"refresh_token":"synthetic-final-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-restored-access","expires_in":3600,"refresh_token":"synthetic-final-refresh","scope":"Calendars.Read Mail.ReadWrite User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -1574,10 +1577,23 @@ mod tests {
                 )
                 .await
         });
-        let _authorization_url = browser_receiver
+        let authorization_url = browser_receiver
             .recv()
             .await
             .expect("permission review opens the test browser");
+        let requested_scopes = authorization_url
+            .query_pairs()
+            .find_map(|(name, value)| (name == "scope").then(|| value.into_owned()))
+            .expect("authorization request includes delegated scopes");
+        let requested_scopes = requested_scopes
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>();
+        assert!(requested_scopes.contains(&"Mail.ReadWrite"));
+        assert!(requested_scopes.contains(&"Calendars.Read"));
+        assert!(requested_scopes.contains(&"User.Read"));
+        assert!(requested_scopes.contains(&"offline_access"));
+        assert!(!requested_scopes.contains(&"Mail.Read"));
+        assert!(!requested_scopes.contains(&"Mail.Send"));
         cancelled_operation.cancel();
         assert_eq!(
             cancelled_renewal
@@ -1642,5 +1658,115 @@ mod tests {
         renewed_profile_request.assert_async().await;
         restored_token.assert_async().await;
         restored_profile_request.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn permission_renewal_for_another_account_keeps_the_saved_session() {
+        let server = MockServer::start_async().await;
+        let initial_refresh = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=refresh_token")
+                    .body_includes("refresh_token=synthetic-old-refresh");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-initial-access","expires_in":3600,"refresh_token":"synthetic-current-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let initial_profile = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-initial-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"account-123","displayName":"Ada Example"}"#);
+            })
+            .await;
+        let token_exchange = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=authorization_code");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-other-access","expires_in":3600,"refresh_token":"synthetic-other-refresh","scope":"Calendars.Read Mail.ReadWrite User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let other_profile = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-other-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"account-456","displayName":"Grace Example"}"#);
+            })
+            .await;
+        let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
+            "synthetic-old-refresh",
+        ))));
+        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
+        let active_profile = provider
+            .restore_account()
+            .await
+            .expect("saved account restores")
+            .expect("synthetic account is present");
+
+        let expected_account_id = active_profile.id().clone();
+        let cancellation = AccountOperationCancellation::new();
+        let renewal = provider.reauthorize_account(
+            &expected_account_id,
+            AccountPermissionRequest::MailReadWrite,
+            cancellation,
+        );
+        let complete_authorization = async {
+            let authorization_url = browser_receiver
+                .recv()
+                .await
+                .expect("permission review opens the test browser");
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("test HTTP client is valid")
+                .get(callback_url_for_response(
+                    &authorization_url,
+                    "code",
+                    "synthetic-other-account-code",
+                ))
+                .send()
+                .await
+                .expect("loopback callback reaches the test listener");
+            assert!(response.status().is_success());
+        };
+        let (renewal_result, ()) = tokio::join!(renewal, complete_authorization);
+
+        assert_eq!(renewal_result, Err(AccountOperationError::AccountMismatch));
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-current-refresh")
+        );
+        let session = provider.config.session.lock().await;
+        let session = session
+            .as_ref()
+            .expect("mismatched authorization preserves the active session");
+        assert_eq!(session.account_id, *active_profile.id());
+        assert_eq!(
+            session
+                .access_token
+                .as_ref()
+                .map(|token| token.token().expose_secret()),
+            Some("synthetic-initial-access")
+        );
+        initial_refresh.assert_async().await;
+        initial_profile.assert_async().await;
+        token_exchange.assert_async().await;
+        other_profile.assert_async().await;
     }
 }

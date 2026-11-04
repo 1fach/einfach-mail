@@ -46,7 +46,11 @@ impl GraphOperation {
     fn uses_immutable_ids(self) -> bool {
         matches!(
             self,
-            Self::Messages | Self::MessageDelta | Self::MessageBody | Self::CalendarViewDelta
+            Self::Messages
+                | Self::MessageDelta
+                | Self::MessageBody
+                | Self::MessageReadState
+                | Self::CalendarViewDelta
         )
     }
 }
@@ -59,12 +63,18 @@ enum RetryAfter {
 
 struct GraphRequest {
     operation: GraphOperation,
+    method: GraphRequestMethod,
     url: GraphUrl,
     token: Arc<AccessToken>,
     body: Option<Vec<u8>>,
 }
 
-struct GetCommand {
+enum GraphRequestMethod {
+    Get,
+    PatchJson(Arc<[u8]>),
+}
+
+struct GraphCommand {
     request: GraphRequest,
     reply: oneshot::Sender<Result<GraphResponse, GraphError>>,
 }
@@ -95,7 +105,7 @@ impl GraphResponse {
 
 #[derive(Clone)]
 pub(super) struct GraphTransportHandle {
-    commands: mpsc::Sender<GetCommand>,
+    commands: mpsc::Sender<GraphCommand>,
 }
 
 impl GraphTransportHandle {
@@ -132,6 +142,35 @@ impl GraphTransportHandle {
             .await
     }
 
+    pub(super) async fn patch_json(
+        &self,
+        operation: GraphOperation,
+        url: GraphUrl,
+        token: Arc<AccessToken>,
+        body: Arc<[u8]>,
+    ) -> Result<Vec<u8>, GraphError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .send(GraphCommand {
+                request: GraphRequest {
+                    operation,
+                    method: GraphRequestMethod::PatchJson(body),
+                    url,
+                    token,
+                },
+                reply,
+            })
+            .await
+            .map_err(|_| GraphError::WorkerClosed)?;
+        response
+            .await
+            .map_err(|_| match operation {
+                GraphOperation::MessageReadState => GraphError::MessageUpdateOutcomeUnknown,
+                _ => GraphError::WorkerClosed,
+            })?
+            .and_then(GraphResponse::into_body)
+    }
+
     async fn request(
         &self,
         operation: GraphOperation,
@@ -141,9 +180,10 @@ impl GraphTransportHandle {
     ) -> Result<GraphResponse, GraphError> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(GetCommand {
+            .send(GraphCommand {
                 request: GraphRequest {
                     operation,
+                    method: GraphRequestMethod::Get,
                     url,
                     token,
                     body,
@@ -195,8 +235,8 @@ impl Drop for GraphTransport {
 }
 
 struct WorkerStartup {
-    commands: mpsc::Sender<GetCommand>,
-    command_receiver: mpsc::Receiver<GetCommand>,
+    commands: mpsc::Sender<GraphCommand>,
+    command_receiver: mpsc::Receiver<GraphCommand>,
     shutdown: oneshot::Sender<()>,
     shutdown_receiver: oneshot::Receiver<()>,
     ready: sync_mpsc::SyncSender<Result<(), GraphError>>,
@@ -241,7 +281,7 @@ impl WorkerStartup {
 }
 
 fn finish_startup(
-    commands: mpsc::Sender<GetCommand>,
+    commands: mpsc::Sender<GraphCommand>,
     shutdown: oneshot::Sender<()>,
     ready: sync_mpsc::Receiver<Result<(), GraphError>>,
     worker: JoinHandle<()>,
@@ -266,7 +306,7 @@ fn join_after_startup_error(
 }
 
 fn worker_thread(
-    commands: mpsc::Receiver<GetCommand>,
+    commands: mpsc::Receiver<GraphCommand>,
     shutdown: oneshot::Receiver<()>,
     ready: sync_mpsc::SyncSender<Result<(), GraphError>>,
     client_builder: fn() -> Result<Client, GraphError>,
@@ -309,7 +349,7 @@ fn configured_client(client: Result<Client, reqwest::Error>) -> Result<Client, G
 }
 
 async fn run_worker(
-    mut commands: mpsc::Receiver<GetCommand>,
+    mut commands: mpsc::Receiver<GraphCommand>,
     mut shutdown: oneshot::Receiver<()>,
     client: Client,
 ) {
@@ -340,14 +380,14 @@ async fn run_worker(
     }
 }
 
-async fn stop_worker(commands: &mut mpsc::Receiver<GetCommand>, tasks: &mut JoinSet<()>) {
+async fn stop_worker(commands: &mut mpsc::Receiver<GraphCommand>, tasks: &mut JoinSet<()>) {
     commands.close();
     tasks.shutdown().await;
 }
 
-fn spawn_request(tasks: &mut JoinSet<()>, client: Client, command: GetCommand) {
+fn spawn_request(tasks: &mut JoinSet<()>, client: Client, command: GraphCommand) {
     tasks.spawn(async move {
-        let GetCommand { request, mut reply } = command;
+        let GraphCommand { request, mut reply } = command;
         if let Some(request_result) = request_with_retry(&client, &request, &mut reply).await {
             let _ = reply.send(request_result);
         }
@@ -380,6 +420,8 @@ async fn request_with_retry(
                 }
                 RetryDecision::Stop(error) => return Some(Err(error)),
             }
+        } else if matches!(request.operation, GraphOperation::MessageReadState) {
+            return message_read_state_response_result(response, reply).await;
         } else {
             return response_result(request.operation, response, reply).await;
         }
@@ -398,6 +440,15 @@ fn retry_decision(response: &Response, attempt: u32) -> RetryDecision {
         attempt,
     );
     retry_decision_for(retry_after, attempt)
+}
+
+fn rate_limit_error(response: &Response) -> GraphError {
+    match retry_after_delay(response.headers().get(RETRY_AFTER), SystemTime::now(), 0) {
+        RetryAfter::Delay(delay) => GraphError::RateLimited {
+            retry_after: Some(delay),
+        },
+        RetryAfter::Unrepresentable => GraphError::RateLimited { retry_after: None },
+    }
 }
 
 fn retry_decision_for(retry_after: RetryAfter, attempt: u32) -> RetryDecision {
@@ -456,6 +507,29 @@ async fn response_result(
         StatusCode::UNAUTHORIZED => Some(Err(GraphError::AccessTokenRejected)),
         StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
         status if status.is_success() => read_limited_body(response, reply).await,
+        _ => Some(Err(GraphError::Transport)),
+    }
+}
+
+async fn message_read_state_response_result(
+    response: Response,
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
+) -> Option<Result<GraphResponse, GraphError>> {
+    match response.status() {
+        StatusCode::UNAUTHORIZED => Some(Err(GraphError::AccessTokenRejected)),
+        StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
+        StatusCode::OK => Some(match read_limited_body(response, reply).await? {
+            Ok(body) => Ok(body),
+            Err(_) => Err(GraphError::MessageUpdateOutcomeUnknown),
+        }),
+        status
+            if status.is_success()
+                || status.is_server_error()
+                || status.is_redirection()
+                || status == StatusCode::REQUEST_TIMEOUT =>
+        {
+            Some(Err(GraphError::MessageUpdateOutcomeUnknown))
+        }
         _ => Some(Err(GraphError::Transport)),
     }
 }
@@ -814,6 +888,43 @@ mod tests {
         assert_eq!(
             request.await.expect("request caller exits after shutdown"),
             Err(GraphError::WorkerClosed)
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_closure_after_read_state_patch_dispatch_reports_unknown() {
+        let server = MockServer::start_async().await;
+        let patch = server
+            .mock_async(|when, then| {
+                when.method(PATCH)
+                    .path("/v1.0/me/messages/synthetic-message");
+                then.status(200)
+                    .delay(Duration::from_secs(20))
+                    .body(r#"{"isRead":true}"#);
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+        let handle = transport.handle();
+        let url = graph_url(&server.url("/v1.0/me/messages/synthetic-message"));
+        let request = tokio::spawn(async move {
+            handle
+                .patch_json(
+                    GraphOperation::MessageReadState,
+                    url,
+                    synthetic_access_token(),
+                    Arc::from(&b"{\"isRead\":true}"[..]),
+                )
+                .await
+        });
+        wait_for_mock_calls(&patch, 1).await;
+
+        drop(transport);
+
+        assert_eq!(
+            request
+                .await
+                .expect("PATCH caller exits after worker shutdown"),
+            Err(GraphError::MessageUpdateOutcomeUnknown)
         );
     }
 

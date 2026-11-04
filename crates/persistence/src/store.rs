@@ -577,6 +577,73 @@ impl MailCache for SqliteMailCache {
         }
     }
 
+    fn message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> impl Future<Output = Result<Option<ReadState>, MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let message_id = message_id.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_and_then(move |connection| {
+                    let is_read = connection
+                        .query_row(
+                            "SELECT is_read FROM mail_messages
+                             WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+                            params![
+                                folder.account_id().as_str(),
+                                folder.folder_id().as_str(),
+                                message_id.as_str()
+                            ],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .optional()?;
+                    Ok(is_read.map(read_state_from_bool))
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn set_message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        read_state: ReadState,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let message_id = message_id.clone();
+        let is_read = read_state == ReadState::Read;
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let changed = connection.execute(
+                        "UPDATE mail_messages SET is_read = ?4
+                         WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+                        params![
+                            folder.account_id().as_str(),
+                            folder.folder_id().as_str(),
+                            message_id.as_str(),
+                            is_read
+                        ],
+                    )?;
+                    if changed == 0 {
+                        return Err(CacheFailure::MessageNotCached);
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
     fn store_message_body(
         &self,
         folder: &FolderReference,
@@ -1607,6 +1674,14 @@ fn decode_message(folder: &FolderReference, raw: RawMessage) -> CacheResult<Mail
     Ok(MailMessage::new(folder.clone(), id, metadata))
 }
 
+fn read_state_from_bool(is_read: bool) -> ReadState {
+    if is_read {
+        ReadState::Read
+    } else {
+        ReadState::Unread
+    }
+}
+
 fn decode_mailbox(
     display_name: Option<String>,
     address: Option<String>,
@@ -2195,6 +2270,42 @@ mod tests {
             );
 
             let message = message_id("message-at-cutoff");
+            assert_eq!(
+                cache
+                    .message_read_state(&folder_reference, &message)
+                    .await
+                    .expect("cached state is readable"),
+                Some(ReadState::Unread)
+            );
+            cache
+                .set_message_read_state(&folder_reference, &message, ReadState::Read)
+                .await
+                .expect("confirmed synthetic read state is stored");
+            cache
+                .set_message_read_state(&folder_reference, &message, ReadState::Read)
+                .await
+                .expect("repeating the confirmed state remains idempotent");
+            assert_eq!(
+                cache
+                    .message_read_state(&folder_reference, &message)
+                    .await
+                    .expect("updated state is readable"),
+                Some(ReadState::Read)
+            );
+            let missing_message = message_id("missing-message");
+            assert_eq!(
+                cache
+                    .message_read_state(&folder_reference, &missing_message)
+                    .await
+                    .expect("missing cached state is represented as absence"),
+                None
+            );
+            assert_eq!(
+                cache
+                    .set_message_read_state(&folder_reference, &missing_message, ReadState::Read,)
+                    .await,
+                Err(MailCacheError::MessageNotCached)
+            );
             cache
                 .store_message_body(
                     &folder_reference,
@@ -2226,6 +2337,7 @@ mod tests {
                 .expect("cached message is readable after restart")
                 .expect("message remains in the folder cache");
             assert_eq!(stored_message.id(), &message);
+            assert_eq!(stored_message.metadata().read_state(), ReadState::Read);
             assert_eq!(
                 stored_body
                     .as_ref()

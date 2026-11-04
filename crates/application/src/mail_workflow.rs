@@ -168,6 +168,20 @@ pub enum MailSyncProgress {
     Rebuilding,
 }
 
+/// Describes the result after Graph confirms a message's requested read state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadStateUpdateOutcome {
+    /// Graph and the encrypted cache both contain the requested state.
+    ConfirmedAndCached(ReadState),
+    /// Graph confirmed the state, but the encrypted cache needs a later sync.
+    ConfirmedNeedsSync {
+        /// The read state Graph confirmed.
+        state: ReadState,
+        /// The cache error that prevented the confirmed state from being stored.
+        cache_error: MailCacheError,
+    },
+}
+
 impl MailSyncReport {
     /// Returns the number of visible folders visited.
     #[must_use]
@@ -559,6 +573,54 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             body,
             loaded_from_cache,
         })
+    }
+
+    /// Sets a cached message's read state after Graph confirms the requested value.
+    ///
+    /// The operation is connected-only, does not queue changes while offline, and reserves the
+    /// folder against a concurrent synchronization.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when Graph cannot confirm the requested state, a cache error
+    /// when the message is not cached or the cache cannot be read, or
+    /// [`MailWorkflowError::OperationInProgress`] when another operation owns the account or
+    /// folder.
+    pub async fn set_message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        requested: ReadState,
+    ) -> Result<ReadStateUpdateOutcome, MailWorkflowError> {
+        let _reservation = self.reserve_folder(folder)?;
+        if self
+            .cache
+            .message_read_state(folder, message_id)
+            .await?
+            .is_none()
+        {
+            return Err(MailCacheError::MessageNotCached.into());
+        }
+
+        let confirmed = self
+            .provider
+            .set_message_read_state(folder, message_id, requested)
+            .await?;
+        if confirmed != requested {
+            return Err(MailOperationError::MessageUpdateOutcomeUnknown.into());
+        }
+
+        match self
+            .cache
+            .set_message_read_state(folder, message_id, confirmed)
+            .await
+        {
+            Ok(()) => Ok(ReadStateUpdateOutcome::ConfirmedAndCached(confirmed)),
+            Err(cache_error) => Ok(ReadStateUpdateOutcome::ConfirmedNeedsSync {
+                state: confirmed,
+                cache_error,
+            }),
+        }
     }
 
     async fn read_or_fetch_message_body(
