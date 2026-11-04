@@ -137,6 +137,23 @@ pub trait MailSession: Send + Sync {
         destination_folder: &'a FolderReference,
     ) -> AccountSessionFuture<'a, Result<MessageMoveOutcome, MailWorkflowError>>;
 
+    /// Moves a cached message to the signed-in account's Deleted Items folder.
+    ///
+    /// The workflow requires a successful account sync in this session and leaves the cached
+    /// source untouched unless Graph confirms the move.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailWorkflowError::MessageAlreadyDeleted`] when the source is already Deleted
+    /// Items, [`MailWorkflowError::AccountSyncRequired`] before a successful session sync,
+    /// [`MailWorkflowError::FolderSyncRequired`] when the source needs reconciliation, or a
+    /// provider, cache, or reservation error when the move cannot complete.
+    fn delete_message<'a>(
+        &'a self,
+        source_folder: &'a FolderReference,
+        message_id: &'a MessageId,
+    ) -> AccountSessionFuture<'a, Result<MessageMoveOutcome, MailWorkflowError>>;
+
     /// Sends a plain-text message and saves a body-free marker before dispatch.
     fn send_message<'a>(
         &'a self,
@@ -455,6 +472,18 @@ where
             source_folder,
             message_id,
             destination_folder,
+        ))
+    }
+
+    fn delete_message<'a>(
+        &'a self,
+        source_folder: &'a FolderReference,
+        message_id: &'a MessageId,
+    ) -> AccountSessionFuture<'a, Result<MessageMoveOutcome, MailWorkflowError>> {
+        Box::pin(MailWorkflow::delete_message(
+            self,
+            source_folder,
+            message_id,
         ))
     }
 

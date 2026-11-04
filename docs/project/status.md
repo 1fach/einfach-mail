@@ -20,6 +20,8 @@ Issue #33's move and issue #43's account-removal changes are presented in draft 
 
 Issue #25's timed appointment creation is ready in draft PR #59, stacked on PR #58. Issue #39's supported appointment editing is ready in draft PR #60, stacked on PR #59. Issue #41's confirmed appointment deletion and shared event-write recovery gate are ready in draft PR #61, stacked on PR #60. The Rust 1.95 workspace check, formatting, Clippy, rustdoc, dependency policy, and no-Tauri checks passed locally on 2026-11-05. The cached RustSec scan found no vulnerable crates and reported the same eight allowed unmaintained-crate advisories. The sandbox could not refresh the advisory database or read the crates.io index for a fresh yanked check. The workspace test suite passed; two Secret Service tests were ignored as documented. Synthetic coverage includes a cross-week deletion recovery test that requires each previously synchronized view to complete its own successful sync after an unknown DELETE. The PR #61 review found no production-code defect. ADR 0026 records OData's weak-ETag comparison rule, while Exchange Online behavior remains unverified. No test tenant, live Graph request, real mailbox, or GUI was used. Keep issues #25, #39, and #41 open through review. Keep issues #26, #40, and #42 open for tenant verification. Graph's v1.0 OpenAPI does not document conditional `If-Match` for event PATCH, so the final-read-to-update race remains; it declares optional `If-Match` for DELETE, but Exchange Online behavior is unverified.
 
+Issue #35's native Delete action is ready in draft PR #62 on `candidate/issue-35-delete-message-pr`, now based on current PR #61 head `104cb4f3797055fe30b8b0872ac498bc40ef1f5f`. Review verified current-session sync gating, visible-folder ownership, folder reservations, exact Graph move confirmation, atomic encrypted-cache relocation, cancellation recovery, and native pending, confirmed, and failed states. It found and fixed the shared Move/Delete permission action so an access denial starts delegated `Mail.ReadWrite` review; a headless regression checks that event and confirms the source stays cached. ADRs 0020 and 0039 record this recovery path. The PR stack no longer carries duplicate calendar commits. The full Linux gate passed on 2026-11-05: 355 workspace tests passed and 2 Secret Service tests were ignored. Rust 1.95 compilation, formatting, Clippy, rustdoc, RustSec audit, and dependency-policy checks passed. RustSec found no vulnerable or yanked locked crates and reported 8 allowed unmaintained-crate advisories. No tenant, live Graph request, real mailbox, or GUI was used. Keep issues #33 and #35 open through review; issue #36 remains for tenant verification.
+
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
 ## Verified state
@@ -37,17 +39,19 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 - Issue #33 adds a native move action for cached messages. It updates the encrypted cache only after exact Graph confirmation and preserves the cached body during reconciliation.
 - Issue #43 serializes cache removal with account, folder, and calendar work, preserves the durable pending-send guard, and prevents a second Linux desktop process from opening the same per-user cache.
 - Calendar event writes now include creation, editing, and deletion for supported timed standalone appointments. Editing and deleting first validate current Graph metadata; writes are not automatically retried. Confirmed results reconcile all applicable encrypted cache views atomically. A stale event, uncertain outcome, or failed cache commit gates later event writes until each previously synchronized view completes a sync. The delete uses the final read's ETag through `If-Match`; live service behavior remains unverified.
+- Message moves require a successful account sync in the current mail session. An uncertain or canceled move, or a cache failure, disables later moves until a successful sync. The Delete action moves the message into the resolved Deleted Items folder and does not permanently delete messages.
 
 ## Active risks
 
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep issue #3 open and leave issue #8's tenant-only sync evidence unverified.
+- Keep issue #36 blocked by issue #35 until a tenant and public app registration are available to verify Deleted Items resolution, move confirmation, and delta reconciliation.
 - Keep issues #26, #40, and #42 open for tenant-only event create, update, and delete evidence. Microsoft's Graph v1.0 OpenAPI documents no conditional precondition for PATCH, leaving a narrow update race; Exchange Online behavior for the documented DELETE `If-Match` precondition still needs verification.
 - Keep Issue #24 open until a dedicated tenant verifies `Mail.ReadWrite` consent and read-state PATCH behavior.
 - Keep issue #31 open through review. Keep issue #32 open until a dedicated tenant verifies follow-up flag delta and PATCH behavior.
 - Issue #9 remains open for real-window layout, operating-system clipboard behavior, and system-browser launch. Do not launch a GUI during this work.
 - The Issue #22 candidate is ready for stacked review on `candidate/issue-22-calendar-sync`, based on PR #47. Keep issue #22 open for manual Linux review of screen-reader announcements, focus, scrolling, and layout. Keep issue #6 open for live recurrence, time-zone, and all-day verification.
 - Draft PR #53 implements Issue #27 and is stacked on PR #52. Keep issue #27 open until review and merge, and keep issue #28 open for tenant-only consent and Graph verification.
-- Keep issues #29, #33, and #43 open through review of draft PRs #56, #57, and #58.
+- Keep issues #29, #33, #35, and #43 open through review of draft PRs #56, #57, #62, and #58.
 - Fedora GNOME Keyring evidence does not establish behavior for every Secret Service implementation.
 - Windows and macOS build, runtime, credential storage, installation, and operating-system integration remain deferred.
 
@@ -57,7 +61,7 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 2. Update linked issues and PR evidence after branch heads are stable; keep drafts open and do not merge.
 3. Keep PR #47 in draft until issue #8's Microsoft 365 initial-sync check and issue #9's real-window checks pass.
 4. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
-5. Keep issues #24, #28, #30, #32, and #34 open for tenant-only consent and Graph verification.
+5. Keep issues #24, #28, #30, #32, #34, #36, #40, and #42 open for tenant-only consent and Graph verification.
 6. After PR #50 merges, review the independent M3 follow-ups in PRs #51 and #52 for merge.
 
 ## Update rule

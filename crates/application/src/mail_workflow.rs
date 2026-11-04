@@ -3,7 +3,10 @@
 use std::{
     collections::HashSet,
     future::Future,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -39,6 +42,12 @@ pub enum MailWorkflowError {
     /// The destination is not another visible folder in the same account.
     #[error("the selected destination folder is unavailable")]
     InvalidMoveDestination,
+    /// A previous successful sync is required in the current account session.
+    #[error("mail must sync successfully before moving messages in this session")]
+    AccountSyncRequired,
+    /// The message already belongs to Deleted Items.
+    #[error("the message is already in Deleted Items")]
+    MessageAlreadyDeleted,
     /// Another mail operation already owns this account or folder.
     #[error("a mail operation is already active for this account or folder")]
     OperationInProgress,
@@ -240,6 +249,7 @@ pub struct MailWorkflow<P, C> {
     provider: P,
     cache: C,
     reservations: Arc<Mutex<ActiveOperations>>,
+    account_sync_ready: AtomicBool,
 }
 
 /// Creates account sessions and shares operation reservations among them.
@@ -284,6 +294,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             provider,
             cache,
             reservations,
+            account_sync_ready: AtomicBool::new(false),
         }
     }
 
@@ -512,6 +523,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         progress_handler: &(dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> Result<MailSyncReport, MailWorkflowError> {
         let _reservation = self.reserve_account(account_id)?;
+        self.account_sync_ready.store(false, Ordering::Release);
         let initial_cutoff = sync_started_at
             .checked_sub(INITIAL_SYNC_WINDOW)
             .ok_or(MailWorkflowError::ClockUnavailable)?;
@@ -525,6 +537,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         let page_count = self
             .sync_folders(&folders, initial_cutoff, progress_handler)
             .await?;
+        self.account_sync_ready.store(true, Ordering::Release);
         Ok(MailSyncReport {
             folder_count: folders.len(),
             page_count,
@@ -800,11 +813,57 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         validate_move_folder_pair(source_folder, destination_folder)?;
         let _reservation =
             self.reserve_folders(&[source_folder.clone(), destination_folder.clone()])?;
+        self.ensure_account_sync_ready()?;
         self.ensure_visible_move_folders(source_folder, destination_folder)
+            .await?;
+        self.ensure_move_folders_writable(source_folder, destination_folder)
             .await?;
         self.ensure_cached_message(source_folder, message_id)
             .await?;
         self.confirm_and_cache_move(source_folder, message_id, destination_folder)
+            .await
+    }
+
+    /// Moves a cached message to the active account's Deleted Items folder.
+    ///
+    /// The workflow reserves the source before resolving the locale-independent destination.
+    /// It holds both folder reservations through provider confirmation and cache reconciliation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailWorkflowError::AccountSyncRequired`] before a successful session sync,
+    /// [`MailWorkflowError::MessageAlreadyDeleted`] when the source is already Deleted Items,
+    /// [`MailWorkflowError::FolderSyncRequired`] when either folder needs reconciliation,
+    /// [`MailWorkflowError::InvalidMoveDestination`] when the resolved folder is not visible,
+    /// a cache or provider error when the message cannot be moved, or
+    /// [`MailWorkflowError::OperationInProgress`] when an affected scope is busy.
+    pub async fn delete_message(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> Result<MessageMoveOutcome, MailWorkflowError> {
+        let _source_reservation = self.reserve_folders(std::slice::from_ref(source_folder))?;
+        self.ensure_account_sync_ready()?;
+        self.ensure_cached_message(source_folder, message_id)
+            .await?;
+
+        let destination_id = self
+            .provider
+            .deleted_items_folder_id(source_folder.account_id())
+            .await?;
+        let destination_folder =
+            FolderReference::new(source_folder.account_id().clone(), destination_id);
+        if source_folder == &destination_folder {
+            return Err(MailWorkflowError::MessageAlreadyDeleted);
+        }
+
+        let _destination_reservation =
+            self.reserve_folders(std::slice::from_ref(&destination_folder))?;
+        self.ensure_visible_move_folders(source_folder, &destination_folder)
+            .await?;
+        self.ensure_move_folders_writable(source_folder, &destination_folder)
+            .await?;
+        self.confirm_and_cache_move(source_folder, message_id, &destination_folder)
             .await
     }
 
@@ -844,21 +903,53 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         }
     }
 
+    async fn ensure_move_folders_writable(
+        &self,
+        source_folder: &FolderReference,
+        destination_folder: &FolderReference,
+    ) -> Result<(), MailWorkflowError> {
+        for folder in [source_folder, destination_folder] {
+            if self.cache.folder_write_sync_required(folder).await? {
+                return Err(MailWorkflowError::FolderSyncRequired);
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_account_sync_ready(&self) -> Result<(), MailWorkflowError> {
+        if self.account_sync_ready.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(MailWorkflowError::AccountSyncRequired)
+        }
+    }
+
     async fn confirm_and_cache_move(
         &self,
         source_folder: &FolderReference,
         message_id: &MessageId,
         destination_folder: &FolderReference,
     ) -> Result<MessageMoveOutcome, MailWorkflowError> {
-        self.provider
+        let mut reconciliation = MoveReconciliationGuard::new(&self.account_sync_ready);
+        if let Err(error) = self
+            .provider
             .move_message(source_folder, message_id, destination_folder)
-            .await?;
+            .await
+        {
+            if error != MailOperationError::MoveOutcomeUnknown {
+                reconciliation.complete();
+            }
+            return Err(error.into());
+        }
         match self
             .cache
             .move_message(source_folder, destination_folder, message_id)
             .await
         {
-            Ok(()) => Ok(MessageMoveOutcome::ConfirmedAndCached),
+            Ok(()) => {
+                reconciliation.complete();
+                Ok(MessageMoveOutcome::ConfirmedAndCached)
+            }
             Err(_) => Ok(MessageMoveOutcome::ConfirmedNeedsSync),
         }
     }
@@ -1126,6 +1217,34 @@ enum ReservationKey {
 pub(crate) struct OperationReservation {
     reservations: Arc<Mutex<ActiveOperations>>,
     key: ReservationKey,
+}
+
+/// Marks the session unsynchronized when a move ends without a definitive outcome.
+#[must_use = "dropping an unresolved move guard blocks message moves until sync"]
+struct MoveReconciliationGuard<'a> {
+    account_sync_ready: &'a AtomicBool,
+    complete: bool,
+}
+
+impl<'a> MoveReconciliationGuard<'a> {
+    fn new(account_sync_ready: &'a AtomicBool) -> Self {
+        Self {
+            account_sync_ready,
+            complete: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.complete = true;
+    }
+}
+
+impl Drop for MoveReconciliationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.account_sync_ready.store(false, Ordering::Release);
+        }
+    }
 }
 
 impl Drop for OperationReservation {

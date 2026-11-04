@@ -94,6 +94,23 @@ impl GraphApi {
         Ok(tree.folders)
     }
 
+    pub(super) async fn deleted_items_folder_id(
+        &self,
+        token: Arc<AccessToken>,
+    ) -> Result<FolderId, GraphError> {
+        let response = self
+            .transport
+            .get(
+                GraphOperation::Folders,
+                self.authority.deleted_items_folder_path()?,
+                token,
+            )
+            .await?;
+        let folder = serde_json::from_slice::<WireFolderId>(&response)
+            .map_err(|_| GraphError::InvalidResponse)?;
+        FolderId::try_from(folder.id).map_err(|_| GraphError::InvalidRecord)
+    }
+
     pub(super) async fn list_messages(
         &self,
         folder: &FolderReference,
@@ -693,6 +710,11 @@ struct WireFolder {
     display_name: String,
     #[serde(default)]
     is_hidden: bool,
+}
+
+#[derive(Deserialize)]
+struct WireFolderId {
+    id: String,
 }
 
 impl WireFolder {
@@ -1618,6 +1640,31 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         post.assert_calls_async(1).await;
+        drop(transport);
+    }
+
+    #[tokio::test]
+    async fn resolves_deleted_items_from_its_well_known_name() {
+        let server = MockServer::start_async().await;
+        let lookup = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/deleteditems")
+                    .query_param("$select", "id");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"synthetic-deleted-folder"}"#);
+            })
+            .await;
+        let (graph_api, transport) = synthetic_graph_api(&server);
+
+        let folder_id = graph_api
+            .deleted_items_folder_id(synthetic_access_token())
+            .await
+            .expect("synthetic Deleted Items folder ID is returned");
+
+        assert_eq!(folder_id.as_str(), "synthetic-deleted-folder");
+        lookup.assert_calls_async(1).await;
         drop(transport);
     }
 

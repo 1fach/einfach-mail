@@ -66,6 +66,9 @@ struct FixtureProvider {
     message_moves: Arc<Mutex<Vec<(FolderReference, MessageId, FolderReference)>>>,
     move_result: Arc<Mutex<Result<(), MailOperationError>>>,
     move_gate: ProviderGate,
+    deleted_items_folder_id: FolderId,
+    deleted_items_folder_calls: Arc<AtomicUsize>,
+    deleted_items_folder_gate: ProviderGate,
     send_gate: ProviderGate,
     calendar_gate: Option<CalendarSyncGate>,
 }
@@ -146,6 +149,10 @@ impl FixtureProvider {
             message_moves: Arc::new(Mutex::new(Vec::new())),
             move_result: Arc::new(Mutex::new(Ok(()))),
             move_gate: Arc::new(Mutex::new(None)),
+            deleted_items_folder_id: FolderId::try_from("deleted-items".to_owned())
+                .expect("synthetic Deleted Items ID is valid"),
+            deleted_items_folder_calls: Arc::new(AtomicUsize::new(0)),
+            deleted_items_folder_gate: Arc::new(Mutex::new(None)),
             send_gate: Arc::new(Mutex::new(None)),
             calendar_gate: None,
         }
@@ -168,6 +175,19 @@ impl FixtureProvider {
             .move_gate
             .lock()
             .expect("synthetic move gate mutex is healthy") = Some((started_tx, release_rx));
+        (started_rx, release_tx)
+    }
+
+    fn hold_next_deleted_items_folder_lookup(
+        &self,
+    ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+        let (started_tx, started_rx) = smol::channel::bounded(1);
+        let (release_tx, release_rx) = smol::channel::bounded(1);
+        *self
+            .deleted_items_folder_gate
+            .lock()
+            .expect("synthetic folder lookup gate mutex is healthy") =
+            Some((started_tx, release_rx));
         (started_rx, release_tx)
     }
 
@@ -425,6 +445,37 @@ impl MailProvider for FixtureProvider {
         }
     }
 
+    fn deleted_items_folder_id(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<FolderId, MailOperationError>> + Send + '_ {
+        let account_matches = account_id == &self.account_id;
+        let folder_id = self.deleted_items_folder_id.clone();
+        let calls = Arc::clone(&self.deleted_items_folder_calls);
+        let gate = Arc::clone(&self.deleted_items_folder_gate);
+        async move {
+            if !account_matches {
+                return Err(MailOperationError::AccountMismatch);
+            }
+            calls.fetch_add(1, Ordering::Relaxed);
+            let gate = gate
+                .lock()
+                .expect("synthetic folder lookup gate mutex is healthy")
+                .take();
+            if let Some((started, release)) = gate {
+                started
+                    .send(())
+                    .await
+                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
+                release
+                    .recv()
+                    .await
+                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
+            }
+            Ok(folder_id)
+        }
+    }
+
     fn send_mail(
         &self,
         account_id: &AccountId,
@@ -558,6 +609,15 @@ fn archive_folder(account_id: &AccountId) -> MailFolder {
         .expect("synthetic archive folder is valid")
 }
 
+fn deleted_items_folder(account_id: &AccountId) -> MailFolder {
+    let reference = FolderReference::new(
+        account_id.clone(),
+        FolderId::try_from("deleted-items".to_owned()).expect("synthetic folder ID is valid"),
+    );
+    MailFolder::new(reference, None, "Gelöschte Elemente".to_owned())
+        .expect("synthetic Deleted Items folder is valid")
+}
+
 fn message_id() -> MessageId {
     MessageId::try_from("message-1".to_owned()).expect("synthetic message ID is valid")
 }
@@ -628,6 +688,15 @@ fn final_page(delta_link: MessageDeltaLink) -> MessageDeltaPage {
             patch,
         }],
         MessageDeltaProgress::Complete(delta_link),
+    )
+}
+
+fn completed_message_delta_page(scope: &str, changes: Vec<MessageDeltaChange>) -> MessageDeltaPage {
+    MessageDeltaPage::new(
+        changes,
+        MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(format!(
+            "https://graph.microsoft.com/v1.0/messages?$deltatoken=synthetic-{scope}"
+        ))),
     )
 }
 
@@ -1905,6 +1974,585 @@ fn message_move_rejects_a_destination_outside_the_visible_folder_tree() {
                 .lock()
                 .expect("synthetic move log mutex is not poisoned")
                 .is_empty()
+        );
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn delete_message_requires_a_current_sync_before_resolving_deleted_items() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let folder_calls = Arc::clone(&provider.deleted_items_folder_calls);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(provider, cache.clone());
+        let source = folder(&account).reference().clone();
+
+        assert_eq!(
+            workflow.delete_message(&source, &message_id()).await,
+            Err(MailWorkflowError::AccountSyncRequired)
+        );
+        assert_eq!(folder_calls.load(Ordering::Relaxed), 0);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn delete_message_uses_visible_deleted_items_id_and_preserves_cached_body() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let deleted = deleted_items_folder(&account);
+        let inbox_reference = inbox.reference().clone();
+        let deleted_reference = deleted.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let source_page = completed_message_delta_page(
+            "delete-source",
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Synthetic subject".to_owned(), started_at),
+            }],
+        );
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![inbox, deleted],
+            [
+                Ok(page_response(source_page)),
+                Ok(page_response(completed_message_delta_page(
+                    "delete-destination",
+                    Vec::new(),
+                ))),
+            ],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let folder_calls = Arc::clone(&provider.deleted_items_folder_calls);
+        let move_calls = Arc::clone(&provider.message_moves);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(provider, cache.clone());
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic inbox and Deleted Items sync");
+        cache
+            .store_message_body(
+                &inbox_reference,
+                &message_id(),
+                MessageBody::new(MessageBodyType::Text, "Synthetic cached body".to_owned()),
+            )
+            .await
+            .expect("synthetic message body is cached before deletion");
+
+        assert_eq!(
+            workflow
+                .delete_message(&inbox_reference, &message_id())
+                .await,
+            Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached)
+        );
+        assert_eq!(folder_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            move_calls
+                .lock()
+                .expect("synthetic move log mutex is not poisoned")
+                .as_slice(),
+            &[(
+                inbox_reference.clone(),
+                message_id(),
+                deleted_reference.clone()
+            )]
+        );
+        assert_eq!(
+            cache
+                .read_message(&inbox_reference, &message_id())
+                .await
+                .expect("source lookup succeeds after deletion"),
+            None
+        );
+        let deleted_message = cache
+            .read_message(&deleted_reference, &message_id())
+            .await
+            .expect("Deleted Items lookup succeeds")
+            .expect("message is cached in Deleted Items");
+        assert_eq!(
+            deleted_message
+                .1
+                .expect("encrypted body moves with its message")
+                .content(),
+            "Synthetic cached body"
+        );
+        drop(workflow);
+        cache.close_for_tests().await;
+
+        let reopened = open_cache(&directory, account).await;
+        let persisted = reopened
+            .read_message(&deleted_reference, &message_id())
+            .await
+            .expect("Deleted Items message remains readable after reopening")
+            .expect("deleted message persists in the encrypted cache");
+        assert_eq!(
+            persisted
+                .1
+                .expect("encrypted body persists after reopening")
+                .content(),
+            "Synthetic cached body"
+        );
+        reopened.close_for_tests().await;
+    });
+}
+
+#[test]
+fn delete_message_rejects_a_resolved_folder_outside_the_visible_tree() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let deleted = deleted_items_folder(&account);
+        let inbox_reference = inbox.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let source_page = completed_message_delta_page(
+            "invisible-delete-source",
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Synthetic subject".to_owned(), started_at),
+            }],
+        );
+        let mut provider = FixtureProvider::new(
+            account.clone(),
+            vec![inbox, deleted],
+            [
+                Ok(page_response(source_page)),
+                Ok(page_response(completed_message_delta_page(
+                    "invisible-delete-destination",
+                    Vec::new(),
+                ))),
+            ],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        provider.deleted_items_folder_id =
+            FolderId::try_from("not-visible".to_owned()).expect("synthetic folder ID is valid");
+        let folder_calls = Arc::clone(&provider.deleted_items_folder_calls);
+        let move_calls = Arc::clone(&provider.message_moves);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(provider, cache.clone());
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic account sync completes");
+
+        assert_eq!(
+            workflow
+                .delete_message(&inbox_reference, &message_id())
+                .await,
+            Err(MailWorkflowError::InvalidMoveDestination)
+        );
+        assert_eq!(folder_calls.load(Ordering::Relaxed), 1);
+        assert!(
+            move_calls
+                .lock()
+                .expect("synthetic move log mutex is not poisoned")
+                .is_empty()
+        );
+        assert!(
+            cache
+                .read_message(&inbox_reference, &message_id())
+                .await
+                .expect("source cache lookup succeeds")
+                .is_some()
+        );
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn delete_message_rejects_a_message_already_in_deleted_items() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let deleted = deleted_items_folder(&account);
+        let deleted_reference = deleted.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let page = completed_message_delta_page(
+            "already-deleted",
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Synthetic subject".to_owned(), started_at),
+            }],
+        );
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![deleted],
+            [Ok(page_response(page))],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let folder_calls = Arc::clone(&provider.deleted_items_folder_calls);
+        let move_calls = Arc::clone(&provider.message_moves);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(provider, cache.clone());
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic Deleted Items sync completes");
+
+        assert_eq!(
+            workflow
+                .delete_message(&deleted_reference, &message_id())
+                .await,
+            Err(MailWorkflowError::MessageAlreadyDeleted)
+        );
+        assert_eq!(folder_calls.load(Ordering::Relaxed), 1);
+        assert!(
+            move_calls
+                .lock()
+                .expect("synthetic move log mutex is not poisoned")
+                .is_empty()
+        );
+        assert!(
+            cache
+                .read_message(&deleted_reference, &message_id())
+                .await
+                .expect("Deleted Items cache lookup succeeds")
+                .is_some()
+        );
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn unknown_delete_outcome_requires_sync_before_another_move_request() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let deleted = deleted_items_folder(&account);
+        let inbox_reference = inbox.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let source_page = || {
+            completed_message_delta_page(
+                "unknown-delete-source",
+                vec![MessageDeltaChange::Upsert {
+                    id: message_id(),
+                    patch: complete_patch("Synthetic subject".to_owned(), started_at),
+                }],
+            )
+        };
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![inbox, deleted],
+            [
+                Ok(page_response(source_page())),
+                Ok(page_response(completed_message_delta_page(
+                    "unknown-delete-destination",
+                    Vec::new(),
+                ))),
+                Ok(page_response(source_page())),
+                Ok(page_response(completed_message_delta_page(
+                    "unknown-delete-resync-destination",
+                    Vec::new(),
+                ))),
+            ],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        *provider
+            .move_result
+            .lock()
+            .expect("synthetic move result mutex is not poisoned") =
+            Err(MailOperationError::MoveOutcomeUnknown);
+        let move_calls = Arc::clone(&provider.message_moves);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(provider.clone(), cache.clone());
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic account sync completes");
+
+        assert_eq!(
+            workflow
+                .delete_message(&inbox_reference, &message_id())
+                .await,
+            Err(MailWorkflowError::Provider(
+                MailOperationError::MoveOutcomeUnknown
+            ))
+        );
+        assert!(
+            cache
+                .read_message(&inbox_reference, &message_id())
+                .await
+                .expect("source cache lookup succeeds after unknown outcome")
+                .is_some()
+        );
+        assert_eq!(
+            workflow
+                .delete_message(&inbox_reference, &message_id())
+                .await,
+            Err(MailWorkflowError::AccountSyncRequired)
+        );
+        assert_eq!(
+            move_calls
+                .lock()
+                .expect("synthetic move log mutex is not poisoned")
+                .len(),
+            1
+        );
+
+        workflow
+            .synchronize_account(
+                &account,
+                started_at + Duration::from_secs(1),
+                &ignore_sync_progress,
+            )
+            .await
+            .expect("a new complete account sync restores message writes");
+        *provider
+            .move_result
+            .lock()
+            .expect("synthetic move result mutex is not poisoned") = Ok(());
+        assert_eq!(
+            workflow
+                .delete_message(&inbox_reference, &message_id())
+                .await,
+            Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached)
+        );
+        assert_eq!(
+            move_calls
+                .lock()
+                .expect("synthetic move log mutex is not poisoned")
+                .len(),
+            2
+        );
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn canceled_delete_request_requires_sync_before_another_move_request() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let deleted = deleted_items_folder(&account);
+        let inbox_reference = inbox.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let source_page = completed_message_delta_page(
+            "canceled-delete-source",
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Synthetic subject".to_owned(), started_at),
+            }],
+        );
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![inbox, deleted],
+            [
+                Ok(page_response(source_page)),
+                Ok(page_response(completed_message_delta_page(
+                    "canceled-delete-destination",
+                    Vec::new(),
+                ))),
+            ],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let (move_started_receiver, _release_move) = provider.hold_next_message_move();
+        let move_calls = Arc::clone(&provider.message_moves);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(provider, cache.clone());
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic account sync completes");
+
+        smol::future::race(
+            async {
+                let _ = workflow
+                    .delete_message(&inbox_reference, &message_id())
+                    .await;
+            },
+            async {
+                move_started_receiver
+                    .recv()
+                    .await
+                    .expect("provider move reaches its cancellation gate");
+            },
+        )
+        .await;
+
+        assert_eq!(
+            workflow
+                .delete_message(&inbox_reference, &message_id())
+                .await,
+            Err(MailWorkflowError::AccountSyncRequired)
+        );
+        assert_eq!(
+            move_calls
+                .lock()
+                .expect("synthetic move log mutex is not poisoned")
+                .len(),
+            1
+        );
+        assert!(
+            cache
+                .read_message(&inbox_reference, &message_id())
+                .await
+                .expect("source cache lookup succeeds after cancellation")
+                .is_some()
+        );
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn delete_message_keeps_the_source_reservation_while_resolving_deleted_items() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let archive = archive_folder(&account);
+        let deleted = deleted_items_folder(&account);
+        let inbox_reference = inbox.reference().clone();
+        let archive_reference = archive.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![inbox, archive, deleted],
+            [
+                Ok(page_response(completed_message_delta_page(
+                    "reserved-delete-source",
+                    vec![MessageDeltaChange::Upsert {
+                        id: message_id(),
+                        patch: complete_patch("Synthetic subject".to_owned(), started_at),
+                    }],
+                ))),
+                Ok(page_response(completed_message_delta_page(
+                    "reserved-delete-archive",
+                    Vec::new(),
+                ))),
+                Ok(page_response(completed_message_delta_page(
+                    "reserved-delete-destination",
+                    Vec::new(),
+                ))),
+            ],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let (lookup_started, release_lookup) = provider.hold_next_deleted_items_folder_lookup();
+        let move_calls = Arc::clone(&provider.message_moves);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic account sync completes");
+        let executor = smol::Executor::new();
+        let delete_workflow = Arc::clone(&workflow);
+        let delete_source = inbox_reference.clone();
+
+        let (delete_result, competing_move) = smol::block_on(executor.run(async {
+            let delete_task = executor.spawn(async move {
+                delete_workflow
+                    .delete_message(&delete_source, &message_id())
+                    .await
+            });
+            lookup_started
+                .recv()
+                .await
+                .expect("Deleted Items resolver blocks after source reservation");
+            let competing_move = workflow
+                .move_message(&inbox_reference, &message_id(), &archive_reference)
+                .await;
+            release_lookup
+                .send(())
+                .await
+                .expect("Deleted Items resolver gate remains open");
+            (delete_task.await, competing_move)
+        }));
+
+        assert_eq!(competing_move, Err(MailWorkflowError::OperationInProgress));
+        assert_eq!(
+            delete_result,
+            Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached)
+        );
+        assert_eq!(
+            move_calls
+                .lock()
+                .expect("synthetic move log mutex is not poisoned")
+                .len(),
+            1
+        );
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn confirmed_delete_with_cache_failure_requires_sync_before_retry() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let deleted = deleted_items_folder(&account);
+        let inbox_reference = inbox.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let source_page = completed_message_delta_page(
+            "failed-cache-delete-source",
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Synthetic subject".to_owned(), started_at),
+            }],
+        );
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![inbox, deleted],
+            [
+                Ok(page_response(source_page)),
+                Ok(page_response(completed_message_delta_page(
+                    "failed-cache-delete-destination",
+                    Vec::new(),
+                ))),
+            ],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let folder_calls = Arc::clone(&provider.deleted_items_folder_calls);
+        let move_calls = Arc::clone(&provider.message_moves);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(provider, cache.clone());
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic account sync completes");
+        cache.set_message_move_failure_for_tests(true).await;
+
+        assert_eq!(
+            workflow
+                .delete_message(&inbox_reference, &message_id())
+                .await,
+            Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedNeedsSync)
+        );
+        assert_eq!(
+            workflow
+                .delete_message(&inbox_reference, &message_id())
+                .await,
+            Err(MailWorkflowError::AccountSyncRequired)
+        );
+        assert_eq!(folder_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            move_calls
+                .lock()
+                .expect("synthetic move log mutex is not poisoned")
+                .len(),
+            1
+        );
+        assert!(
+            cache
+                .read_message(&inbox_reference, &message_id())
+                .await
+                .expect("source cache lookup succeeds after transaction rollback")
+                .is_some()
         );
         cache.close_for_tests().await;
     });

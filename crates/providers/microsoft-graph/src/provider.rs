@@ -30,8 +30,8 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
-    MailFolder, MailMessage, MailReplyDraft, MessageBody, MessageId, ReadState,
+    CalendarViewReference, EditableCalendarEvent, FolderId, FolderReference, FollowUpFlagStatus,
+    MailDraft, MailFolder, MailMessage, MailReplyDraft, MessageBody, MessageId, ReadState,
 };
 
 const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
@@ -245,6 +245,20 @@ impl MailProvider for MicrosoftGraphProvider {
                 .list_folders(&account_id, Arc::clone(&token))
                 .await;
             map_mail_result(&config, &account_id, &token, folders).await
+        })
+    }
+
+    fn deleted_items_folder_id(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<FolderId, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let account_id = account_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let token = ensure_access_token(&config, &account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let result = graph_api.deleted_items_folder_id(Arc::clone(&token)).await;
+            map_mail_result(&config, &account_id, &token, result).await
         })
     }
 
@@ -1196,6 +1210,48 @@ mod tests {
             Err(MailOperationError::AccountMismatch)
         );
         move_request.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn deleted_items_folder_lookup_is_account_scoped() {
+        let server = MockServer::start_async().await;
+        let lookup = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/deleteditems")
+                    .query_param("$select", "id")
+                    .header("authorization", "Bearer synthetic-deleted-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"deleted-folder"}"#);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let provider = synthetic_provider(
+            &server,
+            browser_sender,
+            Arc::new(MemoryRefreshTokenStore::new(None)),
+        );
+        let account =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: account.clone(),
+            access_token: Some(access_token("synthetic-deleted-access")),
+        });
+
+        let folder_id = provider
+            .deleted_items_folder_id(&account)
+            .await
+            .expect("synthetic Deleted Items ID resolves");
+        let other_account =
+            AccountId::try_from("other-account".to_owned()).expect("synthetic account ID is valid");
+
+        assert_eq!(folder_id.as_str(), "deleted-folder");
+        assert_eq!(
+            provider.deleted_items_folder_id(&other_account).await,
+            Err(MailOperationError::AccountMismatch)
+        );
+        lookup.assert_calls_async(1).await;
     }
 
     #[test]

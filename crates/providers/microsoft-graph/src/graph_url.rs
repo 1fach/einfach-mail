@@ -50,6 +50,16 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
+    pub(super) fn deleted_items_folder_path(&self) -> Result<GraphUrl, GraphError> {
+        let mut url = self.base_url.clone();
+        url.path_segments_mut()
+            .map_err(|()| GraphError::UnsafeLink)?
+            .pop_if_empty()
+            .extend(["me", "mailFolders", "deleteditems"]);
+        url.query_pairs_mut().append_pair("$select", "id");
+        self.validated_url(url)
+    }
+
     pub(super) fn child_folders_path(&self, folder_id: &str) -> Result<GraphUrl, GraphError> {
         let mut url = self.folder_path(folder_id, "childFolders")?;
         url.query_pairs_mut().append_pair("$select", FOLDER_SELECT);
@@ -485,6 +495,17 @@ mod tests {
             .expect("folder ID forms an encoded Graph path");
 
         assert!(url.as_str().contains("folder%2Fid%20with%20space"));
+    }
+
+    #[test]
+    fn deleted_items_path_uses_the_well_known_folder_name() {
+        assert_eq!(
+            authority()
+                .deleted_items_folder_path()
+                .expect("Deleted Items endpoint is a valid Graph URL")
+                .as_str(),
+            "https://graph.microsoft.com/v1.0/me/mailFolders/deleteditems?%24select=id"
+        );
     }
 
     #[test]

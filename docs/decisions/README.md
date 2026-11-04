@@ -40,3 +40,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0034](0034-invalidate-cached-message-bodies-after-delta-updates.md) | Invalidate cached message bodies after delta updates | Accepted for Linux implementation |
 | [0037](0037-reject-stale-mail-sync-pages.md) | Reject stale mail sync pages | Accepted for Linux implementation |
 | [0038](0038-per-account-mail-and-calendar-session.md) | Use one per-account mail and calendar session | Accepted |
+| [0039](0039-move-messages-to-deleted-items.md) | Move messages to Deleted Items | Accepted |

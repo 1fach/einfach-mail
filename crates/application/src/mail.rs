@@ -3,7 +3,7 @@
 use std::{future::Future, time::Duration};
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
+    AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
     MailReplyDraft, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId, ReadState,
 };
 use thiserror::Error;
@@ -270,6 +270,20 @@ pub trait MailProvider: Send + Sync {
         message_id: &MessageId,
         destination_folder: &FolderReference,
     ) -> impl Future<Output = Result<(), MailOperationError>> + Send + '_;
+
+    /// Resolves the signed-in account's Deleted Items folder ID.
+    ///
+    /// Implementations use the provider's locale-independent folder identity and reject an
+    /// account that does not match the active session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailOperationError::AccountMismatch`] when `account_id` is not the signed-in
+    /// account, or another provider error when Graph cannot resolve the folder.
+    fn deleted_items_folder_id(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<FolderId, MailOperationError>> + Send + '_;
 
     /// Sends one plain-text message as the signed-in account.
     ///
