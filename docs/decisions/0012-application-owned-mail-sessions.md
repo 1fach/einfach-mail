@@ -1,6 +1,6 @@
 # ADR 0012: Keep mail sessions behind application workflows
 
-- Status: Accepted
+- Status: Superseded by ADR 0038
 - Date: 2026-11-01
 - Owners: Project maintainer
 

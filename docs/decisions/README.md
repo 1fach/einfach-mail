@@ -21,11 +21,13 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0009](0009-account-scoped-domain-identifiers.md) | Use account-scoped opaque domain identifiers | Accepted |
 | [0010](0010-linux-first-development.md) | Focus current development on Linux | Accepted |
 | [0011](0011-initial-mail-sync-scope.md) | Define the initial read-only mail synchronization scope | Accepted |
-| [0012](0012-application-owned-mail-sessions.md) | Keep mail sessions behind application workflows | Accepted |
+| [0012](0012-application-owned-mail-sessions.md) | Keep mail sessions behind application workflows | Superseded by ADR 0038 |
 | [0013](0013-graph-account-identity.md) | Use the Graph profile for initial account identity | Accepted for Linux; live Entra verification open |
+| [0014](0014-linux-read-only-calendar-workflow.md) | Implement a cached Linux read-only primary calendar | Accepted for Linux; live Graph and manual UI verification remain open |
 | [0024](0024-keyboard-navigation-for-cached-messages.md) | Provide keyboard navigation for cached messages | Accepted |
 | [0030](0030-account-operation-cancellation-boundary.md) | Order account cancellation against credential commits | Accepted for the Linux M1 account flow |
 | [0031](0031-registered-loopback-port-for-entra.md) | Require a registered loopback port for Entra | Accepted for Linux; tenant verification open |
 | [0032](0032-recover-expired-message-delta-cursors.md) | Recover expired message delta cursors | Accepted for Linux; live Graph verification remains open |
 | [0034](0034-invalidate-cached-message-bodies-after-delta-updates.md) | Invalidate cached message bodies after delta updates | Accepted for Linux implementation |
 | [0037](0037-reject-stale-mail-sync-pages.md) | Reject stale mail sync pages | Accepted for Linux implementation |
+| [0038](0038-per-account-mail-and-calendar-session.md) | Use one per-account mail and calendar session | Accepted |
