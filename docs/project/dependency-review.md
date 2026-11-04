@@ -1,6 +1,6 @@
 # Rust dependency review
 
-Last reviewed: 2026-11-01. These notes record dependency evidence and adopted choices. Recheck versions and project fit before adding or upgrading a crate.
+Last reviewed: 2026-11-04. These notes record dependency evidence and adopted choices. Recheck versions and project fit before adding or upgrading a crate.
 
 ## Review rules
 
@@ -50,6 +50,10 @@ These crates are transitive lockfile entries, not direct workspace dependencies.
 The first RustSec workflow run for PR #47 loaded 1,403 advisories and rejected the locked `async-executor` 1.14.0 under `cargo audit --deny yanked` ([run 41661798059](https://github.com/1fach/einfach-mail/actions/runs/41661798059)). The crates.io index marks 1.14.0 yanked. The upstream [`async-executor` changelog](https://github.com/smol-rs/async-executor/blob/master/CHANGELOG.md) says 1.14.1 fixes a use-after-free when a waker fires during `Executor::drop`, introduced in 1.14.0. The transitive paths include GPUI Kit, `smol`, and Linux `zbus` integrations. Update only the locked patch release to 1.14.1; do not replace or directly depend on the executor.
 
 The follow-up lockfile audit loaded the same 1,403 advisories and scanned 916 dependencies. It found no vulnerable or yanked versions and reported the eight unmaintained transitive crates already triaged above. `cargo deny check bans`, the Rust 1.95 workspace/all-target check, and the full workspace test suite passed locally with the new lockfile. The two Secret Service credential lifecycle tests remain ignored because they require a desktop Secret Service.
+
+### M4 account-removal candidate audit — 2026-11-04
+
+The Issue #43 workspace lockfile audit used cargo-audit 0.22.2 with cargo audit --db /home/frenico/Documents/development/hey-mail/target/rustsec-advisory-db --deny yanked. RustSec loaded 1,403 advisories and scanned 918 locked crate dependencies. It found no vulnerable or yanked versions and reported the same eight upstream unmaintained transitive crates listed below. No advisory was ignored; xdg 3.0.0 has no matching advisory. The Linux workspace tests, Rust 1.95 all-target check, Clippy, rustdoc, formatting, and dependency policy checks passed locally. The desktop process-lock test uses a synthetic child process and does not open a GUI.
 
 ### Unmaintained warning triage — 2026-10-31
 
@@ -134,6 +138,7 @@ The combined M2 candidate's documented Linux gate passed locally on 2026-11-01. 
 ## Current constraints
 
 - Per-account cache lifecycle coordination uses Rust's `std::fs::File::lock` on the existing `mail-cache.lock` file. The standard-library API is available within the Rust 1.95 MSRV and uses the same lock for send staging and cache removal. No additional locking crate is needed for this Linux file boundary.
+- The Linux desktop uses `std::fs::File::try_lock` for its startup process lock. Rust stabilized that API in 1.89, below the workspace's 1.95 MSRV. No lock crate is needed because startup acquires the lock synchronously before GPUI starts. The path uses `xdg` 3.0.0, already used by persistence. Its package metadata lists Apache-2.0 OR MIT and Rust 1.60; its only optional feature is `serde`, which the app does not enable. The 3.0.0 release is dated 2025-05-04, so recheck upstream activity when updating the dependency. `xdg::BaseDirectories::place_data_file` creates the XDG data path. Compared with `directories` 6.0.0, `xdg` fits the Linux-only target and already owns the persistence path. `directories` adds cross-platform directory behavior that this milestone does not use. A single-instance wrapper would add a crate around the standard-library lock without adding activation forwarding, which this app does not need.
 - `blocking` 1.7.0 runs the synchronous file-lock wait on its blocking-I/O thread pool while persistence awaits the result. The crate is dual MIT/Apache-2.0, declares Rust 1.68, and is maintained by the smol-rs organization; version 1.7.0 was published in 2026 and is already present in the workspace lockfile transitively. Making it a direct persistence dependency adds no new resolved package. `fs4`'s `AsyncFileExt::lock` still invokes a blocking lock syscall, so it does not meet the executor requirement; `async_file_lock` documents process-local locking, so it does not meet the cross-process requirement. See [`blocking`](https://docs.rs/blocking/1.7.0/blocking/), [`fs4`](https://docs.rs/fs4/1.1.0/fs4/trait.AsyncFileExt.html), and [`async_file_lock`](https://docs.rs/async-file-lock/0.1.4/async_file_lock/struct.FileLock.html).
 - The Microsoft provider uses Graph, OAuth, browser, HTTP, and Secret Service libraries. Application workflows keep provider-neutral account and mail types. Graph mail access is read-only in M2.
 - ADR 0005 selects SQLCipher-backed SQLite. Production Linux persistence uses the reviewed async wrapper and migration crate for encrypted mail records, page/cursor transactions, and account-scoped cache removal. The Windows x64 evidence is historical; current platform work targets Linux.
@@ -231,7 +236,9 @@ The combined M2 candidate's documented Linux gate passed locally on 2026-11-01. 
 - [`smol` 2.0.2 documentation and manifest](https://docs.rs/crate/smol/2.0.2)
 - [`tempfile` 3.27.0 documentation and manifest](https://docs.rs/crate/tempfile/3.27.0)
 - [`xdg` 3.0.0 API documentation](https://docs.rs/xdg/3.0.0/xdg/struct.BaseDirectories.html)
-- [`directories` 6.0.0 documentation](https://docs.rs/crate/directories/6.0.0)
+- [`xdg` 3.0.0 package metadata](https://docs.rs/crate/xdg/3.0.0)
+- [Rust 1.95 `File::try_lock` documentation](https://doc.rust-lang.org/1.95.0/std/fs/struct.File.html#method.try_lock)
+- [`directories` 6.0.0 package metadata](https://docs.rs/crate/directories/6.0.0)
 - [`directories-rs` upstream move notice](https://github.com/dirs-dev/directories-rs)
 - [OpenSSL build prerequisites](https://github.com/openssl/openssl/blob/master/INSTALL.md)
 - [OpenSSL Windows build prerequisites](https://github.com/openssl/openssl/blob/master/NOTES-WINDOWS.md)

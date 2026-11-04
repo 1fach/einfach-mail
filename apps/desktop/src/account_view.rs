@@ -415,7 +415,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         });
         let account_session = self
             .close_mail_view(cx)
-            .or_else(|| self.close_calendar_view(cx));
+            .or_else(|| self.close_calendar_view(cx))
+            .or_else(|| self.account_session.clone());
         self.opening_content = None;
         self.session_open_error = None;
         self.status = AccountStatus::SigningOut;
@@ -432,14 +433,14 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         let mail_view = self.mail_view.take()?;
         drop(self.mail_view_subscription.take());
         mail_view.update(cx, |view, _| view.stop_pending_work());
-        self.account_session.take()
+        self.account_session.clone()
     }
 
     fn close_calendar_view(&mut self, cx: &mut Context<Self>) -> Option<Arc<dyn AccountSession>> {
         let calendar_view = self.calendar_view.take()?;
         drop(self.calendar_view_subscription.take());
         calendar_view.update(cx, |view, _| view.stop_pending_work());
-        self.account_session.take()
+        self.account_session.clone()
     }
 
     fn open_mail(&mut self, cx: &mut Context<Self>) {
@@ -460,14 +461,21 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .clone()
             .map(|workflow| -> Arc<dyn MailPermissionRequester> { workflow });
         let profile = profile.clone();
+        let retained_session = self.account_session.clone();
         self.opening_content = Some(OpeningContent::Mail);
         self.session_open_error = None;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let account_id = profile.id().clone();
-            let session = cx
-                .background_executor()
-                .spawn(async move { account_session_factory.open_session(account_id).await })
-                .await;
+            let session = match retained_session {
+                Some(session) => Ok(session),
+                None => {
+                    let account_id = profile.id().clone();
+                    cx.background_executor()
+                        .spawn(
+                            async move { account_session_factory.open_session(account_id).await },
+                        )
+                        .await
+                }
+            };
             match session {
                 Ok(session) => {
                     let _ = this.update(cx, |view, cx| {
@@ -529,14 +537,21 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         };
         let profile = profile.clone();
+        let retained_session = self.account_session.clone();
         self.opening_content = Some(OpeningContent::Calendar);
         self.session_open_error = None;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let account_id = profile.id().clone();
-            let session = cx
-                .background_executor()
-                .spawn(async move { account_session_factory.open_session(account_id).await })
-                .await;
+            let session = match retained_session {
+                Some(session) => Ok(session),
+                None => {
+                    let account_id = profile.id().clone();
+                    cx.background_executor()
+                        .spawn(
+                            async move { account_session_factory.open_session(account_id).await },
+                        )
+                        .await
+                }
+            };
             match session {
                 Ok(session) => {
                     let _ = this.update(cx, |view, cx| {
@@ -603,6 +618,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     let _ = this.update(cx, |view, cx| {
                         view.status = previous_status;
                         view.session_open_error = Some(error);
+                        if !matches!(
+                            error,
+                            MailCacheError::OperationInProgress
+                                | MailCacheError::SendAlreadyPending
+                        ) {
+                            view.account_session = None;
+                        }
                         view.task = None;
                         cx.notify();
                     });
@@ -611,6 +633,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             }
             let sign_out_result = workflow.sign_out().await;
             let _ = this.update(cx, |view, cx| {
+                view.account_session = None;
                 view.status = match sign_out_result {
                     Ok(()) => AccountStatus::Disconnected,
                     Err(error) => AccountStatus::Failed {
@@ -1049,6 +1072,12 @@ async fn remove_account_cache(
 
 fn mail_cache_error_message(error: MailCacheError) -> &'static str {
     match error {
+        MailCacheError::OperationInProgress => {
+            "A mail or calendar operation is still active. Wait for it to finish, then try signing out again."
+        }
+        MailCacheError::SendAlreadyPending => {
+            "A previous send needs review. Open Mail, check Sent Items, and resolve it before signing out."
+        }
         MailCacheError::MissingEncryptionKey => {
             "The encrypted account cache key is missing. Remove the local cache before syncing again."
         }
@@ -1081,7 +1110,8 @@ mod tests {
     use super::{AccountStatus, AccountView, SetupIssue};
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
-        AccountProvider, AccountWorkflow, MailCacheError,
+        AccountProvider, AccountSession, AccountSessionFactory, AccountSessionFuture,
+        AccountWorkflow, CalendarSession, MailCacheError, MailSession,
     };
     use einfach_mail_domain::{AccountId, AccountProfile};
 
@@ -1099,6 +1129,60 @@ mod tests {
     struct CommitGate {
         started: mpsc::Sender<()>,
         finish: oneshot::Receiver<()>,
+    }
+
+    struct TestAccountSession {
+        removal_attempts: Arc<Mutex<Vec<AccountId>>>,
+    }
+
+    impl AccountSession for TestAccountSession {
+        fn mail_session(&self) -> Arc<dyn MailSession> {
+            panic!("the retained test session is not reopened")
+        }
+
+        fn calendar_session(&self) -> Arc<dyn CalendarSession> {
+            panic!("the retained test session is not reopened")
+        }
+
+        fn remove_account_cache<'a>(
+            &'a self,
+            account_id: &'a AccountId,
+        ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+            let attempts = Arc::clone(&self.removal_attempts);
+            let account_id = account_id.clone();
+            Box::pin(async move {
+                let mut attempts = attempts
+                    .lock()
+                    .expect("synthetic session removal log mutex is healthy");
+                attempts.push(account_id);
+                if attempts.len() == 1 {
+                    Err(MailCacheError::OperationInProgress)
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    struct TestAccountSessionFactory {
+        fallback_removals: Arc<AtomicBool>,
+    }
+
+    impl AccountSessionFactory for TestAccountSessionFactory {
+        fn open_session(
+            &self,
+            _: AccountId,
+        ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
+            Box::pin(ready(Err(MailCacheError::Unavailable)))
+        }
+
+        fn remove_account_cache<'a>(
+            &'a self,
+            _: &'a AccountId,
+        ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+            self.fallback_removals.store(true, Ordering::SeqCst);
+            Box::pin(ready(Err(MailCacheError::Unavailable)))
+        }
     }
 
     impl TestProvider {
@@ -1333,6 +1417,80 @@ mod tests {
             .update(|cx| matches!(&view.read(cx).status, super::AccountStatus::Disconnected));
         assert!(disconnected);
         assert!(signed_out.load(Ordering::SeqCst));
+    }
+
+    #[gpui::test]
+    fn sign_out_after_return_to_account_reuses_the_retained_session(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        let signed_out = Arc::clone(&provider.signed_out);
+        let workflow = Arc::new(AccountWorkflow::new(provider));
+        let removal_attempts = Arc::new(Mutex::new(Vec::new()));
+        let fallback_removals = Arc::new(AtomicBool::new(false));
+        let session: Arc<dyn AccountSession> = Arc::new(TestAccountSession {
+            removal_attempts: Arc::clone(&removal_attempts),
+        });
+        let factory: Arc<dyn AccountSessionFactory> = Arc::new(TestAccountSessionFactory {
+            fallback_removals: Arc::clone(&fallback_removals),
+        });
+        let (view, context) =
+            cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+        context.run_until_parked();
+        let profile = AccountProfile::try_new(
+            AccountId::try_from("synthetic-account".to_owned())
+                .expect("synthetic account ID is valid"),
+            Some("Ada Example".to_owned()),
+            Some("ada@example.test".to_owned()),
+            Some("ada@tenant.example.test".to_owned()),
+        )
+        .expect("synthetic account profile is valid");
+        let account_id = profile.id().clone();
+        context.cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.status = AccountStatus::Connected(profile);
+                view.account_session = Some(Arc::clone(&session));
+                cx.notify();
+            });
+        });
+        draw_account_view(context);
+
+        click(context, "sign-out");
+
+        let retry_state_kept = context.cx.update(|cx| {
+            let account_view = view.read(cx);
+            matches!(
+                &account_view.status,
+                AccountStatus::Connected(profile) if profile.id() == &account_id
+            ) && account_view
+                .account_session
+                .as_ref()
+                .is_some_and(|retained| Arc::ptr_eq(retained, &session))
+        });
+        assert!(retry_state_kept);
+        assert_eq!(
+            *removal_attempts
+                .lock()
+                .expect("synthetic session removal log mutex is healthy"),
+            vec![account_id.clone()]
+        );
+        assert!(!fallback_removals.load(Ordering::SeqCst));
+
+        click(context, "sign-out");
+
+        let state_cleared = context.cx.update(|cx| {
+            let account_view = view.read(cx);
+            matches!(&account_view.status, AccountStatus::Disconnected)
+                && account_view.account_session.is_none()
+        });
+        assert!(state_cleared);
+        assert!(signed_out.load(Ordering::SeqCst));
+        assert_eq!(
+            *removal_attempts
+                .lock()
+                .expect("synthetic session removal log mutex is healthy"),
+            vec![account_id.clone(), account_id]
+        );
+        assert!(!fallback_removals.load(Ordering::SeqCst));
     }
 
     #[gpui::test]

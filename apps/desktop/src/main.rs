@@ -17,6 +17,7 @@ mod account_view;
 mod calendar_view;
 mod mail_composer;
 mod mail_view;
+mod single_instance;
 
 use account_view::{AccountView, SetupIssue};
 
@@ -80,6 +81,10 @@ fn configured_callback_port(port_text: Option<&str>) -> Result<CallbackPort, Set
 }
 
 fn main() -> Result<(), std::io::Error> {
+    single_instance::run_with_user_lock(run_application)?
+}
+
+fn run_application() -> Result<(), std::io::Error> {
     let (window_open_attempt_sender, window_open_attempt_receiver) =
         mpsc::channel::<std::io::Result<()>>();
 

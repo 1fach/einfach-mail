@@ -31,6 +31,7 @@ use crate::{security, store::SqliteMailCache};
 const DATABASE_KEY_BYTE: u8 = 0x62;
 
 type PageQueue = VecDeque<Result<MessageDeltaResponse, MailOperationError>>;
+type ProviderGate = Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
 type ReadStateGate = Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
 type FollowUpFlagGate =
     Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
@@ -64,6 +65,8 @@ struct FixtureProvider {
     follow_up_flag_response: FollowUpFlagResponse,
     message_moves: Arc<Mutex<Vec<(FolderReference, MessageId, FolderReference)>>>,
     move_result: Arc<Mutex<Result<(), MailOperationError>>>,
+    move_gate: ProviderGate,
+    send_gate: ProviderGate,
     calendar_gate: Option<CalendarSyncGate>,
 }
 
@@ -142,8 +145,30 @@ impl FixtureProvider {
             follow_up_flag_response: FollowUpFlagResponse::Confirm,
             message_moves: Arc::new(Mutex::new(Vec::new())),
             move_result: Arc::new(Mutex::new(Ok(()))),
+            move_gate: Arc::new(Mutex::new(None)),
+            send_gate: Arc::new(Mutex::new(None)),
             calendar_gate: None,
         }
+    }
+
+    fn hold_next_submission(&self) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+        let (started_tx, started_rx) = smol::channel::bounded(1);
+        let (release_tx, release_rx) = smol::channel::bounded(1);
+        *self
+            .send_gate
+            .lock()
+            .expect("synthetic send gate mutex is healthy") = Some((started_tx, release_rx));
+        (started_rx, release_tx)
+    }
+
+    fn hold_next_message_move(&self) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+        let (started_tx, started_rx) = smol::channel::bounded(1);
+        let (release_tx, release_rx) = smol::channel::bounded(1);
+        *self
+            .move_gate
+            .lock()
+            .expect("synthetic move gate mutex is healthy") = Some((started_tx, release_rx));
+        (started_rx, release_tx)
     }
 
     fn hold_next_read_state(&self) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
@@ -377,6 +402,7 @@ impl MailProvider for FixtureProvider {
         );
         let message_moves = Arc::clone(&self.message_moves);
         let result = Arc::clone(&self.move_result);
+        let gate = Arc::clone(&self.move_gate);
         async move {
             if !account_matches {
                 return Err(MailOperationError::AccountMismatch);
@@ -385,6 +411,14 @@ impl MailProvider for FixtureProvider {
                 .lock()
                 .expect("synthetic message-move log mutex is not poisoned")
                 .push(request);
+            let gate = gate
+                .lock()
+                .expect("synthetic move gate mutex is healthy")
+                .take();
+            if let Some((started, release)) = gate {
+                let _ = started.send(()).await;
+                let _ = release.recv().await;
+            }
             *result
                 .lock()
                 .expect("synthetic message-move result mutex is not poisoned")
@@ -396,11 +430,25 @@ impl MailProvider for FixtureProvider {
         account_id: &AccountId,
         _draft: MailDraft,
     ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
-        self.send_calls.fetch_add(1, Ordering::Relaxed);
-        if account_id != &self.account_id {
-            return ready(Err(MailSendProviderError::AccountMismatch));
+        let matches_account = account_id == &self.account_id;
+        let calls = Arc::clone(&self.send_calls);
+        let gate = Arc::clone(&self.send_gate);
+        let result = self.send_result;
+        async move {
+            if !matches_account {
+                return Err(MailSendProviderError::AccountMismatch);
+            }
+            calls.fetch_add(1, Ordering::Relaxed);
+            let gate = gate
+                .lock()
+                .expect("synthetic send gate mutex is healthy")
+                .take();
+            if let Some((started, release)) = gate {
+                let _ = started.send(()).await;
+                let _ = release.recv().await;
+            }
+            result
         }
-        ready(self.send_result)
     }
 
     fn reply_to_message(
@@ -408,11 +456,26 @@ impl MailProvider for FixtureProvider {
         account_id: &AccountId,
         draft: einfach_mail_domain::MailReplyDraft,
     ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
-        if account_id != &self.account_id || draft.source().account_id() != &self.account_id {
-            return ready(Err(MailSendProviderError::AccountMismatch));
+        let matches_account =
+            account_id == &self.account_id && draft.source().account_id() == &self.account_id;
+        let calls = Arc::clone(&self.send_calls);
+        let gate = Arc::clone(&self.send_gate);
+        let result = self.send_result;
+        async move {
+            if !matches_account {
+                return Err(MailSendProviderError::AccountMismatch);
+            }
+            calls.fetch_add(1, Ordering::Relaxed);
+            let gate = gate
+                .lock()
+                .expect("synthetic send gate mutex is healthy")
+                .take();
+            if let Some((started, release)) = gate {
+                let _ = started.send(()).await;
+                let _ = release.recv().await;
+            }
+            result
         }
-        self.send_calls.fetch_add(1, Ordering::Relaxed);
-        ready(self.send_result)
     }
 }
 
@@ -543,7 +606,32 @@ fn page_response(page: MessageDeltaPage) -> MessageDeltaResponse {
     MessageDeltaResponse::Page(MessageDeltaPageResponse::new(page, 1_024))
 }
 
+fn provider_with_cached_message(
+    account: AccountId,
+    folders: Vec<MailFolder>,
+    started_at: SystemTime,
+    body: Result<MessageBody, MailOperationError>,
+) -> FixtureProvider {
+    let cutoff = started_at - Duration::from_secs(90 * 24 * 60 * 60);
+    let page = MessageDeltaPage::new(
+        vec![MessageDeltaChange::Upsert {
+            id: message_id(),
+            patch: complete_patch("Synthetic subject".to_owned(), cutoff),
+        }],
+        MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/messages?$deltatoken=synthetic-account-removal"
+                .to_owned(),
+        )),
+    );
+    FixtureProvider::new(account, folders, [Ok(page_response(page))], body)
+}
+
 fn ignore_sync_progress(_: MailSyncProgress) {}
+
+fn assert_removal_completed(result: Result<(), MailCacheError>, database_path: &std::path::Path) {
+    assert_ne!(result, Err(MailCacheError::OperationInProgress));
+    assert!(!database_path.exists());
+}
 
 fn complete_patch(subject: String, received_at: SystemTime) -> MessageMetadataPatch {
     let mut patch = MessageMetadataPatch::new();
@@ -3090,5 +3178,466 @@ fn rejected_send_with_marker_clear_failure_keeps_a_resolvable_known_rejection() 
 
         drop(workflow);
         cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn account_removal_reservation_blocks_new_mail_work_before_provider_calls() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic account directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let archive = archive_folder(&account);
+        let inbox_reference = inbox.reference().clone();
+        let archive_reference = archive.reference().clone();
+        let mut provider = FixtureProvider::new(
+            account.clone(),
+            vec![inbox, archive],
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        provider.send_result = Ok(());
+        let folder_list_calls = Arc::clone(&provider.folder_list_calls);
+        let send_calls = Arc::clone(&provider.send_calls);
+        let read_state_updates = Arc::clone(&provider.read_state_updates);
+        let message_moves = Arc::clone(&provider.message_moves);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let (marker_check_finished, resume_removal) =
+            cache.hold_removal_after_marker_check_for_tests();
+        let removing_workflow = Arc::clone(&workflow);
+        let removing_account = account.clone();
+        let removal_task = smol::spawn(async move {
+            removing_workflow
+                .remove_account_cache(&removing_account)
+                .await
+        });
+        marker_check_finished
+            .recv()
+            .await
+            .expect("removal checked the empty pending-send marker");
+
+        assert_eq!(
+            workflow
+                .synchronize_account(
+                    &account,
+                    UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                    &ignore_sync_progress,
+                )
+                .await,
+            Err(MailWorkflowError::OperationInProgress)
+        );
+        assert_eq!(
+            workflow
+                .set_message_read_state(&inbox_reference, &message_id(), ReadState::Read)
+                .await,
+            Err(MailWorkflowError::OperationInProgress)
+        );
+        assert_eq!(
+            workflow
+                .move_message(&inbox_reference, &message_id(), &archive_reference)
+                .await,
+            Err(MailWorkflowError::OperationInProgress)
+        );
+        assert_eq!(
+            workflow
+                .send_message(
+                    &account,
+                    draft("Synthetic subject", "Synthetic body"),
+                    UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                )
+                .await,
+            Err(MailSendWorkflowError::OperationInProgress)
+        );
+        assert_eq!(folder_list_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(send_calls.load(Ordering::Relaxed), 0);
+        assert!(
+            read_state_updates
+                .lock()
+                .expect("synthetic read-state log mutex is healthy")
+                .is_empty()
+        );
+        assert!(
+            message_moves
+                .lock()
+                .expect("synthetic message-move log mutex is healthy")
+                .is_empty()
+        );
+
+        resume_removal
+            .send(())
+            .await
+            .expect("account removal gate is released");
+        let removal_result = removal_task.await;
+        assert_removal_completed(removal_result, &directory.path().join("mail.sqlite3"));
+    });
+}
+
+#[test]
+fn active_send_reservation_blocks_account_removal_before_marker_staging() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic account directory is created");
+        let account = account_id();
+        let mut provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        provider.send_result = Ok(());
+        let send_calls = Arc::clone(&provider.send_calls);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let (marker_read_started, release_marker_read) = cache.hold_pending_send_read_for_tests();
+        let sending_workflow = Arc::clone(&workflow);
+        let sending_account = account.clone();
+        let send_task = smol::spawn(async move {
+            sending_workflow
+                .send_message(
+                    &sending_account,
+                    draft("Synthetic subject", "Synthetic body"),
+                    UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                )
+                .await
+        });
+        marker_read_started
+            .recv()
+            .await
+            .expect("send reserved the account before reading the marker");
+
+        assert_eq!(cache.load_pending_send(&account).await, Ok(None));
+        assert_eq!(
+            workflow.remove_account_cache(&account).await,
+            Err(MailCacheError::OperationInProgress)
+        );
+        assert_eq!(send_calls.load(Ordering::Relaxed), 0);
+        release_marker_read
+            .send(())
+            .await
+            .expect("synthetic send marker read is released");
+        assert_eq!(send_task.await, Ok(MailSendOutcome::Accepted));
+        assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(workflow.load_pending_send(&account).await, Ok(None));
+        let removal_result = workflow.remove_account_cache(&account).await;
+        assert_removal_completed(removal_result, &directory.path().join("mail.sqlite3"));
+    });
+}
+
+#[test]
+fn reply_reservation_blocks_account_removal_before_and_during_submission() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic account directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let folder_reference = cached_folder.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut provider = provider_with_cached_message(
+            account.clone(),
+            vec![cached_folder],
+            started_at,
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        provider.send_result = Err(MailSendProviderError::OutcomeUnknown);
+        let send_calls = Arc::clone(&provider.send_calls);
+        let (submission_started, release_submission) = provider.hold_next_submission();
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic reply source is cached");
+
+        let (marker_read_started, release_marker_read) = cache.hold_pending_send_read_for_tests();
+        let replying_workflow = Arc::clone(&workflow);
+        let replying_account = account.clone();
+        let reply_source = MailReplySource::new(folder_reference, message_id());
+        let reply_task = smol::spawn(async move {
+            replying_workflow
+                .reply_to_message(
+                    &replying_account,
+                    MailReplyDraft::new(reply_source, "Synthetic reply body".to_owned()),
+                    started_at,
+                )
+                .await
+        });
+        marker_read_started
+            .recv()
+            .await
+            .expect("reply reserved the account before reading the marker");
+
+        assert_eq!(cache.load_pending_send(&account).await, Ok(None));
+        assert_eq!(
+            workflow.remove_account_cache(&account).await,
+            Err(MailCacheError::OperationInProgress)
+        );
+        release_marker_read
+            .send(())
+            .await
+            .expect("synthetic reply marker read is released");
+        submission_started
+            .recv()
+            .await
+            .expect("reply reaches the provider with its account reservation held");
+        assert_eq!(
+            workflow.remove_account_cache(&account).await,
+            Err(MailCacheError::OperationInProgress)
+        );
+        release_submission
+            .send(())
+            .await
+            .expect("synthetic reply submission is released");
+        assert!(matches!(
+            reply_task.await,
+            Ok(MailSendOutcome::OutcomeUnknown(_))
+        ));
+        assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            workflow.remove_account_cache(&account).await,
+            Err(MailCacheError::SendAlreadyPending)
+        );
+        assert!(
+            cache
+                .load_pending_send(&account)
+                .await
+                .expect("unresolved reply marker remains readable")
+                .is_some()
+        );
+        assert!(directory.path().join("mail.sqlite3").exists());
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn active_account_sync_blocks_cache_removal() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic account directory is created");
+        let account = account_id();
+        let mut provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let (sync_started, sync_started_receiver) = smol::channel::bounded(1);
+        let (release_sync, release_sync_receiver) = smol::channel::bounded(1);
+        provider.folder_list_gate = Some((sync_started, release_sync_receiver));
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let syncing_workflow = Arc::clone(&workflow);
+        let syncing_account = account.clone();
+        let sync_task = smol::spawn(async move {
+            syncing_workflow
+                .synchronize_account(
+                    &syncing_account,
+                    UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                    &ignore_sync_progress,
+                )
+                .await
+        });
+        sync_started_receiver
+            .recv()
+            .await
+            .expect("account sync owns its reservation while listing folders");
+
+        assert_eq!(
+            workflow.remove_account_cache(&account).await,
+            Err(MailCacheError::OperationInProgress)
+        );
+        assert!(directory.path().join("mail.sqlite3").exists());
+        release_sync
+            .send(())
+            .await
+            .expect("synthetic folder listing gate is released");
+        assert!(sync_task.await.is_ok());
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn active_folder_write_blocks_cache_removal() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic account directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let folder_reference = cached_folder.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let provider = provider_with_cached_message(
+            account.clone(),
+            vec![cached_folder],
+            started_at,
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let (write_started, release_write) = provider.hold_next_read_state();
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic message is cached before its update");
+        let writing_workflow = Arc::clone(&workflow);
+        let writing_folder = folder_reference;
+        let write_task = smol::spawn(async move {
+            writing_workflow
+                .set_message_read_state(&writing_folder, &message_id(), ReadState::Read)
+                .await
+        });
+        write_started
+            .recv()
+            .await
+            .expect("folder write owns its reservation while waiting for Graph");
+
+        assert_eq!(
+            workflow.remove_account_cache(&account).await,
+            Err(MailCacheError::OperationInProgress)
+        );
+        release_write
+            .send(())
+            .await
+            .expect("synthetic folder write is released");
+        assert!(write_task.await.is_ok());
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn uncached_message_body_fetch_blocks_cache_removal() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic account directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let folder_reference = cached_folder.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let body = MessageBody::new(MessageBodyType::Text, "Synthetic body".to_owned());
+        let mut provider = provider_with_cached_message(
+            account.clone(),
+            vec![cached_folder],
+            started_at,
+            Ok(body.clone()),
+        );
+        let body_fetches = Arc::clone(&provider.body_fetches);
+        let (fetch_started_sender, fetch_started) = smol::channel::bounded(1);
+        let (release_fetch, fetch_release_receiver) = smol::channel::bounded(1);
+        provider.body_gate = Some(BodyFetchGate {
+            started: fetch_started_sender,
+            release: fetch_release_receiver,
+        });
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic message is cached before opening");
+        let opening_workflow = Arc::clone(&workflow);
+        let opening_folder = folder_reference.clone();
+        let open_task = smol::spawn(async move {
+            opening_workflow
+                .open_message(&opening_folder, &message_id())
+                .await
+        });
+        fetch_started
+            .recv()
+            .await
+            .expect("message body request owns its folder reservation");
+
+        assert_eq!(
+            workflow.remove_account_cache(&account).await,
+            Err(MailCacheError::OperationInProgress)
+        );
+        release_fetch
+            .send(())
+            .await
+            .expect("synthetic body request is released");
+        assert!(
+            !open_task
+                .await
+                .expect("message opens after its body is fetched")
+                .loaded_from_cache()
+        );
+        assert_eq!(body_fetches.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            cache
+                .read_message(&folder_reference, &message_id())
+                .await
+                .expect("cached message remains readable")
+                .and_then(|(_, body)| body),
+            Some(body)
+        );
+        let removal_result = workflow.remove_account_cache(&account).await;
+        assert_removal_completed(removal_result, &directory.path().join("mail.sqlite3"));
+    });
+}
+
+#[test]
+fn active_message_move_blocks_cache_removal() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic account directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let archive = archive_folder(&account);
+        let inbox_reference = inbox.reference().clone();
+        let archive_reference = archive.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let cutoff = started_at - Duration::from_secs(90 * 24 * 60 * 60);
+        let source_page = MessageDeltaPage::new(
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Synthetic subject".to_owned(), cutoff),
+            }],
+            MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(
+                "https://graph.microsoft.com/v1.0/messages?$deltatoken=synthetic-move-source"
+                    .to_owned(),
+            )),
+        );
+        let destination_page = MessageDeltaPage::new(
+            Vec::new(),
+            MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(
+                "https://graph.microsoft.com/v1.0/messages?$deltatoken=synthetic-move-destination"
+                    .to_owned(),
+            )),
+        );
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![inbox, archive],
+            [
+                Ok(page_response(source_page)),
+                Ok(page_response(destination_page)),
+            ],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let (move_started, release_move) = provider.hold_next_message_move();
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("source and destination folders are cached");
+        let moving_workflow = Arc::clone(&workflow);
+        let move_task = smol::spawn(async move {
+            moving_workflow
+                .move_message(&inbox_reference, &message_id(), &archive_reference)
+                .await
+        });
+        move_started
+            .recv()
+            .await
+            .expect("message move holds its folder reservations during provider work");
+
+        assert_eq!(
+            workflow.remove_account_cache(&account).await,
+            Err(MailCacheError::OperationInProgress)
+        );
+        release_move
+            .send(())
+            .await
+            .expect("synthetic message move is released");
+        assert_eq!(
+            move_task.await,
+            Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached)
+        );
+        let removal_result = workflow.remove_account_cache(&account).await;
+        assert_removal_completed(removal_result, &directory.path().join("mail.sqlite3"));
     });
 }

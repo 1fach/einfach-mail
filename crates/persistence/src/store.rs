@@ -8,7 +8,7 @@ use std::{
 
 #[cfg(test)]
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -206,7 +206,14 @@ pub struct SqliteMailCache {
     credential_account: String,
     #[cfg(test)]
     fail_next_pending_send_clear: Arc<AtomicBool>,
+    #[cfg(test)]
+    removal_gate: Arc<Mutex<Option<TestOperationGate>>>,
+    #[cfg(test)]
+    pending_send_read_gate: Arc<Mutex<Option<TestOperationGate>>>,
 }
+
+#[cfg(test)]
+type TestOperationGate = (smol::channel::Sender<()>, smol::channel::Receiver<()>);
 
 /// Opens and removes account-scoped [`SqliteMailCache`] values.
 #[derive(Clone, Copy, Debug, Default)]
@@ -244,6 +251,10 @@ impl SqliteMailCache {
             credential_account: opened.credential_account,
             #[cfg(test)]
             fail_next_pending_send_clear: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            removal_gate: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            pending_send_read_gate: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -281,7 +292,37 @@ impl SqliteMailCache {
             lock_path,
             credential_account: "synthetic-cache-key".to_owned(),
             fail_next_pending_send_clear: Arc::new(AtomicBool::new(false)),
+            removal_gate: Arc::new(Mutex::new(None)),
+            pending_send_read_gate: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn hold_removal_after_marker_check_for_tests(
+        &self,
+    ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+        let (checked_tx, checked_rx) = smol::channel::bounded(1);
+        let (release_tx, release_rx) = smol::channel::bounded(1);
+        *self
+            .removal_gate
+            .lock()
+            .expect("synthetic account-removal gate mutex is healthy") =
+            Some((checked_tx, release_rx));
+        (checked_rx, release_tx)
+    }
+
+    #[cfg(test)]
+    pub(super) fn hold_pending_send_read_for_tests(
+        &self,
+    ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+        let (started_tx, started_rx) = smol::channel::bounded(1);
+        let (release_tx, release_rx) = smol::channel::bounded(1);
+        *self
+            .pending_send_read_gate
+            .lock()
+            .expect("synthetic pending-send read gate mutex is healthy") =
+            Some((started_tx, release_rx));
+        (started_rx, release_tx)
     }
 
     #[cfg(test)]
@@ -884,8 +925,20 @@ impl MailCache for SqliteMailCache {
         let validation = self.check_account(account_id);
         let account_id = account_id.as_str().to_owned();
         let client = self.client.clone();
+        #[cfg(test)]
+        let pending_send_read_gate = Arc::clone(&self.pending_send_read_gate);
         async move {
             validation?;
+            #[cfg(test)]
+            let gate = pending_send_read_gate
+                .lock()
+                .expect("synthetic pending-send read gate mutex is healthy")
+                .take();
+            #[cfg(test)]
+            if let Some((started, release)) = gate {
+                let _ = started.send(()).await;
+                let _ = release.recv().await;
+            }
             client
                 .conn_and_then(move |connection| read_pending_send(connection, &account_id))
                 .await
@@ -1017,11 +1070,23 @@ impl MailCache for SqliteMailCache {
         let lock_path = self.lock_path.clone();
         let database_path = self.database_path.clone();
         let credential_account = self.credential_account.clone();
+        #[cfg(test)]
+        let removal_gate = Arc::clone(&self.removal_gate);
         async move {
             validation?;
             let _lock = security::lock_account_directory(&lock_path).await?;
             if self.load_pending_send(&account_id).await?.is_some() {
                 return Err(MailCacheError::SendAlreadyPending);
+            }
+            #[cfg(test)]
+            let gate = removal_gate
+                .lock()
+                .expect("synthetic account-removal gate mutex is healthy")
+                .take();
+            #[cfg(test)]
+            if let Some((checked, release)) = gate {
+                let _ = checked.send(()).await;
+                let _ = release.recv().await;
             }
             security::delete_database_files(&client, &database_path).await?;
             security::remove_credential(&credential_account)

@@ -10,13 +10,13 @@ M3 read-only calendar integration is ready for stacked draft review on clean bra
 
 Issue #44's retryable cache-removal fix passed source review and the full Linux gate on 2026-11-05 in isolated branch `candidate/issue-44-retryable-cache-removal`. The fix now treats filesystem inspection failures as errors before creating or deleting a cache key, and the retry guidance covers both cache-file access and the Linux keyring. Synthetic regression tests cover inaccessible cache paths and the recovery message; existing tests cover SQLCipher recovery after sidecar failures and retry after provider credential deletion fails. RustSec reported no vulnerable or yanked locked crates and 8 allowed unmaintained-crate advisories. Three environment-dependent Secret Service tests remain ignored; no real account, live Graph request, or GUI was used. Keep Issue #44 open and PR #52 in draft until review and merge.
 
-Issue #23's read-state implementation is isolated on `candidate/issue-23-read-state-pr`, based on PR #52's head and alongside the send draft in PR #53. Draft PR #54 is open for review. The implementation and source review are complete. `bash scripts/check-linux-local.sh` passed on 2026-11-04. Issue #31's follow-up flag implementation is isolated on `candidate/issue-31-flags-pr` and stacked on PR #54's current head, `19c41468b139cac4facc8e67b14ecaa93d1f46d9`, in draft PR #55. After restacking, `bash scripts/check-linux-local.sh` passed on 2026-11-05. Synthetic tests cover Graph parsing and PATCH responses, SQLCipher migration and recovery, and headless GPUI feedback. Three Secret Service tests remain ignored because they need a desktop service. No test tenant, real mailbox, or GUI was used.
+Issues #23 and #31 are presented in draft PRs #54 and #55 after plain-text send in PR #53. Their earlier Linux checks passed; verification of the complete restacked chain is pending. Synthetic tests cover Graph updates, persistence, and headless GPUI feedback. Keep issues #23 and #31 open through review; issues #24 and #32 remain open for tenant verification.
 
-Issue #27's M4 plain-text send implementation is in draft PR #53. Its head is `candidate/issue-27-plain-text-send`. Its base is PR #52's `candidate/issue-44-retryable-cache-removal` branch. The local Linux gate passed, including Rust 1.95 all-target compilation, Clippy, rustdoc, dependency policy, RustSec audit, formatting, and workspace tests. Three environment-dependent Secret Service tests remain ignored. Cache staging and removal serialize across app processes. Stale cache handles reject sends after database removal, and lock waits run off the async executor. No live Graph request, real mailbox, or desktop window was used. Tenant verification remains under issue #28. Keep issue #27 open until review and merge.
+Issue #27's plain-text send implementation is in draft PR #53, based on PR #52. The cache-presence Result contract has been carried through account opening and no-open sign-out paths. Final Linux verification is pending. Tenant verification remains under issue #28.
 
-Issue #23's read-state action is in draft PR #54, stacked on PR #53. Its Linux checks passed before this restack; final-stack verification is pending. The implementation uses synthetic tests only. No live Graph request, real mailbox, or desktop window was used. Keep issue #23 open through review and issue #24 open for tenant verification.
+Issue #29's reply implementation is in draft PR #56, stacked on PR #55. Its older duplicate flags commit has been removed from the stack. Final Linux verification is pending. Keep issue #30 open for tenant-only consent, Reply-To, and Sent Items evidence.
 
-Issue #29's reply implementation is in draft PR #56, stacked on PR #55. It covers the native composer, cached-source checks, Graph POST mapping, and body-free restart recovery. The branch is being restacked to remove an older duplicate flags commit. Final Linux verification remains pending. Keep issue #30 open for tenant-only consent, `Reply-To`, and Sent Items evidence.
+Issue #33's message move and issue #43's account-removal concurrency changes are in draft PRs #57 and #58. PR #58 reuses the account session and reservation registry for cache removal and holds the Linux per-user process lock before GPUI startup. Final Linux verification of the complete stack is pending. Keep issue #34 open for tenant-only move and immutable-ID verification; issue #43's coverage is synthetic.
 
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
@@ -31,6 +31,9 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 - The M3 port adds account-scoped calendar workflows, Graph calendar-view delta paging, range-scoped SQLCipher caching, and a native weekly GPUI agenda. The full Linux gate and source review pass locally. Synthetic tests cover the request, workflow, persistence, and headless agenda paths. No calendar Graph request or desktop window has been used.
 - Issue #23 adds one M4 action: users can set a cached message read or unread after Graph confirms the change. The encrypted cache updates only after confirmation. An uncertain result blocks more read-state writes until a successful account sync. The permission review discloses the full delegated `Mail.ReadWrite` capability. Tenant consent and live Graph behavior remain unverified under Issue #24.
 - The M4 send candidate adds a native single-recipient plain-text composer, same-account delegated `Mail.Send` renewal, a one-shot Graph `/me/sendMail` request, and an encrypted body-free marker that blocks replay and account removal while unresolved. Confirmed acceptance, definitive rejection, and uncertain outcomes have separate recovery paths; fixtures cover redirect, throttle, transport failure, restart, cache failure, duplicate-send prevention, and cross-process cache lifecycle races. Live permission consent and Graph behavior are unverified under issue #28.
+- Issue #29 adds a native plain-text reply to a cached message. It shares the send marker and uncertain-outcome recovery path; reply bodies are not persisted.
+- Issue #33 adds a native move action for cached messages. It updates the encrypted cache only after exact Graph confirmation and preserves the cached body during reconciliation.
+- Issue #43 serializes cache removal with account, folder, and calendar work, preserves the durable pending-send guard, and prevents a second Linux desktop process from opening the same per-user cache.
 
 ## Active risks
 
@@ -40,20 +43,18 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 - Issue #9 remains open for real-window layout, operating-system clipboard behavior, and system-browser launch. Do not launch a GUI during this work.
 - The Issue #22 candidate is ready for stacked review on `candidate/issue-22-calendar-sync`, based on PR #47. Keep issue #22 open for manual Linux review of screen-reader announcements, focus, scrolling, and layout. Keep issue #6 open for live recurrence, time-zone, and all-day verification.
 - Draft PR #53 implements Issue #27 and is stacked on PR #52. Keep issue #27 open until review and merge, and keep issue #28 open for tenant-only consent and Graph verification.
-- Issue #29 has local synthetic coverage but no review branch yet. Keep issue #30 open for tenant-only reply verification.
+- Keep issues #29, #33, and #43 open through review of draft PRs #56, #57, and #58.
 - Fedora GNOME Keyring evidence does not establish behavior for every Secret Service implementation.
 - Windows and macOS build, runtime, credential storage, installation, and operating-system integration remain deferred.
 
 ## Next actions
 
-1. Finish local Linux verification of the reconciled M4 send, read-state, flags, reply, move, and account-removal stack before publishing branch updates.
-2. Update issue and PR evidence after the restacked branch heads are stable; keep draft states unchanged and do not merge.
+1. Finish local Linux verification of the reconciled PR #53–#64 chain before publishing one coordinated branch update.
+2. Update linked issues and PR evidence after branch heads are stable; keep drafts open and do not merge.
 3. Keep PR #47 in draft until issue #8's Microsoft 365 initial-sync check and issue #9's real-window checks pass.
-4. Keep issue #8 open until initial-sync completeness is verified against a Microsoft 365 test tenant.
-5. Keep issue #9 open until layout, clipboard behavior, and browser launch are verified in a safe Linux session.
-6. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
-7. Keep issues #24, #28, #30, and #32 open for tenant-only consent and Graph verification.
-8. After PR #50 merges, review the independent M3 follow-ups in PRs #51 and #52 for merge.
+4. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
+5. Keep issues #24, #28, #30, #32, and #34 open for tenant-only consent and Graph verification.
+6. After PR #50 merges, review the independent M3 follow-ups in PRs #51 and #52 for merge.
 
 ## Update rule
 
