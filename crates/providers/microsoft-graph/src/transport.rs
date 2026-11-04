@@ -8,7 +8,9 @@ use std::{
 use huskarl::token::AccessToken;
 use reqwest::{
     Client, Response, StatusCode,
-    header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, IF_MATCH, LOCATION, RETRY_AFTER},
+    header::{
+        AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, IF_MATCH, LOCATION, RETRY_AFTER,
+    },
 };
 use tokio::{
     runtime::{Builder, Runtime},
@@ -16,7 +18,11 @@ use tokio::{
     task::JoinSet,
 };
 
-use crate::{error::GraphError, graph_url::GraphUrl, http_client};
+use crate::{
+    error::GraphError,
+    graph_url::{GraphUrl, MAX_GRAPH_CALENDAR_DELTA_URL_BYTES},
+    http_client,
+};
 
 const REQUEST_CHANNEL_CAPACITY: usize = 16;
 const MAX_ACTIVE_REQUESTS: usize = 16;
@@ -34,18 +40,22 @@ pub(super) enum GraphOperation {
     MessageUpdate,
     MessageMove,
     MailSend,
-    CalendarViewDelta,
     CalendarEventCreate,
     CalendarEventRead,
     CalendarEventUpdate,
     CalendarEventDelete,
+    CalendarViewDeltaInitial,
+    CalendarViewDeltaContinuation,
 }
 
 impl GraphOperation {
     fn requires_json_content_type(self) -> bool {
         matches!(
             self,
-            Self::MessageDelta | Self::MailSend | Self::CalendarViewDelta
+            Self::MessageDelta
+                | Self::MailSend
+                | Self::CalendarViewDeltaInitial
+                | Self::CalendarViewDeltaContinuation
         )
     }
 
@@ -57,11 +67,12 @@ impl GraphOperation {
                 | Self::MessageBody
                 | Self::MessageUpdate
                 | Self::MessageMove
-                | Self::CalendarViewDelta
                 | Self::CalendarEventCreate
                 | Self::CalendarEventRead
                 | Self::CalendarEventUpdate
                 | Self::CalendarEventDelete
+                | Self::CalendarViewDeltaInitial
+                | Self::CalendarViewDeltaContinuation
         )
     }
 }
@@ -111,6 +122,10 @@ struct GraphCommand {
 pub(super) enum GraphResponse {
     Body(Vec<u8>),
     MessageDeltaReset(Option<String>),
+    CalendarViewDeltaReset {
+        location: Option<String>,
+        response_bytes: usize,
+    },
 }
 
 impl std::fmt::Debug for GraphResponse {
@@ -118,6 +133,9 @@ impl std::fmt::Debug for GraphResponse {
         match self {
             Self::Body(_) => formatter.write_str("Body(<redacted>)"),
             Self::MessageDeltaReset(_) => formatter.write_str("MessageDeltaReset(<redacted>)"),
+            Self::CalendarViewDeltaReset { .. } => {
+                formatter.write_str("CalendarViewDeltaReset(<redacted>)")
+            }
         }
     }
 }
@@ -126,7 +144,9 @@ impl GraphResponse {
     fn into_body(self) -> Result<Vec<u8>, GraphError> {
         match self {
             Self::Body(body) => Ok(body),
-            Self::MessageDeltaReset(_) => Err(GraphError::InvalidResponse),
+            Self::MessageDeltaReset(_) | Self::CalendarViewDeltaReset { .. } => {
+                Err(GraphError::InvalidResponse)
+            }
         }
     }
 }
@@ -213,6 +233,16 @@ impl GraphTransportHandle {
             GraphResponse::Body(body) if body.is_empty() => Ok(()),
             _ => Err(GraphError::CalendarEventDeletionOutcomeUnknown),
         }
+    }
+
+    pub(super) async fn get_calendar_delta(
+        &self,
+        operation: GraphOperation,
+        url: GraphUrl,
+        token: Arc<AccessToken>,
+    ) -> Result<GraphResponse, GraphError> {
+        self.request(operation, GraphRequestMethod::Get, url, token)
+            .await
     }
 
     async fn request(
@@ -619,6 +649,9 @@ async fn response_result(
             .map(str::to_owned);
         return Some(Ok(GraphResponse::MessageDeltaReset(location)));
     }
+    if matches!(operation, GraphOperation::CalendarViewDeltaContinuation) {
+        return calendar_delta_response_result(response, reply).await;
+    }
     match response.status() {
         StatusCode::UNAUTHORIZED => Some(Err(GraphError::AccessTokenRejected)),
         StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
@@ -741,6 +774,82 @@ fn message_update_outcome_may_be_unknown(status: StatusCode) -> bool {
         || status.is_server_error()
         || status.is_redirection()
         || status == StatusCode::REQUEST_TIMEOUT
+}
+
+async fn calendar_delta_response_result(
+    response: Response,
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
+) -> Option<Result<GraphResponse, GraphError>> {
+    if response.status() == StatusCode::GONE {
+        let location = match calendar_reset_location(response.headers()) {
+            Ok(Some(location)) => location,
+            Ok(None) => return Some(Err(GraphError::Transport)),
+            Err(error) => return Some(Err(error)),
+        };
+        return Some(calendar_delta_reset(Some(location), 0));
+    }
+
+    match response.status() {
+        StatusCode::UNAUTHORIZED => Some(Err(GraphError::AccessTokenRejected)),
+        StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
+        status if status.is_success() => read_limited_body(response, reply).await,
+        status if status.is_client_error() => {
+            let location = calendar_reset_location(response.headers());
+            match read_limited_body(response, reply).await? {
+                Ok(GraphResponse::Body(body)) if is_sync_state_not_found(&body) => {
+                    let location = match location {
+                        Ok(location) => location,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    Some(calendar_delta_reset(location, body.len()))
+                }
+                Ok(_) => Some(Err(GraphError::Transport)),
+                Err(GraphError::ResponseTooLarge) => Some(Err(GraphError::Transport)),
+                Err(error) => Some(Err(error)),
+            }
+        }
+        _ => Some(Err(GraphError::Transport)),
+    }
+}
+
+fn calendar_reset_location(headers: &HeaderMap) -> Result<Option<String>, GraphError> {
+    let mut locations = headers.get_all(LOCATION).iter();
+    let Some(location) = locations.next() else {
+        return Ok(None);
+    };
+    if locations.next().is_some() {
+        return Err(GraphError::UnsafeLink);
+    }
+    let location = location.to_str().map_err(|_| GraphError::UnsafeLink)?;
+    if location.len() > MAX_GRAPH_CALENDAR_DELTA_URL_BYTES {
+        return Err(GraphError::ResponseTooLarge);
+    }
+    if location.trim() != location {
+        return Err(GraphError::UnsafeLink);
+    }
+    Ok(Some(location.to_owned()))
+}
+
+fn calendar_delta_reset(
+    location: Option<String>,
+    body_bytes: usize,
+) -> Result<GraphResponse, GraphError> {
+    let response_bytes = body_bytes
+        .checked_add(location.as_ref().map_or(0, String::len))
+        .ok_or(GraphError::ResponseTooLarge)?;
+    Ok(GraphResponse::CalendarViewDeltaReset {
+        location,
+        response_bytes,
+    })
+}
+
+fn is_sync_state_not_found(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|response| {
+        response
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str)
+            == Some("syncStateNotFound")
+    })
 }
 
 async fn read_limited_body(
@@ -919,13 +1028,14 @@ mod tests {
         core::secrets::SecretString,
         token::{AccessToken, BearerAccessToken},
     };
+    use reqwest::header::HeaderMap;
     use tokio::{io::AsyncReadExt, net::TcpListener, time::timeout};
     use url::Url;
 
     use super::{
         GraphOperation, GraphResponse, GraphTransport, RetryAfter, RetryDecision,
-        append_response_chunk, authorization_header, fallback_delay, parse_retry_after,
-        retry_after_hint, retry_decision_for,
+        append_response_chunk, authorization_header, calendar_reset_location, fallback_delay,
+        parse_retry_after, retry_after_hint, retry_decision_for,
     };
     use crate::{error::GraphError, graph_url::GraphUrl};
 
@@ -938,6 +1048,28 @@ mod tests {
             SystemTime::now(),
             Some(Duration::from_secs(3600)),
         )))
+    }
+
+    #[test]
+    fn rejects_ambiguous_calendar_reset_locations() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            super::LOCATION,
+            "https://graph.microsoft.com/v1.0/me/calendarView/delta"
+                .parse()
+                .expect("synthetic Location is a valid header"),
+        );
+        headers.append(
+            super::LOCATION,
+            "https://example.test/v1.0/me/calendarView/delta"
+                .parse()
+                .expect("synthetic Location is a valid header"),
+        );
+
+        assert_eq!(
+            calendar_reset_location(&headers),
+            Err(GraphError::UnsafeLink)
+        );
     }
 
     fn graph_url(value: &str) -> GraphUrl {
@@ -1023,6 +1155,102 @@ mod tests {
         );
         assert_eq!(other_operation, Err(GraphError::Transport));
         response.assert_calls_async(2).await;
+    }
+
+    #[tokio::test]
+    async fn classifies_calendar_410_resets_only_for_continuation_requests() {
+        let server = MockServer::start_async().await;
+        let location = format!(
+            "{}/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=",
+            server.base_url()
+        );
+        let mock_location = location.clone();
+        let response = server
+            .mock_async(move |when, then| {
+                when.method(GET)
+                    .path("/delta")
+                    .header("content-type", "application/json")
+                    .header("prefer", "IdType=\"ImmutableId\"");
+                then.status(410).header("Location", mock_location.clone());
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+        let handle = transport.handle();
+        let url = graph_url(&server.url("/delta"));
+
+        let reset = handle
+            .get_calendar_delta(
+                GraphOperation::CalendarViewDeltaContinuation,
+                url.clone(),
+                synthetic_access_token(),
+            )
+            .await
+            .expect("continuation reset response is returned to the Graph adapter");
+        let initial = handle
+            .get_calendar_delta(
+                GraphOperation::CalendarViewDeltaInitial,
+                url,
+                synthetic_access_token(),
+            )
+            .await;
+
+        assert_eq!(
+            reset,
+            GraphResponse::CalendarViewDeltaReset {
+                location: Some(location.clone()),
+                response_bytes: location.len(),
+            }
+        );
+        assert_eq!(initial, Err(GraphError::Transport));
+        response.assert_calls_async(2).await;
+    }
+
+    #[tokio::test]
+    async fn maps_only_the_exact_sync_state_not_found_error_code() {
+        let server = MockServer::start_async().await;
+        let expiration_body = r#"{"error":{"code":"syncStateNotFound"}}"#;
+        let unrelated_body = r#"{"error":{"code":"InvalidAuthenticationToken"}}"#;
+        let expiration = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/expired");
+                then.status(400).body(expiration_body);
+            })
+            .await;
+        let unrelated = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/unrelated");
+                then.status(400).body(unrelated_body);
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+        let handle = transport.handle();
+
+        let reset = handle
+            .get_calendar_delta(
+                GraphOperation::CalendarViewDeltaContinuation,
+                graph_url(&server.url("/expired")),
+                synthetic_access_token(),
+            )
+            .await
+            .expect("the exact Graph expiration code is returned as a reset");
+        let error = handle
+            .get_calendar_delta(
+                GraphOperation::CalendarViewDeltaContinuation,
+                graph_url(&server.url("/unrelated")),
+                synthetic_access_token(),
+            )
+            .await;
+
+        assert_eq!(
+            reset,
+            GraphResponse::CalendarViewDeltaReset {
+                location: None,
+                response_bytes: expiration_body.len(),
+            }
+        );
+        assert_eq!(error, Err(GraphError::Transport));
+        expiration.assert_async().await;
+        unrelated.assert_async().await;
     }
 
     #[test]

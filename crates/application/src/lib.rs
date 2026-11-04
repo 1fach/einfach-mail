@@ -20,9 +20,10 @@ pub use account_session::{
 };
 pub use calendar::{
     CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
-    CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
-    CalendarOperationError, CalendarProvider, CalendarSnapshot, CalendarSyncReport,
-    CalendarSyncState, CalendarWorkflow, CalendarWorkflowError, CalendarWriteReadiness,
+    CalendarDeltaResponse, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
+    CalendarEventUpdateOutcome, CalendarOperationError, CalendarProvider, CalendarSnapshot,
+    CalendarSyncMode, CalendarSyncReport, CalendarSyncState, CalendarWorkflow,
+    CalendarWorkflowError, CalendarWriteReadiness,
 };
 pub use email_html::{
     ExternalMessageLink, MessageBodyForDisplay, SanitizedEmailHtml, allowed_external_message_url,

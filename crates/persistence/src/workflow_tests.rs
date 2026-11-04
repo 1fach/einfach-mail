@@ -10,11 +10,11 @@ use std::{
 
 use einfach_mail_application::{
     AccountCacheFactory, AccountSessionFactory, AccountSessionWorkflowFactory, CalendarCacheError,
-    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarOperationError, CalendarProvider,
-    CalendarWorkflowError, MailCache, MailCacheError, MailOperationError, MailProvider,
-    MailSendOutcome, MailSendProviderError, MailSendWorkflowError, MailSyncProgress, MailWorkflow,
-    MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
-    MessageDeltaResponse, WellKnownMailFolder,
+    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError,
+    CalendarProvider, CalendarWorkflowError, MailCache, MailCacheError, MailOperationError,
+    MailProvider, MailSendOutcome, MailSendProviderError, MailSendWorkflowError, MailSyncProgress,
+    MailWorkflow, MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse,
+    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence, CalendarViewRange,
@@ -572,7 +572,7 @@ impl CalendarProvider for FixtureProvider {
         &self,
         view: &CalendarViewReference,
         _request: CalendarDeltaRequest,
-    ) -> impl Future<Output = Result<CalendarDeltaPageResponse, CalendarOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<CalendarDeltaResponse, CalendarOperationError>> + Send + '_
     {
         let matches_account = view.account_id() == &self.account_id;
         let gate = self.calendar_gate.clone();

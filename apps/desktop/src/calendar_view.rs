@@ -1446,8 +1446,8 @@ mod tests {
 
     use einfach_mail_application::{
         CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
-        CalendarOperationError, CalendarProvider, CalendarSession, CalendarSyncState,
-        CalendarWorkflow, CalendarWriteReadiness,
+        CalendarDeltaResponse, CalendarOperationError, CalendarProvider, CalendarSession,
+        CalendarSyncMode, CalendarSyncState, CalendarWorkflow, CalendarWriteReadiness,
     };
     use einfach_mail_domain::{
         AccountId, AccountProfile, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
@@ -1554,7 +1554,7 @@ mod tests {
             &self,
             view: &CalendarViewReference,
             _: CalendarDeltaRequest,
-        ) -> impl Future<Output = Result<CalendarDeltaPageResponse, CalendarOperationError>> + Send + '_
+        ) -> impl Future<Output = Result<CalendarDeltaResponse, CalendarOperationError>> + Send + '_
         {
             self.requests
                 .lock()
@@ -1571,7 +1571,7 @@ mod tests {
             let result = if let Some(failure) = failure {
                 Err(failure)
             } else if self.calendar_sync_succeeds.load(Ordering::Acquire) {
-                Ok(CalendarDeltaPageResponse::new(
+                Ok(CalendarDeltaResponse::Page(CalendarDeltaPageResponse::new(
                     CalendarDeltaPage::new(
                         Vec::new(),
                         CalendarDeltaProgress::Complete(CalendarDeltaLink::from_opaque(
@@ -1580,7 +1580,7 @@ mod tests {
                         )),
                     ),
                     0,
-                ))
+                )))
             } else {
                 Err(CalendarOperationError::AccessDenied)
             };
@@ -1762,6 +1762,13 @@ mod tests {
             ready(Ok(CalendarSyncState::initial()))
         }
 
+        fn account_has_active_replacement(
+            &self,
+            _: &AccountId,
+        ) -> impl Future<Output = Result<bool, CalendarCacheError>> + Send + '_ {
+            ready(Ok(false))
+        }
+
         fn commit_delta_page(
             &self,
             _: &CalendarViewReference,
@@ -1771,14 +1778,29 @@ mod tests {
         {
             let (_, progress) = page.into_parts();
             let state = match progress {
-                CalendarDeltaProgress::Next(link) => {
-                    CalendarSyncState::from_checkpoint(None, Some(link), None)
-                }
-                CalendarDeltaProgress::Complete(link) => {
-                    CalendarSyncState::from_checkpoint(Some(link), None, Some(completed_at))
-                }
+                CalendarDeltaProgress::Next(link) => CalendarSyncState::from_checkpoint(
+                    None,
+                    Some(link),
+                    None,
+                    CalendarSyncMode::Incremental,
+                ),
+                CalendarDeltaProgress::Complete(link) => CalendarSyncState::from_checkpoint(
+                    Some(link),
+                    None,
+                    Some(completed_at),
+                    CalendarSyncMode::Incremental,
+                ),
             };
             ready(state)
+        }
+
+        fn begin_full_resync(
+            &self,
+            _: &CalendarViewReference,
+            _: Option<CalendarDeltaLink>,
+        ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_
+        {
+            ready(Err(CalendarCacheError::InvalidData))
         }
 
         fn list_events(

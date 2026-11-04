@@ -16,9 +16,9 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 use super::{
     CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
-    CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
-    CalendarOperationError, CalendarProvider, CalendarSyncState, CalendarWorkflow,
-    CalendarWorkflowError, CalendarWriteReadiness,
+    CalendarDeltaResponse, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
+    CalendarEventUpdateOutcome, CalendarOperationError, CalendarProvider, CalendarSyncMode,
+    CalendarSyncState, CalendarWorkflow, CalendarWorkflowError, CalendarWriteReadiness,
 };
 
 struct CalendarWriteGate {
@@ -28,7 +28,7 @@ struct CalendarWriteGate {
 
 #[derive(Clone, Default)]
 struct FixtureProvider {
-    pages: Arc<Mutex<VecDeque<Result<CalendarDeltaPageResponse, CalendarOperationError>>>>,
+    pages: Arc<Mutex<VecDeque<Result<CalendarDeltaResponse, CalendarOperationError>>>>,
     requests: Arc<Mutex<Vec<CalendarDeltaRequest>>>,
     creations: Arc<Mutex<Vec<CalendarEventCreationId>>>,
     creation_error: Arc<Mutex<Option<CalendarOperationError>>>,
@@ -43,7 +43,7 @@ struct FixtureProvider {
 
 impl FixtureProvider {
     fn with_pages(
-        pages: impl IntoIterator<Item = Result<CalendarDeltaPageResponse, CalendarOperationError>>,
+        pages: impl IntoIterator<Item = Result<CalendarDeltaResponse, CalendarOperationError>>,
     ) -> Self {
         Self {
             pages: Arc::new(Mutex::new(pages.into_iter().collect())),
@@ -60,7 +60,7 @@ impl FixtureProvider {
         }
     }
 
-    fn push_page(&self, page: Result<CalendarDeltaPageResponse, CalendarOperationError>) {
+    fn push_page(&self, page: Result<CalendarDeltaResponse, CalendarOperationError>) {
         self.pages
             .lock()
             .expect("synthetic page queue mutex is not poisoned")
@@ -137,7 +137,7 @@ impl CalendarProvider for FixtureProvider {
         &self,
         _view: &CalendarViewReference,
         request: CalendarDeltaRequest,
-    ) -> impl Future<Output = Result<CalendarDeltaPageResponse, CalendarOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<CalendarDeltaResponse, CalendarOperationError>> + Send + '_
     {
         let pages = Arc::clone(&self.pages);
         let requests = Arc::clone(&self.requests);
@@ -330,6 +330,8 @@ impl FixtureCache {
 struct CachedView {
     state: CalendarSyncState,
     events: HashMap<String, CalendarOccurrence>,
+    replacement_events: Option<HashMap<String, CalendarOccurrence>>,
+    removed_in_replacement: std::collections::HashSet<String>,
 }
 
 impl CachedView {
@@ -337,6 +339,8 @@ impl CachedView {
         Self {
             state: CalendarSyncState::initial(),
             events: HashMap::new(),
+            replacement_events: None,
+            removed_in_replacement: std::collections::HashSet::new(),
         }
     }
 }
@@ -358,6 +362,23 @@ impl CalendarCache for FixtureCache {
         }
     }
 
+    fn account_has_active_replacement(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<bool, CalendarCacheError>> + Send + '_ {
+        let views = Arc::clone(&self.views);
+        let account_id = account_id.clone();
+        async move {
+            Ok(views
+                .lock()
+                .expect("synthetic cache mutex is not poisoned")
+                .iter()
+                .any(|(view, cached)| {
+                    view.account_id() == &account_id && cached.state.replacement_active()
+                }))
+        }
+    }
+
     fn commit_delta_page(
         &self,
         view: &CalendarViewReference,
@@ -371,42 +392,76 @@ impl CalendarCache for FixtureCache {
             let cached = views.entry(view.clone()).or_insert_with(CachedView::empty);
             let mut staged = cached.clone();
             let (changes, progress) = page.into_parts();
-            for change in changes {
-                match change {
-                    CalendarDeltaChange::Removed { id } => {
-                        staged.events.remove(id.as_str());
+            if staged.state.replacement_active() {
+                apply_replacement_changes(&mut staged, &view, changes)?;
+                match progress {
+                    CalendarDeltaProgress::Next(link) => {
+                        staged.state = CalendarSyncState::from_checkpoint(
+                            staged.state.delta_link().cloned(),
+                            Some(link),
+                            staged.state.last_synchronized_at(),
+                            CalendarSyncMode::Replacement,
+                        )?;
                     }
-                    CalendarDeltaChange::Upsert { id, patch } => {
-                        let event = match staged.events.remove(id.as_str()) {
-                            Some(mut event) => {
-                                patch
-                                    .apply_to(&mut event)
-                                    .map_err(|_| CalendarCacheError::InvalidData)?;
-                                event
-                            }
-                            None => patch
-                                .into_new(view.clone(), id.clone())
-                                .map_err(|_| CalendarCacheError::InvalidData)?,
-                        };
-                        if event.overlaps_view() {
-                            staged.events.insert(id.as_str().to_owned(), event);
-                        }
+                    CalendarDeltaProgress::Complete(link) => {
+                        staged.events = staged
+                            .replacement_events
+                            .take()
+                            .ok_or(CalendarCacheError::InvalidData)?
+                            .into_iter()
+                            .filter(|(_, event)| event.overlaps_view())
+                            .collect();
+                        staged.removed_in_replacement.clear();
+                        staged.state = CalendarSyncState::from_checkpoint(
+                            Some(link),
+                            None,
+                            Some(completed_at),
+                            CalendarSyncMode::Incremental,
+                        )?;
                     }
                 }
+            } else {
+                apply_incremental_changes(&mut staged.events, &view, changes)?;
+                staged.state = match progress {
+                    CalendarDeltaProgress::Next(link) => CalendarSyncState::from_checkpoint(
+                        staged.state.delta_link().cloned(),
+                        Some(link),
+                        staged.state.last_synchronized_at(),
+                        CalendarSyncMode::Incremental,
+                    )?,
+                    CalendarDeltaProgress::Complete(link) => CalendarSyncState::from_checkpoint(
+                        Some(link),
+                        None,
+                        Some(completed_at),
+                        CalendarSyncMode::Incremental,
+                    )?,
+                };
             }
-            staged.state = match progress {
-                CalendarDeltaProgress::Next(link) => CalendarSyncState::from_checkpoint(
-                    staged.state.delta_link().cloned(),
-                    Some(link),
-                    staged.state.last_synchronized_at(),
-                )?,
-                CalendarDeltaProgress::Complete(link) => {
-                    CalendarSyncState::from_checkpoint(Some(link), None, Some(completed_at))?
-                }
-            };
             let state = staged.state.clone();
             *cached = staged;
             Ok(state)
+        }
+    }
+
+    fn begin_full_resync(
+        &self,
+        view: &CalendarViewReference,
+        reset_link: Option<CalendarDeltaLink>,
+    ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_ {
+        let views = Arc::clone(&self.views);
+        let view = view.clone();
+        async move {
+            let mut views = views.lock().expect("synthetic cache mutex is not poisoned");
+            let cached = views.entry(view).or_insert_with(CachedView::empty);
+            cached.replacement_events = Some(HashMap::new());
+            cached.removed_in_replacement.clear();
+            cached.state = CalendarSyncState::from_checkpoint(
+                cached.state.delta_link().cloned(),
+                reset_link,
+                cached.state.last_synchronized_at(),
+                CalendarSyncMode::Replacement,
+            )?;
+            Ok(cached.state.clone())
         }
     }
 
@@ -733,6 +788,82 @@ fn updated_event(
     Ok(event)
 }
 
+fn apply_incremental_changes(
+    events: &mut HashMap<String, CalendarOccurrence>,
+    view: &CalendarViewReference,
+    changes: Vec<CalendarDeltaChange>,
+) -> Result<(), CalendarCacheError> {
+    for change in changes {
+        match change {
+            CalendarDeltaChange::Removed { id } => {
+                events.remove(id.as_str());
+            }
+            CalendarDeltaChange::Upsert { id, patch } => {
+                let occurrence =
+                    updated_occurrence(view, id.clone(), patch, events.remove(id.as_str()))?;
+                if occurrence.overlaps_view() {
+                    events.insert(id.as_str().to_owned(), occurrence);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_replacement_changes(
+    cached: &mut CachedView,
+    view: &CalendarViewReference,
+    changes: Vec<CalendarDeltaChange>,
+) -> Result<(), CalendarCacheError> {
+    let CachedView {
+        events,
+        replacement_events,
+        removed_in_replacement,
+        ..
+    } = cached;
+    let replacement_events = replacement_events
+        .as_mut()
+        .ok_or(CalendarCacheError::InvalidData)?;
+    for change in changes {
+        match change {
+            CalendarDeltaChange::Removed { id } => {
+                replacement_events.remove(id.as_str());
+                removed_in_replacement.insert(id.as_str().to_owned());
+            }
+            CalendarDeltaChange::Upsert { id, patch } => {
+                let existing = replacement_events.remove(id.as_str()).or_else(|| {
+                    (!removed_in_replacement.contains(id.as_str()))
+                        .then(|| events.get(id.as_str()).cloned())
+                        .flatten()
+                });
+                let occurrence = updated_occurrence(view, id.clone(), patch, existing)?;
+                removed_in_replacement.remove(id.as_str());
+                replacement_events.insert(id.as_str().to_owned(), occurrence);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn updated_occurrence(
+    view: &CalendarViewReference,
+    id: EventId,
+    patch: CalendarOccurrencePatch,
+    existing: Option<CalendarOccurrence>,
+) -> Result<CalendarOccurrence, CalendarCacheError> {
+    match existing {
+        Some(mut occurrence) => {
+            patch
+                .apply_to(&mut occurrence)
+                .map_err(|_| CalendarCacheError::InvalidData)?;
+            Ok(occurrence)
+        }
+        None => patch
+            .into_new(view.clone(), id)
+            .map_err(|_| CalendarCacheError::InvalidData),
+    }
+}
+
 fn view() -> CalendarViewReference {
     let account = AccountId::try_from("synthetic-account".to_owned())
         .expect("synthetic account identifier is valid");
@@ -752,6 +883,11 @@ fn view() -> CalendarViewReference {
 
 fn event_id() -> EventId {
     EventId::try_from("synthetic-event".to_owned()).expect("synthetic event ID is valid")
+}
+
+fn replacement_event_id() -> EventId {
+    EventId::try_from("synthetic-replacement-event".to_owned())
+        .expect("synthetic replacement event ID is valid")
 }
 
 fn all_day_patch(subject: Option<&str>, location: Option<&str>) -> CalendarOccurrencePatch {
@@ -782,8 +918,11 @@ fn link(cursor_token: &str) -> CalendarDeltaLink {
 fn response(
     changes: Vec<CalendarDeltaChange>,
     progress: CalendarDeltaProgress,
-) -> CalendarDeltaPageResponse {
-    CalendarDeltaPageResponse::new(CalendarDeltaPage::new(changes, progress), 128)
+) -> CalendarDeltaResponse {
+    CalendarDeltaResponse::Page(CalendarDeltaPageResponse::new(
+        CalendarDeltaPage::new(changes, progress),
+        128,
+    ))
 }
 
 async fn synchronize_empty_view(
@@ -2252,4 +2391,280 @@ fn view_for_week(start_day: u8) -> CalendarViewReference {
     )
     .expect("synthetic calendar view is valid");
     CalendarViewReference::new(account, range)
+}
+
+#[test]
+fn replacement_sync_keeps_the_old_snapshot_visible_until_final_commit() {
+    smol::block_on(async {
+        let view = view();
+        let old_delta = link("synthetic-old-delta");
+        let reset_link = link("synthetic-reset");
+        let replacement_next = link("synthetic-replacement-next");
+        let new_delta = link("synthetic-new-delta");
+        let provider = FixtureProvider::with_pages([Ok(response(
+            vec![CalendarDeltaChange::Upsert {
+                id: event_id(),
+                patch: all_day_patch(Some("Old snapshot"), None),
+            }],
+            CalendarDeltaProgress::Complete(old_delta.clone()),
+        ))]);
+        let request_log = Arc::clone(&provider.requests);
+        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+
+        workflow
+            .sync_view(&view)
+            .await
+            .expect("the initial snapshot commits");
+        provider.push_page(Ok(CalendarDeltaResponse::Reset {
+            reset_link: Some(reset_link.clone()),
+            response_bytes: 96,
+        }));
+        provider.push_page(Ok(response(
+            vec![CalendarDeltaChange::Upsert {
+                id: replacement_event_id(),
+                patch: all_day_patch(Some("Replacement snapshot"), None),
+            }],
+            CalendarDeltaProgress::Next(replacement_next.clone()),
+        )));
+        provider.push_page(Err(CalendarOperationError::ServiceUnavailable));
+
+        assert_eq!(
+            workflow.sync_view(&view).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::ServiceUnavailable
+            ))
+        );
+        let interrupted = workflow
+            .load_cached_view(&view)
+            .await
+            .expect("the previous complete snapshot remains readable");
+        assert_eq!(interrupted.events().len(), 1);
+        assert_eq!(interrupted.events()[0].subject(), Some("Old snapshot"));
+        assert_eq!(interrupted.sync_state().delta_link(), Some(&old_delta));
+        assert_eq!(
+            interrupted.sync_state().next_link(),
+            Some(&replacement_next)
+        );
+        assert!(interrupted.sync_state().replacement_active());
+
+        provider.push_page(Ok(response(
+            Vec::new(),
+            CalendarDeltaProgress::Complete(new_delta.clone()),
+        )));
+        workflow
+            .sync_view(&view)
+            .await
+            .expect("the replacement snapshot completes");
+        let completed = workflow
+            .load_cached_view(&view)
+            .await
+            .expect("the replacement snapshot is readable");
+        assert_eq!(completed.events().len(), 1);
+        assert_eq!(
+            completed.events()[0].subject(),
+            Some("Replacement snapshot")
+        );
+        assert_eq!(completed.sync_state().delta_link(), Some(&new_delta));
+        assert!(!completed.sync_state().replacement_active());
+        assert_eq!(
+            *request_log
+                .lock()
+                .expect("synthetic request log mutex is not poisoned"),
+            vec![
+                CalendarDeltaRequest::Initial,
+                CalendarDeltaRequest::Continue(old_delta),
+                CalendarDeltaRequest::Continue(reset_link),
+                CalendarDeltaRequest::Continue(replacement_next.clone()),
+                CalendarDeltaRequest::Continue(replacement_next),
+            ]
+        );
+    });
+}
+
+#[test]
+fn a_second_reset_is_persisted_and_stops_the_current_attempt() {
+    smol::block_on(async {
+        let view = view();
+        let old_delta = link("synthetic-old-delta");
+        let reset_link = link("synthetic-reset");
+        let provider = FixtureProvider::with_pages([Ok(response(
+            Vec::new(),
+            CalendarDeltaProgress::Complete(old_delta.clone()),
+        ))]);
+        let request_log = Arc::clone(&provider.requests);
+        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        workflow
+            .sync_view(&view)
+            .await
+            .expect("the initial cursor commits");
+
+        provider.push_page(Ok(CalendarDeltaResponse::Reset {
+            reset_link: Some(reset_link.clone()),
+            response_bytes: 24,
+        }));
+        provider.push_page(Ok(CalendarDeltaResponse::Reset {
+            reset_link: None,
+            response_bytes: 32,
+        }));
+        assert_eq!(
+            workflow.sync_view(&view).await,
+            Err(CalendarWorkflowError::DeltaResetLimitExceeded)
+        );
+        let checkpoint = workflow
+            .load_cached_view(&view)
+            .await
+            .expect("the replacement checkpoint remains readable");
+        assert_eq!(checkpoint.sync_state().delta_link(), Some(&old_delta));
+        assert!(checkpoint.sync_state().replacement_active());
+        assert_eq!(
+            checkpoint.sync_state().request(),
+            CalendarDeltaRequest::Initial
+        );
+
+        provider.push_page(Ok(response(
+            Vec::new(),
+            CalendarDeltaProgress::Complete(link("synthetic-recovered")),
+        )));
+        workflow
+            .sync_view(&view)
+            .await
+            .expect("a later attempt resumes the fixed-range initial request");
+        assert_eq!(
+            *request_log
+                .lock()
+                .expect("synthetic request log mutex is not poisoned"),
+            vec![
+                CalendarDeltaRequest::Initial,
+                CalendarDeltaRequest::Continue(old_delta),
+                CalendarDeltaRequest::Continue(reset_link),
+                CalendarDeltaRequest::Initial,
+            ]
+        );
+    });
+}
+
+#[test]
+fn event_writes_wait_for_an_interrupted_calendar_replacement_sync() {
+    smol::block_on(async {
+        let view = view();
+        let another_view = view_for_week(8);
+        let old_delta = link("synthetic-old-delta");
+        let reset_link = link("synthetic-reset");
+        let provider = FixtureProvider::with_pages([
+            Ok(response(
+                vec![CalendarDeltaChange::Upsert {
+                    id: event_id(),
+                    patch: cross_week_timed_event_patch(),
+                }],
+                CalendarDeltaProgress::Complete(old_delta.clone()),
+            )),
+            Ok(response(
+                vec![CalendarDeltaChange::Upsert {
+                    id: event_id(),
+                    patch: cross_week_timed_event_patch(),
+                }],
+                CalendarDeltaProgress::Complete(link("synthetic-another-view")),
+            )),
+        ]);
+        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+
+        workflow
+            .sync_view(&view)
+            .await
+            .expect("the initial event snapshot commits");
+        workflow
+            .sync_view(&another_view)
+            .await
+            .expect("the overlapping event view commits");
+        let event = workflow
+            .load_cached_view(&view)
+            .await
+            .expect("the initial event is readable")
+            .events()[0]
+            .clone();
+        let another_event = workflow
+            .load_cached_view(&another_view)
+            .await
+            .expect("the overlapping event is readable")
+            .events()[0]
+            .clone();
+        let editable = workflow
+            .editable_event(&event)
+            .await
+            .expect("the synchronized event can be opened for editing");
+        let draft = CalendarEventUpdateDraft::timed(
+            "Updated planning".to_owned(),
+            utc(2030, Month::January, 8) + time::Duration::hours(11),
+            utc(2030, Month::January, 8) + time::Duration::hours(12),
+        )
+        .expect("the synthetic update draft is valid");
+        let update = CalendarEventUpdate::new(editable.clone(), draft)
+            .expect("the update differs from the source event");
+
+        provider.push_page(Ok(CalendarDeltaResponse::Reset {
+            reset_link: Some(reset_link),
+            response_bytes: 64,
+        }));
+        provider.push_page(Err(CalendarOperationError::ServiceUnavailable));
+        assert_eq!(
+            workflow.sync_view(&view).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::ServiceUnavailable
+            ))
+        );
+
+        assert_eq!(
+            workflow
+                .load_cached_view(&view)
+                .await
+                .expect("the interrupted replacement remains readable")
+                .write_readiness(),
+            CalendarWriteReadiness::AccountSyncRequired
+        );
+        assert_eq!(
+            workflow
+                .load_cached_view(&another_view)
+                .await
+                .expect("the other account view remains readable")
+                .write_readiness(),
+            CalendarWriteReadiness::AccountSyncRequired
+        );
+        assert_eq!(
+            workflow.create_event(&creation(another_view.clone())).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+        assert_eq!(
+            workflow.editable_event(&another_event).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+        assert_eq!(
+            workflow.update_event(&update).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+        assert_eq!(
+            workflow.delete_event(&editable).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+        assert!(
+            provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned")
+                .is_empty()
+        );
+        assert!(
+            provider
+                .update_calls
+                .lock()
+                .expect("synthetic update log mutex is not poisoned")
+                .is_empty()
+        );
+        assert_eq!(
+            *provider
+                .deletion_calls
+                .lock()
+                .expect("synthetic deletion log mutex is not poisoned"),
+            0
+        );
+    });
 }

@@ -23,6 +23,11 @@ fn event_id() -> EventId {
         .expect("synthetic event identifier is valid")
 }
 
+fn removed_event_id() -> EventId {
+    EventId::try_from("synthetic-removed-event".to_owned())
+        .expect("synthetic event identifier is valid")
+}
+
 fn week(start_day: u8) -> CalendarViewReference {
     let start_date = Date::from_calendar_date(2030, Month::January, start_day)
         .expect("synthetic week start is valid");
@@ -57,6 +62,17 @@ fn timed_event_patch(start: OffsetDateTime, end: OffsetDateTime) -> CalendarOccu
     let mut patch = CalendarOccurrencePatch::new();
     patch.set_subject(Some("Synthetic planning".to_owned()));
     let mut time = CalendarOccurrenceTimePatch::new();
+    time.set_start(start);
+    time.set_end(end);
+    time.set_is_all_day(false);
+    patch.set_time(time);
+    patch
+}
+
+fn out_of_view_event_patch() -> CalendarOccurrencePatch {
+    let mut patch = CalendarOccurrencePatch::new();
+    let mut time = CalendarOccurrenceTimePatch::new();
+    let (start, end) = timed_range(20, 9, 20, 10);
     time.set_start(start);
     time.set_end(end);
     time.set_is_all_day(false);
@@ -585,5 +601,186 @@ fn invalid_event_update_leaves_all_cached_copies_unchanged() {
         assert_eq!(destination_events.len(), 1);
         assert_eq!(destination_events[0].subject(), Some("Synthetic planning"));
         cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn expired_cursor_replacement_preserves_snapshot_until_atomic_completion() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id("synthetic-account");
+        let view = week(7);
+        let cache = open_cache(&directory, account.clone()).await;
+        let completed_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let old_delta = link("synthetic-old-delta");
+        cache
+            .commit_delta_page(
+                &view,
+                CalendarDeltaPage::new(
+                    vec![
+                        CalendarDeltaChange::Upsert {
+                            id: event_id(),
+                            patch: all_day_event_patch(),
+                        },
+                        CalendarDeltaChange::Upsert {
+                            id: removed_event_id(),
+                            patch: all_day_event_patch(),
+                        },
+                    ],
+                    CalendarDeltaProgress::Complete(old_delta.clone()),
+                ),
+                completed_at,
+            )
+            .await
+            .expect("initial calendar snapshot and cursor commit");
+
+        let reset_link = link("synthetic-reset");
+        let state = cache
+            .begin_full_resync(&view, Some(reset_link.clone()))
+            .await
+            .expect("replacement scan starts without changing the active snapshot");
+        assert!(state.replacement_active());
+        assert!(
+            cache
+                .account_has_active_replacement(&account)
+                .await
+                .expect("account replacement state is readable")
+        );
+        assert_eq!(state.delta_link(), Some(&old_delta));
+        assert_eq!(state.next_link(), Some(&reset_link));
+        assert_eq!(state.last_synchronized_at(), Some(completed_at));
+        assert_eq!(
+            cache
+                .list_events(&view)
+                .await
+                .expect("active snapshot remains readable")
+                .len(),
+            2
+        );
+        cache.close_for_tests().await;
+
+        let reopened = open_cache(&directory, account.clone()).await;
+        let persisted = reopened
+            .ensure_view(&view)
+            .await
+            .expect("replacement checkpoint survives restart");
+        assert!(persisted.replacement_active());
+        assert_eq!(
+            persisted.request(),
+            CalendarDeltaRequest::Continue(reset_link)
+        );
+
+        let mut sparse_update = CalendarOccurrencePatch::new();
+        sparse_update.set_subject(Some("Updated during replacement".to_owned()));
+        let next_link = link("synthetic-replacement-next");
+        let replacement_progress = reopened
+            .commit_delta_page(
+                &view,
+                CalendarDeltaPage::new(
+                    vec![
+                        CalendarDeltaChange::Upsert {
+                            id: event_id(),
+                            patch: sparse_update,
+                        },
+                        CalendarDeltaChange::Removed {
+                            id: removed_event_id(),
+                        },
+                        CalendarDeltaChange::Upsert {
+                            id: EventId::try_from("synthetic-out-of-view".to_owned())
+                                .expect("synthetic event identifier is valid"),
+                            patch: out_of_view_event_patch(),
+                        },
+                    ],
+                    CalendarDeltaProgress::Next(next_link.clone()),
+                ),
+                completed_at + Duration::from_secs(1),
+            )
+            .await
+            .expect("replacement events and next link commit together");
+        assert!(replacement_progress.replacement_active());
+        assert_eq!(replacement_progress.delta_link(), Some(&old_delta));
+        assert_eq!(replacement_progress.next_link(), Some(&next_link));
+        assert_eq!(
+            reopened
+                .list_events(&view)
+                .await
+                .expect("old snapshot stays visible during replacement")
+                .len(),
+            2
+        );
+        reopened.close_for_tests().await;
+
+        let reopened = open_cache(&directory, account.clone()).await;
+        let persisted = reopened
+            .ensure_view(&view)
+            .await
+            .expect("staged replacement page survives restart");
+        assert!(persisted.replacement_active());
+        assert_eq!(
+            persisted.request(),
+            CalendarDeltaRequest::Continue(next_link.clone())
+        );
+
+        let mut removed_event_patch = CalendarOccurrencePatch::new();
+        removed_event_patch.set_subject(Some("Must not restore removed event".to_owned()));
+        let rejected_sparse_update = reopened
+            .commit_delta_page(
+                &view,
+                CalendarDeltaPage::new(
+                    vec![CalendarDeltaChange::Upsert {
+                        id: removed_event_id(),
+                        patch: removed_event_patch,
+                    }],
+                    CalendarDeltaProgress::Next(link("synthetic-uncommitted-next")),
+                ),
+                completed_at + Duration::from_secs(2),
+            )
+            .await;
+        assert_eq!(rejected_sparse_update, Err(CalendarCacheError::InvalidData));
+        let state = reopened
+            .ensure_view(&view)
+            .await
+            .expect("rejected page leaves replacement checkpoint intact");
+        assert_eq!(state.next_link(), Some(&next_link));
+        assert_eq!(
+            reopened
+                .list_events(&view)
+                .await
+                .expect("rejected page leaves old snapshot visible")
+                .len(),
+            2
+        );
+
+        let new_delta = link("synthetic-new-delta");
+        let completed_at = completed_at + Duration::from_secs(3);
+        let state = reopened
+            .commit_delta_page(
+                &view,
+                CalendarDeltaPage::new(
+                    Vec::new(),
+                    CalendarDeltaProgress::Complete(new_delta.clone()),
+                ),
+                completed_at,
+            )
+            .await
+            .expect("final replacement page atomically installs the snapshot and cursor");
+        assert!(!state.replacement_active());
+        assert_eq!(state.delta_link(), Some(&new_delta));
+        assert!(state.next_link().is_none());
+        assert_eq!(state.last_synchronized_at(), Some(completed_at));
+        assert!(
+            !reopened
+                .account_has_active_replacement(&account)
+                .await
+                .expect("completed replacement state is readable")
+        );
+        let events = reopened
+            .list_events(&view)
+            .await
+            .expect("replacement snapshot is readable after completion");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id(), &event_id());
+        assert_eq!(events[0].subject(), Some("Updated during replacement"));
+        reopened.close_for_tests().await;
     });
 }

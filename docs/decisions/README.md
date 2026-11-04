@@ -46,3 +46,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0041](0041-bind-saved-sign-in-to-cache-identity.md) | Bind saved sign-in to a verified cache identity | Accepted for Linux M1 |
 | [0042](0042-keyboard-navigation-for-calendar-agenda.md) | Use one listbox for weekly agenda navigation | Accepted; manual Linux accessibility review remains open |
 | [0043](0043-per-account-mail-and-calendar-session.md) | Use one per-account mail and calendar session | Accepted |
+| [0044](0044-block-calendar-actions-during-replacement-sync.md) | Block calendar actions during replacement sync | Accepted |
