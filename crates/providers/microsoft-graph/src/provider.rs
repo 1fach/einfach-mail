@@ -516,7 +516,10 @@ async fn authorize_profile(
 mod tests {
     use std::{
         net::{Ipv4Addr, SocketAddrV4},
-        sync::{Arc, Barrier, Mutex, OnceLock},
+        sync::{
+            Arc, Barrier, Mutex, OnceLock,
+            atomic::{AtomicBool, Ordering},
+        },
         time::Duration,
     };
 
@@ -549,6 +552,7 @@ mod tests {
 
     struct MemoryRefreshTokenStore {
         token: Mutex<Option<RefreshToken>>,
+        fail_next_delete: AtomicBool,
         save_pause: Mutex<Option<(Arc<Barrier>, oneshot::Sender<()>)>>,
     }
 
@@ -556,8 +560,13 @@ mod tests {
         fn new(token: Option<RefreshToken>) -> Self {
             Self {
                 token: Mutex::new(token),
+                fail_next_delete: AtomicBool::new(false),
                 save_pause: Mutex::new(None),
             }
+        }
+
+        fn fail_next_delete(&self) {
+            self.fail_next_delete.store(true, Ordering::SeqCst);
         }
 
         fn pause_next_save_after_write(&self) -> (oneshot::Receiver<()>, Arc<Barrier>) {
@@ -609,6 +618,9 @@ mod tests {
         }
 
         fn delete(&self) -> Result<(), AccountOperationError> {
+            if self.fail_next_delete.swap(false, Ordering::SeqCst) {
+                return Err(AccountOperationError::CredentialStoreUnavailable);
+            }
             self.token
                 .lock()
                 .map(|mut saved| *saved = None)
@@ -783,12 +795,9 @@ mod tests {
         let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
         let credentials = Arc::new(MemoryRefreshTokenStore::new(None));
         let provider = synthetic_provider(&server, browser_sender, credentials.clone());
-        let connect_provider = provider.clone();
-        let connect_task = tokio::spawn(async move {
-            connect_provider
-                .connect_account(AccountOperationCancellation::new())
-                .await
-        });
+        let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
+        let connect_workflow = Arc::clone(&workflow);
+        let connect_task = tokio::spawn(async move { connect_workflow.connect_account().await });
         let authorization_url = browser_receiver
             .recv()
             .await
@@ -860,10 +869,31 @@ mod tests {
         profile_request.assert_async().await;
         folder_request.assert_async().await;
 
-        provider
+        credentials.fail_next_delete();
+        assert_eq!(
+            workflow.sign_out().await,
+            Err(AccountOperationError::CredentialStoreUnavailable)
+        );
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-refresh")
+        );
+        assert_eq!(
+            workflow.connect_account().await,
+            Err(AccountOperationError::AccountAlreadyConnected)
+        );
+        assert!(
+            provider
+                .list_folders(profile.id())
+                .await
+                .expect("provider session remains available for retry")
+                .is_empty()
+        );
+
+        workflow
             .sign_out()
             .await
-            .expect("local sign-out removes the synthetic credential");
+            .expect("retry removes the synthetic credential");
         assert_eq!(credentials.token_value(), None);
     }
 

@@ -227,9 +227,10 @@ pub(super) fn remove_account_without_open_client(
 }
 
 fn remove_database_files(database_path: &Path) -> Result<(), MailCacheError> {
-    remove_file_if_present(database_path)?;
+    // Remove sidecars first so a failure leaves the database available for retry.
     remove_file_if_present(&with_suffix(database_path, "-wal"))?;
-    remove_file_if_present(&with_suffix(database_path, "-shm"))
+    remove_file_if_present(&with_suffix(database_path, "-shm"))?;
+    remove_file_if_present(database_path)
 }
 
 fn remove_file_if_present(path: &Path) -> Result<(), MailCacheError> {
@@ -256,7 +257,7 @@ pub(super) fn lock_account_directory(path: &Path) -> Result<File, MailCacheError
 mod tests {
     use std::fs;
 
-    use super::{remove_database_files, with_suffix};
+    use super::{MailCacheError, open_test_database, remove_database_files, with_suffix};
 
     #[test]
     fn removing_a_cache_deletes_database_and_sidecars_idempotently() {
@@ -276,5 +277,46 @@ mod tests {
         assert!(!database.exists());
         assert!(!with_suffix(&database, "-wal").exists());
         assert!(!with_suffix(&database, "-shm").exists());
+    }
+
+    #[test]
+    fn failed_sidecar_removal_keeps_the_encrypted_database_reopenable_for_retry() {
+        smol::block_on(async {
+            for failing_suffix in ["-wal", "-shm"] {
+                let directory = tempfile::tempdir().expect("synthetic cache directory is created");
+                let database = directory.path().join("mail.sqlite3");
+                let client = open_test_database(&database, 7)
+                    .await
+                    .expect("synthetic encrypted database opens");
+                client.close().await.expect("synthetic database closes");
+
+                if failing_suffix == "-shm" {
+                    fs::write(with_suffix(&database, "-wal"), b"synthetic WAL")
+                        .expect("synthetic WAL sidecar is created");
+                }
+                let failing_sidecar = with_suffix(&database, failing_suffix);
+                fs::create_dir(&failing_sidecar)
+                    .expect("synthetic invalid sidecar directory is created");
+
+                assert!(matches!(
+                    remove_database_files(&database),
+                    Err(MailCacheError::Unavailable)
+                ));
+                assert!(database.exists(), "main database remains after failure");
+
+                fs::remove_dir(&failing_sidecar)
+                    .expect("synthetic filesystem condition is cleared");
+                let retry = open_test_database(&database, 7)
+                    .await
+                    .expect("main encrypted database reopens for a retry");
+                retry.close().await.expect("retry client closes");
+                remove_database_files(&database).expect("retry removes the cache files");
+                remove_database_files(&database).expect("repeated cache removal is safe");
+
+                assert!(!database.exists());
+                assert!(!with_suffix(&database, "-wal").exists());
+                assert!(!with_suffix(&database, "-shm").exists());
+            }
+        });
     }
 }
