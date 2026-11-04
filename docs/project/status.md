@@ -10,7 +10,7 @@ M3 read-only calendar integration is ready for stacked draft review on clean bra
 
 Issue #44's retryable cache-removal fix passed source review and the full Linux gate on 2026-11-05 in isolated branch `candidate/issue-44-retryable-cache-removal`. The fix now treats filesystem inspection failures as errors before creating or deleting a cache key, and the retry guidance covers both cache-file access and the Linux keyring. Synthetic regression tests cover inaccessible cache paths and the recovery message; existing tests cover SQLCipher recovery after sidecar failures and retry after provider credential deletion fails. RustSec reported no vulnerable or yanked locked crates and 8 allowed unmaintained-crate advisories. Three environment-dependent Secret Service tests remain ignored; no real account, live Graph request, or GUI was used. Keep Issue #44 open and PR #52 in draft until review and merge.
 
-Issue #27's M4 plain-text send implementation is ready for one stacked draft PR from `candidate/issue-27-plain-text-send`, based on PR #52's `candidate/issue-44-retryable-cache-removal`. The local Linux gate passes, including Rust 1.95 all-target compilation, Clippy, rustdoc, dependency policy, RustSec audit, formatting, and workspace tests. Three environment-dependent Secret Service tests remain ignored. Cache staging and removal serialize across app processes; stale cache handles reject sends after database removal, and lock waits run off the async executor. No Issue #27 PR has been published yet. No live Graph request, real mailbox, or desktop window was used; tenant verification remains under issue #28. Keep issue #27 open until PR review and merge.
+Issue #27's M4 plain-text send implementation is in draft PR #53. Its head is `candidate/issue-27-plain-text-send`. Its base is PR #52's `candidate/issue-44-retryable-cache-removal` branch. The local Linux gate passed, including Rust 1.95 all-target compilation, Clippy, rustdoc, dependency policy, RustSec audit, formatting, and workspace tests. Three environment-dependent Secret Service tests remain ignored. Cache staging and removal serialize across app processes. Stale cache handles reject sends after database removal, and lock waits run off the async executor. No live Graph request, real mailbox, or desktop window was used. Tenant verification remains under issue #28. Keep issue #27 open until review and merge.
 
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
@@ -30,7 +30,7 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep issue #3 open and leave issue #8's tenant-only sync evidence unverified.
 - Issue #9 remains open for real-window layout, operating-system clipboard behavior, and system-browser launch. Do not launch a GUI during this work.
 - The Issue #22 candidate is ready for stacked review on `candidate/issue-22-calendar-sync`, based on PR #47. Keep issue #22 open for manual Linux review of screen-reader announcements, focus, scrolling, and layout. Keep issue #6 open for live recurrence, time-zone, and all-day verification.
-- Issue #27 is ready for a stacked draft PR on the Issue #44 candidate. Keep issue #27 open until PR review and merge, and keep issue #28 open for tenant-only consent and Graph verification.
+- Draft PR #53 implements Issue #27 and is stacked on PR #52. Keep issue #27 open until review and merge, and keep issue #28 open for tenant-only consent and Graph verification.
 - Fedora GNOME Keyring evidence does not establish behavior for every Secret Service implementation.
 - Windows and macOS build, runtime, credential storage, installation, and operating-system integration remain deferred.
 
@@ -40,7 +40,7 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 2. Keep issue #8 open until initial-sync completeness is verified against a Microsoft 365 test tenant.
 3. Keep issue #9 open until layout, clipboard behavior, and browser launch are verified in a safe Linux session.
 4. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
-5. Review the Issue #27 plain-text send candidate after its draft PR is opened on PR #52; tenant-only evidence remains under issue #28.
+5. Review draft PR #53 after PR #52; tenant-only evidence remains under issue #28.
 6. After PR #50 merges, review the independent M3 follow-ups in PRs #51 and #52 for merge.
 
 ## Update rule
