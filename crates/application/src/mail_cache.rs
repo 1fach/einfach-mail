@@ -3,8 +3,8 @@
 use std::{future::Future, time::SystemTime};
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, MailFolder, MailMessage, MailSendOperationId, MessageBody,
-    MessageDeltaLink, MessageId, PendingMailSend, ReadState,
+    AccountId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, MailSendOperationId,
+    MessageBody, MessageDeltaLink, MessageId, PendingMailSend, ReadState,
 };
 use thiserror::Error;
 
@@ -318,6 +318,56 @@ pub trait MailCache: Send + Sync {
         folder: &FolderReference,
         message_id: &MessageId,
         read_state: ReadState,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
+    /// Returns whether `folder` is blocked until a complete delta round commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account or
+    /// [`MailCacheError::Unavailable`] when the cache cannot be read.
+    fn folder_write_sync_required(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<bool, MailCacheError>> + Send + '_;
+
+    /// Commits a folder recovery marker before a message PATCH is dispatched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::InvalidData`] when the folder is absent, or
+    /// [`MailCacheError::Unavailable`] when the marker cannot be committed.
+    fn require_folder_write_sync(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
+    /// Removes a folder recovery marker after a definite provider rejection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account or
+    /// [`MailCacheError::Unavailable`] when the marker cannot be removed.
+    fn clear_folder_write_sync_requirement(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
+    /// Stores a confirmed follow-up flag status for a message in `folder`.
+    ///
+    /// The cache update and removal of the folder recovery marker commit together.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::MessageNotCached`] when the message is absent, or
+    /// [`MailCacheError::Unavailable`] when the update cannot be committed.
+    fn set_message_follow_up_flag_status(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        status: FollowUpFlagStatus,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
 
     /// Stores an opened raw body only when its message remains in the folder cache.

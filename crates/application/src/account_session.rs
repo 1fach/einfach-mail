@@ -3,15 +3,16 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
 
 use einfach_mail_domain::{
-    AccountId, CalendarViewReference, FolderReference, MailDraft, MailFolder, MailMessage,
-    MailSendOperationId, MessageId, PendingMailSend, ReadState,
+    AccountId, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
+    MailMessage, MailSendOperationId, MessageId, PendingMailSend, ReadState,
 };
 
 use crate::{
     CalendarCache, CalendarProvider, CalendarSnapshot, CalendarSyncReport, CalendarWorkflow,
-    CalendarWorkflowError, MailCache, MailCacheError, MailProvider, MailSendOutcome,
-    MailSendResolutionError, MailSendWorkflowError, MailSyncProgress, MailSyncReport,
-    MailSyncState, MailWorkflow, MailWorkflowError, OpenedMessage, ReadStateUpdateOutcome,
+    CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCache, MailCacheError, MailProvider,
+    MailSendOutcome, MailSendResolutionError, MailSendWorkflowError, MailSyncProgress,
+    MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError, OpenedMessage,
+    ReadStateUpdateOutcome,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -66,6 +67,16 @@ pub trait MailSession: Send + Sync {
         folder: &'a FolderReference,
     ) -> AccountSessionFuture<'a, Result<Option<MailSyncState>, MailWorkflowError>>;
 
+    /// Returns whether a folder requires a complete successful sync before another message write.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the folder marker cannot be read.
+    fn folder_write_sync_required<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+    ) -> AccountSessionFuture<'a, Result<bool, MailWorkflowError>>;
+
     /// Opens a cached message and fetches its body only when it is not cached.
     ///
     /// The returned body has passed the application's display policy.
@@ -91,6 +102,22 @@ pub trait MailSession: Send + Sync {
         message_id: &'a MessageId,
         requested: ReadState,
     ) -> AccountSessionFuture<'a, Result<ReadStateUpdateOutcome, MailWorkflowError>>;
+
+    /// Sets a cached message's follow-up flag and reports whether its confirmed status was cached.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the status cannot be confirmed, a cache error when the
+    /// message or recovery marker cannot be stored, [`MailWorkflowError::FolderSyncRequired`]
+    /// while an earlier update awaits synchronization, or
+    /// [`MailWorkflowError::OperationInProgress`] when another operation owns the account or
+    /// folder.
+    fn set_message_follow_up_flag_status<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        status: FollowUpFlagStatus,
+    ) -> AccountSessionFuture<'a, Result<FollowUpFlagUpdateOutcome, MailWorkflowError>>;
 
     /// Sends a plain-text message and saves a body-free marker before dispatch.
     fn send_message<'a>(
@@ -283,6 +310,13 @@ where
         Box::pin(MailWorkflow::cached_sync_state(self, folder))
     }
 
+    fn folder_write_sync_required<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+    ) -> AccountSessionFuture<'a, Result<bool, MailWorkflowError>> {
+        Box::pin(MailWorkflow::folder_write_sync_required(self, folder))
+    }
+
     fn open_message<'a>(
         &'a self,
         folder: &'a FolderReference,
@@ -299,6 +333,17 @@ where
     ) -> AccountSessionFuture<'a, Result<ReadStateUpdateOutcome, MailWorkflowError>> {
         Box::pin(MailWorkflow::set_message_read_state(
             self, folder, message_id, requested,
+        ))
+    }
+
+    fn set_message_follow_up_flag_status<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        status: FollowUpFlagStatus,
+    ) -> AccountSessionFuture<'a, Result<FollowUpFlagUpdateOutcome, MailWorkflowError>> {
+        Box::pin(MailWorkflow::set_message_follow_up_flag_status(
+            self, folder, message_id, status,
         ))
     }
 

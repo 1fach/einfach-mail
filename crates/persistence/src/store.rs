@@ -26,10 +26,10 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
     CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
-    CalendarOccurrenceTimePatch, CalendarViewReference, FolderId, FolderReference, MailFolder,
-    MailMessage, MailRecipient, MailSendOperationId, MailSubject, Mailbox, MessageBody,
-    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
-    MessageId, MessageMetadata, MessageOrigin, PendingMailSend, ReadState,
+    CalendarOccurrenceTimePatch, CalendarViewReference, FolderId, FolderReference,
+    FollowUpFlagStatus, MailFolder, MailMessage, MailRecipient, MailSendOperationId, MailSubject,
+    Mailbox, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+    MessageDeltaProgress, MessageId, MessageMetadata, MessageOrigin, PendingMailSend, ReadState,
 };
 use thiserror::Error;
 use time::{Date, OffsetDateTime};
@@ -295,6 +295,19 @@ impl SqliteMailCache {
             .close()
             .await
             .expect("synthetic encrypted cache connection closes");
+    }
+
+    #[cfg(test)]
+    pub(super) async fn execute_batch_for_tests(&self, sql: &str) -> Result<(), MailCacheError> {
+        let sql = sql.to_owned();
+        self.client
+            .conn_mut_and_then(move |connection| {
+                connection.execute_batch(&sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(CacheFailure::public)?;
+        Ok(())
     }
 
     fn check_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
@@ -624,7 +637,8 @@ impl MailCache for SqliteMailCache {
             validation?;
             client
                 .conn_mut_and_then(move |connection| {
-                    let changed = connection.execute(
+                    let transaction = connection.transaction()?;
+                    let changed = transaction.execute(
                         "UPDATE mail_messages SET is_read = ?4
                          WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
                         params![
@@ -637,6 +651,135 @@ impl MailCache for SqliteMailCache {
                     if changed == 0 {
                         return Err(CacheFailure::MessageNotCached);
                     }
+                    transaction.execute(
+                        "DELETE FROM mail_folder_write_sync_requirement
+                         WHERE account_id = ?1 AND folder_id = ?2",
+                        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                    )?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn folder_write_sync_required(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<bool, MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_and_then(move |connection| {
+                    if !folder_exists(connection, &folder)? {
+                        return Err(CacheFailure::InvalidData);
+                    }
+                    let required = connection.query_row(
+                        "SELECT EXISTS (
+                            SELECT 1 FROM mail_folder_write_sync_requirement
+                            WHERE account_id = ?1 AND folder_id = ?2
+                        )",
+                        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                        |row| row.get(0),
+                    )?;
+                    Ok(required)
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn require_folder_write_sync(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    if !folder_exists(&transaction, &folder)? {
+                        return Err(CacheFailure::InvalidData);
+                    }
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO mail_folder_write_sync_requirement (
+                            account_id, folder_id
+                        ) VALUES (?1, ?2)",
+                        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                    )?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn clear_folder_write_sync_requirement(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    connection.execute(
+                        "DELETE FROM mail_folder_write_sync_requirement
+                         WHERE account_id = ?1 AND folder_id = ?2",
+                        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn set_message_follow_up_flag_status(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        status: FollowUpFlagStatus,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let message_id = message_id.clone();
+        let flag_status = follow_up_flag_status_name(status);
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    let changed = transaction.execute(
+                        "UPDATE mail_messages SET flag_status = ?4
+                         WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+                        params![
+                            folder.account_id().as_str(),
+                            folder.folder_id().as_str(),
+                            message_id.as_str(),
+                            flag_status
+                        ],
+                    )?;
+                    if changed == 0 {
+                        return Err(CacheFailure::MessageNotCached);
+                    }
+                    transaction.execute(
+                        "DELETE FROM mail_folder_write_sync_requirement
+                         WHERE account_id = ?1 AND folder_id = ?2",
+                        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                    )?;
+                    transaction.commit()?;
                     Ok(())
                 })
                 .await
@@ -1566,7 +1709,7 @@ fn read_messages(
     let mut statement = connection.prepare(
         "SELECT message_id, subject, from_display_name, from_address,
                 sender_display_name, sender_address, received_seconds,
-                received_nanoseconds, is_read
+                received_nanoseconds, is_read, flag_status
          FROM mail_messages
          WHERE account_id = ?1 AND folder_id = ?2
          ORDER BY received_seconds DESC, received_nanoseconds DESC, message_id ASC",
@@ -1603,7 +1746,7 @@ fn read_cached_message(
         .query_row(
             "SELECT message_id, subject, from_display_name, from_address,
                     sender_display_name, sender_address, received_seconds,
-                    received_nanoseconds, is_read, body_type, body_content
+                    received_nanoseconds, is_read, flag_status, body_type, body_content
              FROM mail_messages
              WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
             params![
@@ -1614,8 +1757,8 @@ fn read_cached_message(
             |row| {
                 Ok((
                     raw_message_from_row(row)?,
-                    row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             },
         )
@@ -1640,6 +1783,7 @@ fn raw_message_from_row(row: &async_sqlite::rusqlite::Row<'_>) -> SqlResult<RawM
         received_seconds: row.get(6)?,
         received_nanoseconds: row.get(7)?,
         is_read: row.get(8)?,
+        flag_status: row.get(9)?,
     })
 }
 
@@ -1653,6 +1797,7 @@ struct RawMessage {
     received_seconds: i64,
     received_nanoseconds: i64,
     is_read: bool,
+    flag_status: Option<String>,
 }
 
 fn decode_message(folder: &FolderReference, raw: RawMessage) -> CacheResult<MailMessage> {
@@ -1670,6 +1815,10 @@ fn decode_message(folder: &FolderReference, raw: RawMessage) -> CacheResult<Mail
         MessageOrigin::new(from, sender),
         received_at,
         read_state,
+        raw.flag_status
+            .as_deref()
+            .map(follow_up_flag_status_from_name)
+            .transpose()?,
     );
     Ok(MailMessage::new(folder.clone(), id, metadata))
 }
@@ -1679,6 +1828,23 @@ fn read_state_from_bool(is_read: bool) -> ReadState {
         ReadState::Read
     } else {
         ReadState::Unread
+    }
+}
+
+fn follow_up_flag_status_from_name(name: &str) -> CacheResult<FollowUpFlagStatus> {
+    match name {
+        "not_flagged" => Ok(FollowUpFlagStatus::NotFlagged),
+        "flagged" => Ok(FollowUpFlagStatus::Flagged),
+        "complete" => Ok(FollowUpFlagStatus::Complete),
+        _ => Err(CacheFailure::InvalidData),
+    }
+}
+
+fn follow_up_flag_status_name(status: FollowUpFlagStatus) -> &'static str {
+    match status {
+        FollowUpFlagStatus::NotFlagged => "not_flagged",
+        FollowUpFlagStatus::Flagged => "flagged",
+        FollowUpFlagStatus::Complete => "complete",
     }
 }
 
@@ -1886,7 +2052,7 @@ fn read_cached_metadata(
         .query_row(
             "SELECT message_id, subject, from_display_name, from_address,
                     sender_display_name, sender_address, received_seconds,
-                    received_nanoseconds, is_read
+                    received_nanoseconds, is_read, flag_status
              FROM mail_messages
              WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
             params![
@@ -1914,8 +2080,9 @@ fn store_message_metadata(
         "INSERT INTO mail_messages (
             account_id, folder_id, message_id, subject,
             from_display_name, from_address, sender_display_name, sender_address,
-            received_seconds, received_nanoseconds, is_read, full_sync_generation
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            received_seconds, received_nanoseconds, is_read, flag_status,
+            full_sync_generation
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT (account_id, folder_id, message_id) DO UPDATE SET
             subject = excluded.subject,
             from_display_name = excluded.from_display_name,
@@ -1925,6 +2092,7 @@ fn store_message_metadata(
             received_seconds = excluded.received_seconds,
             received_nanoseconds = excluded.received_nanoseconds,
             is_read = excluded.is_read,
+            flag_status = excluded.flag_status,
             full_sync_generation = excluded.full_sync_generation,
             body_type = NULL,
             body_content = NULL",
@@ -1940,6 +2108,9 @@ fn store_message_metadata(
             received_seconds,
             received_nanoseconds,
             matches!(metadata.read_state(), ReadState::Read),
+            metadata
+                .follow_up_flag_status()
+                .map(follow_up_flag_status_name),
             full_sync_generation
         ],
     )?;
@@ -2103,6 +2274,11 @@ fn update_sync_progress(
                     checkpoint_revision
                 ],
             )?;
+            transaction.execute(
+                "DELETE FROM mail_folder_write_sync_requirement
+                 WHERE account_id = ?1 AND folder_id = ?2",
+                params![folder.account_id().as_str(), folder.folder_id().as_str()],
+            )?;
         }
     }
     Ok(())
@@ -2162,9 +2338,9 @@ mod tests {
 
     use einfach_mail_application::{MailCache, MailCacheError};
     use einfach_mail_domain::{
-        AccountId, FolderId, FolderReference, MailFolder, MessageBodyType, MessageDeltaChange,
-        MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
-        ReadState,
+        AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailFolder, MessageBodyType,
+        MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+        MessageMetadataPatch, ReadState,
     };
     use tempfile::TempDir;
 
@@ -2349,6 +2525,107 @@ mod tests {
                 .expect("synthetic encrypted database is readable as bytes");
             assert_ne!(&database_bytes[..SQLITE_HEADER.len()], SQLITE_HEADER);
             reopened.close_for_tests().await;
+        });
+    }
+
+    #[test]
+    fn confirmed_flag_and_recovery_marker_commit_in_one_transaction() {
+        smol::block_on(async {
+            let directory = TempDir::new().expect("temporary directory is created");
+            let account = account_id("synthetic-account");
+            let cached_folder = folder(&account, "folder-inbox");
+            let folder_reference = cached_folder.reference().clone();
+            let message = message_id("synthetic-message");
+            let cutoff = UNIX_EPOCH + Duration::from_secs(100);
+            let cache = open_test_cache(&directory, account.clone()).await;
+            cache
+                .replace_folders(&account, vec![cached_folder])
+                .await
+                .expect("synthetic folder is cached");
+            let state = cache
+                .ensure_sync_state(&folder_reference, cutoff)
+                .await
+                .expect("initial checkpoint is saved");
+            let mut patch = complete_patch(Some("Synthetic message"), cutoff, ReadState::Unread);
+            patch.set_follow_up_flag_status(Some(FollowUpFlagStatus::NotFlagged));
+            let page = MessageDeltaPage::new(
+                vec![MessageDeltaChange::Upsert {
+                    id: message.clone(),
+                    patch,
+                }],
+                MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(
+                    "https://graph.microsoft.com/v1.0/messages?$deltatoken=synthetic".to_owned(),
+                )),
+            );
+            cache
+                .commit_delta_page(&folder_reference, &state, page, cutoff)
+                .await
+                .expect("synthetic message is cached");
+            cache
+                .require_folder_write_sync(&folder_reference)
+                .await
+                .expect("recovery marker is staged");
+            cache
+                .execute_batch_for_tests(
+                    "CREATE TRIGGER fail_flag_marker_delete
+                     BEFORE DELETE ON mail_folder_write_sync_requirement
+                     BEGIN SELECT RAISE(ABORT, 'synthetic marker failure'); END;",
+                )
+                .await
+                .expect("synthetic failure trigger is installed");
+
+            assert_eq!(
+                cache
+                    .set_message_follow_up_flag_status(
+                        &folder_reference,
+                        &message,
+                        FollowUpFlagStatus::Flagged,
+                    )
+                    .await,
+                Err(MailCacheError::Unavailable)
+            );
+            assert!(
+                cache
+                    .folder_write_sync_required(&folder_reference)
+                    .await
+                    .expect("failed transaction leaves the marker in place")
+            );
+            assert_eq!(
+                cache
+                    .read_message(&folder_reference, &message)
+                    .await
+                    .expect("message is readable after transaction rollback")
+                    .and_then(|(message, _)| message.metadata().follow_up_flag_status()),
+                Some(FollowUpFlagStatus::NotFlagged)
+            );
+
+            cache
+                .execute_batch_for_tests("DROP TRIGGER fail_flag_marker_delete;")
+                .await
+                .expect("synthetic failure trigger is removed");
+            cache
+                .set_message_follow_up_flag_status(
+                    &folder_reference,
+                    &message,
+                    FollowUpFlagStatus::Flagged,
+                )
+                .await
+                .expect("confirmed status and marker removal commit together");
+            assert!(
+                !cache
+                    .folder_write_sync_required(&folder_reference)
+                    .await
+                    .expect("successful transaction clears the marker")
+            );
+            assert_eq!(
+                cache
+                    .read_message(&folder_reference, &message)
+                    .await
+                    .expect("message is readable after confirmed update")
+                    .and_then(|(message, _)| message.metadata().follow_up_flag_status()),
+                Some(FollowUpFlagStatus::Flagged)
+            );
+            cache.close_for_tests().await;
         });
     }
 

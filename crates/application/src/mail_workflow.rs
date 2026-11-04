@@ -2,13 +2,15 @@
 
 use std::{
     collections::HashSet,
+    future::Future,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
 use einfach_mail_domain::{
-    AccountId, CalendarViewReference, FolderReference, MailDraft, MailFolder, MailMessage,
-    MailSendOperationId, MessageBody, MessageDeltaProgress, MessageId, PendingMailSend, ReadState,
+    AccountId, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
+    MailMessage, MailSendOperationId, MessageBody, MessageDeltaProgress, MessageId,
+    PendingMailSend, ReadState,
 };
 use thiserror::Error;
 
@@ -55,6 +57,9 @@ pub enum MailWorkflowError {
     /// The synchronization reservation could not be read or released.
     #[error("the mail workflow state is unavailable")]
     StateUnavailable,
+    /// A previous message update requires a complete folder sync before another write.
+    #[error("the folder must sync before another message update")]
+    FolderSyncRequired,
 }
 
 /// A send result that needs no further provider request.
@@ -178,6 +183,20 @@ pub enum ReadStateUpdateOutcome {
         /// The read state Graph confirmed.
         state: ReadState,
         /// The cache error that prevented the confirmed state from being stored.
+        cache_error: MailCacheError,
+    },
+}
+
+/// Describes the result after the provider confirms a message's follow-up flag status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FollowUpFlagUpdateOutcome {
+    /// The provider and encrypted cache contain the requested status.
+    ConfirmedAndCached(FollowUpFlagStatus),
+    /// The provider confirmed the status, but the cache needs a later folder sync.
+    ConfirmedNeedsSync {
+        /// The status confirmed by the provider.
+        status: FollowUpFlagStatus,
+        /// The cache error that prevented the update from being stored.
         cache_error: MailCacheError,
     },
 }
@@ -543,6 +562,18 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         Ok(self.cache.load_sync_state(folder).await?)
     }
 
+    /// Returns whether a folder recovery marker blocks message writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the marker cannot be read.
+    pub async fn folder_write_sync_required(
+        &self,
+        folder: &FolderReference,
+    ) -> Result<bool, MailWorkflowError> {
+        Ok(self.cache.folder_write_sync_required(folder).await?)
+    }
+
     /// Opens a cached message and fetches its body only when it is not already cached.
     ///
     /// The returned body is safe for the native reader. Raw content remains in the cache.
@@ -577,50 +608,34 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
 
     /// Sets a cached message's read state after Graph confirms the requested value.
     ///
-    /// The operation is connected-only, does not queue changes while offline, and reserves the
-    /// folder against a concurrent synchronization.
+    /// The operation commits a recovery marker before dispatching the provider request. A complete
+    /// folder delta round clears the marker after an unknown outcome or process exit.
     ///
     /// # Errors
     ///
-    /// Returns a provider error when Graph cannot confirm the requested state, a cache error
-    /// when the message is not cached or the cache cannot be read, or
-    /// [`MailWorkflowError::OperationInProgress`] when another operation owns the account or
-    /// folder.
+    /// Returns a provider error when the request is rejected, a cache error when the message is
+    /// absent or the marker cannot be committed, [`MailWorkflowError::FolderSyncRequired`] while
+    /// an earlier update awaits reconciliation, or [`MailWorkflowError::OperationInProgress`]
+    /// when another operation owns the account or folder.
     pub async fn set_message_read_state(
         &self,
         folder: &FolderReference,
         message_id: &MessageId,
         requested: ReadState,
     ) -> Result<ReadStateUpdateOutcome, MailWorkflowError> {
-        let _reservation = self.reserve_folder(folder)?;
-        self.ensure_message_is_cached(folder, message_id).await?;
+        let _reservation = self.prepare_message_write(folder, message_id).await?;
 
         let confirmed = self
-            .provider
-            .set_message_read_state(folder, message_id, requested)
+            .confirm_message_update(
+                folder,
+                requested,
+                self.provider
+                    .set_message_read_state(folder, message_id, requested),
+            )
             .await?;
-        if confirmed != requested {
-            return Err(MailOperationError::MessageUpdateOutcomeUnknown.into());
-        }
 
         self.store_confirmed_read_state(folder, message_id, confirmed)
             .await
-    }
-
-    async fn ensure_message_is_cached(
-        &self,
-        folder: &FolderReference,
-        message_id: &MessageId,
-    ) -> Result<(), MailWorkflowError> {
-        if self
-            .cache
-            .message_read_state(folder, message_id)
-            .await?
-            .is_none()
-        {
-            return Err(MailCacheError::MessageNotCached.into());
-        }
-        Ok(())
     }
 
     async fn store_confirmed_read_state(
@@ -640,6 +655,94 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
                 cache_error,
             }),
         }
+    }
+
+    /// Sets a cached message's follow-up flag status after the provider confirms it.
+    ///
+    /// A SQLCipher recovery marker is committed before the provider request. A complete folder
+    /// delta round removes the marker after an unknown outcome or process exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the request is rejected, a cache error when the message is
+    /// absent or the marker cannot be committed, [`MailWorkflowError::FolderSyncRequired`] while
+    /// an earlier update awaits reconciliation, or [`MailWorkflowError::OperationInProgress`]
+    /// when another operation owns the account or folder.
+    pub async fn set_message_follow_up_flag_status(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        requested: FollowUpFlagStatus,
+    ) -> Result<FollowUpFlagUpdateOutcome, MailWorkflowError> {
+        let _reservation = self.prepare_message_write(folder, message_id).await?;
+        let confirmed = self
+            .confirm_message_update(
+                folder,
+                requested,
+                self.provider
+                    .set_message_follow_up_flag_status(folder, message_id, requested),
+            )
+            .await?;
+
+        match self
+            .cache
+            .set_message_follow_up_flag_status(folder, message_id, confirmed)
+            .await
+        {
+            Ok(()) => Ok(FollowUpFlagUpdateOutcome::ConfirmedAndCached(confirmed)),
+            Err(cache_error) => Ok(FollowUpFlagUpdateOutcome::ConfirmedNeedsSync {
+                status: confirmed,
+                cache_error,
+            }),
+        }
+    }
+
+    async fn prepare_message_write(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> Result<OperationReservation, MailWorkflowError> {
+        let reservation = self.reserve_folder(folder)?;
+        if self.cache.folder_write_sync_required(folder).await? {
+            return Err(MailWorkflowError::FolderSyncRequired);
+        }
+        if self
+            .cache
+            .message_read_state(folder, message_id)
+            .await?
+            .is_none()
+        {
+            return Err(MailCacheError::MessageNotCached.into());
+        }
+        self.cache.require_folder_write_sync(folder).await?;
+        Ok(reservation)
+    }
+
+    async fn confirm_message_update<T, F>(
+        &self,
+        folder: &FolderReference,
+        requested: T,
+        provider_update: F,
+    ) -> Result<T, MailWorkflowError>
+    where
+        T: Copy + Eq + Send,
+        F: Future<Output = Result<T, MailOperationError>> + Send,
+    {
+        let confirmed = match provider_update.await {
+            Ok(confirmed) => confirmed,
+            Err(MailOperationError::MessageUpdateOutcomeUnknown) => {
+                return Err(MailOperationError::MessageUpdateOutcomeUnknown.into());
+            }
+            Err(error) => {
+                self.cache
+                    .clear_folder_write_sync_requirement(folder)
+                    .await?;
+                return Err(error.into());
+            }
+        };
+        (confirmed == requested)
+            .then_some(confirmed)
+            .ok_or_else(|| MailOperationError::MessageUpdateOutcomeUnknown.into())
     }
 
     async fn read_or_fetch_message_body(

@@ -24,7 +24,7 @@ use einfach_mail_application::{AccountOperationError, AccountPermissionRequest};
 
 const CALLBACK_PATH: &str = "/callback";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(600);
-pub(super) const BASE_AUTHORIZATION_SCOPES: [&str; 4] =
+const BASE_AUTHORIZATION_SCOPES: [&str; 4] =
     ["Calendars.Read", "Mail.Read", "User.Read", "offline_access"];
 pub(super) const SEND_MAIL_AUTHORIZATION_SCOPES: [&str; 5] = [
     "Calendars.Read",
@@ -84,11 +84,12 @@ pub(super) async fn authorize(
     endpoints: &Endpoints,
     client: reqwest::Client,
     browser: &dyn BrowserLauncher,
-    requested_scopes: &[&str],
+    request: AccountPermissionRequest,
 ) -> Result<TokenResponse, AccountOperationError> {
     let listener = bind_callback_listener(callback_port).await?;
     let redirect_uri = callback_uri(&listener)?;
     let grant = authorization_grant(client_id, &redirect_uri, endpoints, client.clone()).await?;
+    let requested_scopes = authorization_scopes(request);
     let (started, authorization_url) = begin_authorization(
         &grant,
         endpoints,
@@ -216,7 +217,7 @@ fn validate_authorization_request(
     expected_endpoint: &Url,
     expected_client_id: Uuid,
     redirect_uri: &str,
-    expected_scopes: &[&str],
+    requested_scopes: &[&str],
 ) -> Result<(), AccountOperationError> {
     let endpoint_is_expected = url.origin() == expected_endpoint.origin()
         && url.path() == expected_endpoint.path()
@@ -225,7 +226,8 @@ fn validate_authorization_request(
         && url.fragment().is_none();
     let parameters = AuthorizationParameters::parse(url);
 
-    if endpoint_is_expected && parameters.matches(expected_client_id, redirect_uri, expected_scopes)
+    if endpoint_is_expected
+        && parameters.matches(expected_client_id, redirect_uri, requested_scopes)
     {
         Ok(())
     } else {
@@ -272,7 +274,7 @@ impl AuthorizationParameters {
         &self,
         expected_client_id: Uuid,
         redirect_uri: &str,
-        expected_scopes: &[&str],
+        requested_scopes: &[&str],
     ) -> bool {
         let expected_client_id = expected_client_id.to_string();
         self.response_type.as_deref() == Some("code")
@@ -284,13 +286,13 @@ impl AuthorizationParameters {
                 .challenge
                 .as_ref()
                 .is_some_and(|challenge| !challenge.is_empty())
-            && self.has_exact_scopes(expected_scopes)
+            && self.has_exact_scopes(requested_scopes)
             && !self.includes_nonce
     }
 
     fn has_exact_scopes(&self, expected_scopes: &[&str]) -> bool {
-        self.scopes.as_ref().is_some_and(|requested_scopes| {
-            requested_scopes
+        self.scopes.as_ref().is_some_and(|actual_scopes| {
+            actual_scopes
                 .iter()
                 .map(String::as_str)
                 .eq(expected_scopes.iter().copied())

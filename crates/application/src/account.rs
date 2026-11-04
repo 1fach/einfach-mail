@@ -780,7 +780,10 @@ mod tests {
         let other_account = AccountId::try_from("other-account".to_owned()).expect("ID is valid");
         assert_eq!(
             workflow
-                .reauthorize_account(&other_account, super::AccountPermissionRequest::SendMail)
+                .reauthorize_account(
+                    &other_account,
+                    super::AccountPermissionRequest::MailReadWrite
+                )
                 .await,
             Err(AccountOperationError::AccountMismatch)
         );

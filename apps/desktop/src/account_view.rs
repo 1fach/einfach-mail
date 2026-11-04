@@ -181,11 +181,11 @@ fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static s
         AccountPermissionRequest::Current => {
             "Microsoft will review the existing delegated access: User.Read, Mail.Read, Calendars.Read, and offline_access."
         }
-        AccountPermissionRequest::SendMail => {
-            "Microsoft grants Mail.Send permission to send mail as this account. Continue opens Microsoft in your system browser."
-        }
         AccountPermissionRequest::MailReadWrite => {
-            "Microsoft grants Mail.ReadWrite the ability to create, read, update, and delete mail in this account. Einfach Mail requests it to set messages read or unread after Microsoft denied that action. The app does not request Mail.Send, and this permission review does not send or change a message. Continue opens Microsoft in your system browser."
+            "Microsoft grants Mail.ReadWrite, which can create, read, update, and delete mail in this account. Einfach Mail requests it to change a message's read state or follow-up flag after Microsoft denies that action. This permission review does not send or change a message, and it does not request Mail.Send. Continue opens Microsoft in your system browser."
+        }
+        AccountPermissionRequest::SendMail => {
+            "Microsoft grants Mail.Send so Einfach Mail can send mail as this account. It does not grant permission to read or change mail. Continue opens Microsoft in your system browser."
         }
     }
 }

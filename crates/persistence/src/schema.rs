@@ -1,11 +1,11 @@
 //! SQL schema and migrations for the encrypted mail cache.
 
-use async_sqlite::Client;
+use async_sqlite::{Client, rusqlite::Connection};
 use rusqlite_migration::{M, Migrations};
 
 use crate::store::{CacheFailure, CacheResult};
 
-pub(super) const MESSAGE_QUERY_VERSION: i64 = 1;
+pub(super) const MESSAGE_QUERY_VERSION: i64 = 2;
 
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -204,7 +204,35 @@ fn migrations() -> Migrations<'static> {
             );",
         ),
         M::up(
-            "CREATE TABLE mail_pending_send (
+            "ALTER TABLE mail_messages ADD COLUMN flag_status TEXT
+                CHECK (flag_status IS NULL OR flag_status IN (
+                    'not_flagged', 'flagged', 'complete'
+                ));
+
+            UPDATE mail_account_sync_scope SET query_version = 2;
+
+            UPDATE mail_sync_state
+            SET delta_link = NULL,
+                next_link = NULL,
+                last_sync_seconds = NULL,
+                last_sync_nanoseconds = NULL,
+                full_sync_generation = 0,
+                full_sync_active = 0;
+
+            UPDATE mail_messages SET full_sync_generation = NULL;",
+        ),
+        M::up(
+            "CREATE TABLE mail_folder_write_sync_requirement (
+                account_id TEXT NOT NULL,
+                folder_id TEXT NOT NULL,
+                PRIMARY KEY (account_id, folder_id),
+                FOREIGN KEY (account_id, folder_id)
+                    REFERENCES mail_folders (account_id, folder_id)
+                    ON DELETE CASCADE
+            );",
+        ),
+        M::up(
+            "CREATE TABLE IF NOT EXISTS mail_pending_send (
                 account_id TEXT PRIMARY KEY NOT NULL,
                 operation_id TEXT NOT NULL UNIQUE,
                 recipient TEXT NOT NULL CHECK (length(recipient) > 0),
@@ -220,6 +248,7 @@ fn migrations() -> Migrations<'static> {
 pub(super) async fn apply(client: &Client) -> CacheResult<()> {
     client
         .conn_mut_and_then(|connection| {
+            apply_parallel_v5_compatibility(connection)?;
             migrations()
                 .to_latest(connection)
                 .map_err(|_| CacheFailure::Unavailable)
@@ -229,11 +258,59 @@ pub(super) async fn apply(client: &Client) -> CacheResult<()> {
     Ok(())
 }
 
+fn apply_parallel_v5_compatibility(connection: &mut Connection) -> Result<(), CacheFailure> {
+    let migration_set = migrations();
+    let version = migration_set
+        .current_version(connection)
+        .map_err(|_| CacheFailure::Unavailable)?;
+    if usize::from(version) != 5 {
+        return Ok(());
+    }
+
+    let has_flag_status = connection
+        .query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM pragma_table_info('mail_messages') WHERE name = 'flag_status'
+            )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| CacheFailure::Unavailable)?;
+    if has_flag_status {
+        return Ok(());
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|_| CacheFailure::Unavailable)?;
+    transaction
+        .execute_batch(
+            "ALTER TABLE mail_messages ADD COLUMN flag_status TEXT
+                CHECK (flag_status IS NULL OR flag_status IN (
+                    'not_flagged', 'flagged', 'complete'
+                ));
+
+            UPDATE mail_account_sync_scope SET query_version = 2;
+
+            UPDATE mail_sync_state
+            SET delta_link = NULL,
+                next_link = NULL,
+                last_sync_seconds = NULL,
+                last_sync_nanoseconds = NULL,
+                full_sync_generation = 0,
+                full_sync_active = 0;
+
+            UPDATE mail_messages SET full_sync_generation = NULL;",
+        )
+        .map_err(|_| CacheFailure::Unavailable)?;
+    transaction.commit().map_err(|_| CacheFailure::Unavailable)
+}
+
 #[cfg(test)]
 mod tests {
     use async_sqlite::rusqlite::Connection;
 
-    use super::migrations;
+    use super::{apply_parallel_v5_compatibility, migrations};
 
     #[test]
     fn replacement_generation_migration_preserves_an_existing_snapshot() {
@@ -311,6 +388,95 @@ mod tests {
     }
 
     #[test]
+    fn flag_migration_preserves_cached_mail_and_resets_message_checkpoints() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database opens");
+        let migrations = migrations();
+        migrations
+            .to_version(&mut connection, 4)
+            .expect("previous schema is created");
+        connection
+            .execute_batch(
+                "INSERT INTO mail_folders (
+                    account_id, folder_id, parent_folder_id, display_name
+                 ) VALUES ('account', 'inbox', NULL, 'Inbox');
+                 INSERT INTO mail_account_sync_scope (
+                    account_id, query_version, cutoff_seconds, cutoff_nanoseconds
+                 ) VALUES ('account', 1, 10, 123);
+                 INSERT INTO mail_sync_state (
+                    account_id, folder_id, delta_link, next_link,
+                    last_sync_seconds, last_sync_nanoseconds,
+                    full_sync_generation, full_sync_active
+                 ) VALUES ('account', 'inbox', 'delta', 'next', 20, 456, 3, 1);
+                 INSERT INTO mail_messages (
+                    account_id, folder_id, message_id, subject,
+                    received_seconds, received_nanoseconds, is_read,
+                    body_type, body_content, full_sync_generation
+                 ) VALUES (
+                    'account', 'inbox', 'message', 'Synthetic subject',
+                    20, 0, 1, 'text', 'Synthetic body', 3
+                 );",
+            )
+            .expect("synthetic in-progress snapshot is inserted");
+
+        migrations
+            .to_latest(&mut connection)
+            .expect("follow-up flag and recovery-marker migrations apply");
+
+        let sync = connection
+            .query_row(
+                "SELECT a.query_version, a.cutoff_seconds, a.cutoff_nanoseconds,
+                        s.delta_link, s.next_link, s.last_sync_seconds,
+                        s.last_sync_nanoseconds, s.full_sync_generation,
+                        s.full_sync_active
+                 FROM mail_account_sync_scope a
+                 JOIN mail_sync_state s USING (account_id)",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, bool>(8)?,
+                    ))
+                },
+            )
+            .expect("migrated sync state remains readable");
+        let message = connection
+            .query_row(
+                "SELECT subject, flag_status, body_type, body_content, full_sync_generation
+                 FROM mail_messages WHERE message_id = 'message'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                },
+            )
+            .expect("cached message remains readable");
+
+        assert_eq!(sync, (2, 10, 123, None, None, None, None, 0, false));
+        assert_eq!(
+            message,
+            (
+                "Synthetic subject".to_owned(),
+                None,
+                Some("text".to_owned()),
+                Some("Synthetic body".to_owned()),
+                None,
+            )
+        );
+    }
+
+    #[test]
     fn pending_send_schema_contains_only_reconciliation_metadata() {
         let mut connection = Connection::open_in_memory().expect("in-memory database opens");
         migrations()
@@ -337,5 +503,55 @@ mod tests {
             ]
         );
         assert!(!columns.iter().any(|column| column.contains("body")));
+    }
+
+    #[test]
+    fn parallel_send_v5_schema_receives_the_missing_flag_migration() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database opens");
+        let migrations = migrations();
+        migrations
+            .to_version(&mut connection, 4)
+            .expect("common schema reaches version four");
+        connection
+            .execute_batch(
+                "CREATE TABLE mail_pending_send (
+                    account_id TEXT PRIMARY KEY NOT NULL,
+                    operation_id TEXT NOT NULL UNIQUE,
+                    recipient TEXT NOT NULL CHECK (length(recipient) > 0),
+                    subject TEXT NOT NULL CHECK (length(subject) > 0),
+                    created_seconds INTEGER NOT NULL,
+                    created_nanoseconds INTEGER NOT NULL
+                        CHECK (created_nanoseconds BETWEEN 0 AND 999999999)
+                );
+                PRAGMA user_version = 5;",
+            )
+            .expect("parallel send branch version five is simulated");
+
+        apply_parallel_v5_compatibility(&mut connection)
+            .expect("missing flag migration is applied transactionally");
+        migrations
+            .to_latest(&mut connection)
+            .expect("remaining migrations preserve the existing pending-send table");
+
+        let columns = connection
+            .prepare("PRAGMA table_info(mail_messages)")
+            .expect("message schema is inspectable")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("message columns are read")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("message column names are valid");
+        assert!(columns.iter().any(|column| column == "flag_status"));
+
+        let pending_send_exists = connection
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'mail_pending_send'
+                )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("pending-send table remains available");
+        assert!(pending_send_exists);
     }
 }

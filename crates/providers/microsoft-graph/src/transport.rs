@@ -31,7 +31,7 @@ pub(super) enum GraphOperation {
     Messages,
     MessageDelta,
     MessageBody,
-    MessageReadState,
+    MessageUpdate,
     MailSend,
     CalendarViewDelta,
 }
@@ -40,7 +40,7 @@ impl GraphOperation {
     fn requires_json_content_type(self) -> bool {
         matches!(
             self,
-            Self::MessageDelta | Self::MessageReadState | Self::MailSend | Self::CalendarViewDelta
+            Self::MessageDelta | Self::MailSend | Self::CalendarViewDelta
         )
     }
 
@@ -50,7 +50,7 @@ impl GraphOperation {
             Self::Messages
                 | Self::MessageDelta
                 | Self::MessageBody
-                | Self::MessageReadState
+                | Self::MessageUpdate
                 | Self::CalendarViewDelta
         )
     }
@@ -189,7 +189,7 @@ impl GraphTransportHandle {
             .map_err(|_| GraphError::WorkerClosed)?;
         response.await.map_err(|_| match operation {
             GraphOperation::MailSend => GraphError::SendOutcomeUnknown,
-            GraphOperation::MessageReadState => GraphError::MessageUpdateOutcomeUnknown,
+            GraphOperation::MessageUpdate => GraphError::MessageUpdateOutcomeUnknown,
             _ => GraphError::WorkerClosed,
         })?
     }
@@ -396,20 +396,23 @@ async fn request_with_retry(
     loop {
         let response = match send_once(client, request, reply).await? {
             Ok(response) => response,
-            Err(GraphError::Transport) if matches!(request.operation, GraphOperation::MailSend) => {
-                return Some(Err(GraphError::SendOutcomeUnknown));
-            }
             Err(GraphError::Transport)
-                if matches!(request.operation, GraphOperation::MessageReadState) =>
+                if matches!(request.operation, GraphOperation::MessageUpdate) =>
             {
                 return Some(Err(GraphError::MessageUpdateOutcomeUnknown));
             }
+            Err(GraphError::Transport) if matches!(request.operation, GraphOperation::MailSend) => {
+                return Some(Err(GraphError::SendOutcomeUnknown));
+            }
             Err(error) => return Some(Err(error)),
         };
-        if matches!(request.operation, GraphOperation::MessageReadState) {
-            return message_read_state_response_result(response, reply).await;
+        if matches!(request.operation, GraphOperation::MessageUpdate) {
+            return message_update_response_result(response, reply).await;
         }
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            if matches!(&request.method, GraphRequestMethod::PatchJson(_)) {
+                return Some(Err(rate_limit_error(&response)));
+            }
             if matches!(request.operation, GraphOperation::MailSend) {
                 return response_result(request.operation, response, reply).await;
             }
@@ -510,7 +513,7 @@ async fn response_result(
     }
 }
 
-async fn message_read_state_response_result(
+async fn message_update_response_result(
     response: Response,
     reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
 ) -> Option<Result<GraphResponse, GraphError>> {
@@ -522,14 +525,14 @@ async fn message_read_state_response_result(
             Ok(body) => Ok(body),
             Err(_) => Err(GraphError::MessageUpdateOutcomeUnknown),
         }),
-        status if read_state_outcome_may_be_unknown(status) => {
+        status if message_update_outcome_may_be_unknown(status) => {
             Some(Err(GraphError::MessageUpdateOutcomeUnknown))
         }
         _ => Some(Err(GraphError::Transport)),
     }
 }
 
-fn read_state_outcome_may_be_unknown(status: StatusCode) -> bool {
+fn message_update_outcome_may_be_unknown(status: StatusCode) -> bool {
     status.is_success()
         || status.is_server_error()
         || status.is_redirection()
@@ -583,7 +586,7 @@ async fn send_once(
         (GraphRequestMethod::Get, operation)
             if !matches!(
                 operation,
-                GraphOperation::MailSend | GraphOperation::MessageReadState
+                GraphOperation::MailSend | GraphOperation::MessageUpdate
             ) =>
         {
             client.get(request.url.as_str())
@@ -591,13 +594,16 @@ async fn send_once(
         (GraphRequestMethod::PostJson(body), GraphOperation::MailSend) => {
             client.post(request.url.as_str()).body(body.clone())
         }
-        (GraphRequestMethod::PatchJson(body), GraphOperation::MessageReadState) => client
+        (GraphRequestMethod::PatchJson(body), GraphOperation::MessageUpdate) => client
             .patch(request.url.as_str())
+            .header(CONTENT_TYPE, "application/json")
             .body(body.as_ref().to_vec()),
         _ => return Some(Err(GraphError::InvalidResponse)),
     }
     .header(AUTHORIZATION, authorization);
-    if request.operation.requires_json_content_type() {
+    if matches!(&request.method, GraphRequestMethod::Get)
+        && request.operation.requires_json_content_type()
+    {
         outbound = outbound.header(CONTENT_TYPE, "application/json");
     }
     if request.operation.uses_immutable_ids() {
@@ -920,7 +926,7 @@ mod tests {
         let request = tokio::spawn(async move {
             handle
                 .patch_json(
-                    GraphOperation::MessageReadState,
+                    GraphOperation::MessageUpdate,
                     url,
                     synthetic_access_token(),
                     Arc::from(&b"{\"isRead\":true}"[..]),
@@ -953,7 +959,7 @@ mod tests {
         let result = transport
             .handle()
             .patch_json(
-                GraphOperation::MessageReadState,
+                GraphOperation::MessageUpdate,
                 graph_url(&server.url("/v1.0/me/messages/synthetic-message")),
                 synthetic_access_token(),
                 Arc::from(&b"{\"isRead\":true}"[..]),
@@ -1050,6 +1056,79 @@ mod tests {
         assert_eq!(response, b"synthetic retry response");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         throttle.assert_calls_async(2).await;
+    }
+
+    #[tokio::test]
+    async fn message_read_state_patch_uses_one_attempt_and_requires_exact_confirmation() {
+        for status in [200, 201, 202, 204, 302, 503] {
+            let server = MockServer::start_async().await;
+            let patch = server
+                .mock_async(move |when, then| {
+                    when.method(PATCH)
+                        .path("/v1.0/me/messages/synthetic-message")
+                        .header("authorization", "Bearer synthetic-access-token")
+                        .header("content-type", "application/json")
+                        .header("prefer", "IdType=\"ImmutableId\"")
+                        .body(r#"{"isRead":true}"#);
+                    then.status(status).body(r#"{"isRead":true}"#);
+                })
+                .await;
+            let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+            let result = transport
+                .handle()
+                .patch_json(
+                    GraphOperation::MessageUpdate,
+                    graph_url(&server.url("/v1.0/me/messages/synthetic-message")),
+                    synthetic_access_token(),
+                    Arc::from(&b"{\"isRead\":true}"[..]),
+                )
+                .await;
+
+            let expected = if status == 200 {
+                Ok(br#"{"isRead":true}"#.to_vec())
+            } else {
+                Err(GraphError::MessageUpdateOutcomeUnknown)
+            };
+            assert_eq!(result, expected, "PATCH response status {status}");
+            patch.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn message_read_state_patch_does_not_retry_throttle_responses() {
+        let server = MockServer::start_async().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let responder_calls = Arc::clone(&calls);
+        let patch = server
+            .mock_async(move |when, then| {
+                when.method(PATCH)
+                    .path("/v1.0/me/messages/synthetic-message");
+                then.respond_with(move |_request: &HttpMockRequest| {
+                    responder_calls.fetch_add(1, Ordering::SeqCst);
+                    HttpMockResponse::builder()
+                        .status(429)
+                        .header("Retry-After", "0")
+                        .body("synthetic throttle response")
+                        .build()
+                });
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+        let result = transport
+            .handle()
+            .patch_json(
+                GraphOperation::MessageUpdate,
+                graph_url(&server.url("/v1.0/me/messages/synthetic-message")),
+                synthetic_access_token(),
+                Arc::from(&b"{\"isRead\":true}"[..]),
+            )
+            .await;
+
+        assert!(matches!(result, Err(GraphError::RateLimited { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        patch.assert_calls_async(1).await;
     }
 
     #[tokio::test]

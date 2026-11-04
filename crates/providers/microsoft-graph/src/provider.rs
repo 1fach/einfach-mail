@@ -29,8 +29,8 @@ use einfach_mail_application::{
     MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, CalendarViewReference, FolderReference, MailDraft, MailFolder,
-    MailMessage, MessageBody, MessageId, ReadState,
+    AccountId, AccountProfile, CalendarViewReference, FolderReference, FollowUpFlagStatus,
+    MailDraft, MailFolder, MailMessage, MessageBody, MessageId, ReadState,
 };
 
 const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
@@ -168,7 +168,7 @@ impl AccountProvider for MicrosoftGraphProvider {
         worker::run_with_account_cancellation(
             move |_cancellation: CancellationToken| async move {
                 let authorized =
-                    authorize_profile(&config, &identity::BASE_AUTHORIZATION_SCOPES).await?;
+                    authorize_profile(&config, AccountPermissionRequest::Current).await?;
                 let mut session = config.session.lock().await;
                 commit_cancellation.begin_credential_commit()?;
                 config.credentials.save(&authorized.refresh_token)?;
@@ -190,12 +190,11 @@ impl AccountProvider for MicrosoftGraphProvider {
     ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let expected_account_id = expected_account_id.clone();
-        let requested_scopes = identity::authorization_scopes(request);
         let commit_cancellation = cancellation.clone();
 
         worker::run_with_account_cancellation(
             move |_cancellation: CancellationToken| async move {
-                let authorized = authorize_profile(&config, requested_scopes).await?;
+                let authorized = authorize_profile(&config, request).await?;
                 if authorized.profile.id() != &expected_account_id {
                     return Err(AccountOperationError::AccountMismatch);
                 }
@@ -314,6 +313,26 @@ impl MailProvider for MicrosoftGraphProvider {
             let graph_api = config.graph_api().map_err(map_graph_error)?;
             let result = graph_api
                 .set_message_read_state(&message_id, requested, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, account_id, &token, result).await
+        })
+    }
+
+    fn set_message_follow_up_flag_status(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        status: FollowUpFlagStatus,
+    ) -> impl Future<Output = Result<FollowUpFlagStatus, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let folder = folder.clone();
+        let message_id = message_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = folder.account_id();
+            let token = ensure_access_token(&config, account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let result = graph_api
+                .set_message_follow_up_flag_status(&message_id, status, Arc::clone(&token))
                 .await;
             map_mail_result(&config, account_id, &token, result).await
         })
@@ -574,7 +593,7 @@ fn map_send_graph_error(error: GraphError) -> MailSendProviderError {
 
 async fn authorize_profile(
     config: &ProviderConfig,
-    requested_scopes: &[&str],
+    request: AccountPermissionRequest,
 ) -> Result<AuthorizedAccount, AccountOperationError> {
     let client =
         http_client::build_client().map_err(|_| AccountOperationError::ServiceUnavailable)?;
@@ -584,7 +603,7 @@ async fn authorize_profile(
         &config.endpoints,
         client.clone(),
         config.browser.as_ref(),
-        requested_scopes,
+        request,
     )
     .await?;
     let refresh_token = response

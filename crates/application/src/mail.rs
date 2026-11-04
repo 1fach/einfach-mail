@@ -3,8 +3,8 @@
 use std::{future::Future, time::Duration};
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, MailDraft, MailFolder, MailMessage, MessageBody, MessageDeltaLink,
-    MessageDeltaPage, MessageId, ReadState,
+    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
+    MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId, ReadState,
 };
 use thiserror::Error;
 
@@ -29,8 +29,8 @@ pub enum MailOperationError {
         /// The advised delay, or `None` when the provider could not represent it.
         retry_after: Option<Duration>,
     },
-    /// The read-state change may have reached the provider without exact confirmation.
-    #[error("the message read-state update outcome is unknown")]
+    /// The message change may have reached the provider without exact confirmation.
+    #[error("the message update outcome is unknown")]
     MessageUpdateOutcomeUnknown,
     /// The Linux credential service could not read or rotate a token.
     #[error("the Linux credential service is unavailable")]
@@ -230,6 +230,25 @@ pub trait MailProvider: Send + Sync {
         message_id: &MessageId,
         requested: ReadState,
     ) -> impl Future<Output = Result<ReadState, MailOperationError>> + Send + '_;
+
+    /// Sets a message's follow-up flag and returns the status confirmed by the provider.
+    ///
+    /// Implementations must use the signed-in account and return
+    /// [`MailOperationError::MessageUpdateOutcomeUnknown`] when the response
+    /// does not confirm the requested status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailOperationError::SignInRequired`] without a valid session,
+    /// [`MailOperationError::AccountMismatch`] when `folder` belongs to another account,
+    /// [`MailOperationError::MessageUpdateOutcomeUnknown`] without exact confirmation, or a
+    /// provider error for access, throttling, or service failures.
+    fn set_message_follow_up_flag_status(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        status: FollowUpFlagStatus,
+    ) -> impl Future<Output = Result<FollowUpFlagStatus, MailOperationError>> + Send + '_;
 
     /// Sends one plain-text message as the signed-in account.
     ///

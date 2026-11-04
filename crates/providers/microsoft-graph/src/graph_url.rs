@@ -9,7 +9,7 @@ use einfach_mail_domain::CalendarViewRange;
 
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
 const FOLDER_SELECT: &str = "id,displayName,isHidden";
-const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead";
+const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead,flag";
 
 #[derive(Clone)]
 pub(super) struct GraphAuthority {
@@ -79,7 +79,7 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub(super) fn message_read_state_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
+    pub(super) fn message_update_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
         self.validated_url(self.message_path(message_id)?)
     }
 
@@ -380,7 +380,7 @@ mod tests {
             .message_body_path("message/id with space")
             .expect("message ID forms an encoded Graph body path");
         let read_state_url = authority
-            .message_read_state_path("message/id with space")
+            .message_update_path("message/id with space")
             .expect("message ID forms an encoded Graph update path");
 
         assert!(

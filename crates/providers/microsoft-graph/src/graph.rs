@@ -23,10 +23,10 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage,
     CalendarDeltaProgress, CalendarOccurrencePatch, CalendarOccurrenceTimePatch,
-    CalendarViewReference, EventId, FolderId, FolderReference, MailDraft, MailFolder, MailMessage,
-    Mailbox, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
-    MessageDeltaProgress, MessageId, MessageMetadata, MessageMetadataPatch, MessageOrigin,
-    ReadState,
+    CalendarViewReference, EventId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
+    MailFolder, MailMessage, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
+    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadata,
+    MessageMetadataPatch, MessageOrigin, ReadState,
 };
 
 const MAX_PAGINATION_PAGES: usize = 1_000;
@@ -210,14 +210,31 @@ impl GraphApi {
         let response = self
             .transport
             .patch_json(
-                GraphOperation::MessageReadState,
-                self.authority
-                    .message_read_state_path(message_id.as_str())?,
+                GraphOperation::MessageUpdate,
+                self.authority.message_update_path(message_id.as_str())?,
                 token,
                 read_state_patch_body(requested),
             )
             .await?;
         confirmed_read_state(&response, requested)
+    }
+
+    pub(super) async fn set_message_follow_up_flag_status(
+        &self,
+        message_id: &MessageId,
+        status: FollowUpFlagStatus,
+        token: std::sync::Arc<AccessToken>,
+    ) -> Result<FollowUpFlagStatus, GraphError> {
+        let response = self
+            .transport
+            .patch_json(
+                GraphOperation::MessageUpdate,
+                self.authority.message_update_path(message_id.as_str())?,
+                token,
+                follow_up_flag_patch_body(status),
+            )
+            .await?;
+        confirmed_follow_up_flag_status(&response, status)
     }
 
     pub(super) async fn send_mail(
@@ -547,6 +564,7 @@ struct WireMessage {
     sender: Option<WireRecipient>,
     received_date_time: String,
     is_read: bool,
+    flag: Option<WireFollowUpFlag>,
 }
 
 impl WireMessage {
@@ -562,7 +580,14 @@ impl WireMessage {
             true => ReadState::Read,
             false => ReadState::Unread,
         };
-        let metadata = MessageMetadata::new(self.subject, origin, received_at, read_state);
+        let follow_up_flag_status = self.flag.and_then(|flag| flag.flag_status.map(Into::into));
+        let metadata = MessageMetadata::new(
+            self.subject,
+            origin,
+            received_at,
+            read_state,
+            follow_up_flag_status,
+        );
         Ok(MailMessage::new(folder, id, metadata))
     }
 }
@@ -738,6 +763,32 @@ struct WireMessageMetadata {
     received_date_time: WireField<String>,
     #[serde(default)]
     is_read: WireField<bool>,
+    #[serde(default)]
+    flag: WireField<WireFollowUpFlag>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireFollowUpFlag {
+    flag_status: Option<WireFollowUpFlagStatus>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum WireFollowUpFlagStatus {
+    NotFlagged,
+    Flagged,
+    Complete,
+}
+
+impl From<WireFollowUpFlagStatus> for FollowUpFlagStatus {
+    fn from(status: WireFollowUpFlagStatus) -> Self {
+        match status {
+            WireFollowUpFlagStatus::NotFlagged => Self::NotFlagged,
+            WireFollowUpFlagStatus::Flagged => Self::Flagged,
+            WireFollowUpFlagStatus::Complete => Self::Complete,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -835,6 +886,7 @@ impl TryFrom<WireMessageChange> for MessageDeltaChange {
             change.metadata.is_read,
             &mut patch,
         )?;
+        apply_follow_up_flag_field(change.metadata.flag, &mut patch);
         Ok(Self::Upsert { id, patch })
     }
 }
@@ -887,6 +939,16 @@ fn apply_required_fields(
     Ok(())
 }
 
+fn apply_follow_up_flag_field(flag: WireField<WireFollowUpFlag>, patch: &mut MessageMetadataPatch) {
+    match flag {
+        WireField::Missing => {}
+        WireField::Null => patch.set_follow_up_flag_status(None),
+        WireField::Value(flag) => {
+            patch.set_follow_up_flag_status(flag.flag_status.map(Into::into));
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct WireMessageBody {
     body: WireBodyContent,
@@ -913,6 +975,38 @@ fn confirmed_read_state(response: &[u8], requested: ReadState) -> Result<ReadSta
     } else {
         ReadState::Unread
     };
+    if confirmed != requested {
+        return Err(GraphError::MessageUpdateOutcomeUnknown);
+    }
+    Ok(confirmed)
+}
+
+fn follow_up_flag_patch_body(status: FollowUpFlagStatus) -> Arc<[u8]> {
+    match status {
+        FollowUpFlagStatus::NotFlagged => {
+            Arc::from(&b"{\"flag\":{\"flagStatus\":\"notFlagged\"}}"[..])
+        }
+        FollowUpFlagStatus::Flagged => Arc::from(&b"{\"flag\":{\"flagStatus\":\"flagged\"}}"[..]),
+        FollowUpFlagStatus::Complete => Arc::from(&b"{\"flag\":{\"flagStatus\":\"complete\"}}"[..]),
+    }
+}
+
+#[derive(Deserialize)]
+struct WireMessageFollowUpFlagUpdate {
+    flag: WireFollowUpFlag,
+}
+
+fn confirmed_follow_up_flag_status(
+    response: &[u8],
+    requested: FollowUpFlagStatus,
+) -> Result<FollowUpFlagStatus, GraphError> {
+    let message = serde_json::from_slice::<WireMessageFollowUpFlagUpdate>(response)
+        .map_err(|_| GraphError::MessageUpdateOutcomeUnknown)?;
+    let confirmed = message
+        .flag
+        .flag_status
+        .map(Into::into)
+        .ok_or(GraphError::MessageUpdateOutcomeUnknown)?;
     if confirmed != requested {
         return Err(GraphError::MessageUpdateOutcomeUnknown);
     }
@@ -946,12 +1040,15 @@ mod tests {
     use einfach_mail_domain::{
         AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarOccurrence,
         CalendarOccurrenceTime, CalendarViewRange, CalendarViewReference, FolderId,
-        FolderReference, MailDraft, MailRecipient, MailSubject, MessageId, ReadState,
+        FolderReference, FollowUpFlagStatus, MailDraft, MailRecipient, MailSubject,
+        MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, ReadState,
     };
 
     use super::{
         GraphApi, MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget,
-        WireCalendarEvent, WireFolder, WireMessage, confirmed_read_state, read_state_patch_body,
+        WireCalendarEvent, WireFolder, WireMessage, WireMessageChange,
+        confirmed_follow_up_flag_status, confirmed_read_state, follow_up_flag_patch_body,
+        read_state_patch_body,
     };
     use crate::{
         error::GraphError,
@@ -1017,6 +1114,117 @@ mod tests {
             confirmed_read_state(br#"{}"#, ReadState::Read),
             Err(GraphError::MessageUpdateOutcomeUnknown)
         );
+    }
+
+    #[test]
+    fn follow_up_flag_patch_is_minimal_and_requires_matching_confirmation() {
+        for (status, payload) in [
+            (
+                FollowUpFlagStatus::NotFlagged,
+                br#"{"flag":{"flagStatus":"notFlagged"}}"#.as_slice(),
+            ),
+            (
+                FollowUpFlagStatus::Flagged,
+                br#"{"flag":{"flagStatus":"flagged"}}"#.as_slice(),
+            ),
+            (
+                FollowUpFlagStatus::Complete,
+                br#"{"flag":{"flagStatus":"complete"}}"#.as_slice(),
+            ),
+        ] {
+            assert_eq!(follow_up_flag_patch_body(status).as_ref(), payload);
+            assert_eq!(confirmed_follow_up_flag_status(payload, status), Ok(status));
+        }
+
+        assert_eq!(
+            confirmed_follow_up_flag_status(br#"{}"#, FollowUpFlagStatus::Flagged),
+            Err(GraphError::MessageUpdateOutcomeUnknown)
+        );
+        assert_eq!(
+            confirmed_follow_up_flag_status(
+                br#"{"flag":{"flagStatus":"complete"}}"#,
+                FollowUpFlagStatus::Flagged
+            ),
+            Err(GraphError::MessageUpdateOutcomeUnknown)
+        );
+        assert!(
+            serde_json::from_slice::<WireMessageChange>(
+                br#"{"id":"synthetic-message","flag":{"flagStatus":"unknown"}}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn delta_flag_updates_preserve_omitted_status_and_clear_explicit_null() {
+        let mut metadata = MessageMetadata::new(
+            None,
+            MessageOrigin::new(None, None),
+            SystemTime::UNIX_EPOCH,
+            ReadState::Unread,
+            Some(FollowUpFlagStatus::Flagged),
+        );
+
+        for (payload, expected) in [
+            (
+                br#"{"id":"synthetic-message"}"#.as_slice(),
+                Some(FollowUpFlagStatus::Flagged),
+            ),
+            (
+                br#"{"id":"synthetic-message","flag":{"flagStatus":"complete"}}"#.as_slice(),
+                Some(FollowUpFlagStatus::Complete),
+            ),
+            (
+                br#"{"id":"synthetic-message","flag":null}"#.as_slice(),
+                None,
+            ),
+            (
+                br#"{"id":"synthetic-message","flag":{"flagStatus":null}}"#.as_slice(),
+                None,
+            ),
+        ] {
+            let wire = serde_json::from_slice::<WireMessageChange>(payload)
+                .expect("synthetic message delta is valid");
+            let MessageDeltaChange::Upsert { patch, .. } =
+                MessageDeltaChange::try_from(wire).expect("message delta maps to domain values")
+            else {
+                panic!("synthetic metadata change is an upsert");
+            };
+            metadata.apply_patch(patch);
+            assert_eq!(metadata.follow_up_flag_status(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn follow_up_flag_patch_uses_the_message_update_endpoint() {
+        let server = MockServer::start_async().await;
+        let patch = server
+            .mock_async(|when, then| {
+                when.method(PATCH)
+                    .path("/v1.0/me/messages/synthetic-message")
+                    .header("content-type", "application/json")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .body(r#"{"flag":{"flagStatus":"flagged"}}"#);
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"flag":{"flagStatus":"flagged"}}"#);
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+        let message_id = MessageId::try_from("synthetic-message".to_owned())
+            .expect("synthetic message ID is valid");
+
+        assert_eq!(
+            api.set_message_follow_up_flag_status(
+                &message_id,
+                FollowUpFlagStatus::Flagged,
+                synthetic_access_token(),
+            )
+            .await,
+            Ok(FollowUpFlagStatus::Flagged)
+        );
+
+        patch.assert_async().await;
     }
 
     #[tokio::test]

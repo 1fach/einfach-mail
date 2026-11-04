@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     rc::Rc,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -7,13 +6,13 @@ use std::{
 
 use crate::mail_composer::{MailComposer, MailComposerEvent, MailPermissionRequester};
 use einfach_mail_application::{
-    MailCacheError, MailOperationError, MailSession, MailSyncProgress, MailSyncReport,
-    MailSyncState, MailWorkflowError, MessageBodyForDisplay, OpenedMessage, ReadStateUpdateOutcome,
-    SanitizedEmailHtml, allowed_external_message_url,
+    FollowUpFlagUpdateOutcome, MailCacheError, MailOperationError, MailSession, MailSyncProgress,
+    MailSyncReport, MailSyncState, MailWorkflowError, MessageBodyForDisplay, OpenedMessage,
+    ReadStateUpdateOutcome, SanitizedEmailHtml, allowed_external_message_url,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, FolderReference, MailFolder, MailMessage, MessageId,
-    MessageMetadataPatch, PendingMailSend, ReadState,
+    AccountId, AccountProfile, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage,
+    MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
 };
 use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::WindowExt;
@@ -78,7 +77,9 @@ pub(crate) struct MailView {
     message_task: Option<Task<()>>,
     read_state_update: ReadStateUpdateStatus,
     read_state_task: Option<Task<()>>,
-    read_state_reconciliation_required: HashSet<FolderReference>,
+    follow_up_flag_update: FollowUpFlagUpdateStatus,
+    follow_up_flag_task: Option<Task<()>>,
+    selected_folder_write_sync_required: bool,
 }
 
 enum SyncStatus {
@@ -225,11 +226,66 @@ struct ReadStateUpdateRequest {
     requested: ReadState,
 }
 
+enum FollowUpFlagUpdateStatus {
+    Idle,
+    Pending {
+        message_id: MessageId,
+        requested: FollowUpFlagStatus,
+    },
+    Confirmed {
+        message_id: MessageId,
+        status: FollowUpFlagStatus,
+    },
+    ConfirmedNeedsSync {
+        message_id: MessageId,
+        status: FollowUpFlagStatus,
+    },
+    Failed {
+        message_id: MessageId,
+        requested: FollowUpFlagStatus,
+        error: MailWorkflowError,
+    },
+}
+
+struct FollowUpFlagUpdateRequest {
+    folder: FolderReference,
+    message_id: MessageId,
+    requested: FollowUpFlagStatus,
+}
+
+impl FollowUpFlagUpdateStatus {
+    fn is_pending_for(&self, message_id: &MessageId) -> bool {
+        matches!(
+            self,
+            Self::Pending {
+                message_id: pending_id,
+                ..
+            } if pending_id == message_id
+        )
+    }
+
+    fn action_label(
+        &self,
+        message_id: &MessageId,
+        flag_status: Option<FollowUpFlagStatus>,
+    ) -> &'static str {
+        if self.is_pending_for(message_id) {
+            return "Updating…";
+        }
+        match flag_status {
+            Some(FollowUpFlagStatus::Flagged) => "Clear flag",
+            Some(FollowUpFlagStatus::Complete) => "Reopen flag",
+            Some(FollowUpFlagStatus::NotFlagged) | None => "Flag",
+        }
+    }
+}
+
 struct MailSnapshot {
     folders: Vec<MailFolder>,
     selected_folder: Option<FolderReference>,
     messages: Vec<MailMessage>,
     sync_state: Option<MailSyncState>,
+    folder_write_sync_required: bool,
     pending_send: Result<Option<PendingMailSend>, MailCacheError>,
 }
 
@@ -263,7 +319,9 @@ impl MailView {
             message_task: None,
             read_state_update: ReadStateUpdateStatus::Idle,
             read_state_task: None,
-            read_state_reconciliation_required: HashSet::new(),
+            follow_up_flag_update: FollowUpFlagUpdateStatus::Idle,
+            follow_up_flag_task: None,
+            selected_folder_write_sync_required: true,
         };
         view.load_cache_and_sync(cx);
         view
@@ -323,6 +381,7 @@ impl MailView {
         self.selected_folder = snapshot.selected_folder;
         self.set_messages(snapshot.messages);
         self.sync_state = snapshot.sync_state;
+        self.selected_folder_write_sync_required = snapshot.folder_write_sync_required;
         match snapshot.pending_send {
             Ok(pending) => {
                 self.pending_send = pending;
@@ -337,6 +396,7 @@ impl MailView {
         self.message_state = MessageState::Empty;
         self.message_task = None;
         self.read_state_update = ReadStateUpdateStatus::Idle;
+        self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
     }
 
     fn set_messages(&mut self, messages: Vec<MailMessage>) {
@@ -357,7 +417,6 @@ impl MailView {
         sync_result: Result<(), MailWorkflowError>,
         snapshot: Result<MailSnapshot, MailWorkflowError>,
     ) {
-        let sync_reconciled = sync_result.is_ok() && snapshot.is_ok();
         let (status, snapshot) = match (sync_result, snapshot) {
             (_, Err(error)) => (SyncStatus::Failed(error), None),
             (Err(error), Ok(snapshot)) => (SyncStatus::Failed(error), Some(snapshot)),
@@ -366,9 +425,6 @@ impl MailView {
         if let Some(snapshot) = snapshot {
             self.apply_snapshot(snapshot);
         }
-        if sync_reconciled {
-            self.read_state_reconciliation_required.clear();
-        }
         self.sync_status = status;
     }
 
@@ -376,6 +432,7 @@ impl MailView {
         drop(self.sync_task.take());
         drop(self.message_task.take());
         drop(self.read_state_task.take());
+        drop(self.follow_up_flag_task.take());
         self.sync_running = false;
         self.selected_folder = None;
         self.selected_message_id = None;
@@ -384,36 +441,42 @@ impl MailView {
         self.messages.clear();
         self.message_state = MessageState::Empty;
         self.read_state_update = ReadStateUpdateStatus::Idle;
+        self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
+        self.selected_folder_write_sync_required = true;
     }
 
     fn select_folder(&mut self, folder: FolderReference, cx: &mut Context<Self>) {
-        if self.read_state_task.is_some() {
+        if self.read_state_task.is_some() || self.follow_up_flag_task.is_some() {
             return;
         }
         if self.selected_folder.as_ref() == Some(&folder) {
             return;
         }
         self.selected_folder = Some(folder.clone());
+        self.selected_folder_write_sync_required = true;
         self.sync_state = None;
         self.selected_message_id = None;
         self.message_state = MessageState::Loading;
         self.read_state_update = ReadStateUpdateStatus::Idle;
+        self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
         self.set_messages(Vec::new());
         let workflow = Arc::clone(&self.workflow);
         self.message_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let messages = workflow.list_cached_messages(&folder).await;
             let sync_state = workflow.cached_sync_state(&folder).await;
+            let write_sync_required = workflow.folder_write_sync_required(&folder).await;
             let _ = this.update(cx, |view, cx| {
                 if view.selected_folder.as_ref() != Some(&folder) {
                     return;
                 }
-                match (messages, sync_state) {
-                    (Ok(messages), Ok(sync_state)) => {
+                match (messages, sync_state, write_sync_required) {
+                    (Ok(messages), Ok(sync_state), Ok(write_sync_required)) => {
                         view.set_messages(messages);
                         view.sync_state = sync_state;
+                        view.selected_folder_write_sync_required = write_sync_required;
                         view.message_state = MessageState::Empty;
                     }
-                    (Err(error), _) | (_, Err(error)) => {
+                    (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
                         view.message_state = MessageState::Failed(error);
                     }
                 }
@@ -425,7 +488,7 @@ impl MailView {
     }
 
     fn select_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        if self.read_state_task.is_some() {
+        if self.read_state_task.is_some() || self.follow_up_flag_task.is_some() {
             return;
         }
         if !self
@@ -464,7 +527,8 @@ impl MailView {
     }
 
     fn navigate_message(&mut self, navigation: MessageNavigation, cx: &mut Context<Self>) {
-        if self.sync_running || self.read_state_task.is_some() {
+        if self.sync_running || self.read_state_task.is_some() || self.follow_up_flag_task.is_some()
+        {
             return;
         }
         let selected_index = self.selected_message_id.as_ref().and_then(|selected| {
@@ -538,7 +602,8 @@ impl MailView {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.sync_running || self.read_state_task.is_some() {
+        if self.sync_running || self.read_state_task.is_some() || self.follow_up_flag_task.is_some()
+        {
             return;
         }
         self.sync_running = true;
@@ -571,6 +636,238 @@ impl MailView {
             });
         }));
         cx.notify();
+    }
+
+    fn update_selected_read_state(&mut self, cx: &mut Context<Self>) {
+        if self.sync_running || self.read_state_task.is_some() || self.follow_up_flag_task.is_some()
+        {
+            return;
+        }
+        let Some(request) = self.selected_read_state_request() else {
+            return;
+        };
+        let workflow = Arc::clone(&self.workflow);
+        self.read_state_update = ReadStateUpdateStatus::Pending {
+            message_id: request.message_id.clone(),
+            requested: request.requested,
+        };
+        self.read_state_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let update_outcome = workflow
+                .set_message_read_state(&request.folder, &request.message_id, request.requested)
+                .await;
+            let write_sync_required = workflow
+                .folder_write_sync_required(&request.folder)
+                .await
+                .unwrap_or(true);
+            let _ = this.update(cx, |view, cx| {
+                view.finish_read_state_update(request, update_outcome, write_sync_required);
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn selected_read_state_request(&self) -> Option<ReadStateUpdateRequest> {
+        let folder = self.selected_folder.as_ref()?;
+        if !self.can_update_message_in(folder) {
+            return None;
+        }
+        let folder = folder.clone();
+        let message_id = self.selected_message_id.clone()?;
+        let current_state = self
+            .messages
+            .iter()
+            .find(|message| message.id() == &message_id)?
+            .metadata()
+            .read_state();
+        let requested = match current_state {
+            ReadState::Read => ReadState::Unread,
+            ReadState::Unread => ReadState::Read,
+        };
+        Some(ReadStateUpdateRequest {
+            folder,
+            message_id,
+            requested,
+        })
+    }
+
+    fn finish_read_state_update(
+        &mut self,
+        request: ReadStateUpdateRequest,
+        update_outcome: Result<ReadStateUpdateOutcome, MailWorkflowError>,
+        write_sync_required: bool,
+    ) {
+        self.read_state_update = if self.selected_folder.as_ref() == Some(&request.folder) {
+            self.selected_folder_write_sync_required = write_sync_required;
+            self.apply_read_state_result(request, update_outcome)
+        } else {
+            ReadStateUpdateStatus::Idle
+        };
+        self.read_state_task = None;
+    }
+
+    fn apply_read_state_result(
+        &mut self,
+        request: ReadStateUpdateRequest,
+        update_outcome: Result<ReadStateUpdateOutcome, MailWorkflowError>,
+    ) -> ReadStateUpdateStatus {
+        match update_outcome {
+            Ok(ReadStateUpdateOutcome::ConfirmedAndCached(state)) => {
+                self.apply_read_state_to_message(&request.message_id, state);
+                ReadStateUpdateStatus::Confirmed {
+                    message_id: request.message_id,
+                    state,
+                }
+            }
+            Ok(ReadStateUpdateOutcome::ConfirmedNeedsSync { state, .. }) => {
+                self.apply_read_state_to_message(&request.message_id, state);
+                ReadStateUpdateStatus::ConfirmedNeedsSync {
+                    message_id: request.message_id,
+                    state,
+                }
+            }
+            Err(error) => ReadStateUpdateStatus::Failed {
+                message_id: request.message_id,
+                requested: request.requested,
+                error,
+            },
+        }
+    }
+
+    fn apply_read_state_to_message(&mut self, message_id: &MessageId, state: ReadState) {
+        let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id() == message_id)
+        else {
+            return;
+        };
+        let mut patch = MessageMetadataPatch::new();
+        patch.set_read_state(state);
+        message.apply_patch(patch);
+    }
+
+    fn update_selected_follow_up_flag(&mut self, cx: &mut Context<Self>) {
+        if self.sync_running || self.read_state_task.is_some() || self.follow_up_flag_task.is_some()
+        {
+            return;
+        }
+        let Some(request) = self.selected_follow_up_flag_request() else {
+            return;
+        };
+        let workflow = Arc::clone(&self.workflow);
+        self.follow_up_flag_update = FollowUpFlagUpdateStatus::Pending {
+            message_id: request.message_id.clone(),
+            requested: request.requested,
+        };
+        self.follow_up_flag_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let flag_update_outcome = workflow
+                .set_message_follow_up_flag_status(
+                    &request.folder,
+                    &request.message_id,
+                    request.requested,
+                )
+                .await;
+            let write_sync_required = workflow
+                .folder_write_sync_required(&request.folder)
+                .await
+                .unwrap_or(true);
+            let _ = this.update(cx, |view, cx| {
+                view.finish_follow_up_flag_update(
+                    request,
+                    flag_update_outcome,
+                    write_sync_required,
+                );
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn selected_follow_up_flag_request(&self) -> Option<FollowUpFlagUpdateRequest> {
+        let folder = self.selected_folder.as_ref()?;
+        if !self.can_update_message_in(folder) {
+            return None;
+        }
+        let folder = folder.clone();
+        let message_id = self.selected_message_id.clone()?;
+        let current_status = self
+            .messages
+            .iter()
+            .find(|message| message.id() == &message_id)?
+            .metadata()
+            .follow_up_flag_status();
+        let requested = match current_status {
+            Some(FollowUpFlagStatus::Flagged) => FollowUpFlagStatus::NotFlagged,
+            Some(FollowUpFlagStatus::NotFlagged | FollowUpFlagStatus::Complete) | None => {
+                FollowUpFlagStatus::Flagged
+            }
+        };
+        Some(FollowUpFlagUpdateRequest {
+            folder,
+            message_id,
+            requested,
+        })
+    }
+
+    fn finish_follow_up_flag_update(
+        &mut self,
+        request: FollowUpFlagUpdateRequest,
+        flag_update_outcome: Result<FollowUpFlagUpdateOutcome, MailWorkflowError>,
+        write_sync_required: bool,
+    ) {
+        self.follow_up_flag_update = if self.selected_folder.as_ref() == Some(&request.folder) {
+            self.selected_folder_write_sync_required = write_sync_required;
+            self.apply_follow_up_flag_result(request, flag_update_outcome)
+        } else {
+            FollowUpFlagUpdateStatus::Idle
+        };
+        self.follow_up_flag_task = None;
+    }
+
+    fn apply_follow_up_flag_result(
+        &mut self,
+        request: FollowUpFlagUpdateRequest,
+        flag_update_outcome: Result<FollowUpFlagUpdateOutcome, MailWorkflowError>,
+    ) -> FollowUpFlagUpdateStatus {
+        match flag_update_outcome {
+            Ok(FollowUpFlagUpdateOutcome::ConfirmedAndCached(status)) => {
+                self.apply_follow_up_flag_to_message(&request.message_id, status);
+                FollowUpFlagUpdateStatus::Confirmed {
+                    message_id: request.message_id,
+                    status,
+                }
+            }
+            Ok(FollowUpFlagUpdateOutcome::ConfirmedNeedsSync { status, .. }) => {
+                self.apply_follow_up_flag_to_message(&request.message_id, status);
+                FollowUpFlagUpdateStatus::ConfirmedNeedsSync {
+                    message_id: request.message_id,
+                    status,
+                }
+            }
+            Err(error) => FollowUpFlagUpdateStatus::Failed {
+                message_id: request.message_id,
+                requested: request.requested,
+                error,
+            },
+        }
+    }
+
+    fn apply_follow_up_flag_to_message(
+        &mut self,
+        message_id: &MessageId,
+        status: FollowUpFlagStatus,
+    ) {
+        let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id() == message_id)
+        else {
+            return;
+        };
+        let mut patch = MessageMetadataPatch::new();
+        patch.set_follow_up_flag_status(Some(status));
+        message.apply_patch(patch);
     }
 
     fn open_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -670,7 +967,11 @@ impl MailView {
                             .ghost()
                             .label("Sync")
                             .loading(self.sync_running)
-                            .disabled(self.sync_running || self.read_state_task.is_some())
+                            .disabled(
+                                self.sync_running
+                                    || self.read_state_task.is_some()
+                                    || self.follow_up_flag_task.is_some(),
+                            )
                             .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
                     )
                     .child(
@@ -678,7 +979,10 @@ impl MailView {
                             .debug_selector(|| "mail-account-navigation".to_owned())
                             .ghost()
                             .label("Account")
-                            .disabled(self.read_state_task.is_some())
+                            .disabled(
+                                self.read_state_task.is_some()
+                                    || self.follow_up_flag_task.is_some(),
+                            )
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(MailViewEvent::BackToAccount);
                             })),
@@ -864,7 +1168,9 @@ impl MailView {
                                                 .rounded_md()
                                                 .text_color(colors.foreground)
                                                 .role(Role::ListBoxOption)
-                                                .aria_label(if view.read_state_task.is_some() {
+                                                .aria_label(if view.read_state_task.is_some()
+                                                    || view.follow_up_flag_task.is_some()
+                                                {
                                                     format!(
                                                         "{accessible_label}, read-state update pending"
                                                     )
@@ -904,7 +1210,10 @@ impl MailView {
                                                             div().w_full().text_sm().child(subject),
                                                         ),
                                                 )
-                                                .when(view.read_state_task.is_none(), |option| {
+                                                .when(
+                                                    view.read_state_task.is_none()
+                                                        && view.follow_up_flag_task.is_none(),
+                                                    |option| {
                                                     option.on_click(cx.listener(
                                                         move |view, _, window, cx| {
                                                             view.select_message_from_option(
@@ -915,7 +1224,8 @@ impl MailView {
                                                             );
                                                         },
                                                     ))
-                                                }),
+                                                },
+                                                ),
                                         )
                                     })
                                     .collect()
@@ -988,7 +1298,16 @@ impl MailView {
                                     .child(div().text_lg().font_bold().child(
                                         metadata.subject().unwrap_or("(No subject)").to_owned(),
                                     ))
-                                    .child(self.render_read_state_action(message_id, cx)),
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(self.render_read_state_action(message_id, cx))
+                                            .child(
+                                                self.render_follow_up_flag_action(message_id, cx),
+                                            ),
+                                    ),
                             )
                             .child(
                                 div()
@@ -999,6 +1318,7 @@ impl MailView {
                             .children(self.read_state_update.feedback_for(message_id).map(
                                 |feedback| self.render_read_state_feedback_element(feedback, cx),
                             ))
+                            .children(self.render_follow_up_flag_feedback(message_id, cx))
                             .children(self.render_read_state_reconciliation_notice()),
                     )
                     .child(body)
@@ -1030,6 +1350,37 @@ impl MailView {
             .into_any_element()
     }
 
+    fn render_follow_up_flag_action(
+        &self,
+        message_id: &MessageId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let flag_status = self
+            .messages
+            .iter()
+            .find(|message| message.id() == message_id)
+            .and_then(|message| message.metadata().follow_up_flag_status());
+        Button::new("message-follow-up-flag")
+            .ghost()
+            .debug_selector(|| "message-follow-up-flag".to_owned())
+            .label(
+                self.follow_up_flag_update
+                    .action_label(message_id, flag_status),
+            )
+            .loading(self.follow_up_flag_update.is_pending_for(message_id))
+            .disabled(self.follow_up_flag_action_disabled(message_id))
+            .on_click(cx.listener(|view, _, _, cx| view.update_selected_follow_up_flag(cx)))
+            .into_any_element()
+    }
+
+    fn follow_up_flag_action_disabled(&self, message_id: &MessageId) -> bool {
+        self.selected_message_id.as_ref() != Some(message_id)
+            || self
+                .selected_folder
+                .as_ref()
+                .is_none_or(|folder| !self.can_update_message_in(folder))
+    }
+
     fn cached_read_state(&self, message_id: &MessageId) -> Option<ReadState> {
         self.messages
             .iter()
@@ -1041,141 +1392,16 @@ impl MailView {
         let Some(folder) = self.selected_folder.as_ref() else {
             return true;
         };
-        read_state.is_none() || !self.can_update_read_state_in(folder)
+        read_state.is_none() || !self.can_update_message_in(folder)
     }
 
-    fn can_update_read_state_in(&self, folder: &FolderReference) -> bool {
+    fn can_update_message_in(&self, folder: &FolderReference) -> bool {
         !self.sync_running
             && self.read_state_task.is_none()
+            && self.follow_up_flag_task.is_none()
             && !matches!(self.sync_status, SyncStatus::Failed(_))
-            && !self.read_state_reconciliation_required.contains(folder)
-    }
-
-    fn selected_read_state_request(&self) -> Option<ReadStateUpdateRequest> {
-        let folder = self.selected_folder.as_ref()?;
-        if !self.can_update_read_state_in(folder) {
-            return None;
-        }
-        let message_id = self.selected_message_id.as_ref()?;
-        let MessageState::Opened(opened) = &self.message_state else {
-            return None;
-        };
-        if opened.message().id() != message_id {
-            return None;
-        }
-        let requested = match self.cached_read_state(message_id)? {
-            ReadState::Read => ReadState::Unread,
-            ReadState::Unread => ReadState::Read,
-        };
-        Some(ReadStateUpdateRequest {
-            folder: folder.clone(),
-            message_id: message_id.clone(),
-            requested,
-        })
-    }
-
-    fn update_selected_read_state(&mut self, cx: &mut Context<Self>) {
-        let Some(request) = self.selected_read_state_request() else {
-            return;
-        };
-        self.read_state_update = ReadStateUpdateStatus::Pending {
-            message_id: request.message_id.clone(),
-            requested: request.requested,
-        };
-        let workflow = Arc::clone(&self.workflow);
-        self.read_state_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let result = workflow
-                .set_message_read_state(&request.folder, &request.message_id, request.requested)
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                view.finish_read_state_update(request, result, cx);
-            });
-        }));
-        cx.notify();
-    }
-
-    fn finish_read_state_update(
-        &mut self,
-        request: ReadStateUpdateRequest,
-        result: Result<ReadStateUpdateOutcome, MailWorkflowError>,
-        cx: &mut Context<Self>,
-    ) {
-        self.read_state_task = None;
-        if self.selected_folder.as_ref() == Some(&request.folder)
-            && self.selected_message_id.as_ref() == Some(&request.message_id)
-        {
-            self.apply_read_state_result(request, result);
-        }
-        cx.notify();
-    }
-
-    fn apply_read_state_result(
-        &mut self,
-        request: ReadStateUpdateRequest,
-        result: Result<ReadStateUpdateOutcome, MailWorkflowError>,
-    ) {
-        match result {
-            Ok(ReadStateUpdateOutcome::ConfirmedAndCached(state)) => {
-                self.record_confirmed_read_state(request, state)
-            }
-            Ok(ReadStateUpdateOutcome::ConfirmedNeedsSync { state, .. }) => {
-                self.record_confirmed_read_state_needing_sync(request, state)
-            }
-            Err(error) => self.record_read_state_failure(request, error),
-        }
-    }
-
-    fn record_confirmed_read_state(&mut self, request: ReadStateUpdateRequest, state: ReadState) {
-        self.apply_visible_read_state(&request.message_id, state);
-        self.read_state_update = ReadStateUpdateStatus::Confirmed {
-            message_id: request.message_id,
-            state,
-        };
-    }
-
-    fn record_confirmed_read_state_needing_sync(
-        &mut self,
-        request: ReadStateUpdateRequest,
-        state: ReadState,
-    ) {
-        self.apply_visible_read_state(&request.message_id, state);
-        self.read_state_reconciliation_required
-            .insert(request.folder);
-        self.read_state_update = ReadStateUpdateStatus::ConfirmedNeedsSync {
-            message_id: request.message_id,
-            state,
-        };
-    }
-
-    fn record_read_state_failure(
-        &mut self,
-        request: ReadStateUpdateRequest,
-        error: MailWorkflowError,
-    ) {
-        if matches!(
-            error,
-            MailWorkflowError::Provider(MailOperationError::MessageUpdateOutcomeUnknown)
-        ) {
-            self.read_state_reconciliation_required
-                .insert(request.folder);
-        }
-        self.read_state_update = ReadStateUpdateStatus::Failed {
-            message_id: request.message_id,
-            requested: request.requested,
-            error,
-        };
-    }
-
-    fn apply_visible_read_state(&mut self, message_id: &MessageId, state: ReadState) {
-        if let Some(message) = self
-            .messages
-            .iter_mut()
-            .find(|message| message.id() == message_id)
-        {
-            let mut patch = MessageMetadataPatch::new();
-            patch.set_read_state(state);
-            message.apply_patch(patch);
-        }
+            && self.selected_folder.as_ref() == Some(folder)
+            && !self.selected_folder_write_sync_required
     }
 
     fn render_read_state_feedback_element(
@@ -1228,6 +1454,84 @@ impl MailView {
             .into_any_element()
     }
 
+    fn render_follow_up_flag_feedback(
+        &self,
+        message_id: &MessageId,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (message, role) = match &self.follow_up_flag_update {
+            FollowUpFlagUpdateStatus::Idle => return None,
+            FollowUpFlagUpdateStatus::Pending {
+                message_id: pending_id,
+                requested,
+            } if pending_id == message_id => {
+                (follow_up_flag_progress_message(*requested), Role::Status)
+            }
+            FollowUpFlagUpdateStatus::Confirmed {
+                message_id: confirmed_id,
+                status,
+            } if confirmed_id == message_id => (
+                follow_up_flag_confirmed_message(*status).to_owned(),
+                Role::Status,
+            ),
+            FollowUpFlagUpdateStatus::ConfirmedNeedsSync {
+                message_id: confirmed_id,
+                status,
+            } if confirmed_id == message_id => (
+                follow_up_flag_cache_sync_message(*status).to_owned(),
+                Role::Status,
+            ),
+            FollowUpFlagUpdateStatus::Failed {
+                message_id: failed_id,
+                requested,
+                error,
+            } if failed_id == message_id => (
+                follow_up_flag_failure_message(*requested, *error),
+                Role::Alert,
+            ),
+            _ => return None,
+        };
+        let colors = cx.theme().semantic_tokens().colors;
+        let feedback = div()
+            .id("message-follow-up-flag-feedback")
+            .debug_selector(|| "message-follow-up-flag-feedback".to_owned())
+            .role(role)
+            .text_sm()
+            .text_color(if role == Role::Alert {
+                colors.destructive
+            } else {
+                colors.muted_foreground
+            })
+            .child(message);
+        if matches!(
+            &self.follow_up_flag_update,
+            FollowUpFlagUpdateStatus::Failed {
+                message_id: failed_id,
+                error: MailWorkflowError::Provider(MailOperationError::AccessDenied),
+                ..
+            } if failed_id == message_id
+        ) {
+            Some(
+                feedback
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        Button::new("review-mail-permissions-from-flag")
+                            .ghost()
+                            .debug_selector(|| "review-mail-permissions-from-flag".to_owned())
+                            .label("Review mail permissions…")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(MailViewEvent::ReviewMailWritePermission);
+                            })),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            Some(feedback.into_any_element())
+        }
+    }
+
     fn render_read_state_reconciliation_notice(&self) -> Option<AnyElement> {
         let message = self.read_state_reconciliation_message()?;
         Some(
@@ -1242,10 +1546,10 @@ impl MailView {
     }
 
     fn read_state_reconciliation_message(&self) -> Option<&'static str> {
-        let folder = self.selected_folder.as_ref()?;
-        if self.read_state_reconciliation_required.contains(folder) {
+        self.selected_folder.as_ref()?;
+        if self.selected_folder_write_sync_required {
             Some(
-                "This folder's cached read state may not match Microsoft. Sync mail before changing a message's read state again.",
+                "This folder has a message update that needs syncing. Sync mail before changing read state or follow-up flags again.",
             )
         } else if matches!(self.sync_status, SyncStatus::Failed(_)) {
             Some("Mail sync failed. Sync successfully before changing a message's read state.")
@@ -1477,6 +1781,67 @@ fn read_state_word(state: ReadState) -> &'static str {
     }
 }
 
+fn follow_up_flag_progress_message(status: FollowUpFlagStatus) -> String {
+    match status {
+        FollowUpFlagStatus::NotFlagged => "Clearing the follow-up flag…".to_owned(),
+        FollowUpFlagStatus::Flagged => "Flagging the message for follow-up…".to_owned(),
+        FollowUpFlagStatus::Complete => "Marking follow-up complete…".to_owned(),
+    }
+}
+
+fn follow_up_flag_confirmed_message(status: FollowUpFlagStatus) -> &'static str {
+    match status {
+        FollowUpFlagStatus::NotFlagged => "Follow-up flag cleared",
+        FollowUpFlagStatus::Flagged => "Flagged for follow-up",
+        FollowUpFlagStatus::Complete => "Follow-up marked complete",
+    }
+}
+
+fn follow_up_flag_cache_sync_message(status: FollowUpFlagStatus) -> &'static str {
+    match status {
+        FollowUpFlagStatus::NotFlagged => {
+            "Microsoft cleared the follow-up flag. Sync this folder to update the encrypted cache."
+        }
+        FollowUpFlagStatus::Flagged => {
+            "Microsoft flagged this message. Sync this folder to update the encrypted cache."
+        }
+        FollowUpFlagStatus::Complete => {
+            "Microsoft marked follow-up complete. Sync this folder to update the encrypted cache."
+        }
+    }
+}
+
+fn follow_up_flag_failure_message(status: FollowUpFlagStatus, error: MailWorkflowError) -> String {
+    match error {
+        MailWorkflowError::Provider(MailOperationError::AccessDenied) => {
+            "Microsoft denied the flag change. Review mail permissions or check your organization's consent policies.".to_owned()
+        }
+        MailWorkflowError::Provider(MailOperationError::SignInRequired) => {
+            "Your Microsoft sign-in needs attention. Return to Accounts and reconnect.".to_owned()
+        }
+        MailWorkflowError::Provider(MailOperationError::RateLimited { .. }) => {
+            "Microsoft asked Einfach Mail to wait before retrying. Try again later.".to_owned()
+        }
+        MailWorkflowError::Provider(MailOperationError::MessageUpdateOutcomeUnknown) => {
+            "Microsoft may have changed this message's follow-up flag, but Einfach Mail could not confirm it. Sync this folder before trying again.".to_owned()
+        }
+        MailWorkflowError::FolderSyncRequired => {
+            "Sync this folder before changing message state again.".to_owned()
+        }
+        MailWorkflowError::Provider(MailOperationError::ServiceUnavailable) => {
+            "Couldn’t update the follow-up flag. Check your connection and try again.".to_owned()
+        }
+        _ => format!(
+            "Couldn’t {} the follow-up flag. Sync this folder and try again.",
+            match status {
+                FollowUpFlagStatus::NotFlagged => "clear",
+                FollowUpFlagStatus::Flagged => "set",
+                FollowUpFlagStatus::Complete => "complete",
+            }
+        ),
+    }
+}
+
 async fn load_snapshot(
     workflow: &dyn MailSession,
     account_id: &einfach_mail_domain::AccountId,
@@ -1492,19 +1857,22 @@ async fn load_snapshot(
         })
         .cloned()
         .or_else(|| preferred_folder(&folders));
-    let (messages, sync_state) = if let Some(folder) = &selected_folder {
+    let (messages, sync_state, folder_write_sync_required) = if let Some(folder) = &selected_folder
+    {
         (
             workflow.list_cached_messages(folder).await?,
             workflow.cached_sync_state(folder).await?,
+            workflow.folder_write_sync_required(folder).await?,
         )
     } else {
-        (Vec::new(), None)
+        (Vec::new(), None, false)
     };
     Ok(MailSnapshot {
         folders,
         selected_folder,
         messages,
         sync_state,
+        folder_write_sync_required,
         pending_send,
     })
 }
@@ -1568,7 +1936,7 @@ async fn synchronize_with_progress(
         let changed = tokio::select! {
             biased;
             changed = progress_receiver.changed() => changed,
-            result = &mut sync_future => return result,
+            sync_result = &mut sync_future => return sync_result,
         };
         if changed.is_err() {
             return sync_future.await;
@@ -1638,10 +2006,10 @@ mod tests {
         MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
     };
     use einfach_mail_domain::{
-        AccountId, AccountProfile, FolderId, FolderReference, MailDraft, MailFolder, MailMessage,
-        MailSendOperationId, Mailbox, MessageBody, MessageBodyType, MessageDeltaLink,
-        MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch, PendingMailSend,
-        ReadState,
+        AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
+        MailFolder, MailMessage, MailSendOperationId, Mailbox, MessageBody, MessageBodyType,
+        MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
+        PendingMailSend, ReadState,
     };
     use gpui_kit::base::TextSelection;
     use gpui_kit::component::WindowExt as _;
@@ -1650,9 +2018,10 @@ mod tests {
     };
 
     use super::{
-        MailPermissionRequester, MailSyncProgress, MailView, MailViewEvent, MessageBodyForDisplay,
-        MessageNavigation, MessageState, ReadStateUpdateStatus, SyncStatus,
-        bind_message_navigation_keys, mail_error_message, read_state_failure_message,
+        FollowUpFlagUpdateStatus, MailPermissionRequester, MailSyncProgress, MailView,
+        MailViewEvent, MessageBodyForDisplay, MessageNavigation, MessageState,
+        ReadStateUpdateStatus, SyncStatus, bind_message_navigation_keys,
+        follow_up_flag_failure_message, mail_error_message, read_state_failure_message,
     };
     use crate::mail_composer::bind_mail_composer_keys;
 
@@ -1670,6 +2039,35 @@ mod tests {
             mail_error_message(MailWorkflowError::Cache(MailCacheError::SyncStateChanged)),
             "Another sync updated this folder. Choose Sync to continue."
         );
+    }
+
+    #[test]
+    fn follow_up_flag_action_label_matches_cached_state() {
+        let message_id = MessageId::try_from("synthetic-message".to_owned())
+            .expect("synthetic message ID is valid");
+        let pending = FollowUpFlagUpdateStatus::Pending {
+            message_id: message_id.clone(),
+            requested: FollowUpFlagStatus::Flagged,
+        };
+        let idle = FollowUpFlagUpdateStatus::Idle;
+
+        assert_eq!(
+            pending.action_label(&message_id, Some(FollowUpFlagStatus::Complete)),
+            "Updating…"
+        );
+        assert_eq!(
+            idle.action_label(&message_id, Some(FollowUpFlagStatus::Flagged)),
+            "Clear flag"
+        );
+        assert_eq!(
+            idle.action_label(&message_id, Some(FollowUpFlagStatus::Complete)),
+            "Reopen flag"
+        );
+        assert_eq!(
+            idle.action_label(&message_id, Some(FollowUpFlagStatus::NotFlagged)),
+            "Flag"
+        );
+        assert_eq!(idle.action_label(&message_id, None), "Flag");
     }
 
     #[derive(Clone)]
@@ -1720,6 +2118,16 @@ mod tests {
             ready(Err(MailOperationError::ServiceUnavailable))
         }
 
+        fn set_message_follow_up_flag_status(
+            &self,
+            _: &FolderReference,
+            _: &MessageId,
+            _: FollowUpFlagStatus,
+        ) -> impl Future<Output = Result<FollowUpFlagStatus, MailOperationError>> + Send + '_
+        {
+            ready(Err(MailOperationError::ServiceUnavailable))
+        }
+
         fn send_mail(
             &self,
             _: &AccountId,
@@ -1741,6 +2149,7 @@ mod tests {
     struct ReadStateProvider {
         response: ReadStateActionResponse,
         updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
+        flag_updates: Arc<Mutex<Vec<(MessageId, FollowUpFlagStatus)>>>,
         sync_failure: bool,
     }
 
@@ -1752,8 +2161,17 @@ mod tests {
             Self {
                 response,
                 updates,
+                flag_updates: Arc::new(Mutex::new(Vec::new())),
                 sync_failure: false,
             }
+        }
+
+        fn with_flag_updates(
+            mut self,
+            updates: Arc<Mutex<Vec<(MessageId, FollowUpFlagStatus)>>>,
+        ) -> Self {
+            self.flag_updates = updates;
+            self
         }
 
         fn with_sync_failure(mut self) -> Self {
@@ -1851,6 +2269,35 @@ mod tests {
             }
         }
 
+        fn set_message_follow_up_flag_status(
+            &self,
+            _: &FolderReference,
+            message_id: &MessageId,
+            status: FollowUpFlagStatus,
+        ) -> impl Future<Output = Result<FollowUpFlagStatus, MailOperationError>> + Send + '_
+        {
+            let message_id = message_id.clone();
+            let updates = Arc::clone(&self.flag_updates);
+            let response = self.response;
+            async move {
+                updates
+                    .lock()
+                    .expect("fixture flag-update log mutex is healthy")
+                    .push((message_id, status));
+                match response {
+                    ReadStateActionResponse::Confirm => Ok(status),
+                    ReadStateActionResponse::Unconfirmed => {
+                        Err(MailOperationError::MessageUpdateOutcomeUnknown)
+                    }
+                    ReadStateActionResponse::Pending => {
+                        pending::<Result<FollowUpFlagStatus, MailOperationError>>().await
+                    }
+                    ReadStateActionResponse::Deny => Err(MailOperationError::AccessDenied),
+                    ReadStateActionResponse::Offline => Err(MailOperationError::ServiceUnavailable),
+                }
+            }
+        }
+
         fn send_mail(
             &self,
             _: &AccountId,
@@ -1936,6 +2383,17 @@ mod tests {
                 .set_message_read_state(folder, message_id, requested)
         }
 
+        fn set_message_follow_up_flag_status(
+            &self,
+            folder: &FolderReference,
+            message_id: &MessageId,
+            status: FollowUpFlagStatus,
+        ) -> impl Future<Output = Result<FollowUpFlagStatus, MailOperationError>> + Send + '_
+        {
+            self.offline
+                .set_message_follow_up_flag_status(folder, message_id, status)
+        }
+
         fn send_mail(
             &self,
             account_id: &AccountId,
@@ -2014,10 +2472,11 @@ mod tests {
         messages: Vec<MailMessage>,
         body: Option<MessageBody>,
         sync_state: Option<MailSyncState>,
+        read_state_write_error: Option<MailCacheError>,
+        folder_write_sync_required: bool,
         pending_send: Option<PendingMailSend>,
         fail_next_pending_send_stage: bool,
         fail_next_pending_send_clear: bool,
-        read_state_write_error: Option<MailCacheError>,
     }
 
     impl MailCache for FixtureCache {
@@ -2111,6 +2570,7 @@ mod tests {
             match state {
                 Ok(state) => {
                     data.sync_state = Some(state.clone());
+                    data.folder_write_sync_required = false;
                     ready(Ok(state))
                 }
                 Err(error) => ready(Err(error)),
@@ -2251,6 +2711,68 @@ mod tests {
                 let mut patch = MessageMetadataPatch::new();
                 patch.set_read_state(read_state);
                 message.apply_patch(patch);
+                data.folder_write_sync_required = false;
+                Ok(())
+            }
+        }
+
+        fn folder_write_sync_required(
+            &self,
+            _: &FolderReference,
+        ) -> impl Future<Output = Result<bool, MailCacheError>> + Send + '_ {
+            ready(Ok(self
+                .0
+                .lock()
+                .expect("fixture cache mutex is healthy")
+                .folder_write_sync_required))
+        }
+
+        fn require_folder_write_sync(
+            &self,
+            _: &FolderReference,
+        ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+            self.0
+                .lock()
+                .expect("fixture cache mutex is healthy")
+                .folder_write_sync_required = true;
+            ready(Ok(()))
+        }
+
+        fn clear_folder_write_sync_requirement(
+            &self,
+            _: &FolderReference,
+        ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+            self.0
+                .lock()
+                .expect("fixture cache mutex is healthy")
+                .folder_write_sync_required = false;
+            ready(Ok(()))
+        }
+
+        fn set_message_follow_up_flag_status(
+            &self,
+            folder: &FolderReference,
+            message_id: &MessageId,
+            status: FollowUpFlagStatus,
+        ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+            let folder = folder.clone();
+            let message_id = message_id.clone();
+            async move {
+                let mut data = self.0.lock().expect("fixture cache mutex is healthy");
+                if let Some(error) = data.read_state_write_error {
+                    return Err(error);
+                }
+                let Some(message) = data
+                    .messages
+                    .iter_mut()
+                    .find(|message| message.folder() == &folder && message.id() == &message_id)
+                else {
+                    return Err(MailCacheError::MessageNotCached);
+                };
+                let mut patch = MessageMetadataPatch::new();
+                patch.set_follow_up_flag_status(Some(status));
+                message.apply_patch(patch);
+                data.folder_write_sync_required = false;
                 Ok(())
             }
         }
@@ -2346,6 +2868,7 @@ mod tests {
                 einfach_mail_domain::MessageOrigin::new(Some(sender), None),
                 UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                 einfach_mail_domain::ReadState::Unread,
+                None,
             ),
         );
         let cache = FixtureCache::default();
@@ -2400,6 +2923,23 @@ mod tests {
         let action = context
             .debug_bounds("message-read-state")
             .expect("opened message exposes its read-state action");
+        context.simulate_click(action.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+    }
+
+    fn open_cached_message_and_click_follow_up_flag(context: &mut VisualTestContext) {
+        context.run_until_parked();
+        draw_mail_view(context);
+        let message_row = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached message row is rendered");
+        context.simulate_click(message_row.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+        let action = context
+            .debug_bounds("message-follow-up-flag")
+            .expect("opened message exposes its follow-up flag action");
         context.simulate_click(action.center(), Modifiers::default());
         context.run_until_parked();
         draw_mail_view(context);
@@ -2665,6 +3205,131 @@ mod tests {
                 .await
                 .expect("confirmed state is readable from the cache"),
             Some(ReadState::Read)
+        );
+    }
+
+    #[gpui_kit::test]
+    async fn confirmed_follow_up_flag_updates_the_view_and_encrypted_cache(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let folder = FolderReference::new(
+            account.clone(),
+            FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let (profile, cache, message_id) = fixture(account);
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Arc::new(MailWorkflow::new(
+            ReadStateProvider::new(
+                ReadStateActionResponse::Confirm,
+                Arc::new(Mutex::new(Vec::new())),
+            )
+            .with_flag_updates(Arc::clone(&updates)),
+            cache.clone(),
+        ));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+
+        open_cached_message_and_click_follow_up_flag(context);
+
+        assert_eq!(
+            context.cx.update(|cx| {
+                view.read(cx)
+                    .messages
+                    .iter()
+                    .find(|message| message.id() == &message_id)
+                    .and_then(|message| message.metadata().follow_up_flag_status())
+            }),
+            Some(FollowUpFlagStatus::Flagged)
+        );
+        assert!(context.cx.update(|cx| matches!(
+            &view.read(cx).follow_up_flag_update,
+            FollowUpFlagUpdateStatus::Confirmed {
+                status: FollowUpFlagStatus::Flagged,
+                ..
+            }
+        )));
+        assert_eq!(
+            cache
+                .read_message(&folder, &message_id)
+                .await
+                .expect("confirmed flag remains readable from the cache")
+                .and_then(|(message, _)| message.metadata().follow_up_flag_status()),
+            Some(FollowUpFlagStatus::Flagged)
+        );
+        assert_eq!(
+            updates
+                .lock()
+                .expect("fixture flag-update log mutex is healthy")
+                .as_slice(),
+            [(message_id, FollowUpFlagStatus::Flagged)]
+        );
+        assert!(
+            context
+                .debug_bounds("message-follow-up-flag-feedback")
+                .is_some()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn uncertain_follow_up_flag_blocks_a_second_write(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, message_id) = fixture(account);
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Arc::new(MailWorkflow::new(
+            ReadStateProvider::new(
+                ReadStateActionResponse::Unconfirmed,
+                Arc::new(Mutex::new(Vec::new())),
+            )
+            .with_flag_updates(Arc::clone(&updates)),
+            cache.clone(),
+        ));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+
+        open_cached_message_and_click_follow_up_flag(context);
+
+        assert!(context.cx.update(|cx| matches!(
+            &view.read(cx).follow_up_flag_update,
+            FollowUpFlagUpdateStatus::Failed {
+                error: MailWorkflowError::Provider(MailOperationError::MessageUpdateOutcomeUnknown),
+                ..
+            }
+        )));
+        assert!(
+            context
+                .cx
+                .update(|cx| { view.read(cx).selected_follow_up_flag_request().is_none() })
+        );
+        assert!(
+            context
+                .debug_bounds("message-follow-up-flag-feedback")
+                .is_some()
+        );
+        assert!(context.debug_bounds("read-state-reconciliation").is_some());
+
+        let action_bounds = context
+            .debug_bounds("message-follow-up-flag")
+            .expect("follow-up action remains visible");
+        context.simulate_click(action_bounds.center(), Modifiers::default());
+        context.run_until_parked();
+        assert_eq!(
+            updates
+                .lock()
+                .expect("fixture flag-update log mutex is healthy")
+                .as_slice(),
+            [(message_id, FollowUpFlagStatus::Flagged)]
+        );
+        assert!(
+            cache
+                .0
+                .lock()
+                .expect("fixture cache mutex is healthy")
+                .folder_write_sync_required
         );
     }
 
@@ -2968,6 +3633,17 @@ mod tests {
                 MailWorkflowError::Provider(MailOperationError::ServiceUnavailable),
             ),
             "Couldn’t mark the message read. Check your connection and try again."
+        );
+    }
+
+    #[test]
+    fn uncertain_follow_up_flag_failure_explains_sync_recovery() {
+        assert_eq!(
+            follow_up_flag_failure_message(
+                FollowUpFlagStatus::Flagged,
+                MailWorkflowError::Provider(MailOperationError::MessageUpdateOutcomeUnknown),
+            ),
+            "Microsoft may have changed this message's follow-up flag, but Einfach Mail could not confirm it. Sync this folder before trying again."
         );
     }
 
