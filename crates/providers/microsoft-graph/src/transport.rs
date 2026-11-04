@@ -31,12 +31,16 @@ pub(super) enum GraphOperation {
     Messages,
     MessageDelta,
     MessageBody,
+    MailSend,
     CalendarViewDelta,
 }
 
 impl GraphOperation {
     fn requires_json_content_type(self) -> bool {
-        matches!(self, Self::MessageDelta | Self::CalendarViewDelta)
+        matches!(
+            self,
+            Self::MessageDelta | Self::MailSend | Self::CalendarViewDelta
+        )
     }
 
     fn uses_immutable_ids(self) -> bool {
@@ -57,6 +61,7 @@ struct GraphRequest {
     operation: GraphOperation,
     url: GraphUrl,
     token: Arc<AccessToken>,
+    body: Option<Vec<u8>>,
 }
 
 struct GetCommand {
@@ -100,7 +105,22 @@ impl GraphTransportHandle {
         url: GraphUrl,
         token: Arc<AccessToken>,
     ) -> Result<Vec<u8>, GraphError> {
-        self.request(operation, url, token).await?.into_body()
+        self.request(operation, url, token, None).await?.into_body()
+    }
+
+    pub(super) async fn send_mail(
+        &self,
+        url: GraphUrl,
+        token: Arc<AccessToken>,
+        body: Vec<u8>,
+    ) -> Result<(), GraphError> {
+        match self
+            .request(GraphOperation::MailSend, url, token, Some(body))
+            .await?
+        {
+            GraphResponse::Body(body) if body.is_empty() => Ok(()),
+            _ => Err(GraphError::InvalidResponse),
+        }
     }
 
     pub(super) async fn get_message_delta(
@@ -108,7 +128,8 @@ impl GraphTransportHandle {
         url: GraphUrl,
         token: Arc<AccessToken>,
     ) -> Result<GraphResponse, GraphError> {
-        self.request(GraphOperation::MessageDelta, url, token).await
+        self.request(GraphOperation::MessageDelta, url, token, None)
+            .await
     }
 
     async fn request(
@@ -116,6 +137,7 @@ impl GraphTransportHandle {
         operation: GraphOperation,
         url: GraphUrl,
         token: Arc<AccessToken>,
+        body: Option<Vec<u8>>,
     ) -> Result<GraphResponse, GraphError> {
         let (reply, response) = oneshot::channel();
         self.commands
@@ -124,12 +146,19 @@ impl GraphTransportHandle {
                     operation,
                     url,
                     token,
+                    body,
                 },
                 reply,
             })
             .await
             .map_err(|_| GraphError::WorkerClosed)?;
-        response.await.map_err(|_| GraphError::WorkerClosed)?
+        response.await.map_err(|_| {
+            if matches!(operation, GraphOperation::MailSend) {
+                GraphError::SendOutcomeUnknown
+            } else {
+                GraphError::WorkerClosed
+            }
+        })?
     }
 }
 
@@ -334,9 +363,15 @@ async fn request_with_retry(
     loop {
         let response = match send_once(client, request, reply).await? {
             Ok(response) => response,
+            Err(GraphError::Transport) if matches!(request.operation, GraphOperation::MailSend) => {
+                return Some(Err(GraphError::SendOutcomeUnknown));
+            }
             Err(error) => return Some(Err(error)),
         };
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            if matches!(request.operation, GraphOperation::MailSend) {
+                return response_result(request.operation, response, reply).await;
+            }
             match retry_decision(&response, retry_index) {
                 RetryDecision::Retry(delay) => {
                     drop(response);
@@ -393,6 +428,22 @@ async fn response_result(
     response: Response,
     reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
 ) -> Option<Result<GraphResponse, GraphError>> {
+    if matches!(operation, GraphOperation::MailSend) {
+        return Some(match response.status() {
+            StatusCode::ACCEPTED => Ok(GraphResponse::Body(Vec::new())),
+            StatusCode::UNAUTHORIZED => Err(GraphError::AccessTokenRejected),
+            StatusCode::FORBIDDEN => Err(GraphError::AccessDenied),
+            StatusCode::TOO_MANY_REQUESTS => Err(GraphError::RateLimited {
+                retry_after: retry_after_hint(
+                    response.headers().get(RETRY_AFTER),
+                    SystemTime::now(),
+                ),
+            }),
+            StatusCode::REQUEST_TIMEOUT => Err(GraphError::SendOutcomeUnknown),
+            status if status.is_client_error() => Err(GraphError::SendRejected),
+            _ => Err(GraphError::SendOutcomeUnknown),
+        });
+    }
     if matches!(operation, GraphOperation::MessageDelta) && response.status() == StatusCode::GONE {
         let location = response
             .headers()
@@ -452,9 +503,15 @@ async fn send_once(
         Ok(header) => header,
         Err(error) => return Some(Err(error)),
     };
-    let mut outbound = client
-        .get(request.url.as_str())
-        .header(AUTHORIZATION, authorization);
+    let mut outbound = match (request.operation, request.body.as_ref()) {
+        (GraphOperation::MailSend, Some(body)) => {
+            client.post(request.url.as_str()).body(body.clone())
+        }
+        (GraphOperation::MailSend, None) => return Some(Err(GraphError::InvalidResponse)),
+        (_, Some(_)) => return Some(Err(GraphError::InvalidResponse)),
+        (_, None) => client.get(request.url.as_str()),
+    }
+    .header(AUTHORIZATION, authorization);
     if request.operation.requires_json_content_type() {
         outbound = outbound.header(CONTENT_TYPE, "application/json");
     }
@@ -494,22 +551,32 @@ fn retry_after_delay(
     now: SystemTime,
     attempt: u32,
 ) -> RetryAfter {
-    let Some(retry_after_text) = retry_after_header.and_then(|header| header.to_str().ok()) else {
-        return RetryAfter::Delay(fallback_delay(attempt));
-    };
-    parse_retry_after(retry_after_text, now, attempt)
+    retry_after_header
+        .and_then(|header| header.to_str().ok())
+        .and_then(|retry_after_text| parse_retry_after(retry_after_text, now))
+        .unwrap_or_else(|| RetryAfter::Delay(fallback_delay(attempt)))
 }
 
-fn parse_retry_after(retry_after_text: &str, now: SystemTime, attempt: u32) -> RetryAfter {
+fn retry_after_hint(retry_after_header: Option<&HeaderValue>, now: SystemTime) -> Option<Duration> {
+    let retry_after_text = retry_after_header?.to_str().ok()?;
+    match parse_retry_after(retry_after_text, now)? {
+        RetryAfter::Delay(delay) => Some(delay),
+        RetryAfter::Unrepresentable => None,
+    }
+}
+
+fn parse_retry_after(retry_after_text: &str, now: SystemTime) -> Option<RetryAfter> {
     if !retry_after_text.is_empty() && retry_after_text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return match retry_after_text.parse::<u64>() {
+        return Some(match retry_after_text.parse::<u64>() {
             Ok(seconds) => RetryAfter::Delay(Duration::from_secs(seconds)),
             Err(_) => RetryAfter::Unrepresentable,
-        };
+        });
     }
     match httpdate::parse_http_date(retry_after_text) {
-        Ok(retry_at) => RetryAfter::Delay(retry_at.duration_since(now).unwrap_or(Duration::ZERO)),
-        Err(_) => RetryAfter::Delay(fallback_delay(attempt)),
+        Ok(retry_at) => Some(RetryAfter::Delay(
+            retry_at.duration_since(now).unwrap_or(Duration::ZERO),
+        )),
+        Err(_) => None,
     }
 }
 
@@ -528,18 +595,22 @@ mod tests {
         time::{Duration, Instant, SystemTime},
     };
 
-    use httpmock::{HttpMockRequest, HttpMockResponse, Method::GET, Mock, MockServer};
+    use httpmock::{
+        HttpMockRequest, HttpMockResponse,
+        Method::{GET, POST},
+        Mock, MockServer,
+    };
     use huskarl::{
         core::secrets::SecretString,
         token::{AccessToken, BearerAccessToken},
     };
-    use tokio::time::timeout;
+    use tokio::{io::AsyncReadExt, net::TcpListener, time::timeout};
     use url::Url;
 
     use super::{
         GraphOperation, GraphResponse, GraphTransport, RetryAfter, RetryDecision,
         append_response_chunk, authorization_header, fallback_delay, parse_retry_after,
-        retry_decision_for,
+        retry_after_hint, retry_decision_for,
     };
     use crate::{error::GraphError, graph_url::GraphUrl};
 
@@ -644,20 +715,22 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_798_000_000);
 
         assert_eq!(
-            parse_retry_after("17", now, 0),
-            RetryAfter::Delay(Duration::from_secs(17))
+            parse_retry_after("17", now),
+            Some(RetryAfter::Delay(Duration::from_secs(17)))
         );
         assert_eq!(
-            parse_retry_after("99999999999999999999", now, 0),
-            RetryAfter::Unrepresentable
+            parse_retry_after("99999999999999999999", now),
+            Some(RetryAfter::Unrepresentable)
         );
         assert_eq!(fallback_delay(0), Duration::from_secs(1));
         assert_eq!(fallback_delay(10), Duration::from_secs(60));
         let date = httpdate::fmt_http_date(now + Duration::from_secs(31));
         assert_eq!(
-            parse_retry_after(&date, now, 0),
-            RetryAfter::Delay(Duration::from_secs(31))
+            parse_retry_after(&date, now),
+            Some(RetryAfter::Delay(Duration::from_secs(31)))
         );
+        assert_eq!(parse_retry_after("invalid", now), None);
+        assert_eq!(retry_after_hint(None, now), None);
     }
 
     #[tokio::test]
@@ -825,6 +898,154 @@ mod tests {
         assert_eq!(response, b"synthetic retry response");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         throttle.assert_calls_async(2).await;
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_a_send_throttle() {
+        for (header, expected) in [
+            (Some("0"), Some(Duration::ZERO)),
+            (None, None),
+            (Some("invalid"), None),
+        ] {
+            let server = MockServer::start_async().await;
+            let header = header.map(str::to_owned);
+            let throttle = server
+                .mock_async(move |when, then| {
+                    when.method(POST).path("/send");
+                    then.respond_with(move |_| {
+                        let mut response = HttpMockResponse::builder().status(429);
+                        if let Some(header) = &header {
+                            response = response.header("Retry-After", header);
+                        }
+                        response.build()
+                    });
+                })
+                .await;
+            let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+            let result = transport
+                .handle()
+                .send_mail(
+                    graph_url(&server.url("/send")),
+                    synthetic_access_token(),
+                    b"{}".to_vec(),
+                )
+                .await;
+
+            assert_eq!(
+                result,
+                Err(GraphError::RateLimited {
+                    retry_after: expected
+                })
+            );
+            throttle.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn classifies_send_statuses_without_treating_other_success_codes_as_accepted() {
+        for (status, expected) in [
+            (200, Err(GraphError::SendOutcomeUnknown)),
+            (202, Ok(())),
+            (400, Err(GraphError::SendRejected)),
+            (401, Err(GraphError::AccessTokenRejected)),
+            (403, Err(GraphError::AccessDenied)),
+            (408, Err(GraphError::SendOutcomeUnknown)),
+            (500, Err(GraphError::SendOutcomeUnknown)),
+        ] {
+            let server = MockServer::start_async().await;
+            let response = server
+                .mock_async(|when, then| {
+                    when.method(POST).path("/send");
+                    then.status(status);
+                })
+                .await;
+            let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+            let result = transport
+                .handle()
+                .send_mail(
+                    graph_url(&server.url("/send")),
+                    synthetic_access_token(),
+                    b"{}".to_vec(),
+                )
+                .await;
+
+            assert_eq!(
+                result, expected,
+                "unexpected classification for HTTP {status}"
+            );
+            response.assert_calls_async(1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn does_not_follow_a_send_redirect() {
+        let server = MockServer::start_async().await;
+        let redirect = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/send");
+                then.status(302).header("Location", "/redirected");
+            })
+            .await;
+        let redirect_target = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/redirected");
+                then.status(202);
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+        let result = transport
+            .handle()
+            .send_mail(
+                graph_url(&server.url("/send")),
+                synthetic_access_token(),
+                b"{}".to_vec(),
+            )
+            .await;
+
+        assert_eq!(result, Err(GraphError::SendOutcomeUnknown));
+        redirect.assert_calls_async(1).await;
+        redirect_target.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn connection_closed_after_a_send_request_has_unknown_outcome() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("synthetic loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("synthetic loopback listener has an address");
+        let accept_and_close = tokio::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("synthetic send request connects");
+            let mut request = [0_u8; 2048];
+            let received = stream
+                .read(&mut request)
+                .await
+                .expect("synthetic send request bytes are readable");
+            assert!(received > 0);
+            drop(stream);
+        });
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+        let result = transport
+            .handle()
+            .send_mail(
+                graph_url(&format!("http://{address}/send")),
+                synthetic_access_token(),
+                b"{}".to_vec(),
+            )
+            .await;
+
+        assert_eq!(result, Err(GraphError::SendOutcomeUnknown));
+        accept_and_close
+            .await
+            .expect("synthetic server closes after receiving the request");
     }
 
     #[tokio::test]

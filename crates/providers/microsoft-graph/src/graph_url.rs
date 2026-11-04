@@ -86,6 +86,14 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
+    pub(super) fn mail_send_path(&self) -> Result<GraphUrl, GraphError> {
+        let url = self
+            .base_url
+            .join("me/sendMail")
+            .map_err(|_| GraphError::UnsafeLink)?;
+        self.validated_url(url)
+    }
+
     pub(super) fn calendar_view_delta_path(
         &self,
         range: &CalendarViewRange,
@@ -329,6 +337,17 @@ mod tests {
         assert_eq!(
             GraphAuthority::from_profile_endpoint(&public_http).err(),
             Some(GraphError::UnsafeLink)
+        );
+    }
+
+    #[test]
+    fn constructs_the_me_send_mail_endpoint() {
+        assert_eq!(
+            authority()
+                .mail_send_path()
+                .expect("send endpoint uses the selected Graph authority")
+                .as_str(),
+            "https://graph.microsoft.com/v1.0/me/sendMail"
         );
     }
 

@@ -14,9 +14,11 @@ rusqlite_migration.workspace = true
 sha2.workspace = true
 time.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+blocking.workspace = true
 keyring.workspace = true
 xdg.workspace = true
 

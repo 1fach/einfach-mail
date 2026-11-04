@@ -203,6 +203,17 @@ fn migrations() -> Migrations<'static> {
                 )
             );",
         ),
+        M::up(
+            "CREATE TABLE mail_pending_send (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                operation_id TEXT NOT NULL UNIQUE,
+                recipient TEXT NOT NULL CHECK (length(recipient) > 0),
+                subject TEXT NOT NULL CHECK (length(subject) > 0),
+                created_seconds INTEGER NOT NULL,
+                created_nanoseconds INTEGER NOT NULL
+                    CHECK (created_nanoseconds BETWEEN 0 AND 999999999)
+            );",
+        ),
     ])
 }
 
@@ -297,5 +308,34 @@ mod tests {
                 "Synthetic body".to_owned()
             )
         );
+    }
+
+    #[test]
+    fn pending_send_schema_contains_only_reconciliation_metadata() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database opens");
+        migrations()
+            .to_latest(&mut connection)
+            .expect("pending-send migration applies");
+        let mut statement = connection
+            .prepare("PRAGMA table_info(mail_pending_send)")
+            .expect("pending-send schema is inspectable");
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("pending-send columns are read")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("pending-send column names are valid");
+
+        assert_eq!(
+            columns,
+            [
+                "account_id",
+                "operation_id",
+                "recipient",
+                "subject",
+                "created_seconds",
+                "created_nanoseconds",
+            ]
+        );
+        assert!(!columns.iter().any(|column| column.contains("body")));
     }
 }

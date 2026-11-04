@@ -9,20 +9,23 @@ use std::{
 };
 
 use einfach_mail_application::{
-    AccountCacheFactory, AccountSessionFactory, AccountSessionWorkflowFactory,
+    AccountCacheFactory, AccountSessionFactory, AccountSessionWorkflowFactory, CalendarCacheError,
     CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarOperationError, CalendarProvider,
-    MailCache, MailCacheError, MailOperationError, MailProvider, MailSyncProgress, MailWorkflow,
+    CalendarWorkflowError, MailCache, MailCacheError, MailOperationError, MailProvider,
+    MailSendOutcome, MailSendProviderError, MailSendWorkflowError, MailSyncProgress, MailWorkflow,
     MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
     MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, CalendarViewReference, FolderId, FolderReference, MailFolder, MailMessage,
-    MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
-    MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
+    AccountId, CalendarViewRange, CalendarViewReference, FolderId, FolderReference, MailDraft,
+    MailFolder, MailMessage, MailRecipient, MailSubject, MessageBody, MessageBodyType,
+    MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+    MessageMetadataPatch, ReadState,
 };
 use tempfile::TempDir;
+use time::{Date, Month};
 
-use crate::store::SqliteMailCache;
+use crate::{security, store::SqliteMailCache};
 
 const DATABASE_KEY_BYTE: u8 = 0x62;
 
@@ -38,8 +41,11 @@ struct FixtureProvider {
     requests: Arc<Mutex<Vec<MessageDeltaRequest>>>,
     body_result: Result<MessageBody, MailOperationError>,
     body_fetches: Arc<AtomicUsize>,
+    send_calls: Arc<AtomicUsize>,
+    send_result: Result<(), MailSendProviderError>,
     body_gate: Option<BodyFetchGate>,
     delta_gate: Option<DeltaPageGate>,
+    calendar_gate: Option<CalendarSyncGate>,
 }
 
 struct FixtureCacheFactory {
@@ -83,6 +89,12 @@ struct DeltaPageGate {
     release: smol::channel::Receiver<()>,
 }
 
+#[derive(Clone)]
+struct CalendarSyncGate {
+    started: smol::channel::Sender<()>,
+    release: smol::channel::Receiver<()>,
+}
+
 impl FixtureProvider {
     fn new(
         account_id: AccountId,
@@ -99,9 +111,17 @@ impl FixtureProvider {
             requests: Arc::new(Mutex::new(Vec::new())),
             body_result,
             body_fetches: Arc::new(AtomicUsize::new(0)),
+            send_calls: Arc::new(AtomicUsize::new(0)),
+            send_result: Err(MailSendProviderError::ServiceUnavailable),
             body_gate: None,
             delta_gate: None,
+            calendar_gate: None,
         }
+    }
+
+    fn with_send_result(mut self, result: Result<(), MailSendProviderError>) -> Self {
+        self.send_result = result;
+        self
     }
 }
 
@@ -201,16 +221,45 @@ impl MailProvider for FixtureProvider {
             result
         }
     }
+
+    fn send_mail(
+        &self,
+        account_id: &AccountId,
+        _draft: MailDraft,
+    ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
+        self.send_calls.fetch_add(1, Ordering::Relaxed);
+        if account_id != &self.account_id {
+            return ready(Err(MailSendProviderError::AccountMismatch));
+        }
+        ready(self.send_result)
+    }
 }
 
 impl CalendarProvider for FixtureProvider {
     fn calendar_delta_page(
         &self,
-        _view: &CalendarViewReference,
+        view: &CalendarViewReference,
         _request: CalendarDeltaRequest,
     ) -> impl Future<Output = Result<CalendarDeltaPageResponse, CalendarOperationError>> + Send + '_
     {
-        ready(Err(CalendarOperationError::ServiceUnavailable))
+        let matches_account = view.account_id() == &self.account_id;
+        let gate = self.calendar_gate.clone();
+        async move {
+            if !matches_account {
+                return Err(CalendarOperationError::AccountMismatch);
+            }
+            if let Some(gate) = gate {
+                gate.started
+                    .send(())
+                    .await
+                    .map_err(|_| CalendarOperationError::ServiceUnavailable)?;
+                gate.release
+                    .recv()
+                    .await
+                    .map_err(|_| CalendarOperationError::ServiceUnavailable)?;
+            }
+            Err(CalendarOperationError::ServiceUnavailable)
+        }
     }
 }
 
@@ -229,6 +278,34 @@ fn folder(account_id: &AccountId) -> MailFolder {
 
 fn message_id() -> MessageId {
     MessageId::try_from("message-1".to_owned()).expect("synthetic message ID is valid")
+}
+
+fn draft(subject: &str, body: &str) -> MailDraft {
+    MailDraft::new(
+        "ada@example.test"
+            .parse::<MailRecipient>()
+            .expect("synthetic recipient is valid"),
+        subject
+            .parse::<MailSubject>()
+            .expect("synthetic subject is valid"),
+        body.to_owned(),
+    )
+}
+
+fn calendar_view(account: &AccountId) -> CalendarViewReference {
+    let start_date = Date::from_calendar_date(2030, Month::January, 7)
+        .expect("synthetic calendar view start is valid");
+    let end_date = start_date
+        .checked_add(time::Duration::days(7))
+        .expect("synthetic calendar view end is valid");
+    let range = CalendarViewRange::new(
+        start_date.midnight().assume_utc(),
+        end_date.midnight().assume_utc(),
+        start_date,
+        end_date,
+    )
+    .expect("synthetic calendar view range is valid");
+    CalendarViewReference::new(account.clone(), range)
 }
 
 fn first_page(cutoff: SystemTime, next_link: MessageDeltaLink) -> MessageDeltaPage {
@@ -708,6 +785,83 @@ fn factory_sessions_share_folder_reservations_during_body_fetch() {
         );
         drop(opening_session);
         drop(syncing_session);
+    });
+}
+
+#[test]
+fn calendar_sync_reservation_blocks_sign_out_cache_removal() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let (started_sender, started_receiver) = smol::channel::bounded(1);
+        let (release_sender, release_receiver) = smol::channel::bounded(1);
+        let mut provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        provider.calendar_gate = Some(CalendarSyncGate {
+            started: started_sender,
+            release: release_receiver,
+        });
+        let factory = AccountSessionWorkflowFactory::new(
+            provider,
+            FixtureCacheFactory {
+                database_directory: directory.path().to_path_buf(),
+            },
+        );
+        let session = factory
+            .open_session(account.clone())
+            .await
+            .expect("account session opens");
+        let calendar = session.calendar_session();
+        let view = calendar_view(&account);
+        let sync_calendar = Arc::clone(&calendar);
+        let sync_view = view.clone();
+        let sync_session = Arc::clone(&session);
+        let executor = smol::Executor::new();
+
+        let (sync_result, session_removal_result, factory_removal_result) = executor
+            .run(async {
+                let sync_task =
+                    executor.spawn(async move { sync_calendar.synchronize_view(&sync_view).await });
+                started_receiver
+                    .recv()
+                    .await
+                    .expect("calendar request reaches the synthetic gate");
+                let session_removal_result = sync_session.remove_account_cache(&account).await;
+                let factory_removal_result = factory.remove_account_cache(&account).await;
+                release_sender
+                    .send(())
+                    .await
+                    .expect("calendar sync gate is still open");
+                (
+                    sync_task.await,
+                    session_removal_result,
+                    factory_removal_result,
+                )
+            })
+            .await;
+
+        assert_eq!(
+            sync_result,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::ServiceUnavailable
+            ))
+        );
+        assert_eq!(
+            session_removal_result,
+            Err(MailCacheError::OperationInProgress)
+        );
+        assert_eq!(
+            factory_removal_result,
+            Err(MailCacheError::OperationInProgress)
+        );
+        calendar
+            .load_cached_view(&view)
+            .await
+            .expect("the shared cache remains available after sign-out is blocked");
     });
 }
 
@@ -1451,6 +1605,251 @@ fn response_budget_remains_cumulative_after_a_delta_reset() {
             .expect("folder state exists");
         assert_eq!(state.next_link(), Some(&reset_link));
         assert!(state.is_rebuilding());
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn stale_cache_handle_cannot_stage_a_send_after_account_cache_removal() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic mail cache directory is created");
+        let account = account_id();
+        let removal_cache = open_cache(&directory, account.clone()).await;
+        let stale_send_cache = open_cache(&directory, account.clone()).await;
+        let _lock = security::lock_account_directory(&directory.path().join("mail.lock"))
+            .await
+            .expect("synthetic cache lifecycle lock is acquired");
+        removal_cache.close_for_tests().await;
+        std::fs::remove_file(directory.path().join("mail.sqlite3"))
+            .expect("cache removal unlinks the database before the stale handle can stage a send");
+        drop(_lock);
+
+        let provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        )
+        .with_send_result(Ok(()));
+        let send_calls = Arc::clone(&provider.send_calls);
+        let workflow = MailWorkflow::new(provider, stale_send_cache.clone());
+
+        assert_eq!(
+            workflow
+                .send_message(
+                    &account,
+                    draft("Stale cache subject", "stale cache body"),
+                    UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                )
+                .await,
+            Err(MailSendWorkflowError::Cache(MailCacheError::Unavailable))
+        );
+        assert_eq!(send_calls.load(Ordering::Relaxed), 0);
+
+        drop(workflow);
+        removal_cache.close_for_tests().await;
+        stale_send_cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn unknown_send_marker_survives_encrypted_restart_and_blocks_duplicate_send_and_removal() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic mail cache directory is created");
+        let account = account_id();
+        let provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        )
+        .with_send_result(Err(MailSendProviderError::OutcomeUnknown));
+        let send_calls = Arc::clone(&provider.send_calls);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(provider.clone(), cache.clone());
+        let result = workflow
+            .send_message(
+                &account,
+                draft("Synthetic subject", "synthetic-private-body"),
+                UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+            )
+            .await
+            .expect("ambiguous submission is represented as an outcome");
+        let pending = match result {
+            MailSendOutcome::OutcomeUnknown(pending) => pending,
+            other => panic!("expected unresolved send marker, got {other:?}"),
+        };
+        let removal_cache = open_cache(&directory, account.clone()).await;
+
+        assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            <SqliteMailCache as MailCache>::remove_account(&removal_cache, &account).await,
+            Err(MailCacheError::SendAlreadyPending)
+        );
+        assert_eq!(
+            <SqliteMailCache as einfach_mail_application::CalendarCache>::remove_account(
+                &removal_cache,
+                &account,
+            )
+            .await,
+            Err(CalendarCacheError::PendingMailSend)
+        );
+        assert_eq!(
+            workflow.load_pending_send(&account).await,
+            Ok(Some(pending.clone()))
+        );
+        drop(workflow);
+        removal_cache.close_for_tests().await;
+        cache.close_for_tests().await;
+
+        let encrypted_bytes = std::fs::read(directory.path().join("mail.sqlite3"))
+            .expect("SQLCipher database remains on disk");
+        assert!(
+            !encrypted_bytes
+                .windows(b"synthetic-private-body".len())
+                .any(|window| window == b"synthetic-private-body")
+        );
+
+        let reopened = open_cache(&directory, account.clone()).await;
+        assert_eq!(
+            reopened.load_pending_send(&account).await,
+            Ok(Some(pending.clone()))
+        );
+        let workflow = MailWorkflow::new(provider, reopened.clone());
+        let duplicate = workflow
+            .send_message(
+                &account,
+                draft("Another synthetic subject", "another-body"),
+                UNIX_EPOCH + Duration::from_secs(1_800_000_001),
+            )
+            .await;
+        assert!(matches!(
+            duplicate,
+            Err(MailSendWorkflowError::PendingResolutionRequired(ref saved))
+                if saved == &pending
+        ));
+        assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+
+        workflow
+            .resolve_pending_send(&account, pending.operation_id())
+            .await
+            .expect("explicit resolution clears the old marker without resending");
+        assert_eq!(workflow.load_pending_send(&account).await, Ok(None));
+        drop(workflow);
+        reopened.close_for_tests().await;
+    });
+}
+
+#[test]
+fn accepted_and_definitively_rejected_sends_clear_their_markers() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic mail cache directory is created");
+        let account = account_id();
+        let cache = open_cache(&directory, account.clone()).await;
+        let accepted_provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        )
+        .with_send_result(Ok(()));
+        let accepted_calls = Arc::clone(&accepted_provider.send_calls);
+        let accepted_workflow = MailWorkflow::new(accepted_provider, cache.clone());
+
+        assert_eq!(
+            accepted_workflow
+                .send_message(
+                    &account,
+                    draft("Accepted synthetic subject", "accepted synthetic body"),
+                    UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                )
+                .await,
+            Ok(MailSendOutcome::Accepted)
+        );
+        assert_eq!(
+            accepted_workflow.load_pending_send(&account).await,
+            Ok(None)
+        );
+        assert_eq!(accepted_calls.load(Ordering::Relaxed), 1);
+        drop(accepted_workflow);
+
+        let rejected_provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        )
+        .with_send_result(Err(MailSendProviderError::Rejected));
+        let rejected_calls = Arc::clone(&rejected_provider.send_calls);
+        let rejected_workflow = MailWorkflow::new(rejected_provider, cache.clone());
+
+        assert_eq!(
+            rejected_workflow
+                .send_message(
+                    &account,
+                    draft("Rejected synthetic subject", "rejected synthetic body"),
+                    UNIX_EPOCH + Duration::from_secs(1_800_000_001),
+                )
+                .await,
+            Err(MailSendWorkflowError::Provider(
+                MailSendProviderError::Rejected
+            ))
+        );
+        assert_eq!(
+            rejected_workflow.load_pending_send(&account).await,
+            Ok(None)
+        );
+        assert_eq!(rejected_calls.load(Ordering::Relaxed), 1);
+        drop(rejected_workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn rejected_send_with_marker_clear_failure_keeps_a_resolvable_known_rejection() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("synthetic mail cache directory is created");
+        let account = account_id();
+        let cache = open_cache(&directory, account.clone()).await;
+        cache.fail_next_pending_send_clear();
+        let provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        )
+        .with_send_result(Err(MailSendProviderError::Rejected));
+        let send_calls = Arc::clone(&provider.send_calls);
+        let workflow = MailWorkflow::new(provider, cache.clone());
+
+        let pending = match workflow
+            .send_message(
+                &account,
+                draft("Rejected synthetic subject", "rejected synthetic body"),
+                UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+            )
+            .await
+        {
+            Err(MailSendWorkflowError::RejectedNeedsResolution {
+                pending,
+                provider: MailSendProviderError::Rejected,
+                cache: MailCacheError::Unavailable,
+            }) => pending,
+            other => panic!("expected the known rejection and its retained marker, got {other:?}"),
+        };
+
+        assert_eq!(
+            workflow.load_pending_send(&account).await,
+            Ok(Some(pending.clone()))
+        );
+        workflow
+            .resolve_pending_send(&account, pending.operation_id())
+            .await
+            .expect("explicit recovery clears the known rejection without resending");
+        assert_eq!(workflow.load_pending_send(&account).await, Ok(None));
+        assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+
         drop(workflow);
         cache.close_for_tests().await;
     });

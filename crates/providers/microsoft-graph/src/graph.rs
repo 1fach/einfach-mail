@@ -6,7 +6,7 @@ use std::{
 };
 
 use huskarl::token::AccessToken;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use url::Url;
 
@@ -22,8 +22,8 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage,
     CalendarDeltaProgress, CalendarOccurrencePatch, CalendarOccurrenceTimePatch,
-    CalendarViewReference, EventId, FolderId, FolderReference, MailFolder, MailMessage, Mailbox,
-    MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+    CalendarViewReference, EventId, FolderId, FolderReference, MailDraft, MailFolder, MailMessage,
+    Mailbox, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
     MessageDeltaProgress, MessageId, MessageMetadata, MessageMetadataPatch, MessageOrigin,
     ReadState,
 };
@@ -200,6 +200,18 @@ impl GraphApi {
         Ok(MessageBody::new(content_type, message.body.content))
     }
 
+    pub(super) async fn send_mail(
+        &self,
+        draft: &MailDraft,
+        token: std::sync::Arc<AccessToken>,
+    ) -> Result<(), GraphError> {
+        let body = serde_json::to_vec(&SendMailRequest::from(draft))
+            .map_err(|_| GraphError::InvalidRecord)?;
+        self.transport
+            .send_mail(self.authority.mail_send_path()?, token, body)
+            .await
+    }
+
     fn delta_progress(
         &self,
         next_link: Option<String>,
@@ -233,6 +245,59 @@ impl GraphApi {
                 ),
             )),
             _ => Err(GraphError::InvalidResponse),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMailRequest<'a> {
+    message: SendMailMessage<'a>,
+    save_to_sent_items: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMailMessage<'a> {
+    subject: &'a str,
+    body: SendMailBody<'a>,
+    to_recipients: [SendMailRecipient<'a>; 1],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMailBody<'a> {
+    content_type: &'static str,
+    content: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendMailRecipient<'a> {
+    email_address: SendMailAddress<'a>,
+}
+
+#[derive(Serialize)]
+struct SendMailAddress<'a> {
+    address: &'a str,
+}
+
+impl<'a> From<&'a MailDraft> for SendMailRequest<'a> {
+    fn from(draft: &'a MailDraft) -> Self {
+        Self {
+            message: SendMailMessage {
+                subject: draft.subject(),
+                body: SendMailBody {
+                    content_type: "Text",
+                    content: draft.body(),
+                },
+                to_recipients: [SendMailRecipient {
+                    email_address: SendMailAddress {
+                        address: draft.recipient().as_str(),
+                    },
+                }],
+            },
+            save_to_sent_items: true,
         }
     }
 }
@@ -818,7 +883,10 @@ struct WireBodyContent {
 mod tests {
     use std::{sync::Arc, time::SystemTime};
 
-    use httpmock::{Method::GET, MockServer};
+    use httpmock::{
+        Method::{GET, POST},
+        MockServer,
+    };
     use huskarl::{
         core::secrets::SecretString,
         token::{AccessToken, BearerAccessToken},
@@ -831,7 +899,7 @@ mod tests {
     use einfach_mail_domain::{
         AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarOccurrence,
         CalendarOccurrenceTime, CalendarViewRange, CalendarViewReference, FolderId,
-        FolderReference,
+        FolderReference, MailDraft, MailRecipient, MailSubject,
     };
 
     use super::{
@@ -878,6 +946,43 @@ mod tests {
             GraphTransport::start_for_fixtures().expect("synthetic Graph transport worker starts");
         let handle: GraphTransportHandle = transport.handle();
         (GraphApi::new(authority, handle), transport)
+    }
+
+    #[tokio::test]
+    async fn send_mail_posts_one_plain_text_recipient_and_saves_to_sent_items() {
+        let server = MockServer::start_async().await;
+        let recipient = "ada@example.test"
+            .parse::<MailRecipient>()
+            .expect("synthetic recipient is valid");
+        let subject = "Synthetic subject"
+            .parse::<MailSubject>()
+            .expect("synthetic subject is valid");
+        let draft = MailDraft::new(recipient, subject, "Synthetic body".to_owned());
+        let expected_body = json!({
+            "message": {
+                "subject": "Synthetic subject",
+                "body": { "contentType": "Text", "content": "Synthetic body" },
+                "toRecipients": [{
+                    "emailAddress": { "address": "ada@example.test" }
+                }]
+            },
+            "saveToSentItems": true
+        });
+        let accepted = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/sendMail")
+                    .json_body(expected_body);
+                then.status(202);
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+
+        api.send_mail(&draft, synthetic_access_token())
+            .await
+            .expect("Graph accepts the synthetic plain-text message");
+
+        accepted.assert_async().await;
     }
 
     #[tokio::test]

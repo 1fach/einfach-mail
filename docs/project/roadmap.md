@@ -28,9 +28,11 @@ Show and synchronize calendar events with correct time-zone and recurrence behav
 
 The accepted scope is in [ADR 0014](../decisions/0014-linux-read-only-calendar-workflow.md). The [Issue #22](https://github.com/1fach/einfach-mail/issues/22) candidate is ready for stacked review on a clean branch based on PR #47's current head. The full local Linux gate and source review pass. No live tenant or manual desktop review is claimed.
 
-## M4: Mail and calendar actions — not started
+## M4: Mail and calendar actions — in progress
 
 Support the first defined mail and event changes with clear pending, confirmed, and failed states.
+
+[Issue #27](https://github.com/1fach/einfach-mail/issues/27) implements the first M4 action: composing and sending one plain-text message through Graph with delegated `Mail.Send`. The Linux candidate is ready for stacked draft review on the Issue #44 branch. Live consent and Graph verification remain separate under [issue #28](https://github.com/1fach/einfach-mail/issues/28); event actions remain future M4 work.
 
 ## M5: Windows support and daily-use integration — not started
 

@@ -68,6 +68,18 @@ No direct replacement or audit suppression is added for M0. These maintenance wa
 
 ## Candidates
 
+### Plain-text message recipient validation — 2026-11-01
+
+| Candidate | Evidence | Decision |
+| --- | --- | --- |
+| `addr-spec` 0.10.4 | Apache-2.0 Rust parser for one RFC 5322 `addr-spec`, with UTF-8 and NFC normalization support. It declares Rust 1.81 and its upstream repository had recent activity on 2026-10-25. The default feature adds `unicode-normalization`; `rustc_version` is a small build dependency. It parses the whole value and does not accept display names. Its parser uses internal unsafe storage code. | Use for the composer’s single bare recipient, trimming only outer UI whitespace and storing the library’s normalized serialization. This avoids a general header parser and keeps the parser boundary in the domain crate. The app calls only the safe `FromStr` API and adds no unsafe code. `email-address-parser` 2.0.2 was considered, but its `quick-xml` 0.39.4 build dependency is affected by RUSTSEC-2026-0194 and RUSTSEC-2026-0195; its caret requirement excludes patched 0.41.0. `email_address` 0.2.9 has a smaller API but its last stable release was 2024-07-31. |
+| `emailaddr` 1.0.0 | MIT OR Apache-2.0, Rust 1.86, strict `EmailAddr`, SMTP address-length rules, and IDNA normalization. Its default `std` feature enables `idna` and `thiserror`; its source also contains internal unsafe casts. The current release history does not yet show an established maintenance cadence. | Considered as a recently released option, but its SMTP and IDNA policy is broader than the app’s RFC 5322 `addr-spec` need. Its dependencies and unsafe storage implementation do not improve this single bare-address boundary over `addr-spec` 0.10.4. |
+| `email-address-parser` 2.0.2 | MIT-licensed RFC 5322/6532 parser with strict address-only parsing. Its stable release has no declared MSRV; 3.0 remains a release candidate. | Do not use while its `quick-xml` 0.39.4 build dependency is affected by RUSTSEC-2026-0194 and RUSTSEC-2026-0195. Its caret requirement excludes patched 0.41.0. |
+| `email_address` 0.2.9 | Small MIT-licensed API, UTF-8 support, and no required runtime dependencies when Serde is disabled. | Do not select: its last stable release was 2024-07-31, and it does not normalize equivalent address forms. |
+| `lettre` and `mail-builder` | Maintained mail composition libraries with SMTP/MIME and RFC message-building APIs. | Not suitable for the Graph adapter, which posts a JSON message object and does not use SMTP or MIME construction. |
+
+The parser validates syntax only; it cannot establish that an address exists or can receive mail. The request path still treats the recipient and all message fields as untrusted input. `addr-spec` contains unsafe code internally; the app uses its safe parser API and does not introduce unsafe Rust. Run RustSec against the exact lockfile after adding the selected crate. See [ADR 0017](../decisions/0017-safe-plain-text-mail-sending.md) for the send boundary and its failure policy.
+
 | Need | Candidate and evidence | Status and next check |
 | --- | --- | --- |
 | App-generated entity identifiers | `uuid` 1.29.0 is actively developed under Apache-2.0 or MIT and has a Rust 1.89 MSRV. UUID v4 generation is feature-gated and uses operating-system randomness; v7 adds timestamp ordering. Both fit this workspace's MSRV. | Use `uuid` with defaults disabled and only `std` to parse the Entra client ID. Do not generate app IDs; account identity remains the opaque Graph `id` under ADR 0009. |
@@ -115,6 +127,8 @@ The combined M2 candidate's documented Linux gate passed locally on 2026-11-01. 
 
 ## Current constraints
 
+- Per-account cache lifecycle coordination uses Rust's `std::fs::File::lock` on the existing `mail-cache.lock` file. The standard-library API is available within the Rust 1.95 MSRV and uses the same lock for send staging and cache removal. No additional locking crate is needed for this Linux file boundary.
+- `blocking` 1.7.0 runs the synchronous file-lock wait on its blocking-I/O thread pool while persistence awaits the result. The crate is dual MIT/Apache-2.0, declares Rust 1.68, and is maintained by the smol-rs organization; version 1.7.0 was published in 2026 and is already present in the workspace lockfile transitively. Making it a direct persistence dependency adds no new resolved package. `fs4`'s `AsyncFileExt::lock` still invokes a blocking lock syscall, so it does not meet the executor requirement; `async_file_lock` documents process-local locking, so it does not meet the cross-process requirement. See [`blocking`](https://docs.rs/blocking/1.7.0/blocking/), [`fs4`](https://docs.rs/fs4/1.1.0/fs4/trait.AsyncFileExt.html), and [`async_file_lock`](https://docs.rs/async-file-lock/0.1.4/async_file_lock/struct.FileLock.html).
 - The Microsoft provider uses Graph, OAuth, browser, HTTP, and Secret Service libraries. Application workflows keep provider-neutral account and mail types. Graph mail access is read-only in M2.
 - ADR 0005 selects SQLCipher-backed SQLite. Production Linux persistence uses the reviewed async wrapper and migration crate for encrypted mail records, page/cursor transactions, and account-scoped cache removal. The Windows x64 evidence is historical; current platform work targets Linux.
 - Linux is the sole current development and validation target. Windows and macOS implementation work and validation are deferred to later roadmap milestones.

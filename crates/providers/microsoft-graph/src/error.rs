@@ -9,6 +9,8 @@ pub(super) enum GraphError {
     AccessTokenRejected,
     AccessDenied,
     RateLimited { retry_after: Option<Duration> },
+    SendRejected,
+    SendOutcomeUnknown,
     InvalidResponse,
     UnsafeLink,
     InvalidRecord,

@@ -23,13 +23,14 @@ use crate::{
     worker,
 };
 use einfach_mail_application::{
-    AccountOperationCancellation, AccountOperationError, AccountProvider,
+    AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
     CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarOperationError, CalendarProvider,
-    MailOperationError, MailProvider, MessageDeltaRequest, MessageDeltaResponse,
+    MailOperationError, MailProvider, MailSendProviderError, MessageDeltaRequest,
+    MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, CalendarViewReference, FolderReference, MailFolder, MailMessage,
-    MessageBody, MessageId,
+    AccountId, AccountProfile, CalendarViewReference, FolderReference, MailDraft, MailFolder,
+    MailMessage, MessageBody, MessageId,
 };
 
 const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
@@ -166,7 +167,8 @@ impl AccountProvider for MicrosoftGraphProvider {
 
         worker::run_with_account_cancellation(
             move |_cancellation: CancellationToken| async move {
-                let authorized = authorize_profile(&config).await?;
+                let authorized =
+                    authorize_profile(&config, &identity::BASE_AUTHORIZATION_SCOPES).await?;
                 let mut session = config.session.lock().await;
                 commit_cancellation.begin_credential_commit()?;
                 config.credentials.save(&authorized.refresh_token)?;
@@ -183,15 +185,20 @@ impl AccountProvider for MicrosoftGraphProvider {
     fn reauthorize_account(
         &self,
         expected_account_id: &einfach_mail_domain::AccountId,
+        request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
     ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let expected_account_id = expected_account_id.clone();
+        let requested_scopes: &'static [&'static str] = match request {
+            AccountPermissionRequest::Current => &identity::BASE_AUTHORIZATION_SCOPES,
+            AccountPermissionRequest::SendMail => &identity::SEND_MAIL_AUTHORIZATION_SCOPES,
+        };
         let commit_cancellation = cancellation.clone();
 
         worker::run_with_account_cancellation(
             move |_cancellation: CancellationToken| async move {
-                let authorized = authorize_profile(&config).await?;
+                let authorized = authorize_profile(&config, requested_scopes).await?;
                 if authorized.profile.id() != &expected_account_id {
                     return Err(AccountOperationError::AccountMismatch);
                 }
@@ -292,6 +299,26 @@ impl MailProvider for MicrosoftGraphProvider {
                 .fetch_message_body(&message_id, Arc::clone(&token))
                 .await;
             map_mail_result(&config, &account_id, &token, body).await
+        })
+    }
+
+    fn send_mail(
+        &self,
+        account_id: &AccountId,
+        draft: MailDraft,
+    ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let account_id = account_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_send)?;
+            let graph_api = config.graph_api().map_err(map_send_graph_error)?;
+            let result = graph_api.send_mail(&draft, Arc::clone(&token)).await;
+            if matches!(&result, Err(GraphError::AccessTokenRejected)) {
+                invalidate_access_token(&config, &account_id, &token).await;
+            }
+            result.map_err(map_send_graph_error)
         })
     }
 }
@@ -423,6 +450,8 @@ fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
         GraphError::WorkerStart
         | GraphError::WorkerClosed
         | GraphError::Transport
+        | GraphError::SendRejected
+        | GraphError::SendOutcomeUnknown
         | GraphError::InvalidToken => CalendarOperationError::ServiceUnavailable,
     }
 }
@@ -460,6 +489,8 @@ fn map_graph_error(error: GraphError) -> MailOperationError {
         GraphError::WorkerStart
         | GraphError::WorkerClosed
         | GraphError::Transport
+        | GraphError::SendRejected
+        | GraphError::SendOutcomeUnknown
         | GraphError::InvalidToken => MailOperationError::ServiceUnavailable,
     }
 }
@@ -477,12 +508,52 @@ fn map_profile_graph_error(error: GraphError) -> AccountOperationError {
         | GraphError::WorkerClosed
         | GraphError::Transport
         | GraphError::InvalidToken
+        | GraphError::SendRejected
+        | GraphError::SendOutcomeUnknown
         | GraphError::RateLimited { .. } => AccountOperationError::ServiceUnavailable,
+    }
+}
+
+fn map_mail_operation_to_send(error: MailOperationError) -> MailSendProviderError {
+    match error {
+        MailOperationError::SignInRequired => MailSendProviderError::SignInRequired,
+        MailOperationError::AccountMismatch => MailSendProviderError::AccountMismatch,
+        MailOperationError::AccessDenied => MailSendProviderError::PermissionRequired,
+        MailOperationError::RateLimited { retry_after } => {
+            MailSendProviderError::RateLimited { retry_after }
+        }
+        MailOperationError::CredentialStoreUnavailable
+        | MailOperationError::ServiceUnavailable
+        | MailOperationError::InvalidResponse
+        | MailOperationError::ResourceLimitExceeded => MailSendProviderError::ServiceUnavailable,
+        _ => MailSendProviderError::ServiceUnavailable,
+    }
+}
+
+fn map_send_graph_error(error: GraphError) -> MailSendProviderError {
+    match error {
+        GraphError::AccessTokenRejected => MailSendProviderError::SignInRequired,
+        GraphError::AccessDenied => MailSendProviderError::PermissionRequired,
+        GraphError::RateLimited { retry_after } => {
+            MailSendProviderError::RateLimited { retry_after }
+        }
+        GraphError::SendRejected => MailSendProviderError::Rejected,
+        GraphError::SendOutcomeUnknown => MailSendProviderError::OutcomeUnknown,
+        GraphError::WorkerStart
+        | GraphError::WorkerClosed
+        | GraphError::Transport
+        | GraphError::InvalidToken
+        | GraphError::InvalidResponse
+        | GraphError::UnsafeLink
+        | GraphError::InvalidRecord
+        | GraphError::ResponseTooLarge
+        | GraphError::PaginationLimitExceeded => MailSendProviderError::ServiceUnavailable,
     }
 }
 
 async fn authorize_profile(
     config: &ProviderConfig,
+    requested_scopes: &[&str],
 ) -> Result<AuthorizedAccount, AccountOperationError> {
     let client =
         http_client::build_client().map_err(|_| AccountOperationError::ServiceUnavailable)?;
@@ -492,6 +563,7 @@ async fn authorize_profile(
         &config.endpoints,
         client.clone(),
         config.browser.as_ref(),
+        requested_scopes,
     )
     .await?;
     let refresh_token = response
@@ -541,8 +613,9 @@ mod tests {
         transport::GraphTransport,
     };
     use einfach_mail_application::{
-        AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
-        MailOperationError, MailProvider, MessageDeltaRequest, MessageDeltaResponse,
+        AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
+        AccountProvider, AccountWorkflow, MailOperationError, MailProvider, MessageDeltaRequest,
+        MessageDeltaResponse,
     };
     use einfach_mail_domain::{
         AccountId, FolderReference, MessageBodyType, MessageDeltaLink, MessageDeltaProgress,
@@ -1494,7 +1567,11 @@ mod tests {
         let cancelled_account_id = expected_account_id.clone();
         let cancelled_renewal = tokio::spawn(async move {
             task_workflow
-                .reauthorize_account_with_cancellation(&cancelled_account_id, task_cancellation)
+                .reauthorize_account_with_cancellation(
+                    &cancelled_account_id,
+                    AccountPermissionRequest::Current,
+                    task_cancellation,
+                )
                 .await
         });
         let _authorization_url = browser_receiver
@@ -1520,7 +1597,11 @@ mod tests {
         let renewal_account_id = expected_account_id.clone();
         let renewal = tokio::spawn(async move {
             task_workflow
-                .reauthorize_account_with_cancellation(&renewal_account_id, task_cancellation)
+                .reauthorize_account_with_cancellation(
+                    &renewal_account_id,
+                    AccountPermissionRequest::Current,
+                    task_cancellation,
+                )
                 .await
         });
         complete_test_authorization(&mut browser_receiver, "synthetic-renewal-code").await;

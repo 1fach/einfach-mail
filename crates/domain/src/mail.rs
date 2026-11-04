@@ -1,8 +1,355 @@
 //! Provider-independent mail concepts used by cached browsing and synchronization.
 
-use std::{fmt, time::SystemTime};
+use std::{fmt, str::FromStr, time::SystemTime};
+
+use addr_spec::AddrSpec;
+use uuid::Uuid;
 
 use crate::{AccountId, FolderId, Mailbox, MessageId};
+
+/// A syntactically valid, single recipient address.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct MailRecipient(Box<str>);
+
+impl MailRecipient {
+    /// Returns the validated recipient address.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for MailRecipient {
+    type Err = InvalidMailRecipient;
+
+    /// Parses one bare address, allowing surrounding whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidMailRecipient`] when the value is not one strict
+    /// RFC 5322 address without display-name syntax.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        let address = value
+            .parse::<AddrSpec>()
+            .map_err(|_| InvalidMailRecipient)?;
+        Ok(Self(address.to_string().into()))
+    }
+}
+
+impl fmt::Debug for MailRecipient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MailRecipient(<redacted>)")
+    }
+}
+
+/// The recipient is not one strict bare mail address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
+pub struct InvalidMailRecipient;
+
+impl fmt::Display for InvalidMailRecipient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("recipient must be one valid bare mail address")
+    }
+}
+
+impl std::error::Error for InvalidMailRecipient {}
+
+/// A non-empty, single-line mail subject.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct MailSubject(Box<str>);
+
+impl MailSubject {
+    /// Returns the validated subject text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for MailSubject {
+    type Err = InvalidMailSubject;
+
+    /// Parses a subject after trimming surrounding whitespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidMailSubject::Empty`] for an empty value or
+    /// [`InvalidMailSubject::Multiline`] when it contains a line break.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(InvalidMailSubject::Empty);
+        }
+        if value.contains(['\r', '\n']) {
+            return Err(InvalidMailSubject::Multiline);
+        }
+        Ok(Self(value.into()))
+    }
+}
+
+impl fmt::Debug for MailSubject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MailSubject(<redacted>)")
+    }
+}
+
+/// A subject value that cannot be sent as a single mail header line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
+pub enum InvalidMailSubject {
+    /// The subject is empty after trimming surrounding whitespace.
+    Empty,
+    /// The subject contains a line break.
+    Multiline,
+}
+
+impl fmt::Display for InvalidMailSubject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Empty => "the message subject is empty",
+            Self::Multiline => "the message subject contains a line break",
+        })
+    }
+}
+
+impl std::error::Error for InvalidMailSubject {}
+
+#[cfg(test)]
+mod recipient_tests {
+    use super::{MailDraft, MailRecipient, MailSendOperationId, MailSubject};
+    use crate::AccountId;
+
+    #[test]
+    fn parses_a_single_bare_address_and_trims_outer_whitespace() {
+        let recipient: MailRecipient = "  ada+project@example.test  "
+            .parse()
+            .expect("synthetic recipient is a valid bare address");
+
+        assert_eq!(recipient.as_str(), "ada+project@example.test");
+    }
+
+    #[test]
+    fn rejects_display_names_and_multiple_recipients() {
+        assert!(
+            "Ada Example <ada@example.test>"
+                .parse::<MailRecipient>()
+                .is_err()
+        );
+        assert!(
+            "ada@example.test, grace@example.test"
+                .parse::<MailRecipient>()
+                .is_err()
+        );
+        assert!("not an address".parse::<MailRecipient>().is_err());
+    }
+
+    #[test]
+    fn rejects_empty_and_multiline_subjects() {
+        assert_eq!(
+            " \t ".parse::<MailSubject>(),
+            Err(super::InvalidMailSubject::Empty)
+        );
+        assert_eq!(
+            "Synthetic\nsubject".parse::<MailSubject>(),
+            Err(super::InvalidMailSubject::Multiline)
+        );
+    }
+
+    #[test]
+    fn message_debug_output_redacts_recipient_subject_and_body() {
+        let recipient = "ada@example.test"
+            .parse::<MailRecipient>()
+            .expect("synthetic recipient is a valid bare address");
+        let subject = "Synthetic subject"
+            .parse::<MailSubject>()
+            .expect("synthetic subject is a single line");
+        let draft = MailDraft::new(recipient, subject, "Synthetic body".to_owned());
+        let pending = draft.pending_send(
+            AccountId::try_from("synthetic-account".to_owned())
+                .expect("synthetic account ID is non-empty"),
+            MailSendOperationId::new(),
+            std::time::UNIX_EPOCH,
+        );
+
+        let draft_debug = format!("{draft:?}");
+        let pending_debug = format!("{pending:?}");
+        for value in ["ada@example.test", "Synthetic subject", "Synthetic body"] {
+            assert!(!draft_debug.contains(value));
+            assert!(!pending_debug.contains(value));
+        }
+    }
+}
+
+/// An in-memory plain-text message ready for explicit submission.
+#[derive(Eq, PartialEq)]
+pub struct MailDraft {
+    recipient: MailRecipient,
+    subject: MailSubject,
+    body: Box<str>,
+}
+
+impl MailDraft {
+    /// Creates a message draft with a validated recipient and subject.
+    #[must_use]
+    pub fn new(recipient: MailRecipient, subject: MailSubject, body: String) -> Self {
+        Self {
+            recipient,
+            subject,
+            body: body.into_boxed_str(),
+        }
+    }
+
+    /// Returns the recipient address.
+    #[must_use]
+    pub fn recipient(&self) -> &MailRecipient {
+        &self.recipient
+    }
+
+    /// Returns the subject.
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        self.subject.as_str()
+    }
+
+    /// Returns the plain-text message body.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// Creates the body-free operation marker saved before submission.
+    #[must_use]
+    pub fn pending_send(
+        &self,
+        account_id: AccountId,
+        operation_id: MailSendOperationId,
+        created_at: SystemTime,
+    ) -> PendingMailSend {
+        PendingMailSend::new(
+            account_id,
+            operation_id,
+            self.recipient.clone(),
+            self.subject.clone(),
+            created_at,
+        )
+    }
+}
+
+impl fmt::Debug for MailDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MailDraft")
+            .field("recipient", &"<redacted>")
+            .field("subject", &"<redacted>")
+            .field("body", &"<redacted>")
+            .finish()
+    }
+}
+
+/// A local identifier for one send attempt, not a Graph idempotency key.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct MailSendOperationId(Uuid);
+
+impl MailSendOperationId {
+    /// Creates a random identifier for one local send attempt.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    /// Restores the identifier from a UUID validated by the persistence boundary.
+    #[must_use]
+    pub const fn from_uuid(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    /// Returns the UUID used by the local cache.
+    #[must_use]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for MailSendOperationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// An unresolved send marker encrypted in the account's local cache.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PendingMailSend {
+    account_id: AccountId,
+    operation_id: MailSendOperationId,
+    recipient: MailRecipient,
+    subject: MailSubject,
+    created_at: SystemTime,
+}
+
+impl PendingMailSend {
+    /// Creates the body-free metadata used to reconcile a send operation.
+    #[must_use]
+    pub fn new(
+        account_id: AccountId,
+        operation_id: MailSendOperationId,
+        recipient: MailRecipient,
+        subject: MailSubject,
+        created_at: SystemTime,
+    ) -> Self {
+        Self {
+            account_id,
+            operation_id,
+            recipient,
+            subject,
+            created_at,
+        }
+    }
+
+    /// Returns the account that owns this operation.
+    #[must_use]
+    pub fn account_id(&self) -> &AccountId {
+        &self.account_id
+    }
+
+    /// Returns the local identifier for this operation.
+    #[must_use]
+    pub const fn operation_id(&self) -> MailSendOperationId {
+        self.operation_id
+    }
+
+    /// Returns the recipient kept for reconciliation.
+    #[must_use]
+    pub fn recipient(&self) -> &MailRecipient {
+        &self.recipient
+    }
+
+    /// Returns the subject kept for reconciliation.
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        self.subject.as_str()
+    }
+
+    /// Returns when the app staged this operation.
+    #[must_use]
+    pub fn created_at(&self) -> SystemTime {
+        self.created_at
+    }
+}
+
+impl fmt::Debug for PendingMailSend {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PendingMailSend")
+            .field("account_id", &self.account_id)
+            .field("operation_id", &self.operation_id)
+            .field("recipient", &"<redacted>")
+            .field("subject", &"<redacted>")
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
 
 /// A body returned by a provider for storage and later display-time sanitization.
 ///

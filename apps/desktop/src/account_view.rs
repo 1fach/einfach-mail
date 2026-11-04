@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use crate::calendar_view::{CalendarView, CalendarViewEvent};
+use crate::mail_composer::MailPermissionRequester;
 use crate::mail_view::{MailView, MailViewEvent};
 use einfach_mail_application::{
-    AccountOperationCancellation, AccountOperationError, AccountProvider, AccountSession,
-    AccountSessionFactory, AccountWorkflow, MailCacheError,
+    AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
+    AccountSession, AccountSessionFactory, AccountWorkflow, MailCacheError,
 };
 use einfach_mail_domain::AccountProfile;
 use gpui_kit::component::{
@@ -309,7 +310,11 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     ) -> Task<()> {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let reauthorization_result = workflow
-                .reauthorize_account_with_cancellation(profile.id(), cancellation)
+                .reauthorize_account_with_cancellation(
+                    profile.id(),
+                    AccountPermissionRequest::Current,
+                    cancellation,
+                )
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.task = None;
@@ -402,6 +407,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         let Some(account_session_factory) = self.account_session_factory.clone() else {
             return;
         };
+        let permission_requester = self
+            .workflow
+            .clone()
+            .map(|workflow| -> Arc<dyn MailPermissionRequester> { workflow });
         let profile = profile.clone();
         self.opening_content = Some(OpeningContent::Mail);
         self.session_open_error = None;
@@ -421,7 +430,9 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                         }
                         view.opening_content = None;
                         let mail_view_session = session.mail_session();
-                        let mail_view = cx.new(|cx| MailView::new(profile, mail_view_session, cx));
+                        let mail_view = cx.new(|cx| {
+                            MailView::new(profile, mail_view_session, permission_requester, cx)
+                        });
                         let subscription =
                             cx.subscribe(&mail_view, |view, _, event: &MailViewEvent, cx| {
                                 match event {
@@ -963,8 +974,8 @@ mod tests {
 
     use super::{AccountStatus, AccountView, SetupIssue};
     use einfach_mail_application::{
-        AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
-        MailCacheError,
+        AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
+        AccountProvider, AccountWorkflow, MailCacheError,
     };
     use einfach_mail_domain::{AccountId, AccountProfile};
 
@@ -1054,6 +1065,7 @@ mod tests {
         fn reauthorize_account(
             &self,
             expected_account_id: &AccountId,
+            _: AccountPermissionRequest,
             cancellation: AccountOperationCancellation,
         ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
         {

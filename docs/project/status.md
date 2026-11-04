@@ -10,6 +10,8 @@ M3 read-only calendar integration is ready for stacked draft review on clean bra
 
 Issue #44's retryable cache-removal fix passed source review and the full Linux gate on 2026-11-05 in isolated branch `candidate/issue-44-retryable-cache-removal`. The fix now treats filesystem inspection failures as errors before creating or deleting a cache key, and the retry guidance covers both cache-file access and the Linux keyring. Synthetic regression tests cover inaccessible cache paths and the recovery message; existing tests cover SQLCipher recovery after sidecar failures and retry after provider credential deletion fails. RustSec reported no vulnerable or yanked locked crates and 8 allowed unmaintained-crate advisories. Three environment-dependent Secret Service tests remain ignored; no real account, live Graph request, or GUI was used. Keep Issue #44 open and PR #52 in draft until review and merge.
 
+Issue #27's M4 plain-text send implementation is ready for one stacked draft PR from `candidate/issue-27-plain-text-send`, based on PR #52's `candidate/issue-44-retryable-cache-removal`. The local Linux gate passes, including Rust 1.95 all-target compilation, Clippy, rustdoc, dependency policy, RustSec audit, formatting, and workspace tests. Three environment-dependent Secret Service tests remain ignored. Cache staging and removal serialize across app processes; stale cache handles reject sends after database removal, and lock waits run off the async executor. No Issue #27 PR has been published yet. No live Graph request, real mailbox, or desktop window was used; tenant verification remains under issue #28. Keep issue #27 open until PR review and merge.
+
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
 ## Verified state
@@ -21,12 +23,14 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 - Automated fixtures use synthetic data. The candidate includes Graph transport, persistence, sanitizer, and headless GPUI proof packages. The mail fixes pass the Rust 1.95 workspace/all-target check, full workspace tests, affected-crate Clippy, rustdoc, and formatting. Dependency-boundary and banned-framework checks pass. After CI identified yanked `async-executor` 1.14.0, the lockfile was updated to upstream-fixed 1.14.1; a fresh RustSec audit loaded 1,403 advisories and found no vulnerable or yanked locked crates, while reporting the eight upstream unmaintained crates already tracked in [dependency review](dependency-review.md). Environment-dependent Secret Service tests remain ignored. No live mailbox content is used.
 - No live Entra sign-in or Graph mailbox request has been performed. The candidate does not claim tenant verification.
 - The M3 port adds account-scoped calendar workflows, Graph calendar-view delta paging, range-scoped SQLCipher caching, and a native weekly GPUI agenda. The full Linux gate and source review pass locally. Synthetic tests cover the request, workflow, persistence, and headless agenda paths. No calendar Graph request or desktop window has been used.
+- The M4 send candidate adds a native single-recipient plain-text composer, same-account delegated `Mail.Send` renewal, a one-shot Graph `/me/sendMail` request, and an encrypted body-free marker that blocks replay and account removal while unresolved. Confirmed acceptance, definitive rejection, and uncertain outcomes have separate recovery paths; fixtures cover redirect, throttle, transport failure, restart, cache failure, duplicate-send prevention, and cross-process cache lifecycle races. Live permission consent and Graph behavior are unverified under issue #28.
 
 ## Active risks
 
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep issue #3 open and leave issue #8's tenant-only sync evidence unverified.
 - Issue #9 remains open for real-window layout, operating-system clipboard behavior, and system-browser launch. Do not launch a GUI during this work.
 - The Issue #22 candidate is ready for stacked review on `candidate/issue-22-calendar-sync`, based on PR #47. Keep issue #22 open for manual Linux review of screen-reader announcements, focus, scrolling, and layout. Keep issue #6 open for live recurrence, time-zone, and all-day verification.
+- Issue #27 is ready for a stacked draft PR on the Issue #44 candidate. Keep issue #27 open until PR review and merge, and keep issue #28 open for tenant-only consent and Graph verification.
 - Fedora GNOME Keyring evidence does not establish behavior for every Secret Service implementation.
 - Windows and macOS build, runtime, credential storage, installation, and operating-system integration remain deferred.
 
@@ -36,7 +40,8 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 2. Keep issue #8 open until initial-sync completeness is verified against a Microsoft 365 test tenant.
 3. Keep issue #9 open until layout, clipboard behavior, and browser launch are verified in a safe Linux session.
 4. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
-5. After PR #50 merges, review the independent M3 follow-ups in PRs #51 and #52 for merge.
+5. Review the Issue #27 plain-text send candidate after its draft PR is opened on PR #52; tenant-only evidence remains under issue #28.
+6. After PR #50 merges, review the independent M3 follow-ups in PRs #51 and #52 for merge.
 
 ## Update rule
 

@@ -3,13 +3,15 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
 
 use einfach_mail_domain::{
-    AccountId, CalendarViewReference, FolderReference, MailFolder, MailMessage, MessageId,
+    AccountId, CalendarViewReference, FolderReference, MailDraft, MailFolder, MailMessage,
+    MailSendOperationId, MessageId, PendingMailSend,
 };
 
 use crate::{
     CalendarCache, CalendarProvider, CalendarSnapshot, CalendarSyncReport, CalendarWorkflow,
-    CalendarWorkflowError, MailCache, MailCacheError, MailProvider, MailSyncProgress,
-    MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError, OpenedMessage,
+    CalendarWorkflowError, MailCache, MailCacheError, MailProvider, MailSendOutcome,
+    MailSendResolutionError, MailSendWorkflowError, MailSyncProgress, MailSyncReport,
+    MailSyncState, MailWorkflow, MailWorkflowError, OpenedMessage,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -76,6 +78,27 @@ pub trait MailSession: Send + Sync {
         folder: &'a FolderReference,
         message_id: &'a MessageId,
     ) -> AccountSessionFuture<'a, Result<OpenedMessage, MailWorkflowError>>;
+
+    /// Sends a plain-text message and saves a body-free marker before dispatch.
+    fn send_message<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        draft: MailDraft,
+        created_at: SystemTime,
+    ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>>;
+
+    /// Reads the unresolved send marker without contacting Graph.
+    fn load_pending_send<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> AccountSessionFuture<'a, Result<Option<PendingMailSend>, MailCacheError>>;
+
+    /// Clears a marker after the user explicitly checks Sent Items.
+    fn resolve_pending_send<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        operation_id: MailSendOperationId,
+    ) -> AccountSessionFuture<'a, Result<(), MailSendResolutionError>>;
 
     /// Removes this session's account cache and its local encryption key.
     ///
@@ -253,6 +276,36 @@ where
         message_id: &'a MessageId,
     ) -> AccountSessionFuture<'a, Result<OpenedMessage, MailWorkflowError>> {
         Box::pin(MailWorkflow::open_message(self, folder, message_id))
+    }
+
+    fn send_message<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        draft: MailDraft,
+        created_at: SystemTime,
+    ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>> {
+        Box::pin(MailWorkflow::send_message(
+            self, account_id, draft, created_at,
+        ))
+    }
+
+    fn load_pending_send<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> AccountSessionFuture<'a, Result<Option<PendingMailSend>, MailCacheError>> {
+        Box::pin(MailWorkflow::load_pending_send(self, account_id))
+    }
+
+    fn resolve_pending_send<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        operation_id: MailSendOperationId,
+    ) -> AccountSessionFuture<'a, Result<(), MailSendResolutionError>> {
+        Box::pin(MailWorkflow::resolve_pending_send(
+            self,
+            account_id,
+            operation_id,
+        ))
     }
 
     fn remove_account_cache<'a>(

@@ -3,7 +3,7 @@
 use std::{future::Future, time::Duration};
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, MailFolder, MailMessage, MessageBody, MessageDeltaLink,
+    AccountId, FolderReference, MailDraft, MailFolder, MailMessage, MessageBody, MessageDeltaLink,
     MessageDeltaPage, MessageId,
 };
 use thiserror::Error;
@@ -41,6 +41,56 @@ pub enum MailOperationError {
     /// The response or traversal exceeded the provider's bounded work limits.
     #[error("the mail request exceeded its resource limits")]
     ResourceLimitExceeded,
+}
+
+/// A send failure classified by whether Graph could have accepted the message.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum MailSendProviderError {
+    /// The requested account has no usable provider session.
+    #[error("sign-in is required")]
+    SignInRequired,
+    /// The requested account does not match the provider session.
+    #[error("the message belongs to another account")]
+    AccountMismatch,
+    /// Microsoft denied delegated permission to send mail.
+    #[error("Microsoft denied permission to send mail")]
+    PermissionRequired,
+    /// Microsoft explicitly rejected the message request.
+    #[error("Microsoft rejected the message")]
+    Rejected,
+    /// Microsoft throttled the send request.
+    #[error("Microsoft is throttling message sends")]
+    RateLimited {
+        /// The advised delay, or `None` when Microsoft omitted a usable value.
+        retry_after: Option<Duration>,
+    },
+    /// A local credential or provider setup failed before the send request.
+    #[error("the mail service is unavailable")]
+    ServiceUnavailable,
+    /// The request may have reached Graph, but the app did not receive confirmation.
+    #[error("the send outcome is unknown")]
+    OutcomeUnknown,
+}
+
+impl From<AccountOperationError> for MailSendProviderError {
+    fn from(error: AccountOperationError) -> Self {
+        match error {
+            AccountOperationError::AccessDenied => Self::PermissionRequired,
+            AccountOperationError::AccountMismatch => Self::AccountMismatch,
+            AccountOperationError::AccountNotConnected | AccountOperationError::SignInExpired => {
+                Self::SignInRequired
+            }
+            AccountOperationError::AccessTokenRejected => Self::SignInRequired,
+            AccountOperationError::CredentialStoreUnavailable
+            | AccountOperationError::ProfileUnavailable
+            | AccountOperationError::ServiceUnavailable
+            | AccountOperationError::SignInFailed
+            | AccountOperationError::SignInCancelled
+            | AccountOperationError::AccountAlreadyConnected
+            | AccountOperationError::AccountOperationInProgress
+            | AccountOperationError::AccountStateUnavailable => Self::ServiceUnavailable,
+        }
+    }
 }
 
 /// Selects the initial request or the opaque provider link to resume.
@@ -159,6 +209,22 @@ pub trait MailProvider: Send + Sync {
         folder: &FolderReference,
         message_id: &MessageId,
     ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_;
+
+    /// Sends one plain-text message as the signed-in account.
+    ///
+    /// Implementations must submit exactly one request and return
+    /// [`MailSendProviderError::OutcomeUnknown`] when Graph may have accepted
+    /// the message without returning confirmation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a definitive provider failure when the request was rejected,
+    /// or an unknown outcome when acceptance cannot be established.
+    fn send_mail(
+        &self,
+        account_id: &AccountId,
+        draft: MailDraft,
+    ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_;
 }
 
 impl From<AccountOperationError> for MailOperationError {

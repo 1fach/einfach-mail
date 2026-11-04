@@ -6,6 +6,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use async_sqlite::{
     Client,
     rusqlite::{
@@ -21,11 +27,13 @@ use einfach_mail_domain::{
     AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
     CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
     CalendarOccurrenceTimePatch, CalendarViewReference, FolderId, FolderReference, MailFolder,
-    MailMessage, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink,
-    MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadata, MessageOrigin, ReadState,
+    MailMessage, MailRecipient, MailSendOperationId, MailSubject, Mailbox, MessageBody,
+    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
+    MessageId, MessageMetadata, MessageOrigin, PendingMailSend, ReadState,
 };
 use thiserror::Error;
 use time::{Date, OffsetDateTime};
+use uuid::Uuid;
 
 use crate::{schema, security};
 
@@ -41,6 +49,12 @@ pub(super) enum CacheFailure {
     MessageNotCached,
     #[error("the folder synchronization checkpoint changed")]
     SyncStateChanged,
+    #[error("an unresolved send marker already exists")]
+    SendAlreadyPending,
+    #[error("the pending send belongs to another operation")]
+    PendingSendMismatch,
+    #[error("the pending send marker does not exist")]
+    PendingSendNotFound,
 }
 
 impl From<async_sqlite::Error> for CacheFailure {
@@ -62,6 +76,9 @@ impl CacheFailure {
             Self::InvalidData => MailCacheError::InvalidData,
             Self::MessageNotCached => MailCacheError::MessageNotCached,
             Self::SyncStateChanged => MailCacheError::SyncStateChanged,
+            Self::SendAlreadyPending => MailCacheError::SendAlreadyPending,
+            Self::PendingSendMismatch => MailCacheError::PendingSendMismatch,
+            Self::PendingSendNotFound => MailCacheError::PendingSendNotFound,
         }
     }
 
@@ -70,6 +87,10 @@ impl CacheFailure {
             Self::Unavailable => CalendarCacheError::Unavailable,
             Self::InvalidData | Self::MessageNotCached => CalendarCacheError::InvalidData,
             Self::SyncStateChanged => CalendarCacheError::Unavailable,
+            Self::SendAlreadyPending => CalendarCacheError::PendingMailSend,
+            Self::PendingSendMismatch | Self::PendingSendNotFound => {
+                CalendarCacheError::InvalidData
+            }
         }
     }
 }
@@ -179,8 +200,11 @@ pub struct SqliteMailCache {
     account_id: AccountId,
     client: Client,
     database_path: std::path::PathBuf,
+    database_identity: security::DatabaseIdentity,
     lock_path: std::path::PathBuf,
     credential_account: String,
+    #[cfg(test)]
+    fail_next_pending_send_clear: Arc<AtomicBool>,
 }
 
 /// Opens and removes account-scoped [`SqliteMailCache`] values.
@@ -195,7 +219,7 @@ impl AccountCacheFactory for SqliteMailCacheFactory {
     }
 
     async fn remove_for_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
-        SqliteMailCache::remove_for_account(account_id)
+        SqliteMailCache::remove_for_account(account_id).await
     }
 }
 
@@ -214,8 +238,11 @@ impl SqliteMailCache {
             account_id,
             client: opened.client,
             database_path: opened.database_path,
+            database_identity: opened.database_identity,
             lock_path: opened.lock_path,
             credential_account: opened.credential_account,
+            #[cfg(test)]
+            fail_next_pending_send_clear: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -224,8 +251,13 @@ impl SqliteMailCache {
     /// # Errors
     ///
     /// Returns a cache error when the cache path or credential service cannot be updated.
-    pub fn remove_for_account(account_id: &AccountId) -> Result<(), MailCacheError> {
-        security::remove_account_without_open_client(account_id)
+    pub async fn remove_for_account(account_id: &AccountId) -> Result<(), MailCacheError> {
+        if security::account_database_exists(account_id)? {
+            let cache = Self::open_for_account(account_id.clone()).await?;
+            <Self as MailCache>::remove_account(&cache, account_id).await
+        } else {
+            security::remove_account_without_open_client(account_id).await
+        }
     }
 
     #[cfg(test)]
@@ -237,14 +269,24 @@ impl SqliteMailCache {
         let client = security::open_test_database(&database_path, key_byte)
             .await
             .expect("synthetic encrypted cache opens");
+        let database_identity = security::DatabaseIdentity::read(&database_path)
+            .expect("synthetic cache file identity is readable");
         let lock_path = database_path.with_extension("lock");
         Self {
             account_id,
             client,
             database_path,
+            database_identity,
             lock_path,
             credential_account: "synthetic-cache-key".to_owned(),
+            fail_next_pending_send_clear: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_next_pending_send_clear(&self) {
+        self.fail_next_pending_send_clear
+            .store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -573,18 +615,133 @@ impl MailCache for SqliteMailCache {
         }
     }
 
+    fn load_pending_send(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<Option<PendingMailSend>, MailCacheError>> + Send + '_ {
+        let validation = self.check_account(account_id);
+        let account_id = account_id.as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_and_then(move |connection| read_pending_send(connection, &account_id))
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn stage_pending_send(
+        &self,
+        pending: &PendingMailSend,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self
+            .check_account(pending.account_id())
+            .and_then(|()| timestamp_parts(pending.created_at()));
+        let pending = pending.clone();
+        let client = self.client.clone();
+        let database_path = self.database_path.clone();
+        let database_identity = self.database_identity;
+        let lock_path = self.lock_path.clone();
+        async move {
+            let (created_seconds, created_nanoseconds) = validation?;
+            let account_id = pending.account_id().as_str().to_owned();
+            let operation_id = pending.operation_id().as_uuid().to_string();
+            let recipient = pending.recipient().as_str().to_owned();
+            let subject = pending.subject().to_owned();
+            let _lock = security::lock_account_directory(&lock_path).await?;
+            if !database_identity.matches_path(&database_path)? {
+                return Err(MailCacheError::Unavailable);
+            }
+            client
+                .conn_mut_and_then(move |connection| {
+                    let changed = connection.execute(
+                        "INSERT OR IGNORE INTO mail_pending_send (
+                            account_id, operation_id, recipient, subject,
+                            created_seconds, created_nanoseconds
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            account_id,
+                            operation_id,
+                            recipient,
+                            subject,
+                            created_seconds,
+                            created_nanoseconds
+                        ],
+                    )?;
+                    if changed == 0 {
+                        return Err(CacheFailure::SendAlreadyPending);
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn clear_pending_send(
+        &self,
+        account_id: &AccountId,
+        operation_id: MailSendOperationId,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_account(account_id);
+        let account_id = account_id.as_str().to_owned();
+        let operation_id = operation_id.as_uuid().to_string();
+        let client = self.client.clone();
+        #[cfg(test)]
+        let fail_next_pending_send_clear = Arc::clone(&self.fail_next_pending_send_clear);
+        async move {
+            validation?;
+            #[cfg(test)]
+            if fail_next_pending_send_clear.swap(false, Ordering::Relaxed) {
+                return Err(MailCacheError::Unavailable);
+            }
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    let existing = transaction
+                        .query_row(
+                            "SELECT operation_id FROM mail_pending_send WHERE account_id = ?1",
+                            [account_id.as_str()],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?;
+                    match existing.as_deref() {
+                        None => return Err(CacheFailure::PendingSendNotFound),
+                        Some(existing) if existing != operation_id => {
+                            return Err(CacheFailure::PendingSendMismatch);
+                        }
+                        Some(_) => {}
+                    }
+                    transaction.execute(
+                        "DELETE FROM mail_pending_send
+                         WHERE account_id = ?1 AND operation_id = ?2",
+                        params![account_id, operation_id],
+                    )?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
     fn remove_account(
         &self,
         account_id: &AccountId,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
         let validation = self.check_account(account_id);
+        let account_id = account_id.clone();
         let client = self.client.clone();
         let lock_path = self.lock_path.clone();
         let database_path = self.database_path.clone();
         let credential_account = self.credential_account.clone();
         async move {
             validation?;
-            let _lock = security::lock_account_directory(&lock_path)?;
+            let _lock = security::lock_account_directory(&lock_path).await?;
+            if self.load_pending_send(&account_id).await?.is_some() {
+                return Err(MailCacheError::SendAlreadyPending);
+            }
             security::delete_database_files(&client, &database_path).await?;
             security::remove_credential(&credential_account)
         }
@@ -678,7 +835,11 @@ impl CalendarCache for SqliteMailCache {
                 MailCacheError::Unavailable
                 | MailCacheError::MissingEncryptionKey
                 | MailCacheError::MessageNotCached
-                | MailCacheError::SyncStateChanged => CalendarCacheError::Unavailable,
+                | MailCacheError::SyncStateChanged
+                | MailCacheError::PendingSendMismatch
+                | MailCacheError::PendingSendNotFound
+                | MailCacheError::OperationInProgress => CalendarCacheError::Unavailable,
+                MailCacheError::SendAlreadyPending => CalendarCacheError::PendingMailSend,
             })
         }
     }
@@ -1245,6 +1406,54 @@ fn insert_folder(
         [folder_id],
     )?;
     Ok(())
+}
+
+fn read_pending_send(
+    connection: &Connection,
+    account_id: &str,
+) -> CacheResult<Option<PendingMailSend>> {
+    let stored = connection
+        .query_row(
+            "SELECT operation_id, recipient, subject,
+                    created_seconds, created_nanoseconds
+             FROM mail_pending_send WHERE account_id = ?1",
+            [account_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    stored
+        .map(
+            |(operation_id, recipient, subject, created_seconds, created_nanoseconds)| {
+                let account_id = AccountId::try_from(account_id.to_owned())
+                    .map_err(|_| CacheFailure::InvalidData)?;
+                let operation_id = Uuid::parse_str(&operation_id)
+                    .map(MailSendOperationId::from_uuid)
+                    .map_err(|_| CacheFailure::InvalidData)?;
+                let recipient = recipient
+                    .parse::<MailRecipient>()
+                    .map_err(|_| CacheFailure::InvalidData)?;
+                let subject = subject
+                    .parse::<MailSubject>()
+                    .map_err(|_| CacheFailure::InvalidData)?;
+                let created_at = timestamp_from_parts(created_seconds, created_nanoseconds)?;
+                Ok(PendingMailSend::new(
+                    account_id,
+                    operation_id,
+                    recipient,
+                    subject,
+                    created_at,
+                ))
+            },
+        )
+        .transpose()
 }
 
 fn read_folders(connection: &Connection, account_id: &str) -> CacheResult<Vec<MailFolder>> {

@@ -3,7 +3,8 @@
 use std::{future::Future, time::SystemTime};
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, MailFolder, MailMessage, MessageBody, MessageDeltaLink,
+    AccountId, FolderReference, MailFolder, MailMessage, MailSendOperationId, MessageBody,
+    MessageDeltaLink, PendingMailSend,
 };
 use thiserror::Error;
 
@@ -30,6 +31,18 @@ pub enum MailCacheError {
     /// Another synchronization advanced the folder checkpoint.
     #[error("the folder synchronization checkpoint changed")]
     SyncStateChanged,
+    /// Another unresolved send already exists for this account.
+    #[error("a previous mail send needs to be resolved")]
+    SendAlreadyPending,
+    /// The operation ID does not match the account's pending send marker.
+    #[error("the pending mail send does not match the requested operation")]
+    PendingSendMismatch,
+    /// The account has no pending send marker with the requested ID.
+    #[error("the pending mail send no longer exists")]
+    PendingSendNotFound,
+    /// An active account operation prevents cache removal.
+    #[error("an account operation is still active")]
+    OperationInProgress,
 }
 
 /// A folder's account-wide cutoff and message delta checkpoints.
@@ -294,12 +307,52 @@ pub trait MailCache: Send + Sync {
         body: MessageBody,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
 
+    /// Loads the account's unresolved send marker without message content.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::InvalidData`] for malformed metadata, or
+    /// [`MailCacheError::Unavailable`] when the cache cannot be read.
+    fn load_pending_send(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<Option<PendingMailSend>, MailCacheError>> + Send + '_;
+
+    /// Stages one body-free send marker before the provider request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::SendAlreadyPending`] when a marker already exists,
+    /// or [`MailCacheError::Unavailable`] when the write fails.
+    fn stage_pending_send(
+        &self,
+        pending: &PendingMailSend,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
+    /// Clears only the marker with the matching operation identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::PendingSendMismatch`] for a different operation,
+    /// [`MailCacheError::PendingSendNotFound`] when no marker exists, or
+    /// [`MailCacheError::Unavailable`] when the transaction fails.
+    fn clear_pending_send(
+        &self,
+        account_id: &AccountId,
+        operation_id: MailSendOperationId,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
     /// Removes an account's encrypted data and its local key.
     ///
     /// # Errors
     ///
-    /// Returns [`MailCacheError::AccountMismatch`] for another account or
-    /// [`MailCacheError::Unavailable`] when the credential or files cannot be removed.
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::SendAlreadyPending`] while an outcome is unresolved,
+    /// [`MailCacheError::OperationInProgress`] while a send is active, or
+    /// [`MailCacheError::Unavailable`] when the cache cannot be inspected or removed.
     fn remove_account(
         &self,
         account_id: &AccountId,

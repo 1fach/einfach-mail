@@ -57,6 +57,15 @@ pub enum AccountOperationError {
     AccountStateUnavailable,
 }
 
+/// The delegated permissions requested during same-account authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountPermissionRequest {
+    /// Requests the permissions already used by the connected account.
+    Current,
+    /// Adds delegated permission to send mail as the signed-in account.
+    SendMail,
+}
+
 /// Signals cancellation for one account connection or permission renewal.
 ///
 /// A request cancels asynchronous authorization until a provider starts the
@@ -179,7 +188,7 @@ pub trait AccountProvider: Send + Sync {
         cancellation: AccountOperationCancellation,
     ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_;
 
-    /// Requests the current delegated permissions again for the active account.
+    /// Requests the selected delegated permissions again for the active account.
     ///
     /// Implementations must preserve the existing credential and session when
     /// authorization is cancelled, denied, or returns another account.
@@ -195,6 +204,7 @@ pub trait AccountProvider: Send + Sync {
     fn reauthorize_account(
         &self,
         expected_account_id: &AccountId,
+        request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
     ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_;
 
@@ -289,6 +299,8 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     ///
     /// The provider receives the active account ID and must verify that the
     /// browser flow returns the same identity before replacing credentials.
+    /// `request` selects the existing permission set or adds delegated
+    /// `Mail.Send` access.
     ///
     /// # Errors
     ///
@@ -304,9 +316,11 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     pub async fn reauthorize_account(
         &self,
         expected_account_id: &AccountId,
+        request: AccountPermissionRequest,
     ) -> Result<AccountProfile, AccountOperationError> {
         self.reauthorize_account_with_cancellation(
             expected_account_id,
+            request,
             AccountOperationCancellation::new(),
         )
         .await
@@ -314,8 +328,8 @@ impl<P: AccountProvider> AccountWorkflow<P> {
 
     /// Renews consent with cancellation ordered against credential persistence.
     ///
-    /// `cancellation` controls the provider operation through the credential
-    /// commit boundary.
+    /// `request` selects the delegated permissions to request. `cancellation`
+    /// controls the provider operation through the credential commit boundary.
     ///
     /// # Errors
     ///
@@ -323,13 +337,14 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     pub async fn reauthorize_account_with_cancellation(
         &self,
         expected_account_id: &AccountId,
+        request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
     ) -> Result<AccountProfile, AccountOperationError> {
         let operation = self.begin(AccountOperation::Reauthorizing)?;
         self.ensure_active_account_matches(expected_account_id)?;
         let reauthorization_result = self
             .provider
-            .reauthorize_account(expected_account_id, cancellation)
+            .reauthorize_account(expected_account_id, request, cancellation)
             .await;
         if let Ok(profile) = &reauthorization_result {
             if profile.id() != expected_account_id {
@@ -579,6 +594,7 @@ mod tests {
         fn reauthorize_account(
             &self,
             _: &AccountId,
+            _: super::AccountPermissionRequest,
             _: super::AccountOperationCancellation,
         ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
         {
@@ -622,6 +638,7 @@ mod tests {
         fn reauthorize_account(
             &self,
             _: &AccountId,
+            _: super::AccountPermissionRequest,
             _: super::AccountOperationCancellation,
         ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
         {
@@ -714,7 +731,9 @@ mod tests {
 
         provider.pause_sign_out.store(false, Ordering::SeqCst);
         assert_eq!(
-            workflow.reauthorize_account(profile.id()).await,
+            workflow
+                .reauthorize_account(profile.id(), super::AccountPermissionRequest::Current)
+                .await,
             Ok(profile)
         );
         assert_eq!(workflow.sign_out().await, Ok(()));
@@ -729,7 +748,7 @@ mod tests {
             .expect("synthetic profile is available");
 
         let renewed = workflow
-            .reauthorize_account(profile.id())
+            .reauthorize_account(profile.id(), super::AccountPermissionRequest::Current)
             .await
             .expect("synthetic consent renewal succeeds");
 
@@ -746,7 +765,9 @@ mod tests {
         let expected_account =
             AccountId::try_from("synthetic-account".to_owned()).expect("ID is valid");
         assert_eq!(
-            workflow.reauthorize_account(&expected_account).await,
+            workflow
+                .reauthorize_account(&expected_account, super::AccountPermissionRequest::Current)
+                .await,
             Err(AccountOperationError::AccountNotConnected)
         );
 
@@ -756,7 +777,9 @@ mod tests {
             .expect("synthetic profile is available");
         let other_account = AccountId::try_from("other-account".to_owned()).expect("ID is valid");
         assert_eq!(
-            workflow.reauthorize_account(&other_account).await,
+            workflow
+                .reauthorize_account(&other_account, super::AccountPermissionRequest::SendMail)
+                .await,
             Err(AccountOperationError::AccountMismatch)
         );
     }

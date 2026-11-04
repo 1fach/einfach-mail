@@ -7,16 +7,17 @@ use std::{
 };
 
 use einfach_mail_domain::{
-    AccountId, CalendarViewReference, FolderReference, MailFolder, MailMessage, MessageBody,
-    MessageDeltaProgress, MessageId,
+    AccountId, CalendarViewReference, FolderReference, MailDraft, MailFolder, MailMessage,
+    MailSendOperationId, MessageBody, MessageDeltaProgress, MessageId, PendingMailSend,
 };
 use thiserror::Error;
 
 use crate::{
     AccountCacheFactory, AccountSession, AccountSessionFactory, AccountSessionFuture,
     CalendarProvider, CalendarSession, CalendarWorkflow, MailCache, MailCacheError,
-    MailOperationError, MailProvider, MailSession, MessageBodyForDisplay, MessageDeltaResponse,
-    account_session::AccountSessionWorkflow, prepare_message_body_for_display,
+    MailOperationError, MailProvider, MailSendProviderError, MailSession, MessageBodyForDisplay,
+    MessageDeltaResponse, account_session::AccountSessionWorkflow,
+    prepare_message_body_for_display,
 };
 
 const INITIAL_SYNC_WINDOW: Duration = Duration::from_secs(90 * 24 * 60 * 60);
@@ -53,6 +54,64 @@ pub enum MailWorkflowError {
     ClockUnavailable,
     /// The synchronization reservation could not be read or released.
     #[error("the mail workflow state is unavailable")]
+    StateUnavailable,
+}
+
+/// A send result that needs no further provider request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MailSendOutcome {
+    /// Graph accepted the message and the local marker was removed.
+    Accepted,
+    /// Graph accepted the message, but the local marker remains for resolution.
+    AcceptedNeedsResolution(PendingMailSend),
+    /// Graph may have accepted the message; the marker remains and must not be replayed.
+    OutcomeUnknown(PendingMailSend),
+}
+
+/// A user-safe error from staging, submitting, or explicitly resolving a send.
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum MailSendWorkflowError {
+    /// The encrypted local cache could not read or update the operation marker.
+    #[error("the local mail cache could not update the send operation")]
+    Cache(#[from] MailCacheError),
+    /// The provider explicitly rejected the message before accepting it.
+    #[error("the mail provider rejected the send operation")]
+    Provider(#[from] MailSendProviderError),
+    /// The provider rejected the message, but its local marker could not be cleared.
+    #[error("the provider rejected the message but the local send marker remains")]
+    RejectedNeedsResolution {
+        /// The rejected operation that remains in the cache.
+        pending: PendingMailSend,
+        /// The provider's definitive rejection.
+        provider: MailSendProviderError,
+        /// The failure that prevented clearing the marker.
+        cache: MailCacheError,
+    },
+    /// The account already has a send operation that needs user resolution.
+    #[error("a previous send operation must be resolved first")]
+    PendingResolutionRequired(PendingMailSend),
+    /// Another send or mail operation already owns the account.
+    #[error("another mail operation is in progress")]
+    OperationInProgress,
+    /// The in-memory send reservation could not be read or updated.
+    #[error("the mail send workflow state is unavailable")]
+    StateUnavailable,
+}
+
+/// A user-safe error from clearing an unresolved send marker.
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum MailSendResolutionError {
+    /// The encrypted local cache could not read or update the operation marker.
+    #[error("the local mail cache could not update the send operation")]
+    Cache(#[from] MailCacheError),
+    /// Another send operation remains unresolved.
+    #[error("a previous send operation must be resolved first")]
+    PendingResolutionRequired(PendingMailSend),
+    /// Another send or mail operation already owns the account.
+    #[error("another mail operation is in progress")]
+    OperationInProgress,
+    /// The in-memory send reservation could not be read or updated.
+    #[error("the mail send workflow state is unavailable")]
     StateUnavailable,
 }
 
@@ -135,7 +194,6 @@ pub struct AccountSessionWorkflowFactory<P, F> {
     provider: P,
     cache_factory: F,
     reservations: Arc<Mutex<ActiveOperations>>,
-    calendar_reservations: Arc<Mutex<HashSet<CalendarViewReference>>>,
 }
 
 impl<P, F> AccountSessionWorkflowFactory<P, F> {
@@ -146,7 +204,6 @@ impl<P, F> AccountSessionWorkflowFactory<P, F> {
             provider,
             cache_factory,
             reservations: Arc::new(Mutex::new(ActiveOperations::default())),
-            calendar_reservations: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -175,6 +232,148 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             cache,
             reservations,
         }
+    }
+
+    /// Returns the account's unresolved send marker without contacting Graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the account does not own the cache or the
+    /// encrypted marker cannot be read.
+    pub async fn load_pending_send(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Option<PendingMailSend>, MailCacheError> {
+        self.cache.load_pending_send(account_id).await
+    }
+
+    /// Stages and submits one message without retrying ambiguous outcomes.
+    ///
+    /// The body remains in memory and is never written to the cache. A
+    /// confirmed acceptance clears the marker; an unknown response leaves it
+    /// for explicit user resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error for a definitive rejection, a cache error
+    /// before dispatch, [`MailSendWorkflowError::PendingResolutionRequired`]
+    /// when another send remains unresolved, or
+    /// [`MailSendWorkflowError::OperationInProgress`] when the account is busy.
+    pub async fn send_message(
+        &self,
+        account_id: &AccountId,
+        draft: MailDraft,
+        created_at: SystemTime,
+    ) -> Result<MailSendOutcome, MailSendWorkflowError> {
+        let _reservation = self.reserve_send(account_id)?;
+        self.ensure_no_pending_send(account_id).await?;
+        let pending =
+            draft.pending_send(account_id.clone(), MailSendOperationId::new(), created_at);
+        self.stage_send_marker(&pending).await?;
+        self.submit_staged_send(account_id, draft, pending).await
+    }
+
+    async fn ensure_no_pending_send(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<(), MailSendWorkflowError> {
+        if let Some(pending) = self.cache.load_pending_send(account_id).await? {
+            return Err(MailSendWorkflowError::PendingResolutionRequired(pending));
+        }
+        Ok(())
+    }
+
+    async fn stage_send_marker(
+        &self,
+        pending: &PendingMailSend,
+    ) -> Result<(), MailSendWorkflowError> {
+        match self.cache.stage_pending_send(pending).await {
+            Ok(()) => Ok(()),
+            Err(MailCacheError::SendAlreadyPending) => {
+                match self.cache.load_pending_send(pending.account_id()).await? {
+                    Some(pending) => Err(MailSendWorkflowError::PendingResolutionRequired(pending)),
+                    None => Err(MailCacheError::SendAlreadyPending.into()),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn submit_staged_send(
+        &self,
+        account_id: &AccountId,
+        draft: MailDraft,
+        pending: PendingMailSend,
+    ) -> Result<MailSendOutcome, MailSendWorkflowError> {
+        match self.provider.send_mail(account_id, draft).await {
+            Ok(()) => self.finish_accepted_send(account_id, pending).await,
+            Err(MailSendProviderError::OutcomeUnknown) => {
+                Ok(MailSendOutcome::OutcomeUnknown(pending))
+            }
+            Err(error) => {
+                match self
+                    .cache
+                    .clear_pending_send(account_id, pending.operation_id())
+                    .await
+                {
+                    Ok(()) => Err(MailSendWorkflowError::Provider(error)),
+                    Err(cache) => Err(MailSendWorkflowError::RejectedNeedsResolution {
+                        pending,
+                        provider: error,
+                        cache,
+                    }),
+                }
+            }
+        }
+    }
+
+    async fn finish_accepted_send(
+        &self,
+        account_id: &AccountId,
+        pending: PendingMailSend,
+    ) -> Result<MailSendOutcome, MailSendWorkflowError> {
+        match self
+            .cache
+            .clear_pending_send(account_id, pending.operation_id())
+            .await
+        {
+            Ok(()) => Ok(MailSendOutcome::Accepted),
+            Err(_) => Ok(MailSendOutcome::AcceptedNeedsResolution(pending)),
+        }
+    }
+
+    /// Clears a matching unresolved marker after explicit user review.
+    ///
+    /// This method never sends or retries a message.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error for an account mismatch or failed transaction,
+    /// [`MailSendResolutionError::PendingResolutionRequired`] when another
+    /// operation is pending, or [`MailSendResolutionError::OperationInProgress`]
+    /// while another mail operation owns the account.
+    pub async fn resolve_pending_send(
+        &self,
+        account_id: &AccountId,
+        operation_id: MailSendOperationId,
+    ) -> Result<(), MailSendResolutionError> {
+        let _reservation = self.reserve_send(account_id).map_err(|error| match error {
+            MailSendWorkflowError::OperationInProgress => {
+                MailSendResolutionError::OperationInProgress
+            }
+            MailSendWorkflowError::StateUnavailable => MailSendResolutionError::StateUnavailable,
+            _ => MailSendResolutionError::StateUnavailable,
+        })?;
+        let Some(pending) = self.cache.load_pending_send(account_id).await? else {
+            return Ok(());
+        };
+        if pending.operation_id() != operation_id {
+            return Err(MailSendResolutionError::PendingResolutionRequired(pending));
+        }
+        self.cache
+            .clear_pending_send(account_id, operation_id)
+            .await?;
+        Ok(())
     }
 
     /// Synchronizes every visible folder and commits each page with its checkpoint.
@@ -388,6 +587,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// Returns a cache error when the account does not own this cache or removal fails.
     pub async fn remove_account_cache(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
+        let _reservation =
+            reserve_account(&self.reservations, account_id).map_err(MailCacheError::from)?;
         self.cache.remove_account(account_id).await?;
         Ok(())
     }
@@ -415,22 +616,20 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         &self,
         account: &AccountId,
     ) -> Result<OperationReservation, MailWorkflowError> {
-        let mut reservations = self
-            .reservations
-            .lock()
-            .map_err(|_| MailWorkflowError::StateUnavailable)?;
-        if reservations.accounts.contains(account)
-            || reservations
-                .folders
-                .iter()
-                .any(|folder| folder.account_id() == account)
-        {
-            return Err(MailWorkflowError::OperationInProgress);
-        }
-        reservations.accounts.insert(account.clone());
-        Ok(OperationReservation {
-            reservations: Arc::clone(&self.reservations),
-            key: ReservationKey::Account(account.clone()),
+        reserve_account(&self.reservations, account).map_err(|error| match error {
+            AccountReservationError::OperationInProgress => MailWorkflowError::OperationInProgress,
+            AccountReservationError::StateUnavailable => MailWorkflowError::StateUnavailable,
+        })
+    }
+
+    fn reserve_send(
+        &self,
+        account: &AccountId,
+    ) -> Result<OperationReservation, MailSendWorkflowError> {
+        self.reserve_account(account).map_err(|error| match error {
+            MailWorkflowError::OperationInProgress => MailSendWorkflowError::OperationInProgress,
+            MailWorkflowError::StateUnavailable => MailSendWorkflowError::StateUnavailable,
+            _ => MailSendWorkflowError::StateUnavailable,
         })
     }
 }
@@ -455,7 +654,7 @@ where
                 Arc::new(CalendarWorkflow::with_reservations(
                     self.provider.clone(),
                     cache,
-                    Arc::clone(&self.calendar_reservations),
+                    Arc::clone(&self.reservations),
                 ));
             Ok(Arc::new(AccountSessionWorkflow::new(
                 mail_workflow,
@@ -468,8 +667,53 @@ where
         &'a self,
         account_id: &'a AccountId,
     ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
-        Box::pin(self.cache_factory.remove_for_account(account_id))
+        Box::pin(async move {
+            let _reservation =
+                reserve_account(&self.reservations, account_id).map_err(MailCacheError::from)?;
+            self.cache_factory.remove_for_account(account_id).await
+        })
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum AccountReservationError {
+    OperationInProgress,
+    StateUnavailable,
+}
+
+impl From<AccountReservationError> for MailCacheError {
+    fn from(error: AccountReservationError) -> Self {
+        match error {
+            AccountReservationError::OperationInProgress => Self::OperationInProgress,
+            AccountReservationError::StateUnavailable => Self::Unavailable,
+        }
+    }
+}
+
+pub(crate) fn reserve_account(
+    active: &Arc<Mutex<ActiveOperations>>,
+    account: &AccountId,
+) -> Result<OperationReservation, AccountReservationError> {
+    let mut reservations = active
+        .lock()
+        .map_err(|_| AccountReservationError::StateUnavailable)?;
+    if reservations.accounts.contains(account)
+        || reservations
+            .folders
+            .iter()
+            .any(|folder| folder.account_id() == account)
+        || reservations
+            .calendar_views
+            .iter()
+            .any(|view| view.account_id() == account)
+    {
+        return Err(AccountReservationError::OperationInProgress);
+    }
+    reservations.accounts.insert(account.clone());
+    Ok(OperationReservation {
+        reservations: Arc::clone(active),
+        key: ReservationKey::Account(account.clone()),
+    })
 }
 
 fn request_cursor(
@@ -481,18 +725,38 @@ fn request_cursor(
     }
 }
 
+pub(crate) fn reserve_calendar_view(
+    active: &Arc<Mutex<ActiveOperations>>,
+    view: &CalendarViewReference,
+) -> Result<OperationReservation, AccountReservationError> {
+    let mut reservations = active
+        .lock()
+        .map_err(|_| AccountReservationError::StateUnavailable)?;
+    if reservations.accounts.contains(view.account_id())
+        || !reservations.calendar_views.insert(view.clone())
+    {
+        return Err(AccountReservationError::OperationInProgress);
+    }
+    Ok(OperationReservation {
+        reservations: Arc::clone(active),
+        key: ReservationKey::CalendarView(view.clone()),
+    })
+}
+
 #[derive(Default)]
-struct ActiveOperations {
+pub(crate) struct ActiveOperations {
     accounts: HashSet<AccountId>,
     folders: HashSet<FolderReference>,
+    calendar_views: HashSet<CalendarViewReference>,
 }
 
 enum ReservationKey {
     Account(AccountId),
     Folder(FolderReference),
+    CalendarView(CalendarViewReference),
 }
 
-struct OperationReservation {
+pub(crate) struct OperationReservation {
     reservations: Arc<Mutex<ActiveOperations>>,
     key: ReservationKey,
 }
@@ -506,6 +770,9 @@ impl Drop for OperationReservation {
                 }
                 ReservationKey::Folder(folder) => {
                     reservations.folders.remove(folder);
+                }
+                ReservationKey::CalendarView(view) => {
+                    reservations.calendar_views.remove(view);
                 }
             }
         }

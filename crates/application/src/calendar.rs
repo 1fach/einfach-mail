@@ -1,13 +1,20 @@
 //! Calendar provider and cache contracts used by read-only workflows.
 
-use std::{future::Future, time::SystemTime};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 
 use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarOccurrence, CalendarViewReference,
 };
 use thiserror::Error;
 
-use crate::AccountOperationError;
+use crate::{
+    AccountOperationError,
+    mail_workflow::{AccountReservationError, ActiveOperations, reserve_calendar_view},
+};
 
 /// A user-safe category for a calendar provider failure.
 #[non_exhaustive]
@@ -120,6 +127,9 @@ pub enum CalendarCacheError {
     /// The requested view belongs to another cache account.
     #[error("the local calendar cache belongs to another account")]
     AccountMismatch,
+    /// An unresolved send marker prevents removal of the shared account cache.
+    #[error("a pending mail send must be resolved before removing the account cache")]
+    PendingMailSend,
 }
 
 /// An account and view's completed delta cursor and resumable page checkpoint.
@@ -253,8 +263,9 @@ pub trait CalendarCache: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`CalendarCacheError::AccountMismatch`] for another account or
-    /// [`CalendarCacheError::Unavailable`] when cache removal fails.
+    /// Returns [`CalendarCacheError::AccountMismatch`] for another account,
+    /// [`CalendarCacheError::PendingMailSend`] while a send outcome is unresolved,
+    /// or [`CalendarCacheError::Unavailable`] when cache removal fails.
     fn remove_account(
         &self,
         account_id: &AccountId,
@@ -270,9 +281,9 @@ pub enum CalendarWorkflowError {
     /// The encrypted local cache could not read or commit events.
     #[error("the local calendar cache is unavailable")]
     Cache(#[from] CalendarCacheError),
-    /// Another synchronization round already owns this view.
-    #[error("this calendar view is already synchronizing")]
-    SyncInProgress,
+    /// Another mail or calendar operation already owns this account.
+    #[error("another mail or calendar operation is active for this account")]
+    OperationInProgress,
     /// The provider repeated a cursor before completing the current round.
     #[error("the calendar service repeated a synchronization cursor")]
     RepeatedCursor,
@@ -390,8 +401,7 @@ where
 {
     provider: P,
     cache: C,
-    active_views:
-        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<CalendarViewReference>>>,
+    reservations: Arc<Mutex<ActiveOperations>>,
 }
 
 impl<P, C> CalendarWorkflow<P, C>
@@ -405,21 +415,19 @@ where
         Self::with_reservations(
             provider,
             cache,
-            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            Arc::new(Mutex::new(ActiveOperations::default())),
         )
     }
 
     pub(crate) fn with_reservations(
         provider: P,
         cache: C,
-        active_views: std::sync::Arc<
-            std::sync::Mutex<std::collections::HashSet<CalendarViewReference>>,
-        >,
+        reservations: Arc<Mutex<ActiveOperations>>,
     ) -> Self {
         Self {
             provider,
             cache,
-            active_views,
+            reservations,
         }
     }
 
@@ -446,12 +454,22 @@ where
     ///
     /// Returns a provider or cache error when a page cannot be loaded or
     /// committed, [`CalendarWorkflowError::RepeatedCursor`] for a looped link,
-    /// or a page or response limit error while preserving resumable state.
+    /// a page or response limit error while preserving resumable state, or
+    /// [`CalendarWorkflowError::OperationInProgress`] when another operation
+    /// owns the account.
     pub async fn sync_view(
         &self,
         view: &CalendarViewReference,
     ) -> Result<CalendarSyncReport, CalendarWorkflowError> {
-        let _reservation = self.reserve_view(view)?;
+        let _reservation =
+            reserve_calendar_view(&self.reservations, view).map_err(|error| match error {
+                AccountReservationError::OperationInProgress => {
+                    CalendarWorkflowError::OperationInProgress
+                }
+                AccountReservationError::StateUnavailable => {
+                    CalendarWorkflowError::StateUnavailable
+                }
+            })?;
         let state = self.cache.ensure_view(view).await?;
         self.sync_round(view, state).await
     }
@@ -489,48 +507,6 @@ where
             .await?;
         round.commit(state);
         Ok(round.is_complete())
-    }
-
-    /// Removes the account's local cache and encryption key through the cache port.
-    ///
-    /// # Errors
-    ///
-    /// Returns a cache error when the account does not own this cache or removal fails.
-    pub async fn remove_account_cache(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<(), CalendarCacheError> {
-        self.cache.remove_account(account_id).await
-    }
-
-    fn reserve_view(
-        &self,
-        view: &CalendarViewReference,
-    ) -> Result<CalendarViewReservation<'_>, CalendarWorkflowError> {
-        let mut active_views = self
-            .active_views
-            .lock()
-            .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
-        if !active_views.insert(view.clone()) {
-            return Err(CalendarWorkflowError::SyncInProgress);
-        }
-        Ok(CalendarViewReservation {
-            active_views: &self.active_views,
-            view: view.clone(),
-        })
-    }
-}
-
-struct CalendarViewReservation<'a> {
-    active_views: &'a std::sync::Mutex<std::collections::HashSet<CalendarViewReference>>,
-    view: CalendarViewReference,
-}
-
-impl Drop for CalendarViewReservation<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut active_views) = self.active_views.lock() {
-            active_views.remove(&self.view);
-        }
     }
 }
 

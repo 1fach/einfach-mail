@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 mod account_view;
 mod calendar_view;
+mod mail_composer;
 mod mail_view;
 
 use account_view::{AccountView, SetupIssue};
@@ -85,6 +86,7 @@ fn main() -> Result<(), std::io::Error> {
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
         mail_view::bind_message_navigation_keys(cx);
+        mail_composer::bind_mail_composer_keys(cx);
         let account_services = account_services_from_environment();
 
         let window_open_attempt = open_window(WindowOptions::default(), cx, |_, cx| {

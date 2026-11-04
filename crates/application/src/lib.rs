@@ -11,7 +11,8 @@ mod mail_cache;
 mod mail_workflow;
 
 pub use account::{
-    AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
+    AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
+    AccountWorkflow,
 };
 pub use account_session::{
     AccountCacheFactory, AccountSession, AccountSessionFactory, AccountSessionFuture,
@@ -27,11 +28,11 @@ pub use email_html::{
     prepare_message_body_for_display,
 };
 pub use mail::{
-    MailOperationError, MailProvider, MessageDeltaPageResponse, MessageDeltaRequest,
-    MessageDeltaResponse,
+    MailOperationError, MailProvider, MailSendProviderError, MessageDeltaPageResponse,
+    MessageDeltaRequest, MessageDeltaResponse,
 };
 pub use mail_cache::{MailCache, MailCacheError, MailSyncState};
 pub use mail_workflow::{
-    AccountSessionWorkflowFactory, MailSyncProgress, MailSyncReport, MailWorkflow,
-    MailWorkflowError, OpenedMessage,
+    AccountSessionWorkflowFactory, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError,
+    MailSyncProgress, MailSyncReport, MailWorkflow, MailWorkflowError, OpenedMessage,
 };
