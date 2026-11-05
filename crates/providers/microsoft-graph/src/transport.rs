@@ -699,19 +699,15 @@ async fn send_once(
         {
             client.get(request.url.as_str())
         }
-        (GraphRequestMethod::PostJson(body), operation)
-            if matches!(
-                operation,
-                GraphOperation::MailSend
-                    | GraphOperation::MessageMove
-                    | GraphOperation::CalendarEventCreate
-            ) =>
-        {
-            client
-                .post(request.url.as_str())
-                .header(CONTENT_TYPE, "application/json")
-                .body(Arc::clone(body).to_vec())
-        }
+        (
+            GraphRequestMethod::PostJson(body),
+            GraphOperation::MailSend
+            | GraphOperation::MessageMove
+            | GraphOperation::CalendarEventCreate,
+        ) => client
+            .post(request.url.as_str())
+            .header(CONTENT_TYPE, "application/json")
+            .body(Arc::clone(body).to_vec()),
         (GraphRequestMethod::PatchJson(body), GraphOperation::MessageUpdate) => client
             .patch(request.url.as_str())
             .header(CONTENT_TYPE, "application/json")
