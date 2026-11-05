@@ -600,11 +600,6 @@ async fn response_result(
             _ => Err(GraphError::SendOutcomeUnknown),
         });
     }
-    if matches!(operation, GraphOperation::CalendarEventRead)
-        && response.status() == StatusCode::NOT_FOUND
-    {
-        return Some(Err(GraphError::CalendarEventChanged));
-    }
     if matches!(operation, GraphOperation::CalendarEventCreate) {
         return calendar_event_create_response_result(response, reply).await;
     }
