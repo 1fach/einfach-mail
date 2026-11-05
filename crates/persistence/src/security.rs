@@ -71,7 +71,7 @@ async fn open_locked_database(
     credential_account: String,
 ) -> Result<OpenDatabase, MailCacheError> {
     let credential = credential_entry(&credential_account)?;
-    let key = load_or_create_key(&credential, encrypted_data_exists(&database_path))?;
+    let key = load_or_create_key(&credential, encrypted_data_exists(&database_path)?)?;
     secure_database_file(&database_path)?;
     let client = open_encrypted_client(&database_path, &key).await?;
     schema::apply(&client)
@@ -185,10 +185,18 @@ fn secure_database_file(path: &Path) -> Result<(), MailCacheError> {
         .map_err(|_| MailCacheError::Unavailable)
 }
 
-fn encrypted_data_exists(database_path: &Path) -> bool {
-    database_path.exists()
-        || with_suffix(database_path, "-wal").exists()
-        || with_suffix(database_path, "-shm").exists()
+fn encrypted_data_exists(database_path: &Path) -> Result<bool, MailCacheError> {
+    if path_exists(database_path)? {
+        return Ok(true);
+    }
+    if path_exists(&with_suffix(database_path, "-wal"))? {
+        return Ok(true);
+    }
+    path_exists(&with_suffix(database_path, "-shm"))
+}
+
+fn path_exists(path: &Path) -> Result<bool, MailCacheError> {
+    path.try_exists().map_err(|_| MailCacheError::Unavailable)
 }
 
 pub(super) fn credential_entry(account: &str) -> Result<Entry, MailCacheError> {
@@ -218,7 +226,7 @@ pub(super) fn remove_account_without_open_client(
 ) -> Result<(), MailCacheError> {
     let (database_path, lock_path, credential_account) = cache_paths(account_id)?;
     if let Some(account_directory) = database_path.parent()
-        && account_directory.exists()
+        && path_exists(account_directory)?
     {
         let _lock = lock_account_directory(&lock_path)?;
         remove_database_files(&database_path)?;
@@ -277,6 +285,20 @@ mod tests {
         assert!(!database.exists());
         assert!(!with_suffix(&database, "-wal").exists());
         assert!(!with_suffix(&database, "-shm").exists());
+    }
+
+    #[test]
+    fn cache_presence_check_fails_closed_when_a_parent_is_not_a_directory() {
+        let directory = tempfile::tempdir().expect("synthetic cache directory is created");
+        let blocked_parent = directory.path().join("blocked-parent");
+        fs::write(&blocked_parent, b"synthetic non-directory parent")
+            .expect("synthetic non-directory parent is created");
+        let database = blocked_parent.join("mail.sqlite3");
+
+        assert!(matches!(
+            super::encrypted_data_exists(&database),
+            Err(MailCacheError::Unavailable)
+        ));
     }
 
     #[test]

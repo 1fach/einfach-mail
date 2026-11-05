@@ -10,6 +10,8 @@ The desktop removes an account's encrypted cache before asking the provider to d
 
 `security::remove_database_files` removed the main database before its `-wal` and `-shm` sidecars. If either sidecar could not be removed, the cache key remained but the database needed for a safe retry was gone. Removing the sidecars first keeps the encrypted database available until all sidecar cleanup succeeds.
 
+A later source review found that cache-presence checks used `Path::exists()`, which hides filesystem inspection errors. An inaccessible account directory could therefore look absent, causing no-open-client sign-out to skip file cleanup and remove the existing key.
+
 SQLite normally checkpoints the write-ahead log and removes its sidecars when the last connection closes. The persistence adapter still removes any remaining sidecars after close. See [SQLite write-ahead logging](https://www.sqlite.org/wal.html).
 
 ## Decision
@@ -17,6 +19,7 @@ SQLite normally checkpoints the write-ahead log and removes its sidecars when th
 - Close the SQLCipher client before removing cache files.
 - Remove the `-wal` and `-shm` sidecars before removing the main database.
 - Remove the main database only after both sidecar removals succeed.
+- Treat only a confirmed missing path as absent. Propagate other filesystem inspection errors before creating or removing the cache key.
 - Keep the cache key and Microsoft refresh token when cache-file removal fails. Return the existing cache error so the user can repair the filesystem condition and retry.
 - Keep the recovery test synthetic. Do not use real account data or Graph requests.
 
@@ -31,6 +34,7 @@ SQLite normally checkpoints the write-ahead log and removes its sidecars when th
 ## Consequences
 
 - Cache removal leaves the encrypted database and key in place if either sidecar cannot be removed.
+- Filesystem inspection errors stop cache opening and sign-out before the key can be created or deleted.
 - After the filesystem problem is cleared, the encrypted database can be reopened and removal retried.
 - If provider credential deletion fails, the saved credential, active provider session, and account profile remain available for another sign-out attempt.
 - Missing files remain safe to remove repeatedly.
