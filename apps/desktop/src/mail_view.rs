@@ -2718,6 +2718,7 @@ mod tests {
         updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
         flag_updates: Arc<Mutex<Vec<(MessageId, FollowUpFlagStatus)>>>,
         sync_failure: bool,
+        offline: OfflineProvider,
     }
 
     impl ReadStateProvider {
@@ -2730,6 +2731,9 @@ mod tests {
                 updates,
                 flag_updates: Arc::new(Mutex::new(Vec::new())),
                 sync_failure: false,
+                offline: OfflineProvider {
+                    body_fetches: Arc::new(AtomicUsize::new(0)),
+                },
             }
         }
 
