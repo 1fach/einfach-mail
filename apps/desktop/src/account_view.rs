@@ -182,7 +182,7 @@ fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static s
             "Microsoft will review the existing delegated access: User.Read, Mail.Read, Calendars.Read, and offline_access."
         }
         AccountPermissionRequest::MailReadWrite => {
-            "Microsoft grants Mail.ReadWrite, which can create, read, update, and delete mail in this account. Einfach Mail requests it to change a message's read state or follow-up flag after Microsoft denies that action. This permission review does not send or change a message, and it does not request Mail.Send. Continue opens Microsoft in your system browser."
+            "Microsoft grants Mail.ReadWrite, which can create, read, update, and delete mail in this account. Einfach Mail requests it when Microsoft denies a read-state change, follow-up flag change, or message move. It uses the permission to set read state, update or clear follow-up flags, and move messages between folders. This permission review does not perform the action or send mail, and it does not request Mail.Send. Continue opens Microsoft in your system browser."
         }
         AccountPermissionRequest::SendMail => {
             "Microsoft grants Mail.Send so Einfach Mail can send mail as this account. It does not grant permission to read or change mail. Continue opens Microsoft in your system browser."
@@ -679,7 +679,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 div()
                     .text_sm()
                     .text_color(colors.muted_foreground)
-                    .child("Initial sign-in requests User.Read, Mail.Read, Calendars.Read, and offline_access. Mail.Read lets Einfach Mail read your mail, and Calendars.Read lets it read your primary calendar. If Microsoft denies a read-state change, a separate review can request Mail.ReadWrite, which permits creating, reading, updating, and deleting mail. The app uses the resulting access for its existing mail-reading features and to set messages read or unread. It does not request Mail.Send or calendar-write permissions."),
+                    .child("Initial sign-in requests User.Read, Mail.Read, Calendars.Read, and offline_access. Mail.Read lets Einfach Mail read your mail, and Calendars.Read lets it read your primary calendar. If Microsoft denies a read-state change, follow-up flag change, or message move, a separate review can request Mail.ReadWrite, which permits creating, reading, updating, and deleting mail. The app uses this access to set messages read or unread, update or clear follow-up flags, and move messages between folders. It does not request Mail.Send or calendar-write permissions."),
             )
     }
 
@@ -1506,6 +1506,7 @@ mod tests {
         let disclosure =
             super::permission_review_disclosure(AccountPermissionRequest::MailReadWrite);
         assert!(disclosure.contains("create, read, update, and delete mail"));
+        assert!(disclosure.contains("move messages between folders"));
         assert!(disclosure.contains("does not request Mail.Send"));
         assert_eq!(
             *permission_request

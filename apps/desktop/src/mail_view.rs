@@ -890,6 +890,7 @@ impl MailView {
 
     fn message_move_allowed(&self) -> bool {
         !self.sync_running
+            && !self.selected_folder_write_sync_required
             && !self.message_update_in_progress()
             && self.move_recovery_reason.is_none()
     }
@@ -2042,10 +2043,12 @@ impl MailView {
         self.selected_folder.as_ref()?;
         if self.selected_folder_write_sync_required {
             Some(
-                "This folder has a message update that needs syncing. Sync mail before changing read state or follow-up flags again.",
+                "A message change in this folder needs syncing. Sync mail before changing read state, follow-up flags, or moving messages again.",
             )
         } else if matches!(self.sync_status, SyncStatus::Failed(_)) {
-            Some("Mail sync failed. Sync successfully before changing a message's read state.")
+            Some(
+                "Mail sync failed. Retry sync before changing read state, follow-up flags, or moving messages.",
+            )
         } else {
             None
         }
@@ -4084,6 +4087,96 @@ mod tests {
                     .iter()
                     .any(|message| message.id() == &message_id)
         }));
+    }
+
+    #[gpui_kit::test]
+    async fn folder_write_sync_requirement_disables_and_blocks_message_move(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, message_id) = fixture(account.clone());
+        let destination = cache
+            .0
+            .lock()
+            .expect("fixture cache mutex is healthy")
+            .folders
+            .iter()
+            .find(|folder| folder.display_name() == "Archive")
+            .expect("fixture cache contains a visible archive folder")
+            .reference()
+            .clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = message_move_provider(
+            &cache,
+            MessageMoveActionResponse::Confirm,
+            Arc::clone(&calls),
+        );
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let mut mail_view = None;
+        let (_, context) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+            mail_view = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = mail_view.expect("mail view is created with the test window");
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if !context.cx.update(|cx| view.read(cx).sync_running) {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        let row = context
+            .debug_bounds("message-row-message-1")
+            .expect("source message is visible in the cached inbox");
+        context.simulate_click(row.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if context.debug_bounds("message-move").is_some() {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+
+        context.cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.selected_folder_write_sync_required = true;
+                cx.notify();
+            });
+        });
+        draw_mail_view(context);
+        let move_action = context
+            .debug_bounds("message-move")
+            .expect("opened message still exposes its disabled move action");
+        context.simulate_click(move_action.center(), Modifiers::default());
+        context.run_until_parked();
+        assert!(context.debug_bounds("read-state-reconciliation").is_some());
+        assert!(context.cx.update(|cx| {
+            let view = view.read(cx);
+            !view.message_move_allowed()
+                && view
+                    .prepare_message_move(destination.clone(), "Archive".to_owned())
+                    .is_none()
+        }));
+        context.cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.apply_message_move_menu_action(
+                    MessageMoveMenuAction {
+                        selected_message_id: message_id,
+                        destination_folder: destination,
+                        destination_label: "Archive".to_owned(),
+                    },
+                    cx,
+                );
+            });
+        });
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     #[gpui_kit::test]
