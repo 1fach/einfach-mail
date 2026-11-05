@@ -467,21 +467,9 @@ async fn request_with_retry(
                     return Some(Err(rate_limit_error(&response)));
                 }
             }
-        } else if !has_expected_success_status(request.operation, response.status()) {
-            return Some(Err(GraphError::InvalidResponse));
         } else {
             return response_result(request.operation, response, reply).await;
         }
-    }
-}
-
-fn has_expected_success_status(operation: GraphOperation, status: StatusCode) -> bool {
-    if !status.is_success() {
-        return true;
-    }
-    match operation {
-        GraphOperation::CalendarEventCreate => status == StatusCode::CREATED,
-        _ => true,
     }
 }
 
