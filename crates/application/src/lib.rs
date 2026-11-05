@@ -35,4 +35,5 @@ pub use mail_cache::{MailCache, MailCacheError, MailSyncState};
 pub use mail_workflow::{
     AccountSessionWorkflowFactory, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError,
     MailSyncProgress, MailSyncReport, MailWorkflow, MailWorkflowError, OpenedMessage,
+    ReadStateUpdateOutcome,
 };

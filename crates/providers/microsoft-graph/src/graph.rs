@@ -201,6 +201,25 @@ impl GraphApi {
         Ok(MessageBody::new(content_type, message.body.content))
     }
 
+    pub(super) async fn set_message_read_state(
+        &self,
+        message_id: &MessageId,
+        requested: ReadState,
+        token: std::sync::Arc<AccessToken>,
+    ) -> Result<ReadState, GraphError> {
+        let response = self
+            .transport
+            .patch_json(
+                GraphOperation::MessageReadState,
+                self.authority
+                    .message_read_state_path(message_id.as_str())?,
+                token,
+                read_state_patch_body(requested),
+            )
+            .await?;
+        confirmed_read_state(&response, requested)
+    }
+
     pub(super) async fn send_mail(
         &self,
         draft: &MailDraft,
@@ -912,7 +931,7 @@ mod tests {
     use std::{sync::Arc, time::SystemTime};
 
     use httpmock::{
-        Method::{GET, POST},
+        Method::{GET, PATCH, POST},
         MockServer,
     };
     use huskarl::{
@@ -927,7 +946,7 @@ mod tests {
     use einfach_mail_domain::{
         AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarOccurrence,
         CalendarOccurrenceTime, CalendarViewRange, CalendarViewReference, FolderId,
-        FolderReference, MailDraft, MailRecipient, MailSubject,
+        FolderReference, MailDraft, MailRecipient, MailSubject, MessageId, ReadState,
     };
 
     use super::{
@@ -998,6 +1017,37 @@ mod tests {
             confirmed_read_state(br#"{}"#, ReadState::Read),
             Err(GraphError::MessageUpdateOutcomeUnknown)
         );
+    }
+
+    #[tokio::test]
+    async fn read_state_update_sends_minimal_patch_and_returns_exact_confirmation() {
+        let server = MockServer::start_async().await;
+        let patch = server
+            .mock_async(|when, then| {
+                when.method(PATCH)
+                    .path("/v1.0/me/messages/synthetic-message")
+                    .header("content-type", "application/json")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .body(r#"{"isRead":true}"#);
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"isRead":true}"#);
+            })
+            .await;
+        let (graph_api, _transport) = synthetic_graph_api(&server);
+
+        let confirmed = graph_api
+            .set_message_read_state(
+                &MessageId::try_from("synthetic-message".to_owned())
+                    .expect("synthetic message ID is valid"),
+                ReadState::Read,
+                synthetic_access_token(),
+            )
+            .await
+            .expect("Graph confirms the requested read state");
+
+        assert_eq!(confirmed, ReadState::Read);
+        patch.assert_async().await;
     }
 
     #[tokio::test]

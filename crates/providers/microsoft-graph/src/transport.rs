@@ -31,6 +31,7 @@ pub(super) enum GraphOperation {
     Messages,
     MessageDelta,
     MessageBody,
+    MessageReadState,
     MailSend,
     CalendarViewDelta,
 }
@@ -39,7 +40,7 @@ impl GraphOperation {
     fn requires_json_content_type(self) -> bool {
         matches!(
             self,
-            Self::MessageDelta | Self::MailSend | Self::CalendarViewDelta
+            Self::MessageDelta | Self::MessageReadState | Self::MailSend | Self::CalendarViewDelta
         )
     }
 
@@ -66,11 +67,11 @@ struct GraphRequest {
     method: GraphRequestMethod,
     url: GraphUrl,
     token: Arc<AccessToken>,
-    body: Option<Vec<u8>>,
 }
 
 enum GraphRequestMethod {
     Get,
+    PostJson(Vec<u8>),
     PatchJson(Arc<[u8]>),
 }
 
@@ -115,7 +116,9 @@ impl GraphTransportHandle {
         url: GraphUrl,
         token: Arc<AccessToken>,
     ) -> Result<Vec<u8>, GraphError> {
-        self.request(operation, url, token, None).await?.into_body()
+        self.request(operation, GraphRequestMethod::Get, url, token)
+            .await?
+            .into_body()
     }
 
     pub(super) async fn send_mail(
@@ -125,7 +128,12 @@ impl GraphTransportHandle {
         body: Vec<u8>,
     ) -> Result<(), GraphError> {
         match self
-            .request(GraphOperation::MailSend, url, token, Some(body))
+            .request(
+                GraphOperation::MailSend,
+                GraphRequestMethod::PostJson(body),
+                url,
+                token,
+            )
             .await?
         {
             GraphResponse::Body(body) if body.is_empty() => Ok(()),
@@ -138,8 +146,13 @@ impl GraphTransportHandle {
         url: GraphUrl,
         token: Arc<AccessToken>,
     ) -> Result<GraphResponse, GraphError> {
-        self.request(GraphOperation::MessageDelta, url, token, None)
-            .await
+        self.request(
+            GraphOperation::MessageDelta,
+            GraphRequestMethod::Get,
+            url,
+            token,
+        )
+        .await
     }
 
     pub(super) async fn patch_json(
@@ -149,55 +162,35 @@ impl GraphTransportHandle {
         token: Arc<AccessToken>,
         body: Arc<[u8]>,
     ) -> Result<Vec<u8>, GraphError> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(GraphCommand {
-                request: GraphRequest {
-                    operation,
-                    method: GraphRequestMethod::PatchJson(body),
-                    url,
-                    token,
-                },
-                reply,
-            })
-            .await
-            .map_err(|_| GraphError::WorkerClosed)?;
-        response
-            .await
-            .map_err(|_| match operation {
-                GraphOperation::MessageReadState => GraphError::MessageUpdateOutcomeUnknown,
-                _ => GraphError::WorkerClosed,
-            })?
-            .and_then(GraphResponse::into_body)
+        self.request(operation, GraphRequestMethod::PatchJson(body), url, token)
+            .await?
+            .into_body()
     }
 
     async fn request(
         &self,
         operation: GraphOperation,
+        method: GraphRequestMethod,
         url: GraphUrl,
         token: Arc<AccessToken>,
-        body: Option<Vec<u8>>,
     ) -> Result<GraphResponse, GraphError> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(GraphCommand {
                 request: GraphRequest {
                     operation,
-                    method: GraphRequestMethod::Get,
+                    method,
                     url,
                     token,
-                    body,
                 },
                 reply,
             })
             .await
             .map_err(|_| GraphError::WorkerClosed)?;
-        response.await.map_err(|_| {
-            if matches!(operation, GraphOperation::MailSend) {
-                GraphError::SendOutcomeUnknown
-            } else {
-                GraphError::WorkerClosed
-            }
+        response.await.map_err(|_| match operation {
+            GraphOperation::MailSend => GraphError::SendOutcomeUnknown,
+            GraphOperation::MessageReadState => GraphError::MessageUpdateOutcomeUnknown,
+            _ => GraphError::WorkerClosed,
         })?
     }
 }
@@ -406,8 +399,16 @@ async fn request_with_retry(
             Err(GraphError::Transport) if matches!(request.operation, GraphOperation::MailSend) => {
                 return Some(Err(GraphError::SendOutcomeUnknown));
             }
+            Err(GraphError::Transport)
+                if matches!(request.operation, GraphOperation::MessageReadState) =>
+            {
+                return Some(Err(GraphError::MessageUpdateOutcomeUnknown));
+            }
             Err(error) => return Some(Err(error)),
         };
+        if matches!(request.operation, GraphOperation::MessageReadState) {
+            return message_read_state_response_result(response, reply).await;
+        }
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             if matches!(request.operation, GraphOperation::MailSend) {
                 return response_result(request.operation, response, reply).await;
@@ -420,8 +421,6 @@ async fn request_with_retry(
                 }
                 RetryDecision::Stop(error) => return Some(Err(error)),
             }
-        } else if matches!(request.operation, GraphOperation::MessageReadState) {
-            return message_read_state_response_result(response, reply).await;
         } else {
             return response_result(request.operation, response, reply).await;
         }
@@ -518,20 +517,23 @@ async fn message_read_state_response_result(
     match response.status() {
         StatusCode::UNAUTHORIZED => Some(Err(GraphError::AccessTokenRejected)),
         StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
+        StatusCode::TOO_MANY_REQUESTS => Some(Err(rate_limit_error(&response))),
         StatusCode::OK => Some(match read_limited_body(response, reply).await? {
             Ok(body) => Ok(body),
             Err(_) => Err(GraphError::MessageUpdateOutcomeUnknown),
         }),
-        status
-            if status.is_success()
-                || status.is_server_error()
-                || status.is_redirection()
-                || status == StatusCode::REQUEST_TIMEOUT =>
-        {
+        status if read_state_outcome_may_be_unknown(status) => {
             Some(Err(GraphError::MessageUpdateOutcomeUnknown))
         }
         _ => Some(Err(GraphError::Transport)),
     }
+}
+
+fn read_state_outcome_may_be_unknown(status: StatusCode) -> bool {
+    status.is_success()
+        || status.is_server_error()
+        || status.is_redirection()
+        || status == StatusCode::REQUEST_TIMEOUT
 }
 
 async fn read_limited_body(
@@ -577,13 +579,22 @@ async fn send_once(
         Ok(header) => header,
         Err(error) => return Some(Err(error)),
     };
-    let mut outbound = match (request.operation, request.body.as_ref()) {
-        (GraphOperation::MailSend, Some(body)) => {
+    let mut outbound = match (&request.method, request.operation) {
+        (GraphRequestMethod::Get, operation)
+            if !matches!(
+                operation,
+                GraphOperation::MailSend | GraphOperation::MessageReadState
+            ) =>
+        {
+            client.get(request.url.as_str())
+        }
+        (GraphRequestMethod::PostJson(body), GraphOperation::MailSend) => {
             client.post(request.url.as_str()).body(body.clone())
         }
-        (GraphOperation::MailSend, None) => return Some(Err(GraphError::InvalidResponse)),
-        (_, Some(_)) => return Some(Err(GraphError::InvalidResponse)),
-        (_, None) => client.get(request.url.as_str()),
+        (GraphRequestMethod::PatchJson(body), GraphOperation::MessageReadState) => client
+            .patch(request.url.as_str())
+            .body(body.as_ref().to_vec()),
+        _ => return Some(Err(GraphError::InvalidResponse)),
     }
     .header(AUTHORIZATION, authorization);
     if request.operation.requires_json_content_type() {
@@ -671,7 +682,7 @@ mod tests {
 
     use httpmock::{
         HttpMockRequest, HttpMockResponse,
-        Method::{GET, POST},
+        Method::{GET, PATCH, POST},
         Mock, MockServer,
     };
     use huskarl::{
@@ -926,6 +937,36 @@ mod tests {
                 .expect("PATCH caller exits after worker shutdown"),
             Err(GraphError::MessageUpdateOutcomeUnknown)
         );
+    }
+
+    #[tokio::test]
+    async fn throttled_read_state_patch_is_not_retried() {
+        let server = MockServer::start_async().await;
+        let throttled = server
+            .mock_async(|when, then| {
+                when.method(PATCH)
+                    .path("/v1.0/me/messages/synthetic-message");
+                then.status(429).header("retry-after", "0");
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+        let result = transport
+            .handle()
+            .patch_json(
+                GraphOperation::MessageReadState,
+                graph_url(&server.url("/v1.0/me/messages/synthetic-message")),
+                synthetic_access_token(),
+                Arc::from(&b"{\"isRead\":true}"[..]),
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            Err(GraphError::RateLimited {
+                retry_after: Some(Duration::ZERO),
+            })
+        );
+        throttled.assert_calls_async(1).await;
     }
 
     #[tokio::test]

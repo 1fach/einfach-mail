@@ -7,12 +7,13 @@ use std::{
 
 use crate::mail_composer::{MailComposer, MailComposerEvent, MailPermissionRequester};
 use einfach_mail_application::{
-    MailCacheError, MailSession, MailSyncProgress, MailSyncReport, MailSyncState,
-    MailWorkflowError, MessageBodyForDisplay, OpenedMessage, SanitizedEmailHtml,
-    allowed_external_message_url,
+    MailCacheError, MailOperationError, MailSession, MailSyncProgress, MailSyncReport,
+    MailSyncState, MailWorkflowError, MessageBodyForDisplay, OpenedMessage, ReadStateUpdateOutcome,
+    SanitizedEmailHtml, allowed_external_message_url,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, FolderReference, MailFolder, MailMessage, MessageId, PendingMailSend,
+    AccountId, AccountProfile, FolderReference, MailFolder, MailMessage, MessageId,
+    MessageMetadataPatch, PendingMailSend, ReadState,
 };
 use gpui_kit::base::{VirtualListScrollHandle, v_virtual_list};
 use gpui_kit::component::WindowExt;
@@ -22,9 +23,9 @@ use gpui_kit::component::{
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    AnyElement, App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, ImageSource,
-    IntoElement, KeyBinding, Render, Role, ScrollStrategy, SharedString, Subscription, Task,
-    Window, base::TextSelectionLayer, component::text::TextView, div, prelude::*, px, size,
+    AnyElement, App, AsyncApp, Context, Div, Entity, EventEmitter, FocusHandle, ImageSource,
+    IntoElement, KeyBinding, Render, Role, ScrollStrategy, SharedString, Stateful, Subscription,
+    Task, Window, base::TextSelectionLayer, component::text::TextView, div, prelude::*, px, size,
 };
 
 gpui_kit::actions!(
@@ -142,6 +143,80 @@ enum ReadStateUpdateStatus {
         requested: ReadState,
         error: MailWorkflowError,
     },
+}
+
+enum ReadStateFeedback {
+    Status(String),
+    Failure {
+        message: String,
+        error: MailWorkflowError,
+    },
+}
+
+impl ReadStateFeedback {
+    fn into_parts(self) -> (String, Role, bool) {
+        match self {
+            Self::Status(message) => (message, Role::Status, false),
+            Self::Failure { message, error } => (
+                message,
+                Role::Alert,
+                matches!(
+                    error,
+                    MailWorkflowError::Provider(MailOperationError::AccessDenied)
+                ),
+            ),
+        }
+    }
+}
+
+impl ReadStateUpdateStatus {
+    fn is_pending_for(&self, message_id: &MessageId) -> bool {
+        matches!(
+            self,
+            Self::Pending {
+                message_id: pending_id,
+                ..
+            } if pending_id == message_id
+        )
+    }
+
+    fn feedback_for(&self, message_id: &MessageId) -> Option<ReadStateFeedback> {
+        if self.message_id()? != message_id {
+            return None;
+        }
+        self.feedback()
+    }
+
+    fn message_id(&self) -> Option<&MessageId> {
+        match self {
+            Self::Idle => None,
+            Self::Pending { message_id, .. }
+            | Self::Confirmed { message_id, .. }
+            | Self::ConfirmedNeedsSync { message_id, .. }
+            | Self::Failed { message_id, .. } => Some(message_id),
+        }
+    }
+
+    fn feedback(&self) -> Option<ReadStateFeedback> {
+        match self {
+            Self::Idle => None,
+            Self::Pending { requested, .. } => Some(ReadStateFeedback::Status(
+                read_state_progress_message(*requested),
+            )),
+            Self::Confirmed { state, .. } => Some(ReadStateFeedback::Status(
+                read_state_confirmed_message(*state).to_owned(),
+            )),
+            Self::ConfirmedNeedsSync { state, .. } => Some(ReadStateFeedback::Status(
+                read_state_cache_sync_message(*state).to_owned(),
+            )),
+            Self::Failed {
+                requested, error, ..
+            } => Some(ReadStateFeedback::Failure {
+                message: read_state_failure_message(*requested, *error),
+                error: *error,
+            }),
+        }
+    }
 }
 
 struct ReadStateUpdateRequest {
@@ -921,7 +996,9 @@ impl MailView {
                                     .text_color(colors.muted_foreground)
                                     .child(message_sender(opened.message())),
                             )
-                            .children(self.render_read_state_feedback(message_id, cx))
+                            .children(self.read_state_update.feedback_for(message_id).map(
+                                |feedback| self.render_read_state_feedback_element(feedback, cx),
+                            ))
                             .children(self.render_read_state_reconciliation_notice()),
                     )
                     .child(body)
@@ -935,83 +1012,199 @@ impl MailView {
         message_id: &MessageId,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let read_state = self
-            .messages
-            .iter()
-            .find(|message| message.id() == message_id)
-            .map(|message| message.metadata().read_state());
-        let pending = matches!(
-            &self.read_state_update,
-            ReadStateUpdateStatus::Pending {
-                message_id: pending_id,
-                ..
-            } if pending_id == message_id
-        );
+        let read_state = self.cached_read_state(message_id);
+        let pending = self.read_state_update.is_pending_for(message_id);
         let label = match (pending, read_state) {
             (true, _) => "Updating…",
             (false, Some(ReadState::Read)) => "Mark unread",
             (false, Some(ReadState::Unread)) => "Mark read",
             (false, None) => "Mark read",
         };
-        let reconciliation_required = self
-            .selected_folder
-            .as_ref()
-            .is_some_and(|folder| self.read_state_reconciliation_required.contains(folder));
-        let sync_failed = matches!(&self.sync_status, SyncStatus::Failed(_));
         Button::new("message-read-state")
             .ghost()
             .debug_selector(|| "message-read-state".to_owned())
             .label(label)
             .loading(pending)
-            .disabled(
-                self.sync_running
-                    || self.read_state_task.is_some()
-                    || reconciliation_required
-                    || sync_failed
-                    || read_state.is_none(),
-            )
+            .disabled(self.read_state_action_disabled(read_state))
             .on_click(cx.listener(|view, _, _, cx| view.update_selected_read_state(cx)))
             .into_any_element()
     }
 
-    fn render_read_state_feedback(
-        &self,
-        message_id: &MessageId,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let (message, role) = match &self.read_state_update {
-            ReadStateUpdateStatus::Idle => return None,
-            ReadStateUpdateStatus::Pending {
-                message_id: pending_id,
-                requested,
-            } if pending_id == message_id => {
-                (read_state_progress_message(*requested), Role::Status)
-            }
-            ReadStateUpdateStatus::Confirmed {
-                message_id: confirmed_id,
-                state,
-            } if confirmed_id == message_id => (
-                read_state_confirmed_message(*state).to_owned(),
-                Role::Status,
-            ),
-            ReadStateUpdateStatus::ConfirmedNeedsSync {
-                message_id: confirmed_id,
-                state,
-            } if confirmed_id == message_id => (
-                read_state_cache_sync_message(*state).to_owned(),
-                Role::Status,
-            ),
-            ReadStateUpdateStatus::Failed {
-                message_id: failed_id,
-                requested,
-                error,
-            } if failed_id == message_id => {
-                (read_state_failure_message(*requested, *error), Role::Alert)
-            }
-            _ => return None,
+    fn cached_read_state(&self, message_id: &MessageId) -> Option<ReadState> {
+        self.messages
+            .iter()
+            .find(|message| message.id() == message_id)
+            .map(|message| message.metadata().read_state())
+    }
+
+    fn read_state_action_disabled(&self, read_state: Option<ReadState>) -> bool {
+        let Some(folder) = self.selected_folder.as_ref() else {
+            return true;
         };
+        read_state.is_none() || !self.can_update_read_state_in(folder)
+    }
+
+    fn can_update_read_state_in(&self, folder: &FolderReference) -> bool {
+        !self.sync_running
+            && self.read_state_task.is_none()
+            && !matches!(self.sync_status, SyncStatus::Failed(_))
+            && !self.read_state_reconciliation_required.contains(folder)
+    }
+
+    fn selected_read_state_request(&self) -> Option<ReadStateUpdateRequest> {
+        let folder = self.selected_folder.as_ref()?;
+        if !self.can_update_read_state_in(folder) {
+            return None;
+        }
+        let message_id = self.selected_message_id.as_ref()?;
+        let MessageState::Opened(opened) = &self.message_state else {
+            return None;
+        };
+        if opened.message().id() != message_id {
+            return None;
+        }
+        let requested = match self.cached_read_state(message_id)? {
+            ReadState::Read => ReadState::Unread,
+            ReadState::Unread => ReadState::Read,
+        };
+        Some(ReadStateUpdateRequest {
+            folder: folder.clone(),
+            message_id: message_id.clone(),
+            requested,
+        })
+    }
+
+    fn update_selected_read_state(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self.selected_read_state_request() else {
+            return;
+        };
+        self.read_state_update = ReadStateUpdateStatus::Pending {
+            message_id: request.message_id.clone(),
+            requested: request.requested,
+        };
+        let workflow = Arc::clone(&self.workflow);
+        self.read_state_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let result = workflow
+                .set_message_read_state(&request.folder, &request.message_id, request.requested)
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.finish_read_state_update(request, result, cx);
+            });
+        }));
+        cx.notify();
+    }
+
+    fn finish_read_state_update(
+        &mut self,
+        request: ReadStateUpdateRequest,
+        result: Result<ReadStateUpdateOutcome, MailWorkflowError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.read_state_task = None;
+        if self.selected_folder.as_ref() == Some(&request.folder)
+            && self.selected_message_id.as_ref() == Some(&request.message_id)
+        {
+            self.apply_read_state_result(request, result);
+        }
+        cx.notify();
+    }
+
+    fn apply_read_state_result(
+        &mut self,
+        request: ReadStateUpdateRequest,
+        result: Result<ReadStateUpdateOutcome, MailWorkflowError>,
+    ) {
+        match result {
+            Ok(ReadStateUpdateOutcome::ConfirmedAndCached(state)) => {
+                self.record_confirmed_read_state(request, state)
+            }
+            Ok(ReadStateUpdateOutcome::ConfirmedNeedsSync { state, .. }) => {
+                self.record_confirmed_read_state_needing_sync(request, state)
+            }
+            Err(error) => self.record_read_state_failure(request, error),
+        }
+    }
+
+    fn record_confirmed_read_state(&mut self, request: ReadStateUpdateRequest, state: ReadState) {
+        self.apply_visible_read_state(&request.message_id, state);
+        self.read_state_update = ReadStateUpdateStatus::Confirmed {
+            message_id: request.message_id,
+            state,
+        };
+    }
+
+    fn record_confirmed_read_state_needing_sync(
+        &mut self,
+        request: ReadStateUpdateRequest,
+        state: ReadState,
+    ) {
+        self.apply_visible_read_state(&request.message_id, state);
+        self.read_state_reconciliation_required
+            .insert(request.folder);
+        self.read_state_update = ReadStateUpdateStatus::ConfirmedNeedsSync {
+            message_id: request.message_id,
+            state,
+        };
+    }
+
+    fn record_read_state_failure(
+        &mut self,
+        request: ReadStateUpdateRequest,
+        error: MailWorkflowError,
+    ) {
+        if matches!(
+            error,
+            MailWorkflowError::Provider(MailOperationError::MessageUpdateOutcomeUnknown)
+        ) {
+            self.read_state_reconciliation_required
+                .insert(request.folder);
+        }
+        self.read_state_update = ReadStateUpdateStatus::Failed {
+            message_id: request.message_id,
+            requested: request.requested,
+            error,
+        };
+    }
+
+    fn apply_visible_read_state(&mut self, message_id: &MessageId, state: ReadState) {
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id() == message_id)
+        {
+            let mut patch = MessageMetadataPatch::new();
+            patch.set_read_state(state);
+            message.apply_patch(patch);
+        }
+    }
+
+    fn render_read_state_feedback_element(
+        &self,
+        feedback: ReadStateFeedback,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (message, role, show_permission_review) = feedback.into_parts();
+        let feedback_view = self.read_state_feedback_view(message, role, cx);
+        if show_permission_review {
+            feedback_view
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(self.render_permission_review_button(cx))
+                .into_any_element()
+        } else {
+            feedback_view.into_any_element()
+        }
+    }
+
+    fn read_state_feedback_view(
+        &self,
+        message: String,
+        role: Role,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let colors = cx.theme().semantic_tokens().colors;
-        let feedback = div()
+        div()
             .id("message-read-state-feedback")
             .debug_selector(|| "message-read-state-feedback".to_owned())
             .role(role)
@@ -1021,48 +1214,22 @@ impl MailView {
             } else {
                 colors.muted_foreground
             })
-            .child(message);
-        if matches!(
-            &self.read_state_update,
-            ReadStateUpdateStatus::Failed {
-                message_id: failed_id,
-                error: MailWorkflowError::Provider(MailOperationError::AccessDenied),
-                ..
-            } if failed_id == message_id
-        ) {
-            Some(
-                feedback
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        Button::new("review-mail-permissions-from-message")
-                            .ghost()
-                            .debug_selector(|| "review-mail-permissions-from-message".to_owned())
-                            .label("Review mail permissions…")
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(MailViewEvent::ReviewMailWritePermission);
-                            })),
-                    )
-                    .into_any_element(),
-            )
-        } else {
-            Some(feedback.into_any_element())
-        }
+            .child(message)
+    }
+
+    fn render_permission_review_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("review-mail-permissions-from-message")
+            .ghost()
+            .debug_selector(|| "review-mail-permissions-from-message".to_owned())
+            .label("Review mail permissions…")
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(MailViewEvent::ReviewMailWritePermission);
+            }))
+            .into_any_element()
     }
 
     fn render_read_state_reconciliation_notice(&self) -> Option<AnyElement> {
-        let folder = self.selected_folder.as_ref()?;
-        let reconciliation_required = self.read_state_reconciliation_required.contains(folder);
-        let sync_failed = matches!(&self.sync_status, SyncStatus::Failed(_));
-        if !reconciliation_required && !sync_failed {
-            return None;
-        }
-        let message = if reconciliation_required {
-            "Microsoft may have changed a message, but Einfach Mail could not confirm its read state. Sync mail before changing messages in this folder again."
-        } else {
-            "Mail sync failed. Sync successfully before changing a message's read state."
-        };
+        let message = self.read_state_reconciliation_message()?;
         Some(
             div()
                 .id("read-state-reconciliation")
@@ -1072,6 +1239,19 @@ impl MailView {
                 .child(message)
                 .into_any_element(),
         )
+    }
+
+    fn read_state_reconciliation_message(&self) -> Option<&'static str> {
+        let folder = self.selected_folder.as_ref()?;
+        if self.read_state_reconciliation_required.contains(folder) {
+            Some(
+                "This folder's cached read state may not match Microsoft. Sync mail before changing a message's read state again.",
+            )
+        } else if matches!(self.sync_status, SyncStatus::Failed(_)) {
+            Some("Mail sync failed. Sync successfully before changing a message's read state.")
+        } else {
+            None
+        }
     }
 }
 
@@ -1256,26 +1436,37 @@ fn read_state_cache_sync_message(state: ReadState) -> &'static str {
 
 fn read_state_failure_message(state: ReadState, error: MailWorkflowError) -> String {
     match error {
-        MailWorkflowError::Provider(MailOperationError::AccessDenied) => {
-            "Microsoft denied the change. Review mail permissions or check your organization's consent policies.".to_owned()
-        }
-        MailWorkflowError::Provider(MailOperationError::SignInRequired) => {
-            "Your Microsoft sign-in needs attention. Return to Accounts and reconnect.".to_owned()
-        }
-        MailWorkflowError::Provider(MailOperationError::RateLimited { .. }) => {
-            "Microsoft asked Einfach Mail to wait before retrying. Try again later.".to_owned()
-        }
-        MailWorkflowError::Provider(MailOperationError::MessageUpdateOutcomeUnknown) => {
-            "Microsoft may have changed this message's read state, but Einfach Mail could not confirm it. Sync mail before trying again.".to_owned()
-        }
         MailWorkflowError::Provider(MailOperationError::ServiceUnavailable) => format!(
             "Couldn’t mark the message {}. Check your connection and try again.",
             read_state_word(state)
         ),
-        _ => format!(
-            "Couldn’t mark the message {}. Sync mail and try again.",
-            read_state_word(state)
+        _ => read_state_failure_detail(error).map_or_else(
+            || {
+                format!(
+                    "Couldn’t mark the message {}. Sync mail and try again.",
+                    read_state_word(state)
+                )
+            },
+            str::to_owned,
         ),
+    }
+}
+
+fn read_state_failure_detail(error: MailWorkflowError) -> Option<&'static str> {
+    match error {
+        MailWorkflowError::Provider(MailOperationError::AccessDenied) => Some(
+            "Microsoft denied the change. Review mail permissions or check your organization's consent policies.",
+        ),
+        MailWorkflowError::Provider(MailOperationError::SignInRequired) => {
+            Some("Your Microsoft sign-in needs attention. Return to Accounts and reconnect.")
+        }
+        MailWorkflowError::Provider(MailOperationError::RateLimited { .. }) => {
+            Some("Microsoft asked Einfach Mail to wait before retrying. Try again later.")
+        }
+        MailWorkflowError::Provider(MailOperationError::MessageUpdateOutcomeUnknown) => Some(
+            "Microsoft may have changed this message's read state, but Einfach Mail could not confirm it. Sync mail before trying again.",
+        ),
+        _ => None,
     }
 }
 
@@ -1432,7 +1623,7 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::{
-        future::{Future, ready},
+        future::{Future, pending, ready},
         pin::Pin,
         sync::{
             Arc, Mutex,
@@ -1443,13 +1634,14 @@ mod tests {
 
     use einfach_mail_application::{
         AccountOperationError, MailCache, MailCacheError, MailOperationError, MailProvider,
-        MailSendProviderError, MailSyncState, MailWorkflow, MailWorkflowError, MessageDeltaRequest,
-        MessageDeltaResponse,
+        MailSendProviderError, MailSyncState, MailWorkflow, MailWorkflowError,
+        MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
     };
     use einfach_mail_domain::{
         AccountId, AccountProfile, FolderId, FolderReference, MailDraft, MailFolder, MailMessage,
         MailSendOperationId, Mailbox, MessageBody, MessageBodyType, MessageDeltaLink,
-        MessageDeltaPage, MessageId, PendingMailSend,
+        MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch, PendingMailSend,
+        ReadState,
     };
     use gpui_kit::base::TextSelection;
     use gpui_kit::component::WindowExt as _;
@@ -1458,9 +1650,9 @@ mod tests {
     };
 
     use super::{
-        MailPermissionRequester, MailSyncProgress, MailView, MessageBodyForDisplay,
-        MessageNavigation, MessageState, SyncStatus, bind_message_navigation_keys,
-        mail_error_message,
+        MailPermissionRequester, MailSyncProgress, MailView, MailViewEvent, MessageBodyForDisplay,
+        MessageNavigation, MessageState, ReadStateUpdateStatus, SyncStatus,
+        bind_message_navigation_keys, mail_error_message, read_state_failure_message,
     };
     use crate::mail_composer::bind_mail_composer_keys;
 
@@ -1517,6 +1709,146 @@ mod tests {
         ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
             self.body_fetches.fetch_add(1, Ordering::Relaxed);
             ready(Err(MailOperationError::ServiceUnavailable))
+        }
+
+        fn set_message_read_state(
+            &self,
+            _: &FolderReference,
+            _: &MessageId,
+            _: ReadState,
+        ) -> impl Future<Output = Result<ReadState, MailOperationError>> + Send + '_ {
+            ready(Err(MailOperationError::ServiceUnavailable))
+        }
+
+        fn send_mail(
+            &self,
+            _: &AccountId,
+            _: MailDraft,
+        ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
+            ready(Err(MailSendProviderError::ServiceUnavailable))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReadStateActionResponse {
+        Confirm,
+        Unconfirmed,
+        Pending,
+        Deny,
+        Offline,
+    }
+
+    struct ReadStateProvider {
+        response: ReadStateActionResponse,
+        updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
+        sync_failure: bool,
+    }
+
+    impl ReadStateProvider {
+        fn new(
+            response: ReadStateActionResponse,
+            updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
+        ) -> Self {
+            Self {
+                response,
+                updates,
+                sync_failure: false,
+            }
+        }
+
+        fn with_sync_failure(mut self) -> Self {
+            self.sync_failure = true;
+            self
+        }
+    }
+
+    impl MailProvider for ReadStateProvider {
+        fn list_folders(
+            &self,
+            account_id: &AccountId,
+        ) -> impl Future<Output = Result<Vec<MailFolder>, MailOperationError>> + Send + '_ {
+            let account_id = account_id.clone();
+            let sync_failure = self.sync_failure;
+            async move {
+                if sync_failure {
+                    return Err(MailOperationError::ServiceUnavailable);
+                }
+                let reference = FolderReference::new(
+                    account_id,
+                    FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+                );
+                Ok(vec![
+                    MailFolder::new(reference, None, "Inbox".to_owned())
+                        .expect("synthetic folder is valid"),
+                ])
+            }
+        }
+
+        fn list_messages(
+            &self,
+            _: &FolderReference,
+        ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_
+        {
+            ready(Ok(Vec::new()))
+        }
+
+        fn message_delta_page(
+            &self,
+            _: &FolderReference,
+            _: MessageDeltaRequest,
+        ) -> impl Future<Output = Result<MessageDeltaResponse, MailOperationError>> + Send + '_
+        {
+            let sync_failure = self.sync_failure;
+            async move {
+                if sync_failure {
+                    return Err(MailOperationError::ServiceUnavailable);
+                }
+                let page = MessageDeltaPage::new(
+                    Vec::new(),
+                    MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(
+                        "https://graph.microsoft.com/v1.0/delta?token=synthetic".to_owned(),
+                    )),
+                );
+                Ok(MessageDeltaResponse::Page(MessageDeltaPageResponse::new(
+                    page, 0,
+                )))
+            }
+        }
+
+        fn fetch_message_body(
+            &self,
+            _: &FolderReference,
+            _: &MessageId,
+        ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
+            ready(Err(MailOperationError::ServiceUnavailable))
+        }
+
+        fn set_message_read_state(
+            &self,
+            _: &FolderReference,
+            message_id: &MessageId,
+            requested: ReadState,
+        ) -> impl Future<Output = Result<ReadState, MailOperationError>> + Send + '_ {
+            let message_id = message_id.clone();
+            let response = self.response;
+            let updates = Arc::clone(&self.updates);
+            async move {
+                updates
+                    .lock()
+                    .expect("fixture read-state log mutex is healthy")
+                    .push((message_id, requested));
+                match response {
+                    ReadStateActionResponse::Confirm => Ok(requested),
+                    ReadStateActionResponse::Unconfirmed => {
+                        Err(MailOperationError::MessageUpdateOutcomeUnknown)
+                    }
+                    ReadStateActionResponse::Pending => {
+                        pending::<Result<ReadState, MailOperationError>>().await
+                    }
+                    ReadStateActionResponse::Deny => Err(MailOperationError::AccessDenied),
+                    ReadStateActionResponse::Offline => Err(MailOperationError::ServiceUnavailable),
+                }
+            }
         }
 
         fn send_mail(
@@ -1592,6 +1924,16 @@ mod tests {
             message_id: &MessageId,
         ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
             self.offline.fetch_message_body(folder, message_id)
+        }
+
+        fn set_message_read_state(
+            &self,
+            folder: &FolderReference,
+            message_id: &MessageId,
+            requested: ReadState,
+        ) -> impl Future<Output = Result<ReadState, MailOperationError>> + Send + '_ {
+            self.offline
+                .set_message_read_state(folder, message_id, requested)
         }
 
         fn send_mail(
@@ -1675,6 +2017,7 @@ mod tests {
         pending_send: Option<PendingMailSend>,
         fail_next_pending_send_stage: bool,
         fail_next_pending_send_clear: bool,
+        read_state_write_error: Option<MailCacheError>,
     }
 
     impl MailCache for FixtureCache {
@@ -2045,6 +2388,23 @@ mod tests {
         });
     }
 
+    fn open_cached_message_and_click_read_state(context: &mut VisualTestContext) {
+        context.run_until_parked();
+        draw_mail_view(context);
+        let message_row = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached message row is rendered");
+        context.simulate_click(message_row.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+        let action = context
+            .debug_bounds("message-read-state")
+            .expect("opened message exposes its read-state action");
+        context.simulate_click(action.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+    }
+
     fn click_composer_sheet_close(context: &mut VisualTestContext) {
         let composer = context
             .debug_bounds("mail-composer")
@@ -2270,7 +2630,8 @@ mod tests {
             ReadStateProvider::new(ReadStateActionResponse::Confirm, Arc::clone(&updates)),
             cache.clone(),
         ));
-        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
 
         open_cached_message_and_click_read_state(context);
 
@@ -2319,7 +2680,8 @@ mod tests {
                 .with_sync_failure(),
             cache,
         ));
-        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
 
         context.run_until_parked();
         draw_mail_view(context);
@@ -2379,7 +2741,8 @@ mod tests {
             ),
             cache.clone(),
         ));
-        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
 
         open_cached_message_and_click_read_state(context);
 
@@ -2426,7 +2789,8 @@ mod tests {
             ReadStateProvider::new(ReadStateActionResponse::Unconfirmed, Arc::clone(&updates)),
             cache,
         ));
-        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
 
         open_cached_message_and_click_read_state(context);
 
@@ -2476,7 +2840,8 @@ mod tests {
             ),
             cache,
         ));
-        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
         let navigation_requested = Arc::new(AtomicBool::new(false));
         let observed_navigation = Arc::clone(&navigation_requested);
         let _subscription = context.cx.update(|cx| {
@@ -2530,7 +2895,8 @@ mod tests {
             ),
             cache.clone(),
         ));
-        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
         let permission_review_requested = Arc::new(AtomicBool::new(false));
         let observed_review = Arc::clone(&permission_review_requested);
         let _subscription = context.cx.update(|cx| {
@@ -2575,7 +2941,8 @@ mod tests {
             ),
             cache,
         ));
-        let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, cx));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
 
         open_cached_message_and_click_read_state(context);
 

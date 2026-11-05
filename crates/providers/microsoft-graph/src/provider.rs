@@ -30,7 +30,7 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarViewReference, FolderReference, MailDraft, MailFolder,
-    MailMessage, MessageBody, MessageId,
+    MailMessage, MessageBody, MessageId, ReadState,
 };
 
 const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
@@ -190,10 +190,7 @@ impl AccountProvider for MicrosoftGraphProvider {
     ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let expected_account_id = expected_account_id.clone();
-        let requested_scopes: &'static [&'static str] = match request {
-            AccountPermissionRequest::Current => &identity::BASE_AUTHORIZATION_SCOPES,
-            AccountPermissionRequest::SendMail => &identity::SEND_MAIL_AUTHORIZATION_SCOPES,
-        };
+        let requested_scopes = identity::authorization_scopes(request);
         let commit_cancellation = cancellation.clone();
 
         worker::run_with_account_cancellation(
@@ -299,6 +296,26 @@ impl MailProvider for MicrosoftGraphProvider {
                 .fetch_message_body(&message_id, Arc::clone(&token))
                 .await;
             map_mail_result(&config, &account_id, &token, body).await
+        })
+    }
+
+    fn set_message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        requested: ReadState,
+    ) -> impl Future<Output = Result<ReadState, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let folder = folder.clone();
+        let message_id = message_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = folder.account_id();
+            let token = ensure_access_token(&config, account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let result = graph_api
+                .set_message_read_state(&message_id, requested, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, account_id, &token, result).await
         })
     }
 
@@ -550,6 +567,7 @@ fn map_send_graph_error(error: GraphError) -> MailSendProviderError {
         | GraphError::UnsafeLink
         | GraphError::InvalidRecord
         | GraphError::ResponseTooLarge
+        | GraphError::MessageUpdateOutcomeUnknown
         | GraphError::PaginationLimitExceeded => MailSendProviderError::ServiceUnavailable,
     }
 }
@@ -1572,7 +1590,7 @@ mod tests {
             task_workflow
                 .reauthorize_account_with_cancellation(
                     &cancelled_account_id,
-                    AccountPermissionRequest::Current,
+                    AccountPermissionRequest::MailReadWrite,
                     task_cancellation,
                 )
                 .await
@@ -1615,7 +1633,7 @@ mod tests {
             task_workflow
                 .reauthorize_account_with_cancellation(
                     &renewal_account_id,
-                    AccountPermissionRequest::Current,
+                    AccountPermissionRequest::MailReadWrite,
                     task_cancellation,
                 )
                 .await

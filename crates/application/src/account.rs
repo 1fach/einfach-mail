@@ -64,6 +64,8 @@ pub enum AccountPermissionRequest {
     Current,
     /// Adds delegated permission to send mail as the signed-in account.
     SendMail,
+    /// Adds permission to create, read, update, and delete mail for the user.
+    MailReadWrite,
 }
 
 /// Signals cancellation for one account connection or permission renewal.
@@ -159,15 +161,6 @@ enum AccountOperationPhase {
     Active,
     Cancelled,
     CredentialCommitStarted,
-}
-
-/// Delegated Microsoft Graph permission requested during same-account renewal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AccountPermissionRequest {
-    /// Repeats the permissions used by the connected account.
-    ReadOnly,
-    /// Adds permission to create, read, update, and delete mail for the user.
-    MailReadWrite,
 }
 
 /// Operations the application needs from a connected-account provider.

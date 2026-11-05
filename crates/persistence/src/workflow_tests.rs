@@ -42,6 +42,8 @@ struct FixtureProvider {
     requests: Arc<Mutex<Vec<MessageDeltaRequest>>>,
     body_result: Result<MessageBody, MailOperationError>,
     body_fetches: Arc<AtomicUsize>,
+    read_state_updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
+    read_state_gate: ReadStateGate,
     send_calls: Arc<AtomicUsize>,
     send_result: Result<(), MailSendProviderError>,
     body_gate: Option<BodyFetchGate>,
@@ -112,6 +114,8 @@ impl FixtureProvider {
             requests: Arc::new(Mutex::new(Vec::new())),
             body_result,
             body_fetches: Arc::new(AtomicUsize::new(0)),
+            read_state_updates: Arc::new(Mutex::new(Vec::new())),
+            read_state_gate: Arc::new(Mutex::new(None)),
             send_calls: Arc::new(AtomicUsize::new(0)),
             send_result: Err(MailSendProviderError::ServiceUnavailable),
             body_gate: None,
@@ -123,6 +127,16 @@ impl FixtureProvider {
     fn with_send_result(mut self, result: Result<(), MailSendProviderError>) -> Self {
         self.send_result = result;
         self
+    }
+
+    fn hold_next_read_state(&self) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+        let (started, started_receiver) = smol::channel::bounded(1);
+        let (release, release_receiver) = smol::channel::bounded(1);
+        *self
+            .read_state_gate
+            .lock()
+            .expect("fixture read-state gate mutex is healthy") = Some((started, release_receiver));
+        (started_receiver, release)
     }
 }
 
@@ -220,6 +234,45 @@ impl MailProvider for FixtureProvider {
                     .map_err(|_| MailOperationError::ServiceUnavailable)?;
             }
             result
+        }
+    }
+
+    fn set_message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        requested: ReadState,
+    ) -> impl Future<Output = Result<ReadState, MailOperationError>> + Send + '_ {
+        let matches_account = folder.account_id() == &self.account_id;
+        let read_state_gate = if matches_account {
+            self.read_state_gate
+                .lock()
+                .expect("fixture read-state gate mutex is healthy")
+                .take()
+        } else {
+            None
+        };
+        let updates = Arc::clone(&self.read_state_updates);
+        let message_id = message_id.clone();
+        async move {
+            if !matches_account {
+                return Err(MailOperationError::AccountMismatch);
+            }
+            if let Some((started, release)) = read_state_gate {
+                started
+                    .send(())
+                    .await
+                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
+                release
+                    .recv()
+                    .await
+                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
+            }
+            updates
+                .lock()
+                .expect("synthetic read-state log mutex is healthy")
+                .push((message_id, requested));
+            Ok(requested)
         }
     }
 

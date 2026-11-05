@@ -4,7 +4,7 @@ use std::{future::Future, time::SystemTime};
 
 use einfach_mail_domain::{
     AccountId, FolderReference, MailFolder, MailMessage, MailSendOperationId, MessageBody,
-    MessageDeltaLink, PendingMailSend,
+    MessageDeltaLink, MessageId, PendingMailSend, ReadState,
 };
 use thiserror::Error;
 

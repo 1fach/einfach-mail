@@ -12,6 +12,8 @@ Issue #44's retryable cache-removal fix passed source review and the full Linux 
 
 Issue #27's M4 plain-text send implementation is in draft PR #53. Its head is `candidate/issue-27-plain-text-send`. Its base is PR #52's `candidate/issue-44-retryable-cache-removal` branch. The local Linux gate passed, including Rust 1.95 all-target compilation, Clippy, rustdoc, dependency policy, RustSec audit, formatting, and workspace tests. Three environment-dependent Secret Service tests remain ignored. Cache staging and removal serialize across app processes. Stale cache handles reject sends after database removal, and lock waits run off the async executor. No live Graph request, real mailbox, or desktop window was used. Tenant verification remains under issue #28. Keep issue #27 open until review and merge.
 
+Issue #23's read-state action is in draft PR #54 on `candidate/issue-23-read-state-pr`, based on PR #53's head. The full Linux gate passed locally on 2026-11-05 after source review. The implementation uses synthetic tests only. No live Graph request, real mailbox, or desktop window was used. Keep issue #23 open through review and keep issue #24 open for tenant verification.
+
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
 ## Verified state
@@ -43,6 +45,7 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 4. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
 5. Review draft PR #53 after PR #52; tenant-only evidence remains under issue #28.
 6. After PR #50 merges, review the independent M3 follow-ups in PRs #51 and #52 for merge.
+7. Review PR #54 as the child of PR #53 after its required checks pass. Keep issue #23 open through review and issue #24 open for tenant consent and Graph verification.
 
 ## Update rule
 

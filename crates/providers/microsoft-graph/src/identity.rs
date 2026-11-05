@@ -33,6 +33,12 @@ pub(super) const SEND_MAIL_AUTHORIZATION_SCOPES: [&str; 5] = [
     "User.Read",
     "offline_access",
 ];
+pub(super) const MAIL_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
+    "Calendars.Read",
+    "Mail.ReadWrite",
+    "User.Read",
+    "offline_access",
+];
 
 #[derive(Clone)]
 pub(super) struct Endpoints {
@@ -292,9 +298,10 @@ impl AuthorizationParameters {
     }
 }
 
-fn authorization_scopes(request: AccountPermissionRequest) -> &'static [&'static str] {
+pub(super) fn authorization_scopes(request: AccountPermissionRequest) -> &'static [&'static str] {
     match request {
-        AccountPermissionRequest::ReadOnly => &READ_ONLY_AUTHORIZATION_SCOPES,
+        AccountPermissionRequest::Current => &BASE_AUTHORIZATION_SCOPES,
+        AccountPermissionRequest::SendMail => &SEND_MAIL_AUTHORIZATION_SCOPES,
         AccountPermissionRequest::MailReadWrite => &MAIL_READ_WRITE_AUTHORIZATION_SCOPES,
     }
 }
@@ -341,9 +348,10 @@ mod tests {
     use url::Url;
 
     use super::{
-        BASE_AUTHORIZATION_SCOPES, Endpoints, SEND_MAIL_AUTHORIZATION_SCOPES,
-        validate_authorization_request,
+        BASE_AUTHORIZATION_SCOPES, Endpoints, MAIL_READ_WRITE_AUTHORIZATION_SCOPES,
+        SEND_MAIL_AUTHORIZATION_SCOPES, authorization_scopes, validate_authorization_request,
     };
+    use einfach_mail_application::AccountPermissionRequest;
 
     #[test]
     fn mail_send_is_added_only_to_explicit_same_account_permission_review() {
@@ -473,7 +481,7 @@ mod tests {
         assert_eq!(requested, &MAIL_READ_WRITE_AUTHORIZATION_SCOPES);
         assert!(requested.contains(&"Mail.ReadWrite"));
         assert!(
-            !authorization_scopes(AccountPermissionRequest::ReadOnly).contains(&"Mail.ReadWrite")
+            !authorization_scopes(AccountPermissionRequest::Current).contains(&"Mail.ReadWrite")
         );
     }
 }

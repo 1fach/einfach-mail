@@ -79,6 +79,10 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
+    pub(super) fn message_read_state_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
+        self.validated_url(self.message_path(message_id)?)
+    }
+
     pub(super) fn mail_send_path(&self) -> Result<GraphUrl, GraphError> {
         let url = self
             .base_url

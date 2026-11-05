@@ -4,7 +4,7 @@ use std::{future::Future, time::Duration};
 
 use einfach_mail_domain::{
     AccountId, FolderReference, MailDraft, MailFolder, MailMessage, MessageBody, MessageDeltaLink,
-    MessageDeltaPage, MessageId,
+    MessageDeltaPage, MessageId, ReadState,
 };
 use thiserror::Error;
 
@@ -212,6 +212,24 @@ pub trait MailProvider: Send + Sync {
         folder: &FolderReference,
         message_id: &MessageId,
     ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_;
+
+    /// Sets one message's read state and returns the state confirmed by the provider.
+    ///
+    /// Implementations must return [`MailOperationError::MessageUpdateOutcomeUnknown`] when the
+    /// provider may have applied the update without confirming the requested state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailOperationError::SignInRequired`] without a valid session,
+    /// [`MailOperationError::AccountMismatch`] when `folder` belongs to another account,
+    /// [`MailOperationError::MessageUpdateOutcomeUnknown`] without exact confirmation, or a
+    /// provider error for access denial, throttling, or service failures.
+    fn set_message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        requested: ReadState,
+    ) -> impl Future<Output = Result<ReadState, MailOperationError>> + Send + '_;
 
     /// Sends one plain-text message as the signed-in account.
     ///

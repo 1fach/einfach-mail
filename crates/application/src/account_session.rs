@@ -4,14 +4,14 @@ use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
 
 use einfach_mail_domain::{
     AccountId, CalendarViewReference, FolderReference, MailDraft, MailFolder, MailMessage,
-    MailSendOperationId, MessageId, PendingMailSend,
+    MailSendOperationId, MessageId, PendingMailSend, ReadState,
 };
 
 use crate::{
     CalendarCache, CalendarProvider, CalendarSnapshot, CalendarSyncReport, CalendarWorkflow,
     CalendarWorkflowError, MailCache, MailCacheError, MailProvider, MailSendOutcome,
     MailSendResolutionError, MailSendWorkflowError, MailSyncProgress, MailSyncReport,
-    MailSyncState, MailWorkflow, MailWorkflowError, OpenedMessage,
+    MailSyncState, MailWorkflow, MailWorkflowError, OpenedMessage, ReadStateUpdateOutcome,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -78,6 +78,19 @@ pub trait MailSession: Send + Sync {
         folder: &'a FolderReference,
         message_id: &'a MessageId,
     ) -> AccountSessionFuture<'a, Result<OpenedMessage, MailWorkflowError>>;
+
+    /// Sets the selected message's read state and returns its provider and cache result.
+    ///
+    /// # Errors
+    ///
+    /// Returns provider or cache errors when the requested state cannot be confirmed, or
+    /// [`MailWorkflowError::OperationInProgress`] when another operation owns the folder.
+    fn set_message_read_state<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        requested: ReadState,
+    ) -> AccountSessionFuture<'a, Result<ReadStateUpdateOutcome, MailWorkflowError>>;
 
     /// Sends a plain-text message and saves a body-free marker before dispatch.
     fn send_message<'a>(
@@ -276,6 +289,17 @@ where
         message_id: &'a MessageId,
     ) -> AccountSessionFuture<'a, Result<OpenedMessage, MailWorkflowError>> {
         Box::pin(MailWorkflow::open_message(self, folder, message_id))
+    }
+
+    fn set_message_read_state<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        requested: ReadState,
+    ) -> AccountSessionFuture<'a, Result<ReadStateUpdateOutcome, MailWorkflowError>> {
+        Box::pin(MailWorkflow::set_message_read_state(
+            self, folder, message_id, requested,
+        ))
     }
 
     fn send_message<'a>(

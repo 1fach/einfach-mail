@@ -8,7 +8,7 @@ use std::{
 
 use einfach_mail_domain::{
     AccountId, CalendarViewReference, FolderReference, MailDraft, MailFolder, MailMessage,
-    MailSendOperationId, MessageBody, MessageDeltaProgress, MessageId, PendingMailSend,
+    MailSendOperationId, MessageBody, MessageDeltaProgress, MessageId, PendingMailSend, ReadState,
 };
 use thiserror::Error;
 
@@ -593,14 +593,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         requested: ReadState,
     ) -> Result<ReadStateUpdateOutcome, MailWorkflowError> {
         let _reservation = self.reserve_folder(folder)?;
-        if self
-            .cache
-            .message_read_state(folder, message_id)
-            .await?
-            .is_none()
-        {
-            return Err(MailCacheError::MessageNotCached.into());
-        }
+        self.ensure_message_is_cached(folder, message_id).await?;
 
         let confirmed = self
             .provider
@@ -610,6 +603,32 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             return Err(MailOperationError::MessageUpdateOutcomeUnknown.into());
         }
 
+        self.store_confirmed_read_state(folder, message_id, confirmed)
+            .await
+    }
+
+    async fn ensure_message_is_cached(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> Result<(), MailWorkflowError> {
+        if self
+            .cache
+            .message_read_state(folder, message_id)
+            .await?
+            .is_none()
+        {
+            return Err(MailCacheError::MessageNotCached.into());
+        }
+        Ok(())
+    }
+
+    async fn store_confirmed_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        confirmed: ReadState,
+    ) -> Result<ReadStateUpdateOutcome, MailWorkflowError> {
         match self
             .cache
             .set_message_read_state(folder, message_id, confirmed)

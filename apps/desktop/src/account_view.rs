@@ -178,8 +178,11 @@ enum OpeningContent {
 
 fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static str {
     match request {
-        AccountPermissionRequest::ReadOnly => {
+        AccountPermissionRequest::Current => {
             "Microsoft will review the existing delegated access: User.Read, Mail.Read, Calendars.Read, and offline_access."
+        }
+        AccountPermissionRequest::SendMail => {
+            "Microsoft grants Mail.Send permission to send mail as this account. Continue opens Microsoft in your system browser."
         }
         AccountPermissionRequest::MailReadWrite => {
             "Microsoft grants Mail.ReadWrite the ability to create, read, update, and delete mail in this account. Einfach Mail requests it to set messages read or unread after Microsoft denied that action. The app does not request Mail.Send, and this permission review does not send or change a message. Continue opens Microsoft in your system browser."
@@ -356,11 +359,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     ) -> Task<()> {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let reauthorization_result = workflow
-                .reauthorize_account_with_cancellation(
-                    profile.id(),
-                    AccountPermissionRequest::Current,
-                    cancellation,
-                )
+                .reauthorize_account_with_cancellation(profile.id(), request, cancellation)
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.task = None;
@@ -826,7 +825,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                         .label("Review sign-in permissions")
                         .disabled(self.opening_content.is_some() || self.task.is_some())
                         .on_click(cx.listener(|view, _, _, cx| {
-                            view.prepare_permission_review(AccountPermissionRequest::ReadOnly, cx);
+                            view.prepare_permission_review(AccountPermissionRequest::Current, cx);
                         })),
                 )
                 .into_any_element()
@@ -1173,7 +1172,7 @@ mod tests {
         fn reauthorize_account(
             &self,
             expected_account_id: &AccountId,
-            _: AccountPermissionRequest,
+            request: AccountPermissionRequest,
             cancellation: AccountOperationCancellation,
         ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
         {
