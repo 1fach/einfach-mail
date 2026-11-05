@@ -92,12 +92,13 @@ impl TryFrom<&str> for GraphEventEtag {
     type Error = GraphError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        if value.is_empty() || value == "*" {
-            return Err(GraphError::InvalidResponse);
-        }
-        HeaderValue::from_str(value)
-            .map(Self)
-            .map_err(|_| GraphError::InvalidResponse)
+        let etag = value
+            .parse::<headers::ETag>()
+            .map_err(|_| GraphError::InvalidResponse)?;
+        let if_match = headers::IfMatch::from(etag);
+        let mut values = Vec::new();
+        headers::Header::encode(&if_match, &mut values);
+        values.pop().map(Self).ok_or(GraphError::InvalidResponse)
     }
 }
 
@@ -1869,17 +1870,29 @@ mod tests {
             .await;
         let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
 
-        assert_eq!(
-            transport
-                .handle()
-                .delete_calendar_event(
-                    graph_url(&server.url("/v1.0/me/events/synthetic-event")),
-                    synthetic_access_token(),
-                    "*",
-                )
-                .await,
-            Err(GraphError::InvalidResponse)
-        );
+        for etag in [
+            "*",
+            " *",
+            "* ",
+            "synthetic-etag",
+            "\"unterminated",
+            "W/\"unterminated",
+            "\"synthetic-etag\" suffix",
+        ] {
+            assert_eq!(
+                transport
+                    .handle()
+                    .delete_calendar_event(
+                        graph_url(&server.url("/v1.0/me/events/synthetic-event")),
+                        synthetic_access_token(),
+                        etag,
+                    )
+                    .await,
+                Err(GraphError::InvalidResponse),
+                "invalid ETag {etag:?} must be rejected before sending"
+            );
+        }
+
         delete.assert_calls_async(0).await;
     }
 
