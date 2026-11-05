@@ -16,7 +16,7 @@ Issue #27's plain-text send implementation is in draft PR #53, based on PR #52. 
 
 Issue #29's reply implementation is in draft PR #56, stacked on PR #55. Its older duplicate flags commit has been removed from the stack. Final Linux verification is pending. Keep issue #30 open for tenant-only consent, Reply-To, and Sent Items evidence.
 
-Issue #33's message move and issue #43's account-removal concurrency changes are in draft PRs #57 and #58. PR #58 reuses the account session and reservation registry for cache removal and holds the Linux per-user process lock before GPUI startup. Final Linux verification of the complete stack is pending. Keep issue #34 open for tenant-only move and immutable-ID verification; issue #43's coverage is synthetic.
+Issue #33's move and issue #43's account-removal changes are presented in draft PRs #57 and #58. PR #58 retains the account session and shared reservation registry for cache removal, and holds the Linux per-user process lock before GPUI startup. Its synthetic AccountView regression opens Calendar, returns to Accounts, then verifies sign-out retry reuses that session after an active-operation conflict. Final Linux verification of the complete stack is pending. Keep issue #34 open for tenant-only move and immutable-ID verification.
 
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 

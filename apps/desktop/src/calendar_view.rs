@@ -345,6 +345,7 @@ where
 
     fn render_back_button(cx: &mut Context<Self>) -> impl IntoElement {
         Button::new("calendar-back")
+            .debug_selector(|| "calendar-back".to_owned())
             .ghost()
             .label("Accounts")
             .on_click(cx.listener(|_, _, _, cx| {

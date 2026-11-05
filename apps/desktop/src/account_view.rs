@@ -934,6 +934,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             )
             .child(
                 Button::new("open-calendar")
+                    .debug_selector(|| "open-calendar".to_owned())
                     .outline()
                     .label(if calendar_opening {
                         "Opening calendar…"
@@ -1111,9 +1112,10 @@ mod tests {
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
         AccountProvider, AccountSession, AccountSessionFactory, AccountSessionFuture,
-        AccountWorkflow, CalendarSession, MailCacheError, MailSession,
+        AccountWorkflow, CalendarCacheError, CalendarSession, CalendarSnapshot, CalendarSyncReport,
+        CalendarWorkflowError, MailCacheError, MailSession,
     };
-    use einfach_mail_domain::{AccountId, AccountProfile};
+    use einfach_mail_domain::{AccountId, AccountProfile, CalendarViewReference};
 
     #[derive(Clone, Default)]
     struct TestProvider {
@@ -1141,7 +1143,7 @@ mod tests {
         }
 
         fn calendar_session(&self) -> Arc<dyn CalendarSession> {
-            panic!("the retained test session is not reopened")
+            Arc::new(TestCalendarSession)
         }
 
         fn remove_account_cache<'a>(
@@ -1164,7 +1166,30 @@ mod tests {
         }
     }
 
+    struct TestCalendarSession;
+
+    impl CalendarSession for TestCalendarSession {
+        fn load_cached_view<'a>(
+            &'a self,
+            _: &'a CalendarViewReference,
+        ) -> AccountSessionFuture<'a, Result<CalendarSnapshot, CalendarWorkflowError>> {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn synchronize_view<'a>(
+            &'a self,
+            _: &'a CalendarViewReference,
+        ) -> AccountSessionFuture<'a, Result<CalendarSyncReport, CalendarWorkflowError>> {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+    }
+
     struct TestAccountSessionFactory {
+        session: Arc<dyn AccountSession>,
         fallback_removals: Arc<AtomicBool>,
     }
 
@@ -1173,7 +1198,7 @@ mod tests {
             &self,
             _: AccountId,
         ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
-            Box::pin(ready(Err(MailCacheError::Unavailable)))
+            Box::pin(ready(Ok(Arc::clone(&self.session))))
         }
 
         fn remove_account_cache<'a>(
@@ -1420,7 +1445,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sign_out_after_return_to_account_reuses_the_retained_session(cx: &mut TestAppContext) {
+    fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
         let signed_out = Arc::clone(&provider.signed_out);
@@ -1431,6 +1456,7 @@ mod tests {
             removal_attempts: Arc::clone(&removal_attempts),
         });
         let factory: Arc<dyn AccountSessionFactory> = Arc::new(TestAccountSessionFactory {
+            session: Arc::clone(&session),
             fallback_removals: Arc::clone(&fallback_removals),
         });
         let (view, context) =
@@ -1448,11 +1474,30 @@ mod tests {
         context.cx.update(|cx| {
             view.update(cx, |view, cx| {
                 view.status = AccountStatus::Connected(profile);
-                view.account_session = Some(Arc::clone(&session));
                 cx.notify();
             });
         });
         draw_account_view(context);
+
+        click(context, "open-calendar");
+        let calendar_open = context
+            .cx
+            .update(|cx| view.read(cx).calendar_view.is_some());
+        assert!(calendar_open);
+
+        click(context, "calendar-back");
+        let returned_to_account = context
+            .cx
+            .update(|cx| view.read(cx).calendar_view.is_none());
+        assert!(returned_to_account);
+
+        let session_retained_after_return = context.cx.update(|cx| {
+            view.read(cx)
+                .account_session
+                .as_ref()
+                .is_some_and(|retained| Arc::ptr_eq(retained, &session))
+        });
+        assert!(session_retained_after_return);
 
         click(context, "sign-out");
 
