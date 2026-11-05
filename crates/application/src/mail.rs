@@ -3,12 +3,21 @@
 use std::{future::Future, time::Duration};
 
 use einfach_mail_domain::{
-    AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
+    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
     MailReplyDraft, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId, ReadState,
 };
 use thiserror::Error;
 
 use crate::AccountOperationError;
+
+/// Selects a well-known folder that has a native message action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WellKnownMailFolder {
+    /// The default folder used by Outlook's One_Click Archive action.
+    Archive,
+    /// The folder that holds messages deleted from ordinary folders.
+    DeletedItems,
+}
 
 /// A user-safe category for a mail operation failure.
 #[non_exhaustive]
@@ -271,19 +280,21 @@ pub trait MailProvider: Send + Sync {
         destination_folder: &FolderReference,
     ) -> impl Future<Output = Result<(), MailOperationError>> + Send + '_;
 
-    /// Resolves the signed-in account's Deleted Items folder ID.
+    /// Resolves a well-known folder for the signed-in account.
     ///
     /// Implementations use the provider's locale-independent folder identity and reject an
-    /// account that does not match the active session.
+    /// account that does not match the active session. The returned reference has the same
+    /// account ID as `account_id`.
     ///
     /// # Errors
     ///
     /// Returns [`MailOperationError::AccountMismatch`] when `account_id` is not the signed-in
-    /// account, or another provider error when Graph cannot resolve the folder.
-    fn deleted_items_folder_id(
+    /// account, or another provider error when the folder cannot be resolved.
+    fn well_known_folder(
         &self,
         account_id: &AccountId,
-    ) -> impl Future<Output = Result<FolderId, MailOperationError>> + Send + '_;
+        folder: WellKnownMailFolder,
+    ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_;
 
     /// Sends one plain-text message as the signed-in account.
     ///

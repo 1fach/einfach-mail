@@ -22,6 +22,8 @@ Issue #25's timed appointment creation is ready in draft PR #59, stacked on PR #
 
 Issue #35's native Delete action is implemented in PR #62 on `candidate/issue-35-delete-message-pr`, stacked on current PR #61 head `39a5988b3307b566abd80cae7a8fea3f5003f527`. Review found no actionable production-code defect, and the refreshed required checks pass. PR #62 is ready for review. Keep issue #35 open through merge; issue #36 remains for tenant verification.
 
+Issue #37's native Archive action is on `candidate/issue-37-archive-pr`, cleanly rebased on PR #62 head `5ca8c9b506f39675b6bc0370852edb6a6f6ab151`; draft PR #64 contains only the Archive feature, without stale calendar commits. The full local Linux gate passed on 2026-11-05: 357 workspace tests passed and 3 Secret Service tests were ignored. Rust 1.95 compilation, formatting, Clippy, rustdoc, RustSec audit, no-Tauri, and dependency-policy checks passed; RustSec found no vulnerable or yanked crates and reported 8 allowed unmaintained-crate advisories. Source review verified the shared typed move workflow, visible-folder ownership, session sync gate, reservations, exact immutable-ID Graph confirmation, encrypted body preservation, and recovery states. No test tenant, live Graph request, real mailbox, or desktop window was used. Keep issue #37 open through review and issue #38 open for tenant verification.
+
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
 ## Verified state

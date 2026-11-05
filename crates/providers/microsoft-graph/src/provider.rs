@@ -26,12 +26,12 @@ use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
     CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarOperationError, CalendarProvider,
     MailOperationError, MailProvider, MailSendProviderError, MessageDeltaRequest,
-    MessageDeltaResponse,
+    MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, EditableCalendarEvent, FolderId, FolderReference, FollowUpFlagStatus,
-    MailDraft, MailFolder, MailMessage, MailReplyDraft, MessageBody, MessageId, ReadState,
+    CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
+    MailFolder, MailMessage, MailReplyDraft, MessageBody, MessageId, ReadState,
 };
 
 const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
@@ -248,17 +248,20 @@ impl MailProvider for MicrosoftGraphProvider {
         })
     }
 
-    fn deleted_items_folder_id(
+    fn well_known_folder(
         &self,
         account_id: &AccountId,
-    ) -> impl Future<Output = Result<FolderId, MailOperationError>> + Send + '_ {
+        folder: WellKnownMailFolder,
+    ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let account_id = account_id.clone();
         worker::run(move |_cancellation: CancellationToken| async move {
             let token = ensure_access_token(&config, &account_id).await?;
             let graph_api = config.graph_api().map_err(map_graph_error)?;
-            let result = graph_api.deleted_items_folder_id(Arc::clone(&token)).await;
-            map_mail_result(&config, &account_id, &token, result).await
+            let folder_result = graph_api
+                .well_known_folder(&account_id, folder, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, &account_id, &token, folder_result).await
         })
     }
 
@@ -849,7 +852,7 @@ mod tests {
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
         AccountProvider, AccountWorkflow, CalendarProvider, MailOperationError, MailProvider,
-        MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse,
+        MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
     };
     use einfach_mail_domain::{
         AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrenceTime,
@@ -1213,17 +1216,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleted_items_folder_lookup_is_account_scoped() {
+    async fn well_known_folder_lookup_is_account_scoped() {
         let server = MockServer::start_async().await;
         let lookup = server
             .mock_async(|when, then| {
                 when.method(GET)
                     .path("/v1.0/me/mailFolders/deleteditems")
-                    .query_param("$select", "id")
+                    .query_param("$select", "id,displayName,isHidden")
                     .header("authorization", "Bearer synthetic-deleted-access");
                 then.status(200)
                     .header("content-type", "application/json")
-                    .body(r#"{"id":"deleted-folder"}"#);
+                    .body(r#"{"id":"deleted-folder","displayName":"Gelöschte Elemente","isHidden":false}"#);
             })
             .await;
         let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
@@ -1239,16 +1242,19 @@ mod tests {
             access_token: Some(access_token("synthetic-deleted-access")),
         });
 
-        let folder_id = provider
-            .deleted_items_folder_id(&account)
+        let folder = provider
+            .well_known_folder(&account, WellKnownMailFolder::DeletedItems)
             .await
-            .expect("synthetic Deleted Items ID resolves");
+            .expect("synthetic Deleted Items folder resolves");
         let other_account =
             AccountId::try_from("other-account".to_owned()).expect("synthetic account ID is valid");
 
-        assert_eq!(folder_id.as_str(), "deleted-folder");
+        assert_eq!(folder.account_id(), &account);
+        assert_eq!(folder.folder_id().as_str(), "deleted-folder");
         assert_eq!(
-            provider.deleted_items_folder_id(&other_account).await,
+            provider
+                .well_known_folder(&other_account, WellKnownMailFolder::DeletedItems)
+                .await,
             Err(MailOperationError::AccountMismatch)
         );
         lookup.assert_calls_async(1).await;

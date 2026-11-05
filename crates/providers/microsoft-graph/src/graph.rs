@@ -18,7 +18,7 @@ use crate::{
 };
 use einfach_mail_application::{
     CalendarDeltaPageResponse, CalendarDeltaRequest, MessageDeltaPageResponse, MessageDeltaRequest,
-    MessageDeltaResponse,
+    MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage,
@@ -94,21 +94,26 @@ impl GraphApi {
         Ok(tree.folders)
     }
 
-    pub(super) async fn deleted_items_folder_id(
+    pub(super) async fn well_known_folder(
         &self,
+        account_id: &AccountId,
+        folder: WellKnownMailFolder,
         token: Arc<AccessToken>,
-    ) -> Result<FolderId, GraphError> {
+    ) -> Result<FolderReference, GraphError> {
         let response = self
             .transport
             .get(
                 GraphOperation::Folders,
-                self.authority.deleted_items_folder_path()?,
+                self.authority.well_known_folder_path(folder)?,
                 token,
             )
             .await?;
-        let folder = serde_json::from_slice::<WireFolderId>(&response)
+        let wire_folder = serde_json::from_slice::<WireFolder>(&response)
             .map_err(|_| GraphError::InvalidResponse)?;
-        FolderId::try_from(folder.id).map_err(|_| GraphError::InvalidRecord)
+        wire_folder
+            .into_domain(account_id, None)?
+            .map(|folder| folder.reference().clone())
+            .ok_or(GraphError::InvalidResponse)
     }
 
     pub(super) async fn list_messages(
@@ -710,11 +715,6 @@ struct WireFolder {
     display_name: String,
     #[serde(default)]
     is_hidden: bool,
-}
-
-#[derive(Deserialize)]
-struct WireFolderId {
-    id: String,
 }
 
 impl WireFolder {
@@ -1480,7 +1480,7 @@ mod tests {
     use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
     use url::Url;
 
-    use einfach_mail_application::CalendarDeltaRequest;
+    use einfach_mail_application::{CalendarDeltaRequest, WellKnownMailFolder};
     use einfach_mail_domain::{
         AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarEventCreation,
         CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft, CalendarOccurrence,
@@ -1644,27 +1644,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolves_deleted_items_from_its_well_known_name() {
+    async fn resolves_archive_and_deleted_items_from_well_known_names() {
         let server = MockServer::start_async().await;
-        let lookup = server
+        let archive_lookup = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/archive")
+                    .query_param("$select", "id,displayName,isHidden");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"synthetic-archive-folder","displayName":"Archiv","isHidden":false}"#);
+            })
+            .await;
+        let deleted_lookup = server
             .mock_async(|when, then| {
                 when.method(GET)
                     .path("/v1.0/me/mailFolders/deleteditems")
-                    .query_param("$select", "id");
+                    .query_param("$select", "id,displayName,isHidden");
                 then.status(200)
                     .header("content-type", "application/json")
-                    .body(r#"{"id":"synthetic-deleted-folder"}"#);
+                    .body(r#"{"id":"synthetic-deleted-folder","displayName":"Gelöschte Elemente","isHidden":false}"#);
             })
             .await;
         let (graph_api, transport) = synthetic_graph_api(&server);
+        let account_id = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
 
-        let folder_id = graph_api
-            .deleted_items_folder_id(synthetic_access_token())
+        let archive_folder = graph_api
+            .well_known_folder(
+                &account_id,
+                WellKnownMailFolder::Archive,
+                synthetic_access_token(),
+            )
             .await
-            .expect("synthetic Deleted Items folder ID is returned");
+            .expect("localized synthetic Archive folder is resolved");
+        let deleted_items_folder = graph_api
+            .well_known_folder(
+                &account_id,
+                WellKnownMailFolder::DeletedItems,
+                synthetic_access_token(),
+            )
+            .await
+            .expect("localized synthetic Deleted Items folder is resolved");
 
-        assert_eq!(folder_id.as_str(), "synthetic-deleted-folder");
-        lookup.assert_calls_async(1).await;
+        assert_eq!(archive_folder.account_id(), &account_id);
+        assert_eq!(
+            archive_folder.folder_id().as_str(),
+            "synthetic-archive-folder"
+        );
+        assert_eq!(
+            deleted_items_folder.folder_id().as_str(),
+            "synthetic-deleted-folder"
+        );
+        archive_lookup.assert_calls_async(1).await;
+        deleted_lookup.assert_calls_async(1).await;
         drop(transport);
     }
 
