@@ -114,6 +114,9 @@ pub enum CalendarCacheError {
     /// The encrypted cache is unavailable.
     #[error("the local calendar cache is unavailable")]
     Unavailable,
+    /// Another cache session, initialization, or removal owns the account lock.
+    #[error("the local calendar cache is in use")]
+    InUse,
     /// Stored values do not satisfy the calendar domain contract.
     #[error("the local calendar cache contains invalid data")]
     InvalidData,
@@ -253,7 +256,8 @@ pub trait CalendarCache: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`CalendarCacheError::AccountMismatch`] for another account or
+    /// Returns [`CalendarCacheError::AccountMismatch`] for another account,
+    /// [`CalendarCacheError::InUse`] when exclusive account-lock ownership is unavailable, or
     /// [`CalendarCacheError::Unavailable`] when cache removal fails.
     fn remove_account(
         &self,
@@ -495,7 +499,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account does not own this cache or removal fails.
+    /// Returns [`CalendarCacheError::AccountMismatch`] for another account,
+    /// [`CalendarCacheError::InUse`] when exclusive account-lock ownership is unavailable, or
+    /// [`CalendarCacheError::Unavailable`] when cache removal fails.
     pub async fn remove_account_cache(
         &self,
         account_id: &AccountId,

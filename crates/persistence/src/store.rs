@@ -2,7 +2,9 @@
 
 use std::{
     collections::HashSet,
+    fs::File,
     future::Future,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -179,8 +181,8 @@ pub struct SqliteMailCache {
     account_id: AccountId,
     client: Client,
     database_path: std::path::PathBuf,
-    lock_path: std::path::PathBuf,
     credential_account: String,
+    account_lock: Arc<File>,
 }
 
 /// Opens and removes account-scoped [`SqliteMailCache`] values.
@@ -204,18 +206,20 @@ impl SqliteMailCache {
     ///
     /// A new 32-byte key is generated only when neither the database nor its
     /// sidecar files exist and Secret Service has no saved key.
+    /// The returned cache retains a shared account lock until its final clone is dropped.
     ///
     /// # Errors
     ///
-    /// Returns a cache error when paths, Secret Service, SQLCipher, or migrations fail.
+    /// Returns a cache error when removal or another cache initialization owns its lock, or when
+    /// paths, Secret Service, SQLCipher, or migrations fail.
     pub async fn open_for_account(account_id: AccountId) -> Result<Self, MailCacheError> {
         let opened = security::open_database(&account_id).await?;
         Ok(Self {
             account_id,
             client: opened.client,
             database_path: opened.database_path,
-            lock_path: opened.lock_path,
             credential_account: opened.credential_account,
+            account_lock: opened.account_lock,
         })
     }
 
@@ -223,7 +227,8 @@ impl SqliteMailCache {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the cache path or credential service cannot be updated.
+    /// Returns [`MailCacheError::InUse`] when another cache handle or removal owns the account lock.
+    /// Returns another cache error when the cache path or credential service cannot be updated.
     pub fn remove_for_account(account_id: &AccountId) -> Result<(), MailCacheError> {
         security::remove_account_without_open_client(account_id)
     }
@@ -237,18 +242,17 @@ impl SqliteMailCache {
         let client = security::open_test_database(&database_path, key_byte)
             .await
             .expect("synthetic encrypted cache opens");
-        let lock_path = database_path.with_extension("lock");
         Self {
             account_id,
-            client,
-            database_path,
-            lock_path,
-            credential_account: "synthetic-cache-key".to_owned(),
+            client: client.client,
+            database_path: client.database_path,
+            credential_account: client.credential_account,
+            account_lock: client.account_lock,
         }
     }
 
     #[cfg(test)]
-    pub(super) async fn close_for_tests(&self) {
+    pub(super) async fn close_for_tests(self) {
         self.client
             .close()
             .await
@@ -579,12 +583,12 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
         let validation = self.check_account(account_id);
         let client = self.client.clone();
-        let lock_path = self.lock_path.clone();
+        let account_lock = Arc::clone(&self.account_lock);
         let database_path = self.database_path.clone();
         let credential_account = self.credential_account.clone();
         async move {
             validation?;
-            let _lock = security::lock_account_directory(&lock_path)?;
+            security::upgrade_account_lock(&account_lock)?;
             security::delete_database_files(&client, &database_path).await?;
             security::remove_credential(&credential_account)
         }
@@ -675,6 +679,7 @@ impl CalendarCache for SqliteMailCache {
             removal.await.map_err(|error| match error {
                 MailCacheError::AccountMismatch => CalendarCacheError::AccountMismatch,
                 MailCacheError::InvalidData => CalendarCacheError::InvalidData,
+                MailCacheError::InUse => CalendarCacheError::InUse,
                 MailCacheError::Unavailable
                 | MailCacheError::MissingEncryptionKey
                 | MailCacheError::MessageNotCached
@@ -1997,11 +2002,7 @@ mod tests {
                 )
                 .await
                 .expect("opened synthetic body is saved");
-            cache
-                .client
-                .close()
-                .await
-                .expect("synthetic cache connection closes");
+            cache.close_for_tests().await;
 
             let reopened = open_test_cache(&directory, account).await;
             let persisted_state = reopened
