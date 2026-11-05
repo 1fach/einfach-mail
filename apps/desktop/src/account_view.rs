@@ -1126,11 +1126,13 @@ mod tests {
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
         AccountProvider, AccountSession, AccountSessionFactory, AccountSessionFuture,
-        AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome, CalendarSession,
-        CalendarSnapshot, CalendarSyncReport, CalendarWorkflowError, MailCacheError, MailSession,
+        AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome,
+        CalendarEventUpdateOutcome, CalendarSession, CalendarSnapshot, CalendarSyncReport,
+        CalendarWorkflowError, MailCacheError, MailSession,
     };
     use einfach_mail_domain::{
-        AccountId, AccountProfile, CalendarEventCreation, CalendarViewReference,
+        AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
+        CalendarViewReference, EditableCalendarEvent,
     };
 
     #[derive(Clone, Default)]
@@ -1203,6 +1205,16 @@ mod tests {
             ))))
         }
 
+        fn editable_event<'a>(
+            &'a self,
+            _: &'a CalendarOccurrence,
+        ) -> AccountSessionFuture<'a, Result<EditableCalendarEvent, CalendarWorkflowError>>
+        {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
         fn create_event<'a>(
             &'a self,
             _: &'a CalendarEventCreation,
@@ -1217,6 +1229,16 @@ mod tests {
             &'a self,
             _: &'a CalendarEventCreation,
         ) -> AccountSessionFuture<'a, Result<(), CalendarWorkflowError>> {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn update_event<'a>(
+            &'a self,
+            _: &'a CalendarEventUpdate,
+        ) -> AccountSessionFuture<'a, Result<CalendarEventUpdateOutcome, CalendarWorkflowError>>
+        {
             Box::pin(ready(Err(CalendarWorkflowError::Cache(
                 CalendarCacheError::Unavailable,
             ))))
