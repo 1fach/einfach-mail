@@ -15,6 +15,9 @@ pub enum MailCacheError {
     /// The encrypted cache or its credential service is unavailable.
     #[error("the local mail cache is unavailable")]
     Unavailable,
+    /// Another cache handle, initialization, or removal owns an account lock.
+    #[error("the local mail cache is in use")]
+    InUse,
     /// The cache exists but its encryption key is missing or malformed.
     #[error("the local mail cache encryption key is unavailable")]
     MissingEncryptionKey,

@@ -10,6 +10,7 @@ use einfach_mail_domain::AccountProfile;
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
+    scroll::ScrollableElement,
 };
 use gpui_kit::{
     AsyncApp, Context, Entity, IntoElement, Render, Role, Subscription, Task, Window, div,
@@ -908,12 +909,17 @@ impl<P: AccountProvider + 'static> Render for AccountView<P> {
         let colors = cx.theme().semantic_tokens().colors;
         div()
             .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_8()
+            .overflow_y_scrollbar()
             .bg(colors.background)
-            .child(self.render_account_content(colors, cx))
+            .child(
+                div()
+                    .min_h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_8()
+                    .child(self.render_account_content(colors, cx)),
+            )
             .into_any_element()
     }
 }
@@ -935,6 +941,9 @@ async fn remove_account_cache(
 
 fn mail_cache_error_message(error: MailCacheError) -> &'static str {
     match error {
+        MailCacheError::InUse => {
+            "Another Einfach Mail operation is opening or using this account cache. Wait for it to finish, or close the other account view and try again."
+        }
         MailCacheError::MissingEncryptionKey => {
             "The encrypted account cache key is missing. Remove the local cache before syncing again."
         }
@@ -951,7 +960,7 @@ mod tests {
         future::{Future, ready},
         sync::{
             Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc,
         },
         time::Duration,
@@ -963,8 +972,8 @@ mod tests {
 
     use super::{AccountStatus, AccountView, SetupIssue};
     use einfach_mail_application::{
-        AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
-        MailCacheError,
+        AccountOperationCancellation, AccountOperationError, AccountProvider, AccountSession,
+        AccountSessionFactory, AccountSessionFuture, AccountWorkflow, MailCacheError,
     };
     use einfach_mail_domain::{AccountId, AccountProfile};
 
@@ -981,6 +990,37 @@ mod tests {
     struct CommitGate {
         started: mpsc::Sender<()>,
         finish: oneshot::Receiver<()>,
+    }
+
+    #[derive(Clone, Default)]
+    struct TestAccountSessionFactory {
+        removal_attempts: Arc<AtomicUsize>,
+        fail_next_removal: Arc<AtomicBool>,
+    }
+
+    impl AccountSessionFactory for TestAccountSessionFactory {
+        fn open_session(
+            &self,
+            _: AccountId,
+        ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
+            Box::pin(ready(Err(MailCacheError::Unavailable)))
+        }
+
+        fn remove_account_cache<'a>(
+            &'a self,
+            _: &'a AccountId,
+        ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+            let removal_attempts = Arc::clone(&self.removal_attempts);
+            let fail_next_removal = Arc::clone(&self.fail_next_removal);
+            Box::pin(async move {
+                removal_attempts.fetch_add(1, Ordering::SeqCst);
+                if fail_next_removal.swap(false, Ordering::SeqCst) {
+                    Err(MailCacheError::InUse)
+                } else {
+                    Ok(())
+                }
+            })
+        }
     }
 
     impl TestProvider {
@@ -1107,10 +1147,41 @@ mod tests {
         });
     }
 
+    fn scroll_account_view_by(context: &mut VisualTestContext, vertical_delta: f32) {
+        let viewport = context.update(|window, _| window.inner_window_bounds().get_bounds());
+        context.simulate_event(gpui::ScrollEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(vertical_delta))),
+            ..Default::default()
+        });
+        context.run_until_parked();
+        draw_account_view(context);
+    }
+
     fn click(context: &mut VisualTestContext, selector: &'static str) {
+        for _ in 0..4 {
+            let viewport = context.update(|window, _| window.inner_window_bounds().get_bounds());
+            let bounds = context
+                .debug_bounds(selector)
+                .expect("requested account action is rendered");
+            if bounds.is_contained_within(&viewport) {
+                break;
+            }
+            let vertical_delta = if bounds.bottom() > viewport.bottom() {
+                -500.0
+            } else {
+                500.0
+            };
+            scroll_account_view_by(context, vertical_delta);
+        }
         let bounds = context
             .debug_bounds(selector)
             .expect("requested account action is rendered");
+        let viewport = context.update(|window, _| window.inner_window_bounds().get_bounds());
+        assert!(
+            bounds.is_contained_within(&viewport),
+            "{selector} is reachable after scrolling"
+        );
         context.simulate_click(bounds.center(), Modifiers::default());
         context.run_until_parked();
         draw_account_view(context);
@@ -1133,14 +1204,30 @@ mod tests {
         assert!(message.contains("try again"));
     }
 
+    #[test]
+    fn in_use_cache_message_explains_how_to_retry() {
+        let message = super::mail_cache_error_message(MailCacheError::InUse);
+
+        assert!(message.contains("Another Einfach Mail operation"));
+        assert!(message.contains("close the other account view"));
+        assert!(message.contains("try again"));
+    }
+
     #[gpui::test]
     fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
         let signed_out = provider.signed_out.clone();
         provider.fail_next_sign_out.store(true, Ordering::SeqCst);
+        let account_session_factory = Arc::new(TestAccountSessionFactory::default());
+        account_session_factory
+            .fail_next_removal
+            .store(true, Ordering::SeqCst);
+        let removal_attempts = Arc::clone(&account_session_factory.removal_attempts);
         let workflow = Arc::new(AccountWorkflow::new(provider));
-        let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), None, cx));
+        let (view, context) = cx.add_window_view(|_, cx| {
+            AccountView::new(Ok(workflow), Some(account_session_factory), cx)
+        });
 
         context.run_until_parked();
         draw_account_view(context);
@@ -1160,6 +1247,16 @@ mod tests {
         assert!(connected);
 
         click(context, "sign-out");
+        let cache_retryable_failure = context.cx.update(|cx| {
+            let view = view.read(cx);
+            matches!(&view.status, AccountStatus::Connected(_))
+                && view.session_open_error == Some(MailCacheError::InUse)
+        });
+        assert!(cache_retryable_failure);
+        assert_eq!(removal_attempts.load(Ordering::SeqCst), 1);
+        assert!(!signed_out.load(Ordering::SeqCst));
+
+        click(context, "sign-out");
         let retryable_failure = context.cx.update(|cx| {
             matches!(
                 &view.read(cx).status,
@@ -1170,6 +1267,7 @@ mod tests {
             )
         });
         assert!(retryable_failure);
+        assert_eq!(removal_attempts.load(Ordering::SeqCst), 2);
         assert!(context.debug_bounds("sign-out").is_some());
         assert!(!signed_out.load(Ordering::SeqCst));
 

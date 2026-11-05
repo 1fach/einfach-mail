@@ -82,6 +82,7 @@ pub trait MailSession: Send + Sync {
     /// # Errors
     ///
     /// Returns a cache error when the account does not own the cache or removal fails.
+    /// Returns [`MailCacheError::InUse`] when another cache handle is open for the account.
     fn remove_account_cache<'a>(
         &'a self,
         account_id: &'a AccountId,
@@ -124,6 +125,7 @@ pub trait AccountSession: Send + Sync {
     /// # Errors
     ///
     /// Returns a cache error when the account does not own the cache or removal fails.
+    /// Returns [`MailCacheError::InUse`] when another cache handle is open for the account.
     fn remove_account_cache<'a>(
         &'a self,
         account_id: &'a AccountId,
@@ -137,6 +139,7 @@ pub trait AccountSessionFactory: Send + Sync {
     /// # Errors
     ///
     /// Returns a cache error when the account cache or its credential is unavailable.
+    /// Returns [`MailCacheError::InUse`] when a removal or another cache initialization is active.
     fn open_session(
         &self,
         account_id: AccountId,
@@ -147,6 +150,7 @@ pub trait AccountSessionFactory: Send + Sync {
     /// # Errors
     ///
     /// Returns a cache error when the account files or credential cannot be removed.
+    /// Returns [`MailCacheError::InUse`] when another cache handle or removal owns the account lock.
     fn remove_account_cache<'a>(
         &'a self,
         account_id: &'a AccountId,
@@ -163,6 +167,7 @@ pub trait AccountCacheFactory: Send + Sync {
     /// # Errors
     ///
     /// Returns a cache error when the account cache or its credential is unavailable.
+    /// Returns [`MailCacheError::InUse`] when a removal or another cache initialization is active.
     fn open_for_account(
         &self,
         account_id: AccountId,
@@ -173,6 +178,7 @@ pub trait AccountCacheFactory: Send + Sync {
     /// # Errors
     ///
     /// Returns a cache error when the account files or credential cannot be removed.
+    /// Returns [`MailCacheError::InUse`] when another cache handle or removal owns the account lock.
     fn remove_for_account<'a>(
         &'a self,
         account_id: &'a AccountId,

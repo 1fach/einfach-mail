@@ -5,6 +5,7 @@ use std::{
     io,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use async_sqlite::{Client, ClientBuilder};
@@ -23,8 +24,8 @@ const CREDENTIAL_SERVICE: &str = "com.1fach.einfach-mail";
 pub(super) struct OpenDatabase {
     pub(super) client: Client,
     pub(super) database_path: PathBuf,
-    pub(super) lock_path: PathBuf,
     pub(super) credential_account: String,
+    pub(super) account_lock: Arc<File>,
 }
 
 struct DatabaseKey(Zeroizing<[u8; KEY_BYTES]>);
@@ -58,17 +59,28 @@ impl DatabaseKey {
 
 pub(super) async fn open_database(account_id: &AccountId) -> Result<OpenDatabase, MailCacheError> {
     let (database_path, lock_path, credential_account) = cache_paths(account_id)?;
-    let _lock = lock_account_directory(&lock_path)?;
-    open_locked_database(database_path, lock_path, credential_account).await
+    let account_lock = Arc::new(lock_account_directory_shared(&lock_path)?);
+    let initialization_lock_path = with_suffix(&lock_path, ".init");
+    let _initialization_lock = lock_account_directory_exclusive(&initialization_lock_path)?;
+    open_locked_database(database_path, credential_account, account_lock).await
 }
 
 async fn open_locked_database(
     database_path: PathBuf,
-    lock_path: PathBuf,
     credential_account: String,
+    account_lock: Arc<File>,
 ) -> Result<OpenDatabase, MailCacheError> {
     let credential = credential_entry(&credential_account)?;
     let key = load_or_create_key(&credential, encrypted_data_exists(&database_path)?)?;
+    open_database_with_key(database_path, credential_account, key, account_lock).await
+}
+
+async fn open_database_with_key(
+    database_path: PathBuf,
+    credential_account: String,
+    key: DatabaseKey,
+    account_lock: Arc<File>,
+) -> Result<OpenDatabase, MailCacheError> {
     secure_database_file(&database_path)?;
     let client = open_encrypted_client(&database_path, &key).await?;
     schema::apply(&client)
@@ -77,8 +89,8 @@ async fn open_locked_database(
     Ok(OpenDatabase {
         client,
         database_path,
-        lock_path,
         credential_account,
+        account_lock,
     })
 }
 
@@ -127,14 +139,20 @@ async fn open_encrypted_client(
 pub(super) async fn open_test_database(
     database_path: &Path,
     key_byte: u8,
-) -> Result<Client, MailCacheError> {
-    secure_database_file(database_path)?;
+) -> Result<OpenDatabase, MailCacheError> {
+    let account_directory = database_path.parent().ok_or(MailCacheError::Unavailable)?;
+    let lock_path = account_directory.join("mail-cache.lock");
+    let account_lock = Arc::new(lock_account_directory_shared(&lock_path)?);
+    let initialization_lock_path = with_suffix(&lock_path, ".init");
+    let _initialization_lock = lock_account_directory_exclusive(&initialization_lock_path)?;
     let key = DatabaseKey(Zeroizing::new([key_byte; KEY_BYTES]));
-    let client = open_encrypted_client(database_path, &key).await?;
-    schema::apply(&client)
-        .await
-        .map_err(super::store::CacheFailure::public)?;
-    Ok(client)
+    open_database_with_key(
+        database_path.to_owned(),
+        "synthetic-cache-key".to_owned(),
+        key,
+        account_lock,
+    )
+    .await
 }
 
 fn cache_paths(account_id: &AccountId) -> Result<(PathBuf, PathBuf, String), MailCacheError> {
@@ -232,7 +250,7 @@ fn remove_unopened_account_cache(
     lock_path: &Path,
     remove_credential: impl FnOnce() -> Result<(), MailCacheError>,
 ) -> Result<(), MailCacheError> {
-    let _lock = lock_account_directory(lock_path)?;
+    let _lock = lock_account_directory_exclusive(lock_path)?;
     if encrypted_data_exists(database_path)? {
         remove_database_files(database_path)?;
     }
@@ -260,12 +278,45 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-pub(super) fn lock_account_directory(path: &Path) -> Result<File, MailCacheError> {
+/// Allows multiple cache sessions to share the account lock while excluding removal.
+///
+/// # Errors
+///
+/// Returns [`MailCacheError::InUse`] when an account removal owns the lock.
+/// Returns [`MailCacheError::Unavailable`] when the lock file cannot be opened or locked.
+pub(super) fn lock_account_directory_shared(path: &Path) -> Result<File, MailCacheError> {
+    let file = open_account_lock_file(path)?;
+    file.try_lock_shared().map_err(lock_error)?;
+    Ok(file)
+}
+
+fn lock_account_directory_exclusive(path: &Path) -> Result<File, MailCacheError> {
+    let file = open_account_lock_file(path)?;
+    file.try_lock().map_err(lock_error)?;
+    Ok(file)
+}
+
+/// Requires exclusive ownership before the cache files are removed.
+///
+/// # Errors
+///
+/// Returns [`MailCacheError::InUse`] while another cache handle retains a shared lock.
+/// Returns [`MailCacheError::Unavailable`] when the operating system cannot lock the file.
+pub(super) fn upgrade_account_lock(file: &File) -> Result<(), MailCacheError> {
+    file.try_lock().map_err(lock_error)
+}
+
+fn open_account_lock_file(path: &Path) -> Result<File, MailCacheError> {
     let account_directory = path.parent().ok_or(MailCacheError::Unavailable)?;
     create_private_directory(account_directory)?;
-    let file = open_lock_file(path)?;
-    file.lock().map_err(|_| MailCacheError::Unavailable)?;
-    Ok(file)
+    open_lock_file(path)
+}
+
+fn lock_error(error: std::fs::TryLockError) -> MailCacheError {
+    match error {
+        std::fs::TryLockError::WouldBlock => MailCacheError::InUse,
+        std::fs::TryLockError::Error(_) => MailCacheError::Unavailable,
+    }
 }
 
 #[cfg(test)]
@@ -275,10 +326,7 @@ mod tests {
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
-            mpsc,
         },
-        thread,
-        time::Duration,
     };
 
     use super::{MailCacheError, open_test_database, remove_database_files, with_suffix};
@@ -325,49 +373,120 @@ mod tests {
     }
 
     #[test]
-    fn unopened_cache_removal_waits_for_an_open_database_before_removing_credential() {
-        let directory = tempfile::tempdir().expect("synthetic cache root is created");
-        let account_directory = directory.path().join("account");
-        let database_path = account_directory.join("mail.sqlite3");
-        let lock_path = account_directory.join("mail-cache.lock");
-        let open_lock = super::lock_account_directory(&lock_path)
-            .expect("the synthetic open operation holds the account lock");
-        fs::write(&database_path, b"synthetic encrypted cache")
-            .expect("the synthetic open operation creates its database");
+    fn unopened_cache_removal_keeps_files_and_key_while_cache_is_open() {
+        smol::block_on(async {
+            let directory = tempfile::tempdir().expect("synthetic cache root is created");
+            let account_directory = directory.path().join("account");
+            let database_path = account_directory.join("mail.sqlite3");
+            let lock_path = account_directory.join("mail-cache.lock");
+            let opened = open_test_database(&database_path, 7)
+                .await
+                .expect("synthetic encrypted cache opens with its account lock");
+            let second_opened = open_test_database(&database_path, 7)
+                .await
+                .expect("a second synthetic cache handle shares the account lock");
+            let credential_removed = Arc::new(AtomicBool::new(false));
+            let observed_credential_removed = Arc::clone(&credential_removed);
 
-        let (started_sender, started_receiver) = mpsc::channel();
-        let (credential_sender, credential_receiver) = mpsc::channel();
-        let credential_removed = Arc::new(AtomicBool::new(false));
-        let observed_credential_removed = Arc::clone(&credential_removed);
-        let removal = thread::spawn(move || {
-            started_sender
-                .send(())
-                .expect("the test observes the removal attempt");
-            super::remove_unopened_account_cache(&database_path, &lock_path, move || {
-                observed_credential_removed.store(true, Ordering::Relaxed);
-                credential_sender
-                    .send(())
-                    .expect("the test observes credential removal");
+            assert_eq!(
+                super::remove_unopened_account_cache(&database_path, &lock_path, move || {
+                    observed_credential_removed.store(true, Ordering::Relaxed);
+                    Ok(())
+                }),
+                Err(MailCacheError::InUse)
+            );
+            assert!(database_path.exists());
+            assert!(!credential_removed.load(Ordering::Relaxed));
+
+            second_opened
+                .client
+                .close()
+                .await
+                .expect("second synthetic database closes before retry");
+            drop(second_opened);
+            assert_eq!(
+                super::remove_unopened_account_cache(&database_path, &lock_path, || Ok(())),
+                Err(MailCacheError::InUse)
+            );
+
+            opened
+                .client
+                .close()
+                .await
+                .expect("synthetic database closes before retry");
+            drop(opened);
+            super::remove_unopened_account_cache(&database_path, &lock_path, || {
+                credential_removed.store(true, Ordering::Relaxed);
                 Ok(())
             })
+            .expect("removal succeeds after the cache handle closes");
+
+            assert!(!database_path.exists());
+            assert!(credential_removed.load(Ordering::Relaxed));
         });
+    }
 
-        started_receiver
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the removal attempt starts while the open lock is held");
-        assert!(matches!(
-            credential_receiver.recv_timeout(Duration::from_millis(25)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ));
-        drop(open_lock);
-        let result = removal.join().expect("the cache removal thread completes");
+    #[test]
+    fn cache_lock_upgrade_waits_for_other_open_handles() {
+        smol::block_on(async {
+            let directory = tempfile::tempdir().expect("synthetic cache root is created");
+            let database_path = directory.path().join("account/mail.sqlite3");
+            let first = open_test_database(&database_path, 7)
+                .await
+                .expect("first synthetic cache handle opens");
+            let second = open_test_database(&database_path, 7)
+                .await
+                .expect("second synthetic cache handle opens");
 
-        result.expect("the cache is removed after its open lock is released");
-        credential_receiver
-            .recv_timeout(Duration::from_secs(5))
-            .expect("credential removal follows cache file removal");
-        assert!(!account_directory.join("mail.sqlite3").exists());
-        assert!(credential_removed.load(Ordering::Relaxed));
+            assert_eq!(
+                super::upgrade_account_lock(&first.account_lock),
+                Err(MailCacheError::InUse)
+            );
+            second
+                .client
+                .close()
+                .await
+                .expect("second synthetic database closes");
+            drop(second);
+            super::upgrade_account_lock(&first.account_lock)
+                .expect("cache lock upgrades after the other handle closes");
+
+            first
+                .client
+                .close()
+                .await
+                .expect("first synthetic database closes");
+        });
+    }
+
+    #[test]
+    fn cache_initialization_requires_its_exclusive_lock() {
+        smol::block_on(async {
+            let directory = tempfile::tempdir().expect("synthetic cache root is created");
+            let account_directory = directory.path().join("account");
+            let database_path = account_directory.join("mail.sqlite3");
+            let lock_path = account_directory.join("mail-cache.lock");
+            let initialization_lock_path = with_suffix(&lock_path, ".init");
+            let initialization_lock =
+                super::lock_account_directory_exclusive(&initialization_lock_path)
+                    .expect("synthetic initialization lock is acquired");
+
+            assert!(matches!(
+                open_test_database(&database_path, 7).await,
+                Err(MailCacheError::InUse)
+            ));
+            assert!(!database_path.exists());
+
+            drop(initialization_lock);
+            let opened = open_test_database(&database_path, 7)
+                .await
+                .expect("synthetic cache initializes after the lock is released");
+            opened
+                .client
+                .close()
+                .await
+                .expect("synthetic database closes after initialization");
+        });
     }
 
     #[test]
@@ -390,10 +509,15 @@ mod tests {
             for failing_suffix in ["-wal", "-shm"] {
                 let directory = tempfile::tempdir().expect("synthetic cache directory is created");
                 let database = directory.path().join("mail.sqlite3");
-                let client = open_test_database(&database, 7)
+                let opened = open_test_database(&database, 7)
                     .await
                     .expect("synthetic encrypted database opens");
-                client.close().await.expect("synthetic database closes");
+                opened
+                    .client
+                    .close()
+                    .await
+                    .expect("synthetic database closes");
+                drop(opened);
 
                 if failing_suffix == "-shm" {
                     fs::write(with_suffix(&database, "-wal"), b"synthetic WAL")
@@ -414,7 +538,8 @@ mod tests {
                 let retry = open_test_database(&database, 7)
                     .await
                     .expect("main encrypted database reopens for a retry");
-                retry.close().await.expect("retry client closes");
+                retry.client.close().await.expect("retry client closes");
+                drop(retry);
                 remove_database_files(&database).expect("retry removes the cache files");
                 remove_database_files(&database).expect("repeated cache removal is safe");
 
