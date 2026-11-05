@@ -607,6 +607,7 @@ async fn calendar_event_update_response_result(
         StatusCode::UNAUTHORIZED => Some(Err(GraphError::AccessTokenRejected)),
         StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
         StatusCode::TOO_MANY_REQUESTS => Some(Err(rate_limit_error(&response))),
+        StatusCode::NOT_FOUND => Some(Err(GraphError::CalendarEventChanged)),
         StatusCode::REQUEST_TIMEOUT => Some(Err(GraphError::CalendarEventUpdateOutcomeUnknown)),
         status if status.is_server_error() => {
             Some(Err(GraphError::CalendarEventUpdateOutcomeUnknown))
@@ -1579,6 +1580,39 @@ mod tests {
             .await;
 
         assert_eq!(result, Err(GraphError::CalendarEventUpdateOutcomeUnknown));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        patch.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn calendar_event_update_not_found_reports_a_changed_event_without_retrying() {
+        let server = MockServer::start_async().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let responder_calls = Arc::clone(&calls);
+        let patch = server
+            .mock_async(move |when, then| {
+                when.method(PATCH)
+                    .path("/v1.0/me/events/synthetic-event")
+                    .header("prefer", "IdType=\"ImmutableId\"");
+                then.respond_with(move |_request: &HttpMockRequest| {
+                    responder_calls.fetch_add(1, Ordering::SeqCst);
+                    HttpMockResponse::builder().status(404).build()
+                });
+            })
+            .await;
+        let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
+
+        let result = transport
+            .handle()
+            .patch_json(
+                GraphOperation::CalendarEventUpdate,
+                graph_url(&server.url("/v1.0/me/events/synthetic-event")),
+                synthetic_access_token(),
+                Arc::from(&b"{\"subject\":\"Updated\"}"[..]),
+            )
+            .await;
+
+        assert_eq!(result, Err(GraphError::CalendarEventChanged));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         patch.assert_calls_async(1).await;
     }
