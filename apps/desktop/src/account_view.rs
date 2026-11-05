@@ -1127,8 +1127,8 @@ mod tests {
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
         AccountProvider, AccountSession, AccountSessionFactory, AccountSessionFuture,
         AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome,
-        CalendarEventUpdateOutcome, CalendarSession, CalendarSnapshot, CalendarSyncReport,
-        CalendarWorkflowError, MailCacheError, MailSession,
+        CalendarEventDeletionOutcome, CalendarEventUpdateOutcome, CalendarSession,
+        CalendarSnapshot, CalendarSyncReport, CalendarWorkflowError, MailCacheError, MailSession,
     };
     use einfach_mail_domain::{
         AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
@@ -1238,6 +1238,16 @@ mod tests {
             &'a self,
             _: &'a CalendarEventUpdate,
         ) -> AccountSessionFuture<'a, Result<CalendarEventUpdateOutcome, CalendarWorkflowError>>
+        {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn delete_event<'a>(
+            &'a self,
+            _: &'a EditableCalendarEvent,
+        ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>>
         {
             Box::pin(ready(Err(CalendarWorkflowError::Cache(
                 CalendarCacheError::Unavailable,
