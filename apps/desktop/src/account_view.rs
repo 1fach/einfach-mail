@@ -1126,10 +1126,12 @@ mod tests {
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
         AccountProvider, AccountSession, AccountSessionFactory, AccountSessionFuture,
-        AccountWorkflow, CalendarCacheError, CalendarSession, CalendarSnapshot, CalendarSyncReport,
-        CalendarWorkflowError, MailCacheError, MailSession,
+        AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome, CalendarSession,
+        CalendarSnapshot, CalendarSyncReport, CalendarWorkflowError, MailCacheError, MailSession,
     };
-    use einfach_mail_domain::{AccountId, AccountProfile, CalendarViewReference};
+    use einfach_mail_domain::{
+        AccountId, AccountProfile, CalendarEventCreation, CalendarViewReference,
+    };
 
     #[derive(Clone, Default)]
     struct TestProvider {
@@ -1196,6 +1198,25 @@ mod tests {
             &'a self,
             _: &'a CalendarViewReference,
         ) -> AccountSessionFuture<'a, Result<CalendarSyncReport, CalendarWorkflowError>> {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn create_event<'a>(
+            &'a self,
+            _: &'a CalendarEventCreation,
+        ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>>
+        {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn discard_rejected_event_creation<'a>(
+            &'a self,
+            _: &'a CalendarEventCreation,
+        ) -> AccountSessionFuture<'a, Result<(), CalendarWorkflowError>> {
             Box::pin(ready(Err(CalendarWorkflowError::Cache(
                 CalendarCacheError::Unavailable,
             ))))
