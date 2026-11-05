@@ -126,7 +126,9 @@ impl CalendarDeltaPageResponse {
 pub enum CalendarDeltaResponse {
     /// Contains event changes and the next-page or completed delta link.
     Page(CalendarDeltaPageResponse),
-    /// Starts a replacement scan using a validated reset link or the fixed-range initial query.
+    /// Reports an expired cursor.
+    /// When `reset_link` is `None`, the workflow resumes with the fixed-range
+    /// initial query.
     Reset {
         /// The validated replacement URL returned by the provider, if any.
         reset_link: Option<CalendarDeltaLink>,
