@@ -556,6 +556,11 @@ async fn response_result(
     if matches!(operation, GraphOperation::CalendarEventUpdate) {
         return calendar_event_update_response_result(response, reply).await;
     }
+    if matches!(operation, GraphOperation::CalendarEventRead)
+        && response.status() == StatusCode::NOT_FOUND
+    {
+        return Some(Err(GraphError::CalendarEventChanged));
+    }
     if matches!(operation, GraphOperation::MessageDelta) && response.status() == StatusCode::GONE {
         let location = response
             .headers()

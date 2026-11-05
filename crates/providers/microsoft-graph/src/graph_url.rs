@@ -317,7 +317,7 @@ mod tests {
     use time::{Date, Month};
     use url::Url;
 
-    use super::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority, MESSAGE_SELECT, WellKnownMailFolder};
+    use super::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority, MESSAGE_SELECT};
     use crate::error::GraphError;
 
     fn authority() -> GraphAuthority {

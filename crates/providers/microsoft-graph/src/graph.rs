@@ -1436,10 +1436,10 @@ mod tests {
 
     use super::{
         GraphApi, MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget,
-        WellKnownMailFolder, WireCalendarEvent, WireFolder, WireMessage, WireMessageChange,
-        calendar_event_update_body, confirmed_follow_up_flag_status, confirmed_message_move,
-        confirmed_read_state, create_calendar_event_body, follow_up_flag_patch_body,
-        mail_reply_body, message_move_body, read_state_patch_body, send_mail_body,
+        WireCalendarEvent, WireFolder, WireMessage, WireMessageChange, calendar_event_update_body,
+        confirmed_follow_up_flag_status, confirmed_message_move, confirmed_read_state,
+        create_calendar_event_body, follow_up_flag_patch_body, mail_reply_body, message_move_body,
+        read_state_patch_body,
     };
     use crate::{
         error::GraphError,
@@ -2083,6 +2083,42 @@ mod tests {
                         )
                         .to_string(),
                     );
+            })
+            .await;
+        let patch = server
+            .mock_async(|when, then| {
+                when.method(PATCH).path("/v1.0/me/events/synthetic-event");
+                then.status(200).body("{}");
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+
+        assert_eq!(
+            api.update_calendar_event(&update, synthetic_access_token())
+                .await,
+            Err(GraphError::CalendarEventChanged)
+        );
+        read.assert_calls_async(1).await;
+        patch.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn event_update_refuses_a_missing_event_without_patching() {
+        let server = MockServer::start_async().await;
+        let update = CalendarEventUpdate::new(
+            editable_event("synthetic-version-1"),
+            CalendarEventUpdateDraft::timed(
+                "Updated planning".to_owned(),
+                utc_time(8, 11),
+                utc_time(8, 12),
+            )
+            .expect("synthetic update draft is valid"),
+        )
+        .expect("synthetic event values changed");
+        let read = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/v1.0/me/events/synthetic-event");
+                then.status(404);
             })
             .await;
         let patch = server

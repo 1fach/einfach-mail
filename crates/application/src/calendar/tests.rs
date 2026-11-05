@@ -1276,7 +1276,7 @@ fn event_update_reserves_the_whole_account_until_the_cache_commit_finishes() {
         let another_week = view_for_week(14);
         assert_eq!(
             workflow.sync_view(&another_week).await,
-            Err(CalendarWorkflowError::ViewOperationInProgress)
+            Err(CalendarWorkflowError::OperationInProgress)
         );
         let _ = release.send(());
         assert!(matches!(
