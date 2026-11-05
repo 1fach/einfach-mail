@@ -46,6 +46,7 @@ enum FollowUpFlagResponse {
 struct FixtureProvider {
     account_id: AccountId,
     folders: Vec<MailFolder>,
+    folder_list_gate: Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>,
     folder_snapshots: Arc<Mutex<VecDeque<Vec<MailFolder>>>>,
     folder_list_calls: Arc<AtomicUsize>,
     pages: Arc<Mutex<PageQueue>>,
@@ -61,6 +62,8 @@ struct FixtureProvider {
     follow_up_flag_updates: Arc<Mutex<Vec<(MessageId, FollowUpFlagStatus)>>>,
     follow_up_flag_gate: FollowUpFlagGate,
     follow_up_flag_response: FollowUpFlagResponse,
+    message_moves: Arc<Mutex<Vec<(FolderReference, MessageId, FolderReference)>>>,
+    move_result: Arc<Mutex<Result<(), MailOperationError>>>,
     calendar_gate: Option<CalendarSyncGate>,
 }
 
@@ -121,6 +124,7 @@ impl FixtureProvider {
         Self {
             account_id,
             folders,
+            folder_list_gate: None,
             folder_snapshots: Arc::new(Mutex::new(VecDeque::new())),
             folder_list_calls: Arc::new(AtomicUsize::new(0)),
             pages: Arc::new(Mutex::new(pages.into_iter().collect())),
@@ -136,6 +140,8 @@ impl FixtureProvider {
             follow_up_flag_updates: Arc::new(Mutex::new(Vec::new())),
             follow_up_flag_gate: Arc::new(Mutex::new(None)),
             follow_up_flag_response: FollowUpFlagResponse::Confirm,
+            message_moves: Arc::new(Mutex::new(Vec::new())),
+            move_result: Arc::new(Mutex::new(Ok(()))),
             calendar_gate: None,
         }
     }
@@ -178,6 +184,16 @@ impl MailProvider for FixtureProvider {
         let folder_list_gate = self.folder_list_gate.clone();
         async move {
             if matches_account {
+                if let Some((started, release)) = folder_list_gate {
+                    started
+                        .send(())
+                        .await
+                        .map_err(|_| MailOperationError::ServiceUnavailable)?;
+                    release
+                        .recv()
+                        .await
+                        .map_err(|_| MailOperationError::ServiceUnavailable)?;
+                }
                 calls.fetch_add(1, Ordering::Relaxed);
                 Ok(snapshots
                     .lock()
