@@ -21,12 +21,16 @@ use crate::{
     AccountCacheFactory, AccountSession, AccountSessionFactory, AccountSessionFuture,
     CalendarProvider, CalendarSession, CalendarWorkflow, MailCache, MailCacheError,
     MailOperationError, MailProvider, MailSendProviderError, MailSession, MessageBodyForDisplay,
-    MessageDeltaResponse, account_session::AccountSessionWorkflow,
+    MessageDeltaResponse, WellKnownMailFolder, account_session::AccountSessionWorkflow,
     prepare_message_body_for_display,
 };
 
 const INITIAL_SYNC_WINDOW: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const MAX_PAGES_PER_FOLDER_ROUND: usize = 1_000;
+
+fn mail_folder_is_visible(folders: &[MailFolder], reference: &FolderReference) -> bool {
+    folders.iter().any(|folder| folder.reference() == reference)
+}
 const MAX_SYNC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DELTA_RESETS_PER_ATTEMPT: usize = 1;
 
@@ -45,9 +49,12 @@ pub enum MailWorkflowError {
     /// A previous successful sync is required in the current account session.
     #[error("mail must sync successfully before moving messages in this session")]
     AccountSyncRequired,
-    /// The message already belongs to Deleted Items.
-    #[error("the message is already in Deleted Items")]
-    MessageAlreadyDeleted,
+    /// The message already belongs to the requested well-known folder.
+    #[error("the message is already in the requested folder")]
+    AlreadyInWellKnownFolder(WellKnownMailFolder),
+    /// The requested well-known folder is not visible in the account's folder list.
+    #[error("the requested well-known folder is unavailable")]
+    WellKnownFolderUnavailable(WellKnownMailFolder),
     /// Another mail operation already owns this account or folder.
     #[error("a mail operation is already active for this account or folder")]
     OperationInProgress,
@@ -228,6 +235,27 @@ pub enum MessageMoveOutcome {
     ConfirmedAndCached,
     /// The provider confirmed the move, but a later account sync must repair the cache.
     ConfirmedNeedsSync,
+}
+
+/// Describes a confirmed move into a well-known folder and the cache result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WellKnownFolderMoveOutcome {
+    destination_folder: FolderReference,
+    cache_outcome: MessageMoveOutcome,
+}
+
+impl WellKnownFolderMoveOutcome {
+    /// Returns the account's resolved destination folder.
+    #[must_use]
+    pub fn destination_folder(&self) -> &FolderReference {
+        &self.destination_folder
+    }
+
+    /// Returns the encrypted cache result after the provider confirms the move.
+    #[must_use]
+    pub fn cache_outcome(&self) -> MessageMoveOutcome {
+        self.cache_outcome
+    }
 }
 
 impl MailSyncReport {
@@ -814,8 +842,12 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         let _reservation =
             self.reserve_folders(&[source_folder.clone(), destination_folder.clone()])?;
         self.ensure_account_sync_ready()?;
-        self.ensure_visible_move_folders(source_folder, destination_folder)
-            .await?;
+        self.ensure_visible_move_folders(
+            source_folder,
+            destination_folder,
+            MailWorkflowError::InvalidMoveDestination,
+        )
+        .await?;
         self.ensure_move_folders_writable(source_folder, destination_folder)
             .await?;
         self.ensure_cached_message(source_folder, message_id)
@@ -824,66 +856,88 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             .await
     }
 
-    /// Moves a cached message to the active account's Deleted Items folder.
+    /// Moves a cached message into a well-known folder in the active account.
     ///
-    /// The workflow reserves the source before resolving the locale-independent destination.
-    /// It holds both folder reservations through provider confirmation and cache reconciliation.
+    /// The workflow reserves the source before resolving the destination, then
+    /// holds both folder reservations through provider confirmation and cache reconciliation.
     ///
     /// # Errors
     ///
-    /// Returns [`MailWorkflowError::AccountSyncRequired`] before a successful session sync,
-    /// [`MailWorkflowError::MessageAlreadyDeleted`] when the source is already Deleted Items,
-    /// [`MailWorkflowError::FolderSyncRequired`] when either folder needs reconciliation,
-    /// [`MailWorkflowError::InvalidMoveDestination`] when the resolved folder is not visible,
-    /// a cache or provider error when the message cannot be moved, or
-    /// [`MailWorkflowError::OperationInProgress`] when an affected scope is busy.
-    pub async fn delete_message(
+    /// Returns [`MailWorkflowError::AccountSyncRequired`] before a successful
+    /// session sync, [`MailWorkflowError::AlreadyInWellKnownFolder`] when the
+    /// source is already the requested folder,
+    /// [`MailWorkflowError::WellKnownFolderUnavailable`] when the resolved
+    /// destination is not visible in this account,
+    /// [`MailWorkflowError::FolderSyncRequired`] when either folder needs
+    /// reconciliation, a cache or provider error when the message cannot be
+    /// moved, or [`MailWorkflowError::OperationInProgress`] when an affected
+    /// scope is busy.
+    pub async fn move_message_to_well_known_folder(
         &self,
         source_folder: &FolderReference,
         message_id: &MessageId,
-    ) -> Result<MessageMoveOutcome, MailWorkflowError> {
+        destination: WellKnownMailFolder,
+    ) -> Result<WellKnownFolderMoveOutcome, MailWorkflowError> {
         let _source_reservation = self.reserve_folders(std::slice::from_ref(source_folder))?;
         self.ensure_account_sync_ready()?;
         self.ensure_cached_message(source_folder, message_id)
             .await?;
 
-        let destination_id = self
-            .provider
-            .deleted_items_folder_id(source_folder.account_id())
+        let destination_folder = self
+            .resolve_well_known_folder(source_folder, destination)
             .await?;
-        let destination_folder =
-            FolderReference::new(source_folder.account_id().clone(), destination_id);
-        if source_folder == &destination_folder {
-            return Err(MailWorkflowError::MessageAlreadyDeleted);
-        }
 
         let _destination_reservation =
             self.reserve_folders(std::slice::from_ref(&destination_folder))?;
-        self.ensure_visible_move_folders(source_folder, &destination_folder)
-            .await?;
+        self.ensure_visible_move_folders(
+            source_folder,
+            &destination_folder,
+            MailWorkflowError::WellKnownFolderUnavailable(destination),
+        )
+        .await?;
         self.ensure_move_folders_writable(source_folder, &destination_folder)
             .await?;
-        self.confirm_and_cache_move(source_folder, message_id, &destination_folder)
-            .await
+        let cache_outcome = self
+            .confirm_and_cache_move(source_folder, message_id, &destination_folder)
+            .await?;
+        Ok(WellKnownFolderMoveOutcome {
+            destination_folder,
+            cache_outcome,
+        })
+    }
+
+    async fn resolve_well_known_folder(
+        &self,
+        source_folder: &FolderReference,
+        destination: WellKnownMailFolder,
+    ) -> Result<FolderReference, MailWorkflowError> {
+        let destination_folder = self
+            .provider
+            .well_known_folder(source_folder.account_id(), destination)
+            .await?;
+        if destination_folder.account_id() != source_folder.account_id() {
+            return Err(MailWorkflowError::WellKnownFolderUnavailable(destination));
+        }
+        if source_folder == &destination_folder {
+            return Err(MailWorkflowError::AlreadyInWellKnownFolder(destination));
+        }
+        Ok(destination_folder)
     }
 
     async fn ensure_visible_move_folders(
         &self,
         source_folder: &FolderReference,
         destination_folder: &FolderReference,
+        destination_unavailable: MailWorkflowError,
     ) -> Result<(), MailWorkflowError> {
         let folders = self.cache.list_folders(source_folder.account_id()).await?;
-        let source_visible = folders
-            .iter()
-            .any(|folder| folder.reference() == source_folder);
-        let destination_visible = folders
-            .iter()
-            .any(|folder| folder.reference() == destination_folder);
-        if source_visible && destination_visible {
-            Ok(())
-        } else {
-            Err(MailWorkflowError::InvalidMoveDestination)
+        if !mail_folder_is_visible(&folders, source_folder) {
+            return Err(MailWorkflowError::InvalidMoveDestination);
         }
+        if !mail_folder_is_visible(&folders, destination_folder) {
+            return Err(destination_unavailable);
+        }
+        Ok(())
     }
 
     async fn ensure_cached_message(

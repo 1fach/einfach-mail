@@ -14,7 +14,7 @@ use einfach_mail_application::{
     CalendarWorkflowError, MailCache, MailCacheError, MailOperationError, MailProvider,
     MailSendOutcome, MailSendProviderError, MailSendWorkflowError, MailSyncProgress, MailWorkflow,
     MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
-    MessageDeltaResponse,
+    MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence, CalendarViewRange,
@@ -66,9 +66,10 @@ struct FixtureProvider {
     message_moves: Arc<Mutex<Vec<(FolderReference, MessageId, FolderReference)>>>,
     move_result: Arc<Mutex<Result<(), MailOperationError>>>,
     move_gate: ProviderGate,
+    archive_folder_id: FolderId,
     deleted_items_folder_id: FolderId,
-    deleted_items_folder_calls: Arc<AtomicUsize>,
-    deleted_items_folder_gate: ProviderGate,
+    well_known_folder_calls: Arc<AtomicUsize>,
+    well_known_folder_gate: ProviderGate,
     send_gate: ProviderGate,
     calendar_gate: Option<CalendarSyncGate>,
 }
@@ -149,10 +150,12 @@ impl FixtureProvider {
             message_moves: Arc::new(Mutex::new(Vec::new())),
             move_result: Arc::new(Mutex::new(Ok(()))),
             move_gate: Arc::new(Mutex::new(None)),
+            archive_folder_id: FolderId::try_from("folder-archive".to_owned())
+                .expect("synthetic Archive ID is valid"),
             deleted_items_folder_id: FolderId::try_from("deleted-items".to_owned())
                 .expect("synthetic Deleted Items ID is valid"),
-            deleted_items_folder_calls: Arc::new(AtomicUsize::new(0)),
-            deleted_items_folder_gate: Arc::new(Mutex::new(None)),
+            well_known_folder_calls: Arc::new(AtomicUsize::new(0)),
+            well_known_folder_gate: Arc::new(Mutex::new(None)),
             send_gate: Arc::new(Mutex::new(None)),
             calendar_gate: None,
         }
@@ -178,13 +181,13 @@ impl FixtureProvider {
         (started_rx, release_tx)
     }
 
-    fn hold_next_deleted_items_folder_lookup(
+    fn hold_next_well_known_folder_lookup(
         &self,
     ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
         let (started_tx, started_rx) = smol::channel::bounded(1);
         let (release_tx, release_rx) = smol::channel::bounded(1);
         *self
-            .deleted_items_folder_gate
+            .well_known_folder_gate
             .lock()
             .expect("synthetic folder lookup gate mutex is healthy") =
             Some((started_tx, release_rx));
@@ -445,14 +448,19 @@ impl MailProvider for FixtureProvider {
         }
     }
 
-    fn deleted_items_folder_id(
+    fn well_known_folder(
         &self,
         account_id: &AccountId,
-    ) -> impl Future<Output = Result<FolderId, MailOperationError>> + Send + '_ {
+        folder: WellKnownMailFolder,
+    ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         let account_matches = account_id == &self.account_id;
-        let folder_id = self.deleted_items_folder_id.clone();
-        let calls = Arc::clone(&self.deleted_items_folder_calls);
-        let gate = Arc::clone(&self.deleted_items_folder_gate);
+        let folder_id = match folder {
+            WellKnownMailFolder::Archive => self.archive_folder_id.clone(),
+            WellKnownMailFolder::DeletedItems => self.deleted_items_folder_id.clone(),
+        };
+        let folder_reference = FolderReference::new(account_id.clone(), folder_id);
+        let calls = Arc::clone(&self.well_known_folder_calls);
+        let gate = Arc::clone(&self.well_known_folder_gate);
         async move {
             if !account_matches {
                 return Err(MailOperationError::AccountMismatch);
@@ -472,7 +480,7 @@ impl MailProvider for FixtureProvider {
                     .await
                     .map_err(|_| MailOperationError::ServiceUnavailable)?;
             }
-            Ok(folder_id)
+            Ok(folder_reference)
         }
     }
 
@@ -1990,13 +1998,19 @@ fn delete_message_requires_a_current_sync_before_resolving_deleted_items() {
             [],
             Err(MailOperationError::ServiceUnavailable),
         );
-        let folder_calls = Arc::clone(&provider.deleted_items_folder_calls);
+        let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let cache = open_cache(&directory, account.clone()).await;
         let workflow = MailWorkflow::new(provider, cache.clone());
         let source = folder(&account).reference().clone();
 
         assert_eq!(
-            workflow.delete_message(&source, &message_id()).await,
+            workflow
+                .move_message_to_well_known_folder(
+                    &source,
+                    &message_id(),
+                    WellKnownMailFolder::DeletedItems
+                )
+                .await,
             Err(MailWorkflowError::AccountSyncRequired)
         );
         assert_eq!(folder_calls.load(Ordering::Relaxed), 0);
@@ -2033,7 +2047,7 @@ fn delete_message_uses_visible_deleted_items_id_and_preserves_cached_body() {
             ],
             Err(MailOperationError::ServiceUnavailable),
         );
-        let folder_calls = Arc::clone(&provider.deleted_items_folder_calls);
+        let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
         let workflow = MailWorkflow::new(provider, cache.clone());
@@ -2052,8 +2066,13 @@ fn delete_message_uses_visible_deleted_items_id_and_preserves_cached_body() {
 
         assert_eq!(
             workflow
-                .delete_message(&inbox_reference, &message_id())
-                .await,
+                .move_message_to_well_known_folder(
+                    &inbox_reference,
+                    &message_id(),
+                    WellKnownMailFolder::DeletedItems,
+                )
+                .await
+                .map(|outcome| outcome.cache_outcome()),
             Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached)
         );
         assert_eq!(folder_calls.load(Ordering::Relaxed), 1);
@@ -2108,49 +2127,141 @@ fn delete_message_uses_visible_deleted_items_id_and_preserves_cached_body() {
 }
 
 #[test]
-fn delete_message_rejects_a_resolved_folder_outside_the_visible_tree() {
+fn archive_action_resolves_visible_archive_and_preserves_cached_body() {
     smol::block_on(async {
         let directory = TempDir::new().expect("temporary directory is created");
         let account = account_id();
         let inbox = folder(&account);
-        let deleted = deleted_items_folder(&account);
+        let archive = archive_folder(&account);
         let inbox_reference = inbox.reference().clone();
+        let archive_reference = archive.reference().clone();
         let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let source_page = completed_message_delta_page(
-            "invisible-delete-source",
+            "archive-action-source",
             vec![MessageDeltaChange::Upsert {
                 id: message_id(),
                 patch: complete_patch("Synthetic subject".to_owned(), started_at),
             }],
         );
-        let mut provider = FixtureProvider::new(
+        let provider = FixtureProvider::new(
             account.clone(),
-            vec![inbox, deleted],
+            vec![inbox, archive],
             [
                 Ok(page_response(source_page)),
                 Ok(page_response(completed_message_delta_page(
-                    "invisible-delete-destination",
+                    "archive-action-destination",
                     Vec::new(),
                 ))),
             ],
             Err(MailOperationError::ServiceUnavailable),
         );
-        provider.deleted_items_folder_id =
-            FolderId::try_from("not-visible".to_owned()).expect("synthetic folder ID is valid");
-        let folder_calls = Arc::clone(&provider.deleted_items_folder_calls);
+        let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
         let workflow = MailWorkflow::new(provider, cache.clone());
         workflow
             .synchronize_account(&account, started_at, &ignore_sync_progress)
             .await
-            .expect("synthetic account sync completes");
+            .expect("synthetic inbox and Archive sync");
+        cache
+            .store_message_body(
+                &inbox_reference,
+                &message_id(),
+                MessageBody::new(MessageBodyType::Text, "Synthetic archived body".to_owned()),
+            )
+            .await
+            .expect("synthetic message body is cached before archiving");
+
+        let outcome = workflow
+            .move_message_to_well_known_folder(
+                &inbox_reference,
+                &message_id(),
+                WellKnownMailFolder::Archive,
+            )
+            .await
+            .expect("Archive action resolves and confirms the visible well-known folder");
+
+        assert_eq!(outcome.destination_folder(), &archive_reference);
+        assert_eq!(
+            outcome.cache_outcome(),
+            einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached
+        );
+        assert_eq!(folder_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            move_calls
+                .lock()
+                .expect("synthetic move log mutex is not poisoned")
+                .as_slice(),
+            &[(
+                inbox_reference.clone(),
+                message_id(),
+                archive_reference.clone(),
+            )]
+        );
+        assert!(
+            cache
+                .read_message(&inbox_reference, &message_id())
+                .await
+                .expect("source cache lookup succeeds after archiving")
+                .is_none()
+        );
+        let archived_message = cache
+            .read_message(&archive_reference, &message_id())
+            .await
+            .expect("Archive cache lookup succeeds")
+            .expect("message is cached in Archive");
+        assert_eq!(
+            archived_message
+                .1
+                .expect("encrypted body moves with the message")
+                .content(),
+            "Synthetic archived body"
+        );
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn archive_action_rejects_a_message_already_in_archive() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let archive = archive_folder(&account);
+        let archive_reference = archive.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let page = completed_message_delta_page(
+            "already-in-archive",
+            vec![MessageDeltaChange::Upsert {
+                id: message_id(),
+                patch: complete_patch("Synthetic subject".to_owned(), started_at),
+            }],
+        );
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![archive],
+            [Ok(page_response(page))],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let folder_calls = Arc::clone(&provider.well_known_folder_calls);
+        let move_calls = Arc::clone(&provider.message_moves);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(provider, cache.clone());
+        workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("synthetic Archive sync completes");
 
         assert_eq!(
             workflow
-                .delete_message(&inbox_reference, &message_id())
+                .move_message_to_well_known_folder(
+                    &archive_reference,
+                    &message_id(),
+                    WellKnownMailFolder::Archive,
+                )
                 .await,
-            Err(MailWorkflowError::InvalidMoveDestination)
+            Err(MailWorkflowError::AlreadyInWellKnownFolder(
+                WellKnownMailFolder::Archive
+            ))
         );
         assert_eq!(folder_calls.load(Ordering::Relaxed), 1);
         assert!(
@@ -2159,14 +2270,90 @@ fn delete_message_rejects_a_resolved_folder_outside_the_visible_tree() {
                 .expect("synthetic move log mutex is not poisoned")
                 .is_empty()
         );
-        assert!(
-            cache
-                .read_message(&inbox_reference, &message_id())
-                .await
-                .expect("source cache lookup succeeds")
-                .is_some()
-        );
         cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn well_known_folder_rejects_a_resolved_folder_outside_the_visible_tree() {
+    smol::block_on(async {
+        for destination in [
+            WellKnownMailFolder::Archive,
+            WellKnownMailFolder::DeletedItems,
+        ] {
+            let directory = TempDir::new().expect("temporary directory is created");
+            let account = account_id();
+            let inbox = folder(&account);
+            let inbox_reference = inbox.reference().clone();
+            let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+            let source_page = completed_message_delta_page(
+                "invisible-special-folder-source",
+                vec![MessageDeltaChange::Upsert {
+                    id: message_id(),
+                    patch: complete_patch("Synthetic subject".to_owned(), started_at),
+                }],
+            );
+            let mut provider = FixtureProvider::new(
+                account.clone(),
+                vec![
+                    inbox,
+                    archive_folder(&account),
+                    deleted_items_folder(&account),
+                ],
+                [
+                    Ok(page_response(source_page)),
+                    Ok(page_response(completed_message_delta_page(
+                        "invisible-special-folder-archive",
+                        Vec::new(),
+                    ))),
+                    Ok(page_response(completed_message_delta_page(
+                        "invisible-special-folder-deleted",
+                        Vec::new(),
+                    ))),
+                ],
+                Err(MailOperationError::ServiceUnavailable),
+            );
+            let not_visible =
+                FolderId::try_from("not-visible".to_owned()).expect("synthetic folder ID is valid");
+            match destination {
+                WellKnownMailFolder::Archive => provider.archive_folder_id = not_visible,
+                WellKnownMailFolder::DeletedItems => provider.deleted_items_folder_id = not_visible,
+            }
+            let folder_calls = Arc::clone(&provider.well_known_folder_calls);
+            let move_calls = Arc::clone(&provider.message_moves);
+            let cache = open_cache(&directory, account.clone()).await;
+            let workflow = MailWorkflow::new(provider, cache.clone());
+            workflow
+                .synchronize_account(&account, started_at, &ignore_sync_progress)
+                .await
+                .expect("synthetic account sync completes");
+
+            assert_eq!(
+                workflow
+                    .move_message_to_well_known_folder(
+                        &inbox_reference,
+                        &message_id(),
+                        destination,
+                    )
+                    .await,
+                Err(MailWorkflowError::WellKnownFolderUnavailable(destination))
+            );
+            assert_eq!(folder_calls.load(Ordering::Relaxed), 1);
+            assert!(
+                move_calls
+                    .lock()
+                    .expect("synthetic move log mutex is not poisoned")
+                    .is_empty()
+            );
+            assert!(
+                cache
+                    .read_message(&inbox_reference, &message_id())
+                    .await
+                    .expect("source cache lookup succeeds")
+                    .is_some()
+            );
+            cache.close_for_tests().await;
+        }
     });
 }
 
@@ -2191,7 +2378,7 @@ fn delete_message_rejects_a_message_already_in_deleted_items() {
             [Ok(page_response(page))],
             Err(MailOperationError::ServiceUnavailable),
         );
-        let folder_calls = Arc::clone(&provider.deleted_items_folder_calls);
+        let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
         let workflow = MailWorkflow::new(provider, cache.clone());
@@ -2202,9 +2389,15 @@ fn delete_message_rejects_a_message_already_in_deleted_items() {
 
         assert_eq!(
             workflow
-                .delete_message(&deleted_reference, &message_id())
+                .move_message_to_well_known_folder(
+                    &deleted_reference,
+                    &message_id(),
+                    WellKnownMailFolder::DeletedItems,
+                )
                 .await,
-            Err(MailWorkflowError::MessageAlreadyDeleted)
+            Err(MailWorkflowError::AlreadyInWellKnownFolder(
+                WellKnownMailFolder::DeletedItems
+            ))
         );
         assert_eq!(folder_calls.load(Ordering::Relaxed), 1);
         assert!(
@@ -2274,7 +2467,11 @@ fn unknown_delete_outcome_requires_sync_before_another_move_request() {
 
         assert_eq!(
             workflow
-                .delete_message(&inbox_reference, &message_id())
+                .move_message_to_well_known_folder(
+                    &inbox_reference,
+                    &message_id(),
+                    WellKnownMailFolder::DeletedItems
+                )
                 .await,
             Err(MailWorkflowError::Provider(
                 MailOperationError::MoveOutcomeUnknown
@@ -2289,7 +2486,11 @@ fn unknown_delete_outcome_requires_sync_before_another_move_request() {
         );
         assert_eq!(
             workflow
-                .delete_message(&inbox_reference, &message_id())
+                .move_message_to_well_known_folder(
+                    &inbox_reference,
+                    &message_id(),
+                    WellKnownMailFolder::DeletedItems
+                )
                 .await,
             Err(MailWorkflowError::AccountSyncRequired)
         );
@@ -2315,8 +2516,13 @@ fn unknown_delete_outcome_requires_sync_before_another_move_request() {
             .expect("synthetic move result mutex is not poisoned") = Ok(());
         assert_eq!(
             workflow
-                .delete_message(&inbox_reference, &message_id())
-                .await,
+                .move_message_to_well_known_folder(
+                    &inbox_reference,
+                    &message_id(),
+                    WellKnownMailFolder::DeletedItems,
+                )
+                .await
+                .map(|outcome| outcome.cache_outcome()),
             Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached)
         );
         assert_eq!(
@@ -2371,7 +2577,11 @@ fn canceled_delete_request_requires_sync_before_another_move_request() {
         smol::future::race(
             async {
                 let _ = workflow
-                    .delete_message(&inbox_reference, &message_id())
+                    .move_message_to_well_known_folder(
+                        &inbox_reference,
+                        &message_id(),
+                        WellKnownMailFolder::DeletedItems,
+                    )
                     .await;
             },
             async {
@@ -2385,7 +2595,11 @@ fn canceled_delete_request_requires_sync_before_another_move_request() {
 
         assert_eq!(
             workflow
-                .delete_message(&inbox_reference, &message_id())
+                .move_message_to_well_known_folder(
+                    &inbox_reference,
+                    &message_id(),
+                    WellKnownMailFolder::DeletedItems
+                )
                 .await,
             Err(MailWorkflowError::AccountSyncRequired)
         );
@@ -2417,6 +2631,7 @@ fn delete_message_keeps_the_source_reservation_while_resolving_deleted_items() {
         let deleted = deleted_items_folder(&account);
         let inbox_reference = inbox.reference().clone();
         let archive_reference = archive.reference().clone();
+        let deleted_reference = deleted.reference().clone();
         let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let provider = FixtureProvider::new(
             account.clone(),
@@ -2440,7 +2655,7 @@ fn delete_message_keeps_the_source_reservation_while_resolving_deleted_items() {
             ],
             Err(MailOperationError::ServiceUnavailable),
         );
-        let (lookup_started, release_lookup) = provider.hold_next_deleted_items_folder_lookup();
+        let (lookup_started, release_lookup) = provider.hold_next_well_known_folder_lookup();
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
         let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
@@ -2455,7 +2670,11 @@ fn delete_message_keeps_the_source_reservation_while_resolving_deleted_items() {
         let (delete_result, competing_move) = smol::block_on(executor.run(async {
             let delete_task = executor.spawn(async move {
                 delete_workflow
-                    .delete_message(&delete_source, &message_id())
+                    .move_message_to_well_known_folder(
+                        &delete_source,
+                        &message_id(),
+                        WellKnownMailFolder::DeletedItems,
+                    )
                     .await
             });
             lookup_started
@@ -2474,8 +2693,16 @@ fn delete_message_keeps_the_source_reservation_while_resolving_deleted_items() {
 
         assert_eq!(competing_move, Err(MailWorkflowError::OperationInProgress));
         assert_eq!(
-            delete_result,
-            Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached)
+            delete_result.map(|outcome| {
+                (
+                    outcome.destination_folder().clone(),
+                    outcome.cache_outcome(),
+                )
+            }),
+            Ok((
+                deleted_reference,
+                einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached,
+            ))
         );
         assert_eq!(
             move_calls
@@ -2517,7 +2744,7 @@ fn confirmed_delete_with_cache_failure_requires_sync_before_retry() {
             ],
             Err(MailOperationError::ServiceUnavailable),
         );
-        let folder_calls = Arc::clone(&provider.deleted_items_folder_calls);
+        let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
         let workflow = MailWorkflow::new(provider, cache.clone());
@@ -2529,13 +2756,22 @@ fn confirmed_delete_with_cache_failure_requires_sync_before_retry() {
 
         assert_eq!(
             workflow
-                .delete_message(&inbox_reference, &message_id())
-                .await,
+                .move_message_to_well_known_folder(
+                    &inbox_reference,
+                    &message_id(),
+                    WellKnownMailFolder::DeletedItems,
+                )
+                .await
+                .map(|outcome| outcome.cache_outcome()),
             Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedNeedsSync)
         );
         assert_eq!(
             workflow
-                .delete_message(&inbox_reference, &message_id())
+                .move_message_to_well_known_folder(
+                    &inbox_reference,
+                    &message_id(),
+                    WellKnownMailFolder::DeletedItems
+                )
                 .await,
             Err(MailWorkflowError::AccountSyncRequired)
         );

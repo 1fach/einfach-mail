@@ -10,7 +10,8 @@ use crate::mail_composer::{
 use einfach_mail_application::{
     FollowUpFlagUpdateOutcome, MailCacheError, MailOperationError, MailSession, MailSyncProgress,
     MailSyncReport, MailSyncState, MailWorkflowError, MessageBodyForDisplay, MessageMoveOutcome,
-    OpenedMessage, ReadStateUpdateOutcome, SanitizedEmailHtml, allowed_external_message_url,
+    OpenedMessage, ReadStateUpdateOutcome, SanitizedEmailHtml, WellKnownFolderMoveOutcome,
+    WellKnownMailFolder, allowed_external_message_url,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage,
@@ -85,8 +86,8 @@ pub(crate) struct MailView {
     follow_up_flag_task: Option<Task<()>>,
     message_move_status: MessageMoveStatus,
     message_move_task: Option<Task<()>>,
-    message_delete_status: MessageDeleteStatus,
-    message_delete_task: Option<Task<()>>,
+    well_known_folder_action_status: WellKnownFolderActionStatus,
+    well_known_folder_action_task: Option<Task<()>>,
     move_recovery_reason: Option<MoveRecoveryReason>,
     selected_folder_write_sync_required: bool,
 }
@@ -139,6 +140,7 @@ enum MessageState {
     MoveCompleted {
         destination_folder: FolderReference,
         destination_label: String,
+        open_action_label: &'static str,
     },
     DeleteCompleted,
     Failed(MailWorkflowError),
@@ -156,13 +158,15 @@ enum MessageMoveStatus {
     },
 }
 
-enum MessageDeleteStatus {
+enum WellKnownFolderActionStatus {
     Idle,
     Pending {
         message_id: MessageId,
+        destination: WellKnownMailFolder,
     },
     Failed {
         message_id: MessageId,
+        destination: WellKnownMailFolder,
         error: MailWorkflowError,
     },
 }
@@ -183,9 +187,10 @@ struct MessageMoveRequest {
 }
 
 #[derive(Clone)]
-struct MessageDeleteRequest {
+struct WellKnownFolderActionRequest {
     source_folder: FolderReference,
     message_id: MessageId,
+    destination: WellKnownMailFolder,
 }
 
 #[derive(Clone)]
@@ -393,8 +398,8 @@ impl MailView {
             follow_up_flag_task: None,
             message_move_status: MessageMoveStatus::Idle,
             message_move_task: None,
-            message_delete_status: MessageDeleteStatus::Idle,
-            message_delete_task: None,
+            well_known_folder_action_status: WellKnownFolderActionStatus::Idle,
+            well_known_folder_action_task: None,
             move_recovery_reason: Some(MoveRecoveryReason::InitialSyncRequired),
             selected_folder_write_sync_required: true,
         };
@@ -473,7 +478,7 @@ impl MailView {
         self.read_state_update = ReadStateUpdateStatus::Idle;
         self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
         self.message_move_status = MessageMoveStatus::Idle;
-        self.message_delete_status = MessageDeleteStatus::Idle;
+        self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
     }
 
     fn set_messages(&mut self, messages: Vec<MailMessage>) {
@@ -506,7 +511,7 @@ impl MailView {
         if sync_reconciled {
             self.move_recovery_reason = None;
             self.message_move_status = MessageMoveStatus::Idle;
-            self.message_delete_status = MessageDeleteStatus::Idle;
+            self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
         }
         self.sync_status = status;
     }
@@ -517,7 +522,7 @@ impl MailView {
         drop(self.read_state_task.take());
         drop(self.follow_up_flag_task.take());
         drop(self.message_move_task.take());
-        drop(self.message_delete_task.take());
+        drop(self.well_known_folder_action_task.take());
         self.sync_running = false;
         self.selected_folder = None;
         self.selected_message_id = None;
@@ -528,7 +533,7 @@ impl MailView {
         self.read_state_update = ReadStateUpdateStatus::Idle;
         self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
         self.message_move_status = MessageMoveStatus::Idle;
-        self.message_delete_status = MessageDeleteStatus::Idle;
+        self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
         self.move_recovery_reason = None;
         self.selected_folder_write_sync_required = true;
     }
@@ -541,7 +546,7 @@ impl MailView {
             return;
         }
         self.message_move_status = MessageMoveStatus::Idle;
-        self.message_delete_status = MessageDeleteStatus::Idle;
+        self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
         self.selected_folder = Some(folder.clone());
         self.selected_folder_write_sync_required = true;
         self.sync_state = None;
@@ -916,20 +921,55 @@ impl MailView {
         })
     }
 
-    fn delete_selected_message(&mut self, cx: &mut Context<Self>) {
-        let Some(request) = self.prepare_message_delete() else {
+    fn start_well_known_folder_action(
+        &mut self,
+        destination: WellKnownMailFolder,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(request) = self.prepare_well_known_folder_action(destination) else {
             return;
         };
-        self.start_message_delete(request, cx);
+        self.well_known_folder_action_status = WellKnownFolderActionStatus::Pending {
+            message_id: request.message_id.clone(),
+            destination,
+        };
+        self.spawn_well_known_folder_action(request, cx);
     }
 
-    fn prepare_message_delete(&self) -> Option<MessageDeleteRequest> {
+    fn spawn_well_known_folder_action(
+        &mut self,
+        request: WellKnownFolderActionRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let workflow = Arc::clone(&self.workflow);
+        self.well_known_folder_action_task =
+            Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+                let action_result = workflow
+                    .move_message_to_well_known_folder(
+                        &request.source_folder,
+                        &request.message_id,
+                        request.destination,
+                    )
+                    .await;
+                let _ = this.update(cx, |view, cx| {
+                    view.finish_well_known_folder_action(request, action_result);
+                    cx.notify();
+                });
+            }));
+        cx.notify();
+    }
+
+    fn prepare_well_known_folder_action(
+        &self,
+        destination: WellKnownMailFolder,
+    ) -> Option<WellKnownFolderActionRequest> {
         if !self.message_move_allowed() {
             return None;
         }
-        Some(MessageDeleteRequest {
+        Some(WellKnownFolderActionRequest {
             source_folder: self.selected_folder.clone()?,
             message_id: self.selected_message_id.clone()?,
+            destination,
         })
     }
 
@@ -945,7 +985,7 @@ impl MailView {
         self.read_state_task.is_some()
             || self.follow_up_flag_task.is_some()
             || self.message_move_task.is_some()
-            || self.message_delete_task.is_some()
+            || self.well_known_folder_action_task.is_some()
     }
 
     fn start_message_move(&mut self, request: MessageMoveRequest, cx: &mut Context<Self>) {
@@ -995,6 +1035,7 @@ impl MailView {
                 self.show_message_move_completion(
                     request.destination_folder,
                     request.destination_label,
+                    "Open folder",
                 );
             }
             MessageMoveOutcome::ConfirmedNeedsSync => {
@@ -1007,17 +1048,19 @@ impl MailView {
         &mut self,
         destination_folder: FolderReference,
         destination_label: String,
+        open_action_label: &'static str,
     ) {
         self.message_state = MessageState::MoveCompleted {
             destination_folder,
             destination_label,
+            open_action_label,
         };
     }
 
     fn require_move_sync(&mut self, reason: MoveRecoveryReason) {
         self.message_state = MessageState::Empty;
         self.message_move_status = MessageMoveStatus::Idle;
-        self.message_delete_status = MessageDeleteStatus::Idle;
+        self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
         self.move_recovery_reason = Some(reason);
     }
 
@@ -1030,52 +1073,74 @@ impl MailView {
         }
     }
 
-    fn start_message_delete(&mut self, request: MessageDeleteRequest, cx: &mut Context<Self>) {
-        let workflow = Arc::clone(&self.workflow);
-        self.message_delete_status = MessageDeleteStatus::Pending {
-            message_id: request.message_id.clone(),
-        };
-        let operation_request = request.clone();
-        self.message_delete_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let delete_result = workflow
-                .delete_message(
-                    &operation_request.source_folder,
-                    &operation_request.message_id,
-                )
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                view.finish_message_delete(request, delete_result);
-                cx.notify();
-            });
-        }));
-        cx.notify();
-    }
-
-    fn finish_message_delete(
+    fn finish_well_known_folder_action(
         &mut self,
-        request: MessageDeleteRequest,
-        delete_result: Result<MessageMoveOutcome, MailWorkflowError>,
+        request: WellKnownFolderActionRequest,
+        action_result: Result<WellKnownFolderMoveOutcome, MailWorkflowError>,
     ) {
-        self.message_delete_task = None;
-        match delete_result {
-            Ok(MessageMoveOutcome::ConfirmedAndCached) => {
-                self.remove_confirmed_message(&request.message_id);
-                self.message_delete_status = MessageDeleteStatus::Idle;
-                self.message_state = MessageState::DeleteCompleted;
-            }
-            Ok(MessageMoveOutcome::ConfirmedNeedsSync) => {
-                self.require_move_sync(MoveRecoveryReason::CacheNeedsSync);
-            }
-            Err(error) => self.finish_failed_message_delete(request.message_id, error),
+        self.well_known_folder_action_task = None;
+        match action_result {
+            Ok(outcome) => self.finish_confirmed_well_known_folder_action(request, outcome),
+            Err(error) => self.finish_failed_well_known_folder_action(
+                request.message_id,
+                request.destination,
+                error,
+            ),
         }
     }
 
-    fn finish_failed_message_delete(&mut self, message_id: MessageId, error: MailWorkflowError) {
+    fn finish_confirmed_well_known_folder_action(
+        &mut self,
+        request: WellKnownFolderActionRequest,
+        outcome: WellKnownFolderMoveOutcome,
+    ) {
+        match outcome.cache_outcome() {
+            MessageMoveOutcome::ConfirmedAndCached => {
+                self.finish_cached_well_known_folder_action(
+                    request,
+                    outcome.destination_folder().clone(),
+                );
+            }
+            MessageMoveOutcome::ConfirmedNeedsSync => {
+                self.require_move_sync(MoveRecoveryReason::CacheNeedsSync);
+            }
+        }
+    }
+
+    fn finish_cached_well_known_folder_action(
+        &mut self,
+        request: WellKnownFolderActionRequest,
+        destination_folder: FolderReference,
+    ) {
+        self.remove_confirmed_message(&request.message_id);
+        self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
+        match request.destination {
+            WellKnownMailFolder::Archive => self.show_message_move_completion(
+                destination_folder,
+                "Archive".to_owned(),
+                "Open Archive",
+            ),
+            WellKnownMailFolder::DeletedItems => {
+                self.message_state = MessageState::DeleteCompleted;
+            }
+        }
+    }
+
+    fn finish_failed_well_known_folder_action(
+        &mut self,
+        message_id: MessageId,
+        destination: WellKnownMailFolder,
+        error: MailWorkflowError,
+    ) {
         if message_move_outcome_is_unknown(error) {
             self.move_recovery_reason = Some(MoveRecoveryReason::OutcomeUnknown);
-            self.message_delete_status = MessageDeleteStatus::Idle;
+            self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
         } else {
-            self.message_delete_status = MessageDeleteStatus::Failed { message_id, error };
+            self.well_known_folder_action_status = WellKnownFolderActionStatus::Failed {
+                message_id,
+                destination,
+                error,
+            };
         }
     }
 
@@ -1103,11 +1168,17 @@ impl MailView {
         )
     }
 
-    fn message_delete_pending_for(&self, message_id: &MessageId) -> bool {
+    fn well_known_folder_action_in_progress_for(
+        &self,
+        message_id: &MessageId,
+        destination: WellKnownMailFolder,
+    ) -> bool {
         matches!(
-            &self.message_delete_status,
-            MessageDeleteStatus::Pending { message_id: pending_id }
-                if *pending_id == *message_id
+            &self.well_known_folder_action_status,
+            WellKnownFolderActionStatus::Pending {
+                message_id: pending_id,
+                destination: pending_destination,
+            } if pending_id == message_id && *pending_destination == destination
         )
     }
 
@@ -1125,15 +1196,19 @@ impl MailView {
         }
     }
 
-    fn message_delete_status_for(&self, message_id: &MessageId) -> Option<&MessageDeleteStatus> {
-        match &self.message_delete_status {
-            MessageDeleteStatus::Pending {
-                message_id: pending_id,
-            }
-            | MessageDeleteStatus::Failed {
+    fn well_known_folder_action_status_for(
+        &self,
+        message_id: &MessageId,
+    ) -> Option<&WellKnownFolderActionStatus> {
+        match &self.well_known_folder_action_status {
+            WellKnownFolderActionStatus::Pending {
                 message_id: pending_id,
                 ..
-            } if *pending_id == *message_id => Some(&self.message_delete_status),
+            }
+            | WellKnownFolderActionStatus::Failed {
+                message_id: pending_id,
+                ..
+            } if pending_id == message_id => Some(&self.well_known_folder_action_status),
             _ => None,
         }
     }
@@ -1740,9 +1815,18 @@ impl MailView {
                                             .child(
                                                 self.render_follow_up_flag_action(message_id, cx),
                                             )
+                                            .child(self.render_well_known_folder_action(
+                                                WellKnownMailFolder::Archive,
+                                                message_id,
+                                                cx,
+                                            ))
                                             .child(self.render_move_action(message_id, cx))
                                             .child(self.render_reply_action(message_id, cx))
-                                            .child(self.render_delete_action(message_id, cx)),
+                                            .child(self.render_well_known_folder_action(
+                                                WellKnownMailFolder::DeletedItems,
+                                                message_id,
+                                                cx,
+                                            )),
                                     ),
                             )
                             .child(
@@ -1756,7 +1840,7 @@ impl MailView {
                             ))
                             .children(self.render_follow_up_flag_feedback(message_id, cx))
                             .children(self.render_message_move_feedback(message_id, cx))
-                            .children(self.render_message_delete_feedback(message_id, cx))
+                            .children(self.render_well_known_folder_action_feedback(message_id, cx))
                             .children(self.render_move_recovery_notice(cx))
                             .children(self.render_read_state_reconciliation_notice()),
                     )
@@ -1766,6 +1850,7 @@ impl MailView {
             MessageState::MoveCompleted {
                 destination_folder,
                 destination_label,
+                open_action_label,
             } => div()
                 .flex_1()
                 .min_w_0()
@@ -1782,7 +1867,7 @@ impl MailView {
                 .child(
                     Button::new("open-moved-message-folder")
                         .debug_selector(|| "open-moved-message-folder".to_owned())
-                        .label("Open folder")
+                        .label(*open_action_label)
                         .on_click(cx.listener({
                             let destination_folder = destination_folder.clone();
                             move |view, _, _, cx| {
@@ -1836,19 +1921,32 @@ impl MailView {
             .into_any_element()
     }
 
-    fn render_delete_action(&self, message_id: &MessageId, cx: &mut Context<Self>) -> AnyElement {
-        let pending = self.message_delete_pending_for(message_id);
-        Button::new("message-delete")
-            .danger()
-            .debug_selector(|| "message-delete".to_owned())
-            .label(if pending { "Deleting…" } else { "Delete" })
+    fn render_well_known_folder_action(
+        &self,
+        destination: WellKnownMailFolder,
+        message_id: &MessageId,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pending = self.well_known_folder_action_in_progress_for(message_id, destination);
+        let (button_id, label, pending_label) = match destination {
+            WellKnownMailFolder::Archive => ("message-archive", "Archive", "Archiving…"),
+            WellKnownMailFolder::DeletedItems => ("message-delete", "Delete", "Deleting…"),
+        };
+        let button = Button::new(button_id)
+            .debug_selector(|| button_id.to_owned())
+            .label(if pending { pending_label } else { label })
             .loading(pending)
             .disabled(
                 !self.message_move_allowed()
                     || self.selected_message_id.as_ref() != Some(message_id),
             )
-            .on_click(cx.listener(|view, _, _, cx| view.delete_selected_message(cx)))
-            .into_any_element()
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.start_well_known_folder_action(destination, cx);
+            }));
+        match destination {
+            WellKnownMailFolder::Archive => button.ghost().into_any_element(),
+            WellKnownMailFolder::DeletedItems => button.danger().into_any_element(),
+        }
     }
 
     fn move_destinations(&self, source_folder: &FolderReference) -> Vec<(FolderReference, String)> {
@@ -1907,24 +2005,51 @@ impl MailView {
         }
     }
 
-    fn render_message_delete_feedback(
+    fn render_well_known_folder_action_feedback(
         &self,
         message_id: &MessageId,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        match self.message_delete_status_for(message_id)? {
-            MessageDeleteStatus::Pending { .. } => Some(render_message_pending_feedback(
-                "message-delete-pending",
-                "Deleting message…".to_owned(),
-            )),
-            MessageDeleteStatus::Failed { error, .. } => Some(self.render_message_action_error(
-                "message-delete-error",
-                "review-permissions-from-delete",
-                *error,
-                cx,
-            )),
-            MessageDeleteStatus::Idle => None,
+        match self.well_known_folder_action_status_for(message_id)? {
+            WellKnownFolderActionStatus::Pending { destination, .. } => {
+                Some(self.render_well_known_folder_action_pending(*destination))
+            }
+            WellKnownFolderActionStatus::Failed {
+                destination, error, ..
+            } => Some(self.render_well_known_folder_action_error(*destination, *error, cx)),
+            WellKnownFolderActionStatus::Idle => None,
         }
+    }
+
+    fn render_well_known_folder_action_pending(
+        &self,
+        destination: WellKnownMailFolder,
+    ) -> AnyElement {
+        let pending_id = match destination {
+            WellKnownMailFolder::Archive => "message-archive-pending",
+            WellKnownMailFolder::DeletedItems => "message-delete-pending",
+        };
+        render_message_pending_feedback(
+            pending_id,
+            well_known_folder_progress_message(destination).to_owned(),
+        )
+    }
+
+    fn render_well_known_folder_action_error(
+        &self,
+        destination: WellKnownMailFolder,
+        error: MailWorkflowError,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (error_id, permission_button_id) = match destination {
+            WellKnownMailFolder::Archive => {
+                ("message-archive-error", "review-permissions-from-archive")
+            }
+            WellKnownMailFolder::DeletedItems => {
+                ("message-delete-error", "review-permissions-from-delete")
+            }
+        };
+        self.render_message_action_error(error_id, permission_button_id, error, cx)
     }
 
     fn render_message_action_error(
@@ -2216,11 +2341,11 @@ impl MailView {
         self.selected_folder.as_ref()?;
         if self.selected_folder_write_sync_required {
             Some(
-                "A message change in this folder needs syncing. Sync mail before changing read state, follow-up flags, moving messages, or deleting messages again.",
+                "A message change in this folder needs syncing. Sync mail before changing read state, follow-up flags, moving, archiving, or deleting messages again.",
             )
         } else if matches!(self.sync_status, SyncStatus::Failed(_)) {
             Some(
-                "Mail sync failed. Retry sync before changing read state, follow-up flags, moving messages, or deleting messages.",
+                "Mail sync failed. Retry sync before changing read state, follow-up flags, moving, archiving, or deleting messages.",
             )
         } else {
             None
@@ -2267,7 +2392,7 @@ fn message_move_menu_item(
 fn move_recovery_message(reason: MoveRecoveryReason) -> &'static str {
     match reason {
         MoveRecoveryReason::InitialSyncRequired => {
-            "Sync mail successfully before moving or deleting messages in this session."
+            "Sync mail successfully before archiving, moving, or deleting messages in this session."
         }
         MoveRecoveryReason::OutcomeUnknown => {
             "The message may have moved. Sync mail before trying again."
@@ -2714,11 +2839,22 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
             "The destination folder is unavailable. Sync mail and try again."
         }
         MailWorkflowError::AccountSyncRequired => {
-            "Sync mail successfully before moving or deleting messages in this session."
+            "Sync mail successfully before archiving, moving, or deleting messages in this session."
         }
-        MailWorkflowError::MessageAlreadyDeleted => "This message is already in Deleted Items.",
+        MailWorkflowError::AlreadyInWellKnownFolder(WellKnownMailFolder::Archive) => {
+            "This message is already in Archive."
+        }
+        MailWorkflowError::AlreadyInWellKnownFolder(WellKnownMailFolder::DeletedItems) => {
+            "This message is already in Deleted Items. Move it to another folder instead."
+        }
+        MailWorkflowError::WellKnownFolderUnavailable(WellKnownMailFolder::Archive) => {
+            "Archive is not available in the visible folder list. Sync mail and try again."
+        }
+        MailWorkflowError::WellKnownFolderUnavailable(WellKnownMailFolder::DeletedItems) => {
+            "Deleted Items is not available in the visible folder list. Sync mail and try again."
+        }
         MailWorkflowError::FolderSyncRequired => {
-            "Sync this folder before moving or deleting messages."
+            "Sync this folder before archiving, moving, or deleting messages."
         }
         MailWorkflowError::RepeatedCursor => {
             "Sync stopped because the service repeated a page. Try syncing again."
@@ -2733,6 +2869,13 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
             "Sync paused after receiving a large amount of mail data. Choose Sync to continue from its saved checkpoint."
         }
         _ => "Couldn't complete this mail request. Check your connection and try again.",
+    }
+}
+
+fn well_known_folder_progress_message(folder: WellKnownMailFolder) -> &'static str {
+    match folder {
+        WellKnownMailFolder::Archive => "Moving message to Archive…",
+        WellKnownMailFolder::DeletedItems => "Moving message to Deleted Items…",
     }
 }
 
@@ -2751,7 +2894,7 @@ mod tests {
     use einfach_mail_application::{
         AccountOperationError, MailCache, MailCacheError, MailOperationError, MailProvider,
         MailSendProviderError, MailSyncState, MailWorkflow, MailWorkflowError,
-        MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
+        MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
     };
     use einfach_mail_domain::{
         AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
@@ -2767,10 +2910,10 @@ mod tests {
 
     use super::{
         FollowUpFlagUpdateStatus, MailPermissionRequester, MailSyncProgress, MailView,
-        MailViewEvent, MessageBodyForDisplay, MessageDeleteStatus, MessageMoveMenuAction,
-        MessageNavigation, MessageState, MoveRecoveryReason, ReadStateUpdateStatus, SyncStatus,
-        bind_message_navigation_keys, follow_up_flag_failure_message, mail_error_message,
-        read_state_failure_message,
+        MailViewEvent, MessageBodyForDisplay, MessageMoveMenuAction, MessageNavigation,
+        MessageState, MoveRecoveryReason, ReadStateUpdateStatus, SyncStatus,
+        WellKnownFolderActionStatus, bind_message_navigation_keys, follow_up_flag_failure_message,
+        mail_error_message, read_state_failure_message,
     };
     use crate::mail_composer::bind_mail_composer_keys;
 
@@ -2886,12 +3029,20 @@ mod tests {
             ready(Err(MailOperationError::ServiceUnavailable))
         }
 
-        fn deleted_items_folder_id(
+        fn well_known_folder(
             &self,
-            _: &AccountId,
-        ) -> impl Future<Output = Result<FolderId, MailOperationError>> + Send + '_ {
-            ready(Ok(FolderId::try_from("deleted-items".to_owned())
-                .expect("synthetic Deleted Items ID is valid")))
+            account_id: &AccountId,
+            folder: WellKnownMailFolder,
+        ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
+            let folder_id = match folder {
+                WellKnownMailFolder::Archive => "archive",
+                WellKnownMailFolder::DeletedItems => "deleted-items",
+            };
+            ready(Ok(FolderReference::new(
+                account_id.clone(),
+                FolderId::try_from(folder_id.to_owned())
+                    .expect("synthetic well-known folder ID is valid"),
+            )))
         }
 
         fn send_mail(
@@ -3085,11 +3236,12 @@ mod tests {
             ready(Err(MailOperationError::ServiceUnavailable))
         }
 
-        fn deleted_items_folder_id(
+        fn well_known_folder(
             &self,
             account_id: &AccountId,
-        ) -> impl Future<Output = Result<FolderId, MailOperationError>> + Send + '_ {
-            self.offline.deleted_items_folder_id(account_id)
+            folder: WellKnownMailFolder,
+        ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
+            self.offline.well_known_folder(account_id, folder)
         }
 
         fn send_mail(
@@ -3228,13 +3380,21 @@ mod tests {
             }
         }
 
-        fn deleted_items_folder_id(
+        fn well_known_folder(
             &self,
             account_id: &AccountId,
-        ) -> impl Future<Output = Result<FolderId, MailOperationError>> + Send + '_ {
+            folder: WellKnownMailFolder,
+        ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
+            let folder_id = match folder {
+                WellKnownMailFolder::Archive => "archive",
+                WellKnownMailFolder::DeletedItems => "deleted-items",
+            };
             if account_id == &self.account_id {
-                ready(Ok(FolderId::try_from("deleted-items".to_owned())
-                    .expect("synthetic Deleted Items ID is valid")))
+                ready(Ok(FolderReference::new(
+                    account_id.clone(),
+                    FolderId::try_from(folder_id.to_owned())
+                        .expect("synthetic well-known folder ID is valid"),
+                )))
             } else {
                 ready(Err(MailOperationError::AccountMismatch))
             }
@@ -3356,11 +3516,12 @@ mod tests {
                 .move_message(source_folder, message_id, destination_folder)
         }
 
-        fn deleted_items_folder_id(
+        fn well_known_folder(
             &self,
             account_id: &AccountId,
-        ) -> impl Future<Output = Result<FolderId, MailOperationError>> + Send + '_ {
-            self.offline.deleted_items_folder_id(account_id)
+            folder: WellKnownMailFolder,
+        ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
+            self.offline.well_known_folder(account_id, folder)
         }
 
         fn send_mail(
@@ -4510,8 +4671,9 @@ mod tests {
         assert!(permission_review_requested.load(Ordering::Relaxed));
         assert!(context.cx.update(|cx| {
             matches!(
-                &view.read(cx).message_delete_status,
-                MessageDeleteStatus::Failed {
+                &view.read(cx).well_known_folder_action_status,
+                WellKnownFolderActionStatus::Failed {
+                    destination: WellKnownMailFolder::DeletedItems,
                     error,
                     ..
                 } if *error == MailWorkflowError::Provider(MailOperationError::AccessDenied)
@@ -4519,6 +4681,107 @@ mod tests {
         }));
     }
 
+    #[gpui_kit::test]
+    async fn native_archive_action_moves_cached_message_to_archive(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, message_id) = fixture(account.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = message_move_provider(
+            &cache,
+            MessageMoveActionResponse::Confirm,
+            Arc::clone(&calls),
+        );
+        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let mut mail_view = None;
+        let (_, context) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+            mail_view = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        let view = mail_view.expect("mail view is created with the test window");
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if !context.cx.update(|cx| view.read(cx).sync_running) {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        let row = context
+            .debug_bounds("message-row-message-1")
+            .expect("source message is visible in the cached inbox");
+        context.simulate_click(row.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if context.debug_bounds("message-archive").is_some() {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        let archive_action = context
+            .debug_bounds("message-archive")
+            .expect("opened message exposes its native Archive action");
+        context.simulate_click(archive_action.center(), Modifiers::default());
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if context.debug_bounds("message-move-completed").is_some() {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        let archive_reference = FolderReference::new(
+            account,
+            FolderId::try_from("archive".to_owned()).expect("synthetic Archive ID is valid"),
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(context.debug_bounds("message-move-completed").is_some());
+        assert!(context.cx.update(|cx| view.read(cx).messages.is_empty()));
+        let archived_message = cache
+            .read_message(&archive_reference, &message_id)
+            .await
+            .expect("Archive cache is readable")
+            .expect("message body remains cached after archiving");
+        assert_eq!(
+            archived_message
+                .1
+                .expect("cached body moves with the message")
+                .content(),
+            "Synthetic offline body"
+        );
+        let open_archive = context
+            .debug_bounds("open-moved-message-folder")
+            .expect("archive confirmation offers to open Archive");
+        context.simulate_click(open_archive.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_mail_view(context);
+            if context.cx.update(|cx| {
+                let view = view.read(cx);
+                view.selected_folder.as_ref() == Some(&archive_reference)
+                    && view
+                        .messages
+                        .iter()
+                        .any(|message| message.id() == &message_id)
+            }) {
+                break;
+            }
+            context.cx.executor().timer(Duration::from_millis(10)).await;
+        }
+        assert!(context.cx.update(|cx| {
+            let view = view.read(cx);
+            view.selected_folder.as_ref() == Some(&archive_reference)
+                && view
+                    .messages
+                    .iter()
+                    .any(|message| message.id() == &message_id)
+        }));
+    }
     #[gpui_kit::test]
     async fn pending_message_delete_keeps_the_native_action_busy(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -4575,11 +4838,12 @@ mod tests {
         }
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert!(context.debug_bounds("message-delete-pending").is_some());
-        assert!(
-            context
-                .cx
-                .update(|cx| { view.read(cx).message_delete_pending_for(&message_id) })
-        );
+        assert!(context.cx.update(|cx| {
+            view.read(cx).well_known_folder_action_in_progress_for(
+                &message_id,
+                WellKnownMailFolder::DeletedItems,
+            )
+        }));
     }
 
     #[gpui_kit::test]
