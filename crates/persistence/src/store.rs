@@ -1751,8 +1751,13 @@ fn apply_calendar_changes(
     changes: Vec<CalendarDeltaChange>,
     table: CalendarEventTable,
 ) -> CacheResult<()> {
+    let context = CalendarEventChangeContext {
+        transaction,
+        scope,
+        table,
+    };
     for change in changes {
-        apply_calendar_change(transaction, scope, change, table)?;
+        context.apply(change)?;
     }
     Ok(())
 }
@@ -1763,84 +1768,78 @@ enum CalendarEventTable {
     Rebuild,
 }
 
-fn apply_calendar_change(
-    transaction: &async_sqlite::rusqlite::Transaction<'_>,
-    scope: CalendarEventScope<'_>,
-    change: CalendarDeltaChange,
+struct CalendarEventChangeContext<'scope, 'connection> {
+    transaction: &'scope async_sqlite::rusqlite::Transaction<'connection>,
+    scope: CalendarEventScope<'scope>,
     table: CalendarEventTable,
-) -> CacheResult<()> {
-    match change {
-        CalendarDeltaChange::Removed { id } => match table {
-            CalendarEventTable::Active => delete_calendar_event_from(
-                transaction,
-                scope,
-                id.as_str(),
-                CalendarEventTable::Active,
-            ),
-            CalendarEventTable::Rebuild => {
-                delete_calendar_event_from(
-                    transaction,
-                    scope,
-                    id.as_str(),
-                    CalendarEventTable::Rebuild,
-                )?;
-                mark_calendar_rebuild_removed(transaction, scope, id.as_str())
+}
+
+impl CalendarEventChangeContext<'_, '_> {
+    fn apply(&self, change: CalendarDeltaChange) -> CacheResult<()> {
+        match change {
+            CalendarDeltaChange::Removed { id } => {
+                delete_calendar_event_from(self.transaction, self.scope, id.as_str(), self.table)?;
+                match self.table {
+                    CalendarEventTable::Active => Ok(()),
+                    CalendarEventTable::Rebuild => {
+                        mark_calendar_rebuild_removed(self.transaction, self.scope, id.as_str())
+                    }
+                }
             }
-        },
-        CalendarDeltaChange::Upsert { id, patch } => {
-            apply_calendar_upsert(transaction, scope, id, patch, table)
+            CalendarDeltaChange::Upsert { id, patch } => self.apply_upsert(id, patch),
         }
     }
-}
 
-fn apply_calendar_upsert(
-    transaction: &async_sqlite::rusqlite::Transaction<'_>,
-    scope: CalendarEventScope<'_>,
-    id: einfach_mail_domain::EventId,
-    patch: CalendarOccurrencePatch,
-    table: CalendarEventTable,
-) -> CacheResult<()> {
-    let occurrence = calendar_occurrence_after_patch(transaction, scope, &id, patch, table)?;
-    match table {
-        CalendarEventTable::Active if occurrence.overlaps_view() => {
-            write_calendar_event(transaction, scope, &occurrence)
-        }
-        CalendarEventTable::Active => {
-            delete_calendar_event_from(transaction, scope, id.as_str(), CalendarEventTable::Active)
-        }
-        CalendarEventTable::Rebuild => {
-            clear_calendar_rebuild_removed(transaction, scope, id.as_str())?;
-            write_calendar_rebuild_event(transaction, scope, &occurrence)
+    fn apply_upsert(
+        &self,
+        id: einfach_mail_domain::EventId,
+        patch: CalendarOccurrencePatch,
+    ) -> CacheResult<()> {
+        let occurrence = self.occurrence_after_patch(&id, patch)?;
+        match self.table {
+            CalendarEventTable::Active if occurrence.overlaps_view() => {
+                write_calendar_event(self.transaction, self.scope, &occurrence)
+            }
+            CalendarEventTable::Active => {
+                delete_calendar_event_from(self.transaction, self.scope, id.as_str(), self.table)
+            }
+            CalendarEventTable::Rebuild => {
+                clear_calendar_rebuild_removed(self.transaction, self.scope, id.as_str())?;
+                write_calendar_rebuild_event(self.transaction, self.scope, &occurrence)
+            }
         }
     }
-}
 
-fn calendar_occurrence_after_patch(
-    transaction: &async_sqlite::rusqlite::Transaction<'_>,
-    scope: CalendarEventScope<'_>,
-    id: &einfach_mail_domain::EventId,
-    patch: CalendarOccurrencePatch,
-    table: CalendarEventTable,
-) -> CacheResult<CalendarOccurrence> {
-    let removed_from_rebuild = table == CalendarEventTable::Rebuild
-        && calendar_rebuild_event_was_removed(transaction, scope, id.as_str())?;
-    let existing = match read_calendar_event_from(transaction, scope, id.as_str(), table)? {
-        Some(occurrence) => Some(occurrence),
-        None if table == CalendarEventTable::Rebuild && !removed_from_rebuild => {
-            read_calendar_event(transaction, scope, id.as_str())?
+    fn occurrence_after_patch(
+        &self,
+        id: &einfach_mail_domain::EventId,
+        patch: CalendarOccurrencePatch,
+    ) -> CacheResult<CalendarOccurrence> {
+        let removed_from_rebuild = self.table == CalendarEventTable::Rebuild
+            && calendar_rebuild_event_was_removed(self.transaction, self.scope, id.as_str())?;
+        let existing = match read_calendar_event_from(
+            self.transaction,
+            self.scope,
+            id.as_str(),
+            self.table,
+        )? {
+            Some(occurrence) => Some(occurrence),
+            None if self.table == CalendarEventTable::Rebuild && !removed_from_rebuild => {
+                read_calendar_event(self.transaction, self.scope, id.as_str())?
+            }
+            None => None,
+        };
+        match existing {
+            Some(mut occurrence) => {
+                patch
+                    .apply_to(&mut occurrence)
+                    .map_err(|_| CacheFailure::InvalidData)?;
+                Ok(occurrence)
+            }
+            None => patch
+                .into_new(self.scope.view.clone(), id.clone())
+                .map_err(|_| CacheFailure::InvalidData),
         }
-        None => None,
-    };
-    match existing {
-        Some(mut occurrence) => {
-            patch
-                .apply_to(&mut occurrence)
-                .map_err(|_| CacheFailure::InvalidData)?;
-            Ok(occurrence)
-        }
-        None => patch
-            .into_new(scope.view.clone(), id.clone())
-            .map_err(|_| CacheFailure::InvalidData),
     }
 }
 
