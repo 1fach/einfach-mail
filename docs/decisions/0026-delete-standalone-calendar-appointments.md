@@ -7,7 +7,7 @@
 
 The calendar editor supports only timed, standalone primary-calendar appointments with no attendees or online meeting. Users need to remove the same supported appointments in Einfach Mail. Deleting an organizer's meeting can send cancellation messages, so the final provider check must reject missing or contradictory event metadata.
 
-Microsoft Graph v1.0 deletes an event with `DELETE /me/events/{id}` and returns `204 No Content` on success. The Microsoft-maintained v1.0 OpenAPI specification declares an optional `If-Match` header with description `ETag` for this operation. Graph event reads can return `@odata.etag`; the final read can therefore supply a server-side precondition. The Learn page does not list the header, so the adapter fails closed when the ETag is missing and issue #42 must verify the behavior against Exchange Online.
+Microsoft Graph v1.0 deletes an event with `DELETE /me/events/{id}` and returns `204 No Content` on success. The Microsoft-maintained v1.0 OpenAPI specification declares `If-Match` as an optional request header for event deletion. Microsoft's event GET example returns a weak `@odata.etag`. OData 4.01 section 8.2.4 specifies weak comparison for services that send weak entity-state ETags. It also permits `If-Match` on DELETE. The adapter preserves the ETag unchanged. The Learn page does not list the header. Issue #42 must verify Exchange Online behavior.
 
 ## Decision
 
@@ -39,4 +39,5 @@ Microsoft Graph v1.0 deletes an event with `DELETE /me/events/{id}` and returns 
 - [Microsoft-maintained Graph v1.0 OpenAPI at revision ab170ed](https://github.com/microsoftgraph/msgraph-metadata/blob/ab170ed19a075b7b9df5a95bc4e08d9d49af56bd/openapi/v1.0/openapi.yaml)
 - [Microsoft Graph get event v1.0](https://learn.microsoft.com/en-us/graph/api/event-get?view=graph-rest-1.0)
 - [Microsoft Graph event resource](https://learn.microsoft.com/en-us/graph/api/resources/event?view=graph-rest-1.0)
+- [OData Version 4.01 Protocol](https://docs.oasis-open.org/odata/odata/v4.01/odata-v4.01-part1-protocol.html)
 - [ADR 0023: Edit standalone calendar appointments](0023-edit-standalone-calendar-appointments.md)

@@ -1522,6 +1522,128 @@ fn uncertain_event_deletion_requires_sync_and_is_not_replayed() {
 }
 
 #[test]
+fn uncertain_event_deletion_requires_sync_for_each_previously_synced_account_view() {
+    smol::block_on(async {
+        let source_view = view();
+        let overlapping_view = view_for_week(14);
+        let provider = FixtureProvider::default();
+        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+
+        for (view, cursor) in [
+            (&source_view, "delete-cross-week-source-initial"),
+            (&overlapping_view, "delete-cross-week-overlap-initial"),
+        ] {
+            provider.push_page(Ok(response(
+                vec![CalendarDeltaChange::Upsert {
+                    id: event_id(),
+                    patch: cross_week_timed_event_patch(),
+                }],
+                CalendarDeltaProgress::Complete(link(cursor)),
+            )));
+            workflow
+                .sync_view(view)
+                .await
+                .expect("each synthetic view completes its initial sync");
+        }
+
+        let source_event = workflow
+            .load_cached_view(&source_view)
+            .await
+            .expect("source event view is readable")
+            .events()[0]
+            .clone();
+        let overlapping_event = workflow
+            .load_cached_view(&overlapping_view)
+            .await
+            .expect("overlapping event view is readable")
+            .events()[0]
+            .clone();
+        let source_editable = workflow
+            .editable_event(&source_event)
+            .await
+            .expect("synchronized event can be opened for deletion");
+        let overlapping_editable = workflow
+            .editable_event(&overlapping_event)
+            .await
+            .expect("overlapping event can be opened for deletion");
+        provider.fail_next_deletion(CalendarOperationError::DeleteOutcomeUnknown);
+
+        assert_eq!(
+            workflow.delete_event(&source_editable).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::DeleteOutcomeUnknown
+            ))
+        );
+        for view in [&source_view, &overlapping_view] {
+            assert!(
+                workflow
+                    .load_cached_view(view)
+                    .await
+                    .expect("each cached event view is readable")
+                    .calendar_write_sync_required()
+            );
+        }
+        assert_eq!(
+            workflow.delete_event(&overlapping_editable).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+
+        provider.push_page(Ok(response(
+            vec![CalendarDeltaChange::Removed { id: event_id() }],
+            CalendarDeltaProgress::Complete(link("delete-cross-week-source-recovered")),
+        )));
+        workflow
+            .sync_view(&source_view)
+            .await
+            .expect("source view completes its recovery sync");
+        assert!(
+            !workflow
+                .load_cached_view(&source_view)
+                .await
+                .expect("reconciled source view is readable")
+                .calendar_write_sync_required()
+        );
+        assert!(
+            workflow
+                .load_cached_view(&overlapping_view)
+                .await
+                .expect("overlapping view remains readable")
+                .calendar_write_sync_required()
+        );
+        assert_eq!(
+            workflow.delete_event(&overlapping_editable).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+
+        provider.push_page(Ok(response(
+            vec![CalendarDeltaChange::Removed { id: event_id() }],
+            CalendarDeltaProgress::Complete(link("delete-cross-week-overlap-recovered")),
+        )));
+        workflow
+            .sync_view(&overlapping_view)
+            .await
+            .expect("overlapping view completes its recovery sync");
+        for view in [&source_view, &overlapping_view] {
+            assert!(
+                !workflow
+                    .load_cached_view(view)
+                    .await
+                    .expect("reconciled event view is readable")
+                    .calendar_write_sync_required()
+            );
+        }
+        assert_eq!(
+            *provider
+                .deletion_calls
+                .lock()
+                .expect("synthetic deletion counter mutex is not poisoned"),
+            1,
+            "an uncertain deletion is not replayed before all views sync"
+        );
+    });
+}
+
+#[test]
 fn changed_event_deletion_requires_sync_before_another_write() {
     smol::block_on(async {
         let view = view();
