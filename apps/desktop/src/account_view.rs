@@ -939,7 +939,7 @@ fn mail_cache_error_message(error: MailCacheError) -> &'static str {
             "The encrypted account cache key is missing. Remove the local cache before syncing again."
         }
         MailCacheError::Unavailable => {
-            "The encrypted account cache is unavailable. Unlock your Linux keyring and try again."
+            "The encrypted cache could not be read or removed. Check that the cache files are accessible and your Linux keyring is unlocked, then try again."
         }
         _ => "The local mail cache could not be opened. Try again.",
     }
@@ -964,6 +964,7 @@ mod tests {
     use super::{AccountStatus, AccountView, SetupIssue};
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
+        MailCacheError,
     };
     use einfach_mail_domain::{AccountId, AccountProfile};
 
@@ -1121,6 +1122,15 @@ mod tests {
             AccountStatus::reauthorization_error_message(AccountOperationError::SignInCancelled),
             "Permission review was cancelled."
         );
+    }
+
+    #[test]
+    fn unavailable_cache_message_covers_file_and_keyring_recovery() {
+        let message = super::mail_cache_error_message(MailCacheError::Unavailable);
+
+        assert!(message.contains("cache files"));
+        assert!(message.contains("Linux keyring"));
+        assert!(message.contains("try again"));
     }
 
     #[gpui::test]
