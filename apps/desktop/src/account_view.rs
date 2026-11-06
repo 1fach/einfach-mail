@@ -1634,6 +1634,7 @@ mod tests {
         assert!(message.contains("try again"));
     }
 
+    #[test]
     fn unavailable_cache_message_covers_file_and_keyring_recovery() {
         let message = super::mail_cache_error_message(MailCacheError::Unavailable);
 
