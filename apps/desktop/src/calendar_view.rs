@@ -3,7 +3,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use einfach_mail_application::{CalendarOperationError, CalendarSession, CalendarWorkflowError};
+use einfach_mail_application::{
+    CalendarOperationError, CalendarSession, CalendarWorkflowError, CalendarWriteReadiness,
+};
 use einfach_mail_domain::{
     AccountProfile, CalendarOccurrence, CalendarOccurrenceTime, CalendarViewRange,
     CalendarViewReference, PendingCalendarEventCreation,
@@ -39,7 +41,7 @@ pub(crate) struct CalendarView<S: CalendarSession + ?Sized = dyn CalendarSession
     events: Vec<CalendarOccurrence>,
     pending_creation: Option<PendingCalendarEventCreation>,
     sync_state: Option<einfach_mail_application::CalendarSyncState>,
-    calendar_write_sync_required: bool,
+    write_readiness: CalendarWriteReadiness,
     status: CalendarStatus,
     sync_running: bool,
     request_id: u64,
@@ -169,7 +171,7 @@ where
             events: Vec::new(),
             pending_creation: None,
             sync_state: None,
-            calendar_write_sync_required: false,
+            write_readiness: CalendarWriteReadiness::ViewSyncRequired,
             status: CalendarStatus::LoadingCache,
             sync_running: false,
             request_id: 0,
@@ -284,9 +286,6 @@ where
     }
 
     fn apply_refresh_outcome(&mut self, outcome: CalendarRefreshOutcome) {
-        if outcome.sync_result.is_ok() {
-            self.calendar_write_sync_required = false;
-        }
         match outcome.snapshot_result {
             Ok(snapshot) => {
                 self.apply_snapshot(snapshot);
@@ -302,7 +301,7 @@ where
     fn apply_snapshot(&mut self, snapshot: einfach_mail_application::CalendarSnapshot) {
         self.events = snapshot.events().to_vec();
         self.pending_creation = snapshot.pending_creation().cloned();
-        self.calendar_write_sync_required = snapshot.calendar_write_sync_required();
+        self.write_readiness = snapshot.write_readiness();
         self.sync_state = Some(snapshot.sync_state().clone());
     }
 
@@ -340,6 +339,9 @@ where
     }
 
     fn open_event_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.write_readiness != CalendarWriteReadiness::Ready {
+            return;
+        }
         let intent = EventComposerIntent::Create {
             pending_creation: self.pending_creation.clone(),
         };
@@ -357,7 +359,7 @@ where
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.calendar_write_sync_required
+        if self.write_readiness != CalendarWriteReadiness::Ready
             || !matches!(cached_event.time(), CalendarOccurrenceTime::Timed { .. })
         {
             return;
@@ -429,7 +431,7 @@ where
     }
 
     fn require_calendar_sync_for_write(&mut self, cx: &mut Context<Self>) {
-        self.calendar_write_sync_required = true;
+        self.write_readiness = CalendarWriteReadiness::AccountSyncRequired;
         cx.notify();
     }
 
@@ -448,7 +450,7 @@ where
         self.week_start = selected_week;
         self.view = view;
         self.events.clear();
-        self.calendar_write_sync_required = false;
+        self.write_readiness = CalendarWriteReadiness::ViewSyncRequired;
         self.sync_state = None;
         self.refresh(cx);
     }
@@ -460,7 +462,7 @@ where
         self.events.clear();
         self.pending_creation = None;
         self.sync_state = None;
-        self.calendar_write_sync_required = false;
+        self.write_readiness = CalendarWriteReadiness::ViewSyncRequired;
     }
 
     fn render_header(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
@@ -533,7 +535,9 @@ where
                     } else {
                         "New event…"
                     })
-                    .disabled(self.sync_running)
+                    .disabled(
+                        self.sync_running || self.write_readiness != CalendarWriteReadiness::Ready,
+                    )
                     .on_click(cx.listener(|view, _, window, cx| {
                         view.open_event_composer(window, cx);
                     })),
@@ -580,24 +584,23 @@ where
             .text_sm()
             .text_color(colors.destructive)
             .child(calendar_error_message(error, !self.events.is_empty()));
-        if self.calendar_write_sync_required {
-            status = status.child(
-                "Sync each calendar week you opened this session before editing or deleting appointments.",
-            );
+        if let Some(message) = write_readiness_message(self.write_readiness) {
+            status = status.child(message);
         }
         status.into_any_element()
     }
 
     fn render_sync_progress(&self, colors: ColorTokens) -> AnyElement {
+        if matches!(self.status, CalendarStatus::UpToDate)
+            && let Some(message) = write_readiness_message(self.write_readiness)
+        {
+            return render_status_label(message.to_owned(), Role::Alert, colors);
+        }
         let (label, role) = match self.status {
             CalendarStatus::LoadingCache => {
                 ("Loading saved calendar events…".to_owned(), Role::Status)
             }
             CalendarStatus::Syncing => ("Refreshing calendar events…".to_owned(), Role::Status),
-            CalendarStatus::UpToDate if self.calendar_write_sync_required => (
-                "Sync each calendar week you opened this session before editing or deleting appointments.".to_owned(),
-                Role::Alert,
-            ),
             CalendarStatus::UpToDate => match self
                 .sync_state
                 .as_ref()
@@ -688,7 +691,10 @@ where
                             .debug_selector(|| "calendar-event-edit".to_owned())
                             .ghost()
                             .label("Edit")
-                            .disabled(self.sync_running || self.calendar_write_sync_required)
+                            .disabled(
+                                self.sync_running
+                                    || self.write_readiness != CalendarWriteReadiness::Ready,
+                            )
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 view.open_event_editor(cached_event.clone(), window, cx);
                             }))
@@ -700,6 +706,18 @@ where
             event_list = event_list.child(render_event(&display_event, colors, edit_action));
         }
         event_list
+    }
+}
+
+fn write_readiness_message(readiness: CalendarWriteReadiness) -> Option<&'static str> {
+    match readiness {
+        CalendarWriteReadiness::Ready => None,
+        CalendarWriteReadiness::ViewSyncRequired => {
+            Some("Sync this calendar week before creating, editing, or deleting appointments.")
+        }
+        CalendarWriteReadiness::AccountSyncRequired => Some(
+            "Sync each calendar week already synced in this session before writing calendar changes.",
+        ),
     }
 }
 
@@ -1143,6 +1161,7 @@ mod tests {
     use einfach_mail_application::{
         CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
         CalendarOperationError, CalendarProvider, CalendarSyncState, CalendarWorkflow,
+        CalendarWriteReadiness,
     };
     use einfach_mail_domain::{
         AccountId, AccountProfile, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
@@ -1919,6 +1938,7 @@ mod tests {
         let cache = TestCache::default();
         let workflow = Arc::new(CalendarWorkflow::new(provider.clone(), cache.clone()));
         let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
+        let mut calendar_handle = None;
         let (_, context) = cx.add_window_view(|window, cx| {
             let calendar = cx.new(|cx| {
                 CalendarView::new_for_week(
@@ -1932,8 +1952,10 @@ mod tests {
                     cx,
                 )
             });
+            calendar_handle = Some(calendar.clone());
             gpui_kit::base::Root::new(calendar, window, cx)
         });
+        let calendar = calendar_handle.expect("calendar entity is retained for assertions");
         let mut sync_finished = false;
         for _ in 0..100 {
             context.run_until_parked();
@@ -1953,6 +1975,37 @@ mod tests {
         let new_event = context
             .debug_bounds("calendar-new-event")
             .expect("calendar offers event creation");
+        context.simulate_click(new_event.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_calendar_view(context);
+        assert!(!context.update(|window, cx| window.has_active_sheet(cx)));
+        provider.allow_calendar_sync();
+        let sync = context
+            .debug_bounds("calendar-sync")
+            .expect("calendar offers a retry after the initial sync fails");
+        context.simulate_click(sync.center(), Modifiers::default());
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if context.cx.update(|cx| {
+                calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
+                    && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
+            }) {
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(context.cx.update(|cx| {
+            calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
+                && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
+        }));
+        let new_event = context
+            .debug_bounds("calendar-new-event")
+            .expect("synchronized calendar offers event creation");
         context.simulate_click(new_event.center(), Modifiers::default());
         context.run_until_parked();
         draw_calendar_view(context);
@@ -2123,6 +2176,7 @@ mod tests {
     async fn denied_calendar_write_emits_permission_review_request(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
+        provider.allow_calendar_sync();
         provider.fail_next_event_creation(CalendarOperationError::AccessDenied);
         let workflow = Arc::new(CalendarWorkflow::new(
             provider.clone(),
@@ -2131,6 +2185,7 @@ mod tests {
         let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
         let permission_review_requested = Arc::new(AtomicBool::new(false));
         let requested = Arc::clone(&permission_review_requested);
+        let mut calendar_handle = None;
         let mut subscription = None;
         let (_, context) = cx.add_window_view(|window, cx| {
             let calendar = cx.new(|cx| {
@@ -2145,6 +2200,7 @@ mod tests {
                     cx,
                 )
             });
+            calendar_handle = Some(calendar.clone());
             subscription = Some(cx.subscribe(
                 &calendar,
                 move |_, _, event: &super::CalendarViewEvent, _| {
@@ -2158,12 +2214,16 @@ mod tests {
             ));
             gpui_kit::base::Root::new(calendar, window, cx)
         });
+        let calendar = calendar_handle.expect("calendar entity is retained for assertions");
         let _subscription = subscription;
 
         for _ in 0..100 {
             context.run_until_parked();
             draw_calendar_view(context);
-            if context.debug_bounds("calendar-sync-error").is_some() {
+            if context.cx.update(|cx| {
+                calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
+                    && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
+            }) {
                 break;
             }
             context
@@ -2172,6 +2232,10 @@ mod tests {
                 .timer(std::time::Duration::from_millis(10))
                 .await;
         }
+        assert!(context.cx.update(|cx| {
+            calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
+                && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
+        }));
         let new_event = context
             .debug_bounds("calendar-new-event")
             .expect("calendar offers event creation");
@@ -2571,7 +2635,7 @@ mod tests {
             draw_calendar_view(context);
             if context
                 .cx
-                .update(|cx| calendar.read(cx).calendar_write_sync_required)
+                .update(|cx| calendar.read(cx).write_readiness != CalendarWriteReadiness::Ready)
             {
                 break;
             }
@@ -2584,7 +2648,7 @@ mod tests {
         assert!(
             context
                 .cx
-                .update(|cx| calendar.read(cx).calendar_write_sync_required)
+                .update(|cx| calendar.read(cx).write_readiness != CalendarWriteReadiness::Ready)
         );
         let done = context
             .debug_bounds("event-composer-close")
@@ -2600,7 +2664,7 @@ mod tests {
             context.run_until_parked();
             draw_calendar_view(context);
             if context.cx.update(|cx| {
-                !calendar.read(cx).calendar_write_sync_required
+                calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
                     && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
             }) {
                 break;
@@ -2612,9 +2676,9 @@ mod tests {
                 .await;
         }
         assert!(
-            !context
-                .cx
-                .update(|cx| calendar.read(cx).calendar_write_sync_required)
+            context.cx.update(|cx| {
+                calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
+            })
         );
 
         let edit = context
@@ -2704,7 +2768,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    async fn unknown_event_update_requires_sync_before_editing_again(cx: &mut TestAppContext) {
+    async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(crate::event_composer::bind_event_composer_keys);
         let provider = TestProvider::default();
@@ -2787,7 +2851,7 @@ mod tests {
             draw_calendar_view(context);
             if context
                 .cx
-                .update(|cx| calendar.read(cx).calendar_write_sync_required)
+                .update(|cx| calendar.read(cx).write_readiness != CalendarWriteReadiness::Ready)
             {
                 break;
             }
@@ -2800,13 +2864,20 @@ mod tests {
         assert!(
             context
                 .cx
-                .update(|cx| calendar.read(cx).calendar_write_sync_required)
+                .update(|cx| calendar.read(cx).write_readiness != CalendarWriteReadiness::Ready)
         );
         let close = context
             .debug_bounds("event-composer-close")
             .expect("uncertain result can be dismissed");
         context.simulate_click(close.center(), Modifiers::default());
         draw_calendar_view(context);
+
+        let new_event = context
+            .debug_bounds("calendar-new-event")
+            .expect("calendar keeps the new-event action visible during recovery");
+        context.simulate_click(new_event.center(), Modifiers::default());
+        draw_calendar_view(context);
+        assert!(!context.update(|window, cx| window.has_active_sheet(cx)));
 
         let edit = context
             .debug_bounds("calendar-event-edit")
@@ -2843,7 +2914,7 @@ mod tests {
         assert!(
             context
                 .cx
-                .update(|cx| calendar.read(cx).calendar_write_sync_required)
+                .update(|cx| calendar.read(cx).write_readiness != CalendarWriteReadiness::Ready)
         );
         let edit = context
             .debug_bounds("calendar-event-edit")
@@ -2860,7 +2931,7 @@ mod tests {
             context.run_until_parked();
             draw_calendar_view(context);
             if context.cx.update(|cx| {
-                !calendar.read(cx).calendar_write_sync_required
+                calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
                     && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
             }) {
                 break;
@@ -2872,9 +2943,9 @@ mod tests {
                 .await;
         }
         assert!(
-            !context
-                .cx
-                .update(|cx| calendar.read(cx).calendar_write_sync_required)
+            context.cx.update(|cx| {
+                calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
+            })
         );
         let edit = context
             .debug_bounds("calendar-event-edit")

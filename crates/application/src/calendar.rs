@@ -487,8 +487,8 @@ pub enum CalendarWorkflowError {
     /// The provider returned an edit snapshot for another event or account.
     #[error("the calendar service returned an unexpected event for editing")]
     InvalidEditableEvent,
-    /// A complete calendar sync is required before another event write.
-    #[error("sync the calendar before changing this event")]
+    /// A complete calendar sync is required before an event write.
+    #[error("sync the calendar before changing calendar events")]
     CalendarWriteSyncRequired,
     /// The provider repeated a cursor before completing the current round.
     #[error("the calendar service repeated a synchronization cursor")]
@@ -518,13 +518,24 @@ impl CalendarSyncReport {
     }
 }
 
+/// Calendar write state for one view and its account.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalendarWriteReadiness {
+    /// This view and all recovery-required views for the account are synchronized.
+    Ready,
+    /// This view has not completed a successful sync in the current workflow.
+    ViewSyncRequired,
+    /// At least one previously synchronized view for this account needs recovery.
+    AccountSyncRequired,
+}
+
 /// Cached occurrences and cursor state loaded for a fixed view range.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CalendarSnapshot {
     events: Vec<CalendarOccurrence>,
     sync_state: CalendarSyncState,
     pending_creation: Option<PendingCalendarEventCreation>,
-    calendar_write_sync_required: bool,
+    write_readiness: CalendarWriteReadiness,
 }
 
 impl CalendarSnapshot {
@@ -546,11 +557,10 @@ impl CalendarSnapshot {
         self.pending_creation.as_ref()
     }
 
-    /// Returns whether this view or another account view needs a successful sync
-    /// before editing or deleting events.
+    /// Returns whether writes are ready for this view or which sync remains required.
     #[must_use]
-    pub fn calendar_write_sync_required(&self) -> bool {
-        self.calendar_write_sync_required
+    pub fn write_readiness(&self) -> CalendarWriteReadiness {
+        self.write_readiness
     }
 }
 
@@ -680,12 +690,18 @@ struct CalendarWriteRecovery {
 }
 
 impl CalendarWriteRecovery {
-    fn requires_edit_or_delete_sync(&self, view: &CalendarViewReference) -> bool {
-        !self.synchronized_views.contains(view)
-            || self
-                .sync_required_views
-                .iter()
-                .any(|required_view| required_view.account_id() == view.account_id())
+    fn readiness_for(&self, view: &CalendarViewReference) -> CalendarWriteReadiness {
+        if self
+            .sync_required_views
+            .iter()
+            .any(|required_view| required_view.account_id() == view.account_id())
+        {
+            CalendarWriteReadiness::AccountSyncRequired
+        } else if self.synchronized_views.contains(view) {
+            CalendarWriteReadiness::Ready
+        } else {
+            CalendarWriteReadiness::ViewSyncRequired
+        }
     }
 }
 
@@ -733,12 +749,12 @@ where
             .write_recovery
             .lock()
             .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
-        let calendar_write_sync_required = recovery.requires_edit_or_delete_sync(view);
+        let write_readiness = recovery.readiness_for(view);
         Ok(CalendarSnapshot {
             events,
             sync_state,
             pending_creation,
-            calendar_write_sync_required,
+            write_readiness,
         })
     }
 
@@ -778,18 +794,24 @@ where
     /// The exact draft and retry identifier are stored before the network
     /// request. Unknown outcomes keep that operation available for replay.
     ///
-    /// # Errors
-    ///
-    /// Returns a provider or cache error when the operation cannot be staged,
-    /// a user-safe error when another calendar operation owns the view, or
-    /// [`CalendarWorkflowError::InvalidConfirmation`] when Graph returns an
-    /// event that does not match the staged draft. A cache failure after Graph
-    /// confirmation is returned as
-    /// [`CalendarEventCreationOutcome::ConfirmedButNotCached`] so the view can
+    /// A cache failure after Graph confirmation is returned as
+    /// [`CalendarEventCreationOutcome::ConfirmedButNotCached`] so callers can
     /// report the remote result accurately. A definitive Graph rejection is
     /// returned as [`CalendarEventCreationOutcome::Rejected`] when cleanup
     /// succeeds, or [`CalendarEventCreationOutcome::RejectedButPending`] when
     /// local cleanup fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider or cache error when staging fails or Graph cannot
+    /// confirm the request, [`CalendarWorkflowError::OperationInProgress`]
+    /// when another account operation owns the calendar,
+    /// [`CalendarWorkflowError::CalendarWriteSyncRequired`] until this view and
+    /// all recovery-required account views have completed successful syncs,
+    /// [`CalendarWorkflowError::InvalidConfirmation`] when Graph returns an
+    /// event that does not match the staged draft, or
+    /// [`CalendarWorkflowError::StateUnavailable`] when workflow state cannot
+    /// be read.
     pub async fn create_event(
         &self,
         creation: &CalendarEventCreation,
@@ -804,6 +826,7 @@ where
                 }
             },
         )?;
+        self.ensure_calendar_write_ready(creation.view())?;
         self.cache.stage_event_creation(creation).await?;
         let event = match self.provider.create_event(creation).await {
             Ok(event) => event,
@@ -890,7 +913,7 @@ where
                     CalendarWorkflowError::StateUnavailable
                 }
             })?;
-        self.ensure_calendar_write_sync_complete(event.reference())?;
+        self.ensure_calendar_write_ready(event.reference())?;
         let editable = self.provider.editable_event(event).await?;
         if editable.occurrence().reference() != event.reference()
             || editable.occurrence().id() != event.id()
@@ -934,7 +957,7 @@ where
                     CalendarWorkflowError::StateUnavailable
                 }
             })?;
-        self.ensure_calendar_write_sync_complete(view)?;
+        self.ensure_calendar_write_ready(view)?;
         let event = match self.provider.update_event(update).await {
             Ok(event) => event,
             Err(error) => {
@@ -991,7 +1014,7 @@ where
                     CalendarWorkflowError::StateUnavailable
                 }
             })?;
-        self.ensure_calendar_write_sync_complete(view)?;
+        self.ensure_calendar_write_ready(view)?;
         if let Err(error) = self.provider.delete_event(event).await {
             if matches!(
                 error,
@@ -1010,7 +1033,7 @@ where
         }
     }
 
-    fn ensure_calendar_write_sync_complete(
+    fn ensure_calendar_write_ready(
         &self,
         view: &CalendarViewReference,
     ) -> Result<(), CalendarWorkflowError> {
@@ -1018,10 +1041,12 @@ where
             .write_recovery
             .lock()
             .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
-        if recovery.requires_edit_or_delete_sync(view) {
-            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
-        } else {
-            Ok(())
+        match recovery.readiness_for(view) {
+            CalendarWriteReadiness::Ready => Ok(()),
+            CalendarWriteReadiness::ViewSyncRequired
+            | CalendarWriteReadiness::AccountSyncRequired => {
+                Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+            }
         }
     }
 

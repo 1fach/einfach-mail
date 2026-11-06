@@ -18,7 +18,7 @@ use super::{
     CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
     CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
     CalendarOperationError, CalendarProvider, CalendarSyncState, CalendarWorkflow,
-    CalendarWorkflowError,
+    CalendarWorkflowError, CalendarWriteReadiness,
 };
 
 struct CalendarWriteGate {
@@ -999,6 +999,55 @@ fn a_completed_cursor_remains_available_for_the_next_round() {
 }
 
 #[test]
+fn event_creation_waits_for_a_successful_view_sync() {
+    smol::block_on(async {
+        let view = view();
+        let creation = creation(view.clone());
+        let provider = FixtureProvider::default();
+        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+
+        assert_eq!(
+            workflow
+                .load_cached_view(&view)
+                .await
+                .expect("the unsynchronized view remains readable")
+                .write_readiness(),
+            CalendarWriteReadiness::ViewSyncRequired
+        );
+        assert_eq!(
+            workflow.create_event(&creation).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+        let snapshot = workflow
+            .load_cached_view(&view)
+            .await
+            .expect("the unsynchronized view remains readable");
+        assert!(snapshot.pending_creation().is_none());
+        assert!(
+            provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned")
+                .is_empty()
+        );
+
+        synchronize_empty_view(&workflow, &provider, &view, "creation-initial-sync").await;
+        assert_eq!(
+            workflow
+                .load_cached_view(&view)
+                .await
+                .expect("the synchronized view remains readable")
+                .write_readiness(),
+            CalendarWriteReadiness::Ready
+        );
+        assert!(matches!(
+            workflow.create_event(&creation).await,
+            Ok(CalendarEventCreationOutcome::Cached(_))
+        ));
+    });
+}
+
+#[test]
 fn event_creation_reuses_its_pending_id_after_an_uncertain_provider_failure() {
     smol::block_on(async {
         let view = view();
@@ -1007,6 +1056,7 @@ fn event_creation_reuses_its_pending_id_after_an_uncertain_provider_failure() {
         provider.fail_next_creation(CalendarOperationError::ServiceUnavailable);
         let cache = FixtureCache::default();
         let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        synchronize_empty_view(&workflow, &provider, &view, "create-retry-initial-sync").await;
 
         assert_eq!(
             workflow.create_event(&creation).await,
@@ -1058,6 +1108,7 @@ fn event_creation_recovers_when_cache_commit_fails_after_graph_confirmation() {
         let cache = FixtureCache::default();
         cache.fail_creation_commit(CalendarCacheError::Unavailable);
         let workflow = CalendarWorkflow::new(provider.clone(), cache.clone());
+        synchronize_empty_view(&workflow, &provider, &view, "create-cache-initial-sync").await;
 
         let first_outcome = workflow
             .create_event(&creation)
@@ -1114,11 +1165,18 @@ fn event_creation_rejects_an_unrelated_pending_operation_for_the_account() {
         let new_creation = creation(view);
         let provider = FixtureProvider::default();
         let cache = FixtureCache::default();
+        let workflow = CalendarWorkflow::new(provider.clone(), cache.clone());
+        synchronize_empty_view(
+            &workflow,
+            &provider,
+            pending_creation.view(),
+            "create-pending-initial-sync",
+        )
+        .await;
         cache
             .stage_event_creation(&pending_creation)
             .await
             .expect("the synthetic pending operation is staged");
-        let workflow = CalendarWorkflow::new(provider.clone(), cache);
 
         assert_eq!(
             workflow.create_event(&new_creation).await,
@@ -1145,6 +1203,7 @@ fn definitive_event_creation_rejection_clears_its_pending_operation() {
         provider.fail_next_creation(CalendarOperationError::EventCreationRejected);
         let cache = FixtureCache::default();
         let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        synchronize_empty_view(&workflow, &provider, &view, "create-rejected-initial-sync").await;
 
         assert_eq!(
             workflow.create_event(&creation).await,
@@ -1178,6 +1237,7 @@ fn rejected_event_cleanup_can_resume_without_reposting_to_graph() {
         let cache = FixtureCache::default();
         cache.fail_rejection_cleanup(CalendarCacheError::Unavailable);
         let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        synchronize_empty_view(&workflow, &provider, &view, "create-cleanup-initial-sync").await;
 
         assert_eq!(
             workflow.create_event(&creation).await,
@@ -1226,6 +1286,13 @@ fn rejected_event_can_be_resolved_after_persisting_the_rejection_recovers() {
         let cache = FixtureCache::default();
         cache.fail_rejection_mark(CalendarCacheError::Unavailable);
         let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        synchronize_empty_view(
+            &workflow,
+            &provider,
+            &view,
+            "create-rejection-mark-initial-sync",
+        )
+        .await;
 
         assert_eq!(
             workflow.create_event(&creation).await,
@@ -1271,7 +1338,8 @@ fn event_creation_keeps_the_pending_operation_when_graph_confirms_another_event(
         let creation = creation(view.clone());
         let provider = FixtureProvider::default();
         provider.return_creation(mismatched_creation_event(&creation));
-        let workflow = CalendarWorkflow::new(provider, FixtureCache::default());
+        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        synchronize_empty_view(&workflow, &provider, &view, "create-mismatch-initial-sync").await;
 
         assert_eq!(
             workflow.create_event(&creation).await,
@@ -1383,7 +1451,8 @@ fn event_update_reports_remote_confirmation_when_cache_commit_fails() {
                 .load_cached_view(&view)
                 .await
                 .expect("the failed cache commit leaves the view readable")
-                .calendar_write_sync_required()
+                .write_readiness()
+                == CalendarWriteReadiness::AccountSyncRequired
         );
         assert_eq!(
             workflow.editable_event(&event).await,
@@ -1445,7 +1514,7 @@ fn confirmed_event_deletion_removes_the_cached_event() {
             .await
             .expect("deleted view remains readable");
         assert!(snapshot.events().is_empty());
-        assert!(!snapshot.calendar_write_sync_required());
+        assert_eq!(snapshot.write_readiness(), CalendarWriteReadiness::Ready);
         assert_eq!(
             *provider
                 .deletion_calls
@@ -1487,7 +1556,8 @@ fn uncertain_event_deletion_requires_sync_and_is_not_replayed() {
                 .load_cached_view(&view)
                 .await
                 .expect("cached view remains readable")
-                .calendar_write_sync_required()
+                .write_readiness()
+                == CalendarWriteReadiness::AccountSyncRequired
         );
         assert_eq!(
             workflow.delete_event(&editable).await,
@@ -1517,7 +1587,7 @@ fn uncertain_event_deletion_requires_sync_and_is_not_replayed() {
             .await
             .expect("reconciled view remains readable");
         assert!(snapshot.events().is_empty());
-        assert!(!snapshot.calendar_write_sync_required());
+        assert_eq!(snapshot.write_readiness(), CalendarWriteReadiness::Ready);
     });
 }
 
@@ -1580,7 +1650,8 @@ fn uncertain_event_deletion_requires_sync_for_each_previously_synced_account_vie
                     .load_cached_view(view)
                     .await
                     .expect("each cached event view is readable")
-                    .calendar_write_sync_required()
+                    .write_readiness()
+                    == CalendarWriteReadiness::AccountSyncRequired
             );
         }
         assert_eq!(
@@ -1601,7 +1672,8 @@ fn uncertain_event_deletion_requires_sync_for_each_previously_synced_account_vie
                 .load_cached_view(&source_view)
                 .await
                 .expect("reconciled source view is readable")
-                .calendar_write_sync_required(),
+                .write_readiness()
+                == CalendarWriteReadiness::AccountSyncRequired,
             "the source view remains gated while another account view needs recovery"
         );
         assert_eq!(
@@ -1614,7 +1686,8 @@ fn uncertain_event_deletion_requires_sync_for_each_previously_synced_account_vie
                 .load_cached_view(&overlapping_view)
                 .await
                 .expect("overlapping view remains readable")
-                .calendar_write_sync_required()
+                .write_readiness()
+                == CalendarWriteReadiness::AccountSyncRequired
         );
         assert_eq!(
             workflow.delete_event(&overlapping_editable).await,
@@ -1630,12 +1703,13 @@ fn uncertain_event_deletion_requires_sync_for_each_previously_synced_account_vie
             .await
             .expect("overlapping view completes its recovery sync");
         for view in [&source_view, &overlapping_view] {
-            assert!(
-                !workflow
+            assert_eq!(
+                workflow
                     .load_cached_view(view)
                     .await
                     .expect("reconciled event view is readable")
-                    .calendar_write_sync_required()
+                    .write_readiness(),
+                CalendarWriteReadiness::Ready
             );
         }
         assert_eq!(
@@ -1680,7 +1754,8 @@ fn changed_event_deletion_requires_sync_before_another_write() {
                 .load_cached_view(&view)
                 .await
                 .expect("cached event remains available")
-                .calendar_write_sync_required()
+                .write_readiness()
+                == CalendarWriteReadiness::AccountSyncRequired
         );
         assert_eq!(
             workflow.delete_event(&editable).await,
@@ -1729,7 +1804,8 @@ fn confirmed_event_deletion_with_a_cache_failure_requires_sync() {
                 .load_cached_view(&view)
                 .await
                 .expect("cached view remains readable")
-                .calendar_write_sync_required()
+                .write_readiness()
+                == CalendarWriteReadiness::AccountSyncRequired
         );
         assert_eq!(
             workflow.delete_event(&editable).await,
@@ -1758,7 +1834,7 @@ fn confirmed_event_deletion_with_a_cache_failure_requires_sync() {
             .await
             .expect("repaired view remains readable");
         assert!(snapshot.events().is_empty());
-        assert!(!snapshot.calendar_write_sync_required());
+        assert_eq!(snapshot.write_readiness(), CalendarWriteReadiness::Ready);
     });
 }
 
@@ -1816,7 +1892,7 @@ fn event_deletion_reserves_the_account_until_the_provider_returns() {
 }
 
 #[test]
-fn unknown_event_update_requires_successful_sync_before_editing_again() {
+fn unknown_event_update_requires_successful_sync_before_another_write() {
     smol::block_on(async {
         let view = view();
         let provider = FixtureProvider::default();
@@ -1846,6 +1922,7 @@ fn unknown_event_update_requires_successful_sync_before_editing_again() {
         )
         .expect("synthetic edit draft is valid");
         let update = CalendarEventUpdate::new(editable, draft).expect("event values changed");
+        let followup_creation = creation(view.clone());
         provider.fail_next_update(CalendarOperationError::UpdateOutcomeUnknown);
 
         assert_eq!(
@@ -1859,7 +1936,8 @@ fn unknown_event_update_requires_successful_sync_before_editing_again() {
                 .load_cached_view(&view)
                 .await
                 .expect("cached event stays available")
-                .calendar_write_sync_required()
+                .write_readiness()
+                == CalendarWriteReadiness::AccountSyncRequired
         );
         assert_eq!(
             workflow.editable_event(&event).await,
@@ -1868,6 +1946,27 @@ fn unknown_event_update_requires_successful_sync_before_editing_again() {
         assert_eq!(
             workflow.update_event(&update).await,
             Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+        assert_eq!(
+            workflow.create_event(&followup_creation).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+        assert!(
+            workflow
+                .load_cached_view(&view)
+                .await
+                .expect("the unresolved update leaves the view readable")
+                .pending_creation()
+                .is_none()
+        );
+        assert_eq!(
+            provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned")
+                .len(),
+            1,
+            "a recovery-required account must not send another event creation"
         );
         assert!(matches!(
             workflow.sync_view(&view).await,
@@ -1888,6 +1987,10 @@ fn unknown_event_update_requires_successful_sync_before_editing_again() {
             .await
             .expect("a complete sync clears the recovery gate");
         assert!(workflow.editable_event(&event).await.is_ok());
+        assert!(matches!(
+            workflow.create_event(&followup_creation).await,
+            Ok(CalendarEventCreationOutcome::Cached(_))
+        ));
         assert_eq!(
             provider
                 .update_calls
@@ -1938,7 +2041,8 @@ fn changed_event_update_requires_sync_before_another_write() {
                 .load_cached_view(&view)
                 .await
                 .expect("cached event remains available")
-                .calendar_write_sync_required()
+                .write_readiness()
+                == CalendarWriteReadiness::AccountSyncRequired
         );
         assert_eq!(
             workflow.update_event(&update).await,
@@ -2018,7 +2122,8 @@ fn uncertain_update_requires_sync_for_each_previously_synced_account_view() {
                     .load_cached_view(view)
                     .await
                     .expect("each cached event view is readable")
-                    .calendar_write_sync_required()
+                    .write_readiness()
+                    == CalendarWriteReadiness::AccountSyncRequired
             );
         }
         assert_eq!(
@@ -2048,8 +2153,12 @@ fn uncertain_update_requires_sync_for_each_previously_synced_account_view() {
                     .load_cached_view(view)
                     .await
                     .expect("reconciled view is readable")
-                    .calendar_write_sync_required(),
-                view == &source_view,
+                    .write_readiness(),
+                if view == &source_view {
+                    CalendarWriteReadiness::AccountSyncRequired
+                } else {
+                    CalendarWriteReadiness::Ready
+                },
                 "every account view stays gated until the last recovery sync completes"
             );
             if view == &source_view {
@@ -2058,7 +2167,8 @@ fn uncertain_update_requires_sync_for_each_previously_synced_account_view() {
                         .load_cached_view(&overlapping_view)
                         .await
                         .expect("the other view remains readable")
-                        .calendar_write_sync_required()
+                        .write_readiness()
+                        == CalendarWriteReadiness::AccountSyncRequired
                 );
             }
         }

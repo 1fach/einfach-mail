@@ -22,7 +22,7 @@ pub use calendar::{
     CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
     CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
     CalendarOperationError, CalendarProvider, CalendarSnapshot, CalendarSyncReport,
-    CalendarSyncState, CalendarWorkflow, CalendarWorkflowError,
+    CalendarSyncState, CalendarWorkflow, CalendarWorkflowError, CalendarWriteReadiness,
 };
 pub use email_html::{
     ExternalMessageLink, MessageBodyForDisplay, SanitizedEmailHtml, allowed_external_message_url,
