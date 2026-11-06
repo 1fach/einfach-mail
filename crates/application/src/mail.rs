@@ -92,9 +92,9 @@ impl From<AccountOperationError> for MailSendProviderError {
         match error {
             AccountOperationError::AccessDenied => Self::PermissionRequired,
             AccountOperationError::AccountMismatch => Self::AccountMismatch,
-            AccountOperationError::AccountNotConnected | AccountOperationError::SignInExpired => {
-                Self::SignInRequired
-            }
+            AccountOperationError::AccountNotConnected
+            | AccountOperationError::SavedAccountIdentityUnavailable
+            | AccountOperationError::SignInExpired => Self::SignInRequired,
             AccountOperationError::AccessTokenRejected => Self::SignInRequired,
             AccountOperationError::CredentialStoreUnavailable
             | AccountOperationError::ProfileUnavailable

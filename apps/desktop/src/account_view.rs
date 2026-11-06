@@ -69,6 +69,9 @@ enum AccountStatus {
         profile: AccountProfile,
         error: AccountOperationError,
     },
+    SignOutFailed {
+        error: AccountOperationError,
+    },
     Failed {
         error: AccountOperationError,
         saved_credential_may_exist: bool,
@@ -94,6 +97,7 @@ impl AccountStatus {
             | Self::Reauthorizing { .. }
             | Self::CancellingReauthorization { .. }
             | Self::ReauthorizationFailed { .. }
+            | Self::SignOutFailed { .. }
             | Self::Restoring => true,
             Self::Disconnected => false,
         }
@@ -134,7 +138,10 @@ impl AccountStatus {
             AccountOperationError::AccountAlreadyConnected => "An account is already connected.",
             AccountOperationError::AccountNotConnected => "No account is connected.",
             AccountOperationError::AccountMismatch => {
-                "Microsoft returned a different account. Your saved sign-in was not changed."
+                "Microsoft returned a different account. Restore the expected account before replacing this saved sign-in."
+            }
+            AccountOperationError::SavedAccountIdentityUnavailable => {
+                "The saved sign-in has no verified account identity. Retry restore before removing it or signing in with another account."
             }
             AccountOperationError::AccountOperationInProgress => {
                 "An account operation is already running. Wait for it to finish and try again."
@@ -149,6 +156,9 @@ impl AccountStatus {
     fn reauthorization_error_message(error: AccountOperationError) -> &'static str {
         match error {
             AccountOperationError::SignInCancelled => "Permission review was cancelled.",
+            AccountOperationError::AccountMismatch => {
+                "Microsoft returned a different account. Your saved sign-in was not changed."
+            }
             _ => Self::error_message(error),
         }
     }
@@ -174,6 +184,12 @@ pub(super) struct AccountView<P: AccountProvider + 'static> {
 enum OpeningContent {
     Mail,
     Calendar,
+}
+
+enum AccountSignOutError {
+    Identity(AccountOperationError),
+    CacheRemoval(MailCacheError),
+    CredentialRemoval(AccountOperationError),
 }
 
 fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static str {
@@ -226,9 +242,12 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         let Some(workflow) = self.workflow.clone() else {
             return;
         };
+        self.status = AccountStatus::Restoring;
+        self.session_open_error = None;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let restore_result = workflow.restore_account().await;
             let _ = this.update(cx, |view, cx| {
+                view.task = None;
                 view.status = match restore_result {
                     Ok(Some(profile)) => AccountStatus::Connected(profile),
                     Ok(None) => AccountStatus::Disconnected,
@@ -240,6 +259,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 cx.notify();
             });
         }));
+        cx.notify();
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
@@ -248,7 +268,11 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         };
         if !matches!(
             &self.status,
-            AccountStatus::Disconnected | AccountStatus::Failed { .. }
+            AccountStatus::Disconnected
+                | AccountStatus::Failed {
+                    saved_credential_may_exist: false,
+                    ..
+                }
         ) {
             return;
         }
@@ -279,6 +303,12 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.task = None;
+                let saved_credential_may_exist = saved_credential_may_exist
+                    || matches!(
+                        &connection_result,
+                        Err(AccountOperationError::SavedAccountIdentityUnavailable
+                            | AccountOperationError::AccountMismatch)
+                    );
                 view.status = match connection_result {
                     Ok(profile) => AccountStatus::Connected(profile),
                     Err(error) => AccountStatus::Failed {
@@ -411,11 +441,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         }
 
-        let connected_account = self.account_session_factory.clone().and_then(|factory| {
-            self.status
-                .connected_profile()
-                .map(|profile| (self.status.clone(), profile.clone(), factory))
-        });
+        let previous_status = self.status.clone();
+        let account_session_factory = self.account_session_factory.clone();
         let account_session = self
             .close_mail_view(cx)
             .or_else(|| self.close_calendar_view(cx))
@@ -425,8 +452,9 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         self.status = AccountStatus::SigningOut;
         self.task = Some(Self::sign_out_task(
             workflow,
-            connected_account,
+            previous_status,
             account_session,
+            account_session_factory,
             cx,
         ));
         cx.notify();
@@ -603,58 +631,62 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn sign_out_task(
         workflow: Arc<AccountWorkflow<P>>,
-        connected_account: Option<(
-            AccountStatus,
-            AccountProfile,
-            Arc<dyn AccountSessionFactory>,
-        )>,
+        previous_status: AccountStatus,
         account_session: Option<Arc<dyn AccountSession>>,
+        account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
-            if let Some((previous_status, connected_profile, account_session_factory)) =
-                connected_account
-            {
-                let account_id = connected_profile.id().clone();
-                let cache_removal = cx
-                    .background_executor()
-                    .spawn(remove_account_cache(
-                        account_session,
-                        account_session_factory,
-                        account_id,
-                    ))
-                    .await;
-                if let Err(error) = cache_removal {
-                    let _ = this.update(cx, |view, cx| {
-                        view.status = previous_status;
-                        view.session_open_error = Some(error);
-                        if !matches!(
-                            error,
-                            MailCacheError::OperationInProgress
-                                | MailCacheError::SendAlreadyPending
-                                | MailCacheError::CalendarEventCreationUnresolved
-                        ) {
-                            view.account_session = None;
-                        }
-                        view.task = None;
-                        cx.notify();
-                    });
-                    return;
-                }
-            }
-            let sign_out_result = workflow.sign_out().await;
+            let result = cx
+                .background_executor()
+                .spawn(remove_verified_account_cache_and_sign_out(
+                    workflow,
+                    account_session,
+                    account_session_factory,
+                ))
+                .await;
             let _ = this.update(cx, |view, cx| {
-                view.account_session = None;
-                view.status = match sign_out_result {
-                    Ok(()) => AccountStatus::Disconnected,
-                    Err(error) => AccountStatus::Failed {
-                        error,
-                        saved_credential_may_exist: true,
-                    },
-                };
-                cx.notify();
+                view.finish_sign_out(previous_status, result, cx);
             });
         })
+    }
+
+    fn finish_sign_out(
+        &mut self,
+        previous_status: AccountStatus,
+        result: Result<(), AccountSignOutError>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(()) => {
+                self.account_session = None;
+                self.status = AccountStatus::Disconnected;
+            }
+            Err(AccountSignOutError::Identity(error)) => {
+                self.status = AccountStatus::Failed {
+                    error,
+                    saved_credential_may_exist: true,
+                };
+            }
+            Err(AccountSignOutError::CacheRemoval(error)) => {
+                self.status = previous_status;
+                self.session_open_error = Some(error);
+                if !matches!(
+                    error,
+                    MailCacheError::OperationInProgress
+                        | MailCacheError::SendAlreadyPending
+                        | MailCacheError::CalendarEventCreationUnresolved
+                ) {
+                    self.account_session = None;
+                }
+            }
+            Err(AccountSignOutError::CredentialRemoval(error)) => {
+                self.account_session = None;
+                self.status = AccountStatus::SignOutFailed { error };
+            }
+        }
+        self.task = None;
+        cx.notify();
     }
 
     fn account_identity(&self, profile: &AccountProfile, colors: ColorTokens) -> impl IntoElement {
@@ -741,6 +773,11 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 "Removing saved sign-in",
                 "Removing saved sign-in…",
                 Role::Status,
+            ),
+            AccountStatus::SignOutFailed { error } => (
+                AccountStatus::error_message(*error),
+                AccountStatus::error_message(*error),
+                Role::Alert,
             ),
             AccountStatus::Reauthorizing { .. } => (
                 "Reviewing Microsoft permissions",
@@ -880,6 +917,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         match &self.status {
             AccountStatus::Restoring => Self::render_progress_action("Checking account…"),
             AccountStatus::SigningOut => Self::render_progress_action("Signing out…"),
+            AccountStatus::SignOutFailed { .. } => div(),
             AccountStatus::CancellingConnect { .. } => {
                 Self::render_progress_action("Finishing sign-in…")
             }
@@ -909,7 +947,24 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             AccountStatus::Connected(_) if self.account_session_factory.is_some() => {
                 self.render_open_content(cx)
             }
-            AccountStatus::Disconnected | AccountStatus::Failed { .. } => div()
+            AccountStatus::Failed {
+                saved_credential_may_exist: true,
+                ..
+            } => div()
+                .flex()
+                .justify_center()
+                .debug_selector(|| "retry-account-restore".to_owned())
+                .child(
+                    Button::new("retry-account-restore")
+                        .primary()
+                        .label("Retry account restore")
+                        .on_click(cx.listener(|view, _, _, cx| view.start_restore(cx))),
+                ),
+            AccountStatus::Disconnected
+            | AccountStatus::Failed {
+                saved_credential_may_exist: false,
+                ..
+            } => div()
                 .flex()
                 .justify_center()
                 .debug_selector(|| "connect-account".to_owned())
@@ -1021,6 +1076,20 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 content = content.child(self.render_saved_sign_out(cx, "Sign out"));
             }
         }
+        if matches!(&self.status, AccountStatus::SignOutFailed { .. }) {
+            return content.child(self.render_saved_sign_out(cx, "Retry sign out"));
+        }
+        if matches!(
+            &self.status,
+            AccountStatus::Failed {
+                saved_credential_may_exist: true,
+                error: AccountOperationError::SavedAccountIdentityUnavailable
+                    | AccountOperationError::AccountMismatch,
+                ..
+            }
+        ) {
+            return content.child(self.render_primary_action(cx));
+        }
         if matches!(
             &self.status,
             AccountStatus::Failed {
@@ -1069,17 +1138,39 @@ impl<P: AccountProvider + 'static> Render for AccountView<P> {
 
 async fn remove_account_cache(
     account_session: Option<Arc<dyn AccountSession>>,
-    account_session_factory: Arc<dyn AccountSessionFactory>,
+    account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
     account_id: einfach_mail_domain::AccountId,
 ) -> Result<(), MailCacheError> {
     match account_session {
         Some(account_session) => account_session.remove_account_cache(&account_id).await,
         None => {
             account_session_factory
+                .ok_or(MailCacheError::Unavailable)?
                 .remove_account_cache(&account_id)
                 .await
         }
     }
+}
+
+async fn remove_verified_account_cache_and_sign_out<P: AccountProvider>(
+    workflow: Arc<AccountWorkflow<P>>,
+    account_session: Option<Arc<dyn AccountSession>>,
+    account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
+) -> Result<(), AccountSignOutError> {
+    let account_id = workflow
+        .saved_credential_account_id()
+        .await
+        .map_err(AccountSignOutError::Identity)?
+        .ok_or(AccountSignOutError::Identity(
+            AccountOperationError::SavedAccountIdentityUnavailable,
+        ))?;
+    remove_account_cache(account_session, account_session_factory, account_id)
+        .await
+        .map_err(AccountSignOutError::CacheRemoval)?;
+    workflow
+        .sign_out()
+        .await
+        .map_err(AccountSignOutError::CredentialRemoval)
 }
 
 fn mail_cache_error_message(error: MailCacheError) -> &'static str {
@@ -1141,6 +1232,10 @@ mod tests {
         fail_next_sign_out: Arc<AtomicBool>,
         pause_connection: Arc<AtomicBool>,
         pause_permission_update: Arc<AtomicBool>,
+        restore_error: Arc<Mutex<Option<AccountOperationError>>>,
+        connect_error: Arc<Mutex<Option<AccountOperationError>>>,
+        saved_account_id: Arc<Mutex<Option<AccountId>>>,
+        sign_out_events: Arc<Mutex<Vec<&'static str>>>,
         connection_commit: Arc<Mutex<Option<CommitGate>>>,
         permission_commit: Arc<Mutex<Option<CommitGate>>>,
         last_permission_request: Arc<Mutex<Option<AccountPermissionRequest>>>,
@@ -1260,6 +1355,11 @@ mod tests {
         fallback_removals: Arc<AtomicBool>,
     }
 
+    struct SuccessfulAccountSessionFactory {
+        sign_out_events: Arc<Mutex<Vec<&'static str>>>,
+        removal_account_ids: Arc<Mutex<Vec<AccountId>>>,
+    }
+
     impl AccountSessionFactory for TestAccountSessionFactory {
         fn open_session(
             &self,
@@ -1274,6 +1374,30 @@ mod tests {
         ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
             self.fallback_removals.store(true, Ordering::SeqCst);
             Box::pin(ready(Err(MailCacheError::Unavailable)))
+        }
+    }
+
+    impl AccountSessionFactory for SuccessfulAccountSessionFactory {
+        fn open_session(
+            &self,
+            _: AccountId,
+        ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
+            Box::pin(ready(Err(MailCacheError::Unavailable)))
+        }
+
+        fn remove_account_cache<'a>(
+            &'a self,
+            account_id: &'a AccountId,
+        ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+            self.sign_out_events
+                .lock()
+                .expect("synthetic sign-out event log mutex is healthy")
+                .push("cache_removed");
+            self.removal_account_ids
+                .lock()
+                .expect("synthetic cache removal ID mutex is healthy")
+                .push(account_id.clone());
+            Box::pin(ready(Ok(())))
         }
     }
 
@@ -1306,7 +1430,23 @@ mod tests {
             &self,
         ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_
         {
-            ready(Ok(None))
+            let restore_error = *self
+                .restore_error
+                .lock()
+                .expect("synthetic restore error mutex is healthy");
+            ready(restore_error.map_or(Ok(None), Err))
+        }
+
+        fn saved_credential_account_id(
+            &self,
+        ) -> impl Future<Output = Result<Option<AccountId>, AccountOperationError>> + Send + '_
+        {
+            let account_id = self
+                .saved_account_id
+                .lock()
+                .expect("synthetic saved account ID mutex is healthy")
+                .clone();
+            ready(Ok(account_id))
         }
 
         fn connect_account(
@@ -1315,6 +1455,13 @@ mod tests {
         ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
         {
             let pause_connection = Arc::clone(&self.pause_connection);
+            let connection_error = self
+                .connect_error
+                .lock()
+                .expect("synthetic connection error mutex is healthy")
+                .take();
+            let saved_account_id = Arc::clone(&self.saved_account_id);
+            let signed_out = Arc::clone(&self.signed_out);
             let commit_gate = self
                 .connection_commit
                 .lock()
@@ -1328,7 +1475,11 @@ mod tests {
                 Some("ada@tenant.example.test".to_owned()),
             )
             .expect("synthetic account profile has an identity");
+            let account_id = profile.id().clone();
             async move {
+                if let Some(error) = connection_error {
+                    return Err(error);
+                }
                 if pause_connection.load(Ordering::SeqCst) {
                     cancellation.cancelled().await;
                     return Err(AccountOperationError::SignInCancelled);
@@ -1341,6 +1492,10 @@ mod tests {
                         .await
                         .map_err(|_| AccountOperationError::ServiceUnavailable)?;
                 }
+                *saved_account_id
+                    .lock()
+                    .expect("synthetic saved account ID mutex is healthy") = Some(account_id);
+                signed_out.store(false, Ordering::SeqCst);
                 Ok(profile)
             }
         }
@@ -1395,6 +1550,14 @@ mod tests {
             if self.fail_next_sign_out.swap(false, Ordering::SeqCst) {
                 return ready(Err(AccountOperationError::CredentialStoreUnavailable));
             }
+            self.sign_out_events
+                .lock()
+                .expect("synthetic sign-out event log mutex is healthy")
+                .push("credential_removed");
+            *self
+                .saved_account_id
+                .lock()
+                .expect("synthetic saved account ID mutex is healthy") = None;
             self.signed_out.store(true, Ordering::SeqCst);
             ready(Ok(()))
         }
@@ -1473,9 +1636,17 @@ mod tests {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
         let signed_out = provider.signed_out.clone();
+        let sign_out_events = Arc::clone(&provider.sign_out_events);
+        let event_log = Arc::clone(&sign_out_events);
+        let removal_account_ids = Arc::new(Mutex::new(Vec::new()));
         provider.fail_next_sign_out.store(true, Ordering::SeqCst);
         let workflow = Arc::new(AccountWorkflow::new(provider));
-        let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), None, cx));
+        let factory: Arc<dyn AccountSessionFactory> = Arc::new(SuccessfulAccountSessionFactory {
+            sign_out_events: Arc::clone(&sign_out_events),
+            removal_account_ids: Arc::clone(&removal_account_ids),
+        });
+        let (view, context) =
+            cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
 
         context.run_until_parked();
         draw_account_view(context);
@@ -1493,9 +1664,8 @@ mod tests {
         let retryable_failure = context.cx.update(|cx| {
             matches!(
                 &view.read(cx).status,
-                super::AccountStatus::Failed {
+                super::AccountStatus::SignOutFailed {
                     error: AccountOperationError::CredentialStoreUnavailable,
-                    saved_credential_may_exist: true,
                 }
             )
         });
@@ -1509,6 +1679,153 @@ mod tests {
             .update(|cx| matches!(&view.read(cx).status, super::AccountStatus::Disconnected));
         assert!(disconnected);
         assert!(signed_out.load(Ordering::SeqCst));
+        assert_eq!(
+            *removal_account_ids
+                .lock()
+                .expect("synthetic cache removal ID mutex is healthy"),
+            vec![
+                AccountId::try_from("synthetic-account".to_owned())
+                    .expect("synthetic account ID is valid");
+                2
+            ]
+        );
+        assert_eq!(
+            *event_log
+                .lock()
+                .expect("synthetic sign-out event log mutex is healthy"),
+            vec!["cache_removed", "cache_removed", "credential_removed"]
+        );
+    }
+
+    #[gpui::test]
+    fn failed_restore_removes_cache_before_the_verified_saved_credential(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        let signed_out = Arc::clone(&provider.signed_out);
+        *provider
+            .restore_error
+            .lock()
+            .expect("synthetic restore error mutex is healthy") =
+            Some(AccountOperationError::SignInExpired);
+        let account_id =
+            AccountId::try_from("verified-saved-account".to_owned()).expect("ID is valid");
+        *provider
+            .saved_account_id
+            .lock()
+            .expect("synthetic saved account ID mutex is healthy") = Some(account_id.clone());
+        let event_log = Arc::clone(&provider.sign_out_events);
+        let removal_account_ids = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Arc::new(AccountWorkflow::new(provider));
+        let factory: Arc<dyn AccountSessionFactory> = Arc::new(SuccessfulAccountSessionFactory {
+            sign_out_events: Arc::clone(&event_log),
+            removal_account_ids: Arc::clone(&removal_account_ids),
+        });
+        let (view, context) =
+            cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+
+        context.run_until_parked();
+        draw_account_view(context);
+        assert!(context.debug_bounds("connect-account").is_none());
+        click(context, "sign-out");
+
+        assert_eq!(
+            *removal_account_ids
+                .lock()
+                .expect("synthetic cache removal ID mutex is healthy"),
+            vec![account_id]
+        );
+        assert_eq!(
+            *event_log
+                .lock()
+                .expect("synthetic sign-out event log mutex is healthy"),
+            vec!["cache_removed", "credential_removed"]
+        );
+        assert!(signed_out.load(Ordering::SeqCst));
+        assert!(
+            context
+                .cx
+                .update(|cx| matches!(&view.read(cx).status, AccountStatus::Disconnected))
+        );
+    }
+
+    #[gpui::test]
+    fn failed_restore_without_verified_identity_preserves_credential(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        let signed_out = Arc::clone(&provider.signed_out);
+        *provider
+            .restore_error
+            .lock()
+            .expect("synthetic restore error mutex is healthy") =
+            Some(AccountOperationError::SignInExpired);
+        let event_log = Arc::clone(&provider.sign_out_events);
+        let removal_account_ids = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Arc::new(AccountWorkflow::new(provider));
+        let factory: Arc<dyn AccountSessionFactory> = Arc::new(SuccessfulAccountSessionFactory {
+            sign_out_events: Arc::clone(&event_log),
+            removal_account_ids: Arc::clone(&removal_account_ids),
+        });
+        let (view, context) =
+            cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+
+        context.run_until_parked();
+        click(context, "sign-out");
+
+        assert!(context.cx.update(|cx| matches!(
+            &view.read(cx).status,
+            AccountStatus::Failed {
+                error: AccountOperationError::SavedAccountIdentityUnavailable,
+                saved_credential_may_exist: true,
+            }
+        )));
+        assert!(context.debug_bounds("connect-account").is_none());
+        assert!(context.debug_bounds("sign-out").is_none());
+        assert!(context.debug_bounds("retry-account-restore").is_some());
+        assert!(
+            removal_account_ids
+                .lock()
+                .expect("synthetic cache removal ID mutex is healthy")
+                .is_empty()
+        );
+        assert!(
+            event_log
+                .lock()
+                .expect("synthetic sign-out event log mutex is healthy")
+                .is_empty()
+        );
+        assert!(!signed_out.load(Ordering::SeqCst));
+    }
+
+    #[gpui::test]
+    fn connect_mismatch_keeps_saved_sign_in_and_requires_restore(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        *provider
+            .saved_account_id
+            .lock()
+            .expect("synthetic saved account ID mutex is healthy") =
+            Some(AccountId::try_from("existing-account".to_owned()).expect("account ID is valid"));
+        *provider
+            .connect_error
+            .lock()
+            .expect("synthetic connection error mutex is healthy") =
+            Some(AccountOperationError::AccountMismatch);
+        let workflow = Arc::new(AccountWorkflow::new(provider));
+        let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), None, cx));
+
+        context.run_until_parked();
+        draw_account_view(context);
+        click(context, "connect-account");
+
+        assert!(context.cx.update(|cx| matches!(
+            &view.read(cx).status,
+            AccountStatus::Failed {
+                error: AccountOperationError::AccountMismatch,
+                saved_credential_may_exist: true,
+            }
+        )));
+        assert!(context.debug_bounds("connect-account").is_none());
+        assert!(context.debug_bounds("retry-account-restore").is_some());
     }
 
     #[gpui::test]
@@ -1516,6 +1833,13 @@ mod tests {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
         let signed_out = Arc::clone(&provider.signed_out);
+        *provider
+            .saved_account_id
+            .lock()
+            .expect("synthetic saved account ID mutex is healthy") = Some(
+            AccountId::try_from("synthetic-account".to_owned())
+                .expect("synthetic account ID is valid"),
+        );
         let workflow = Arc::new(AccountWorkflow::new(provider));
         let removal_attempts = Arc::new(Mutex::new(Vec::new()));
         let fallback_removals = Arc::new(AtomicBool::new(false));
@@ -1734,6 +2058,14 @@ mod tests {
             )
         });
         assert!(connected);
+    }
+
+    #[test]
+    fn reauthorization_mismatch_copy_confirms_saved_sign_in_was_preserved() {
+        assert_eq!(
+            AccountStatus::reauthorization_error_message(AccountOperationError::AccountMismatch),
+            "Microsoft returned a different account. Your saved sign-in was not changed."
+        );
     }
 
     #[gpui::test]

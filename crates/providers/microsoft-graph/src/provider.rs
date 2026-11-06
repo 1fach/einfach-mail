@@ -13,7 +13,9 @@ use uuid::Uuid;
 
 use crate::{
     CallbackPort,
-    credential::{RefreshTokenStore, SecretServiceRefreshTokenStore},
+    credential::{
+        CredentialIdentity, RefreshTokenStore, SavedRefreshToken, SecretServiceRefreshTokenStore,
+    },
     error::GraphError,
     graph::GraphApi,
     graph_url::GraphAuthority,
@@ -112,6 +114,8 @@ impl AccountProvider for MicrosoftGraphProvider {
     /// Returns a credential-store error when Secret Service cannot read or
     /// update the refresh token, an expired-sign-in error when Microsoft
     /// rejects it, or a service/profile error when refresh or Graph fails.
+    /// Returns [`AccountOperationError::AccountAlreadyConnected`] when this
+    /// provider already has an active account session.
     fn restore_account(
         &self,
     ) -> impl Future<
@@ -122,22 +126,33 @@ impl AccountProvider for MicrosoftGraphProvider {
 
         worker::run(move |_cancellation: CancellationToken| async move {
             let mut session = config.session.lock().await;
-            let Some(refresh_token) = config.credentials.load()? else {
-                *session = None;
+            if session.is_some() {
+                return Err(AccountOperationError::AccountAlreadyConnected);
+            }
+            let Some(saved_credential) = config.credentials.load()? else {
                 return Ok(None);
             };
+            let expected_account_id = saved_credential.expected_account_id().cloned();
             let client = http_client::build_client()
                 .map_err(|_| AccountOperationError::ServiceUnavailable)?;
             let response = identity::refresh(
                 config.client_id,
                 &config.endpoints,
                 client.clone(),
-                refresh_token.clone(),
+                saved_credential.token().clone(),
             )
             .await?;
 
-            let replacement_token = response.refresh_token().cloned().unwrap_or(refresh_token);
-            config.credentials.save(&replacement_token)?;
+            let replacement_token = response
+                .refresh_token()
+                .cloned()
+                .unwrap_or_else(|| saved_credential.token().clone());
+            let pending_identity = CredentialIdentity::Unverified {
+                expected_account_id: expected_account_id.clone(),
+            };
+            config
+                .credentials
+                .save(&pending_identity, &replacement_token)?;
             let access_token = Arc::new(response.access_token().clone());
             let profile = config
                 .graph_api()
@@ -145,6 +160,16 @@ impl AccountProvider for MicrosoftGraphProvider {
                 .load_profile(&config.endpoints.graph_me, Arc::clone(&access_token))
                 .await
                 .map_err(map_profile_graph_error)?;
+            if expected_account_id
+                .as_ref()
+                .is_some_and(|expected_account_id| expected_account_id != profile.id())
+            {
+                return Err(AccountOperationError::AccountMismatch);
+            }
+            config.credentials.save(
+                &CredentialIdentity::Verified(profile.id().clone()),
+                &replacement_token,
+            )?;
             *session = Some(ProviderSession {
                 account_id: profile.id().clone(),
                 access_token: Some(access_token),
@@ -153,12 +178,38 @@ impl AccountProvider for MicrosoftGraphProvider {
         })
     }
 
+    fn saved_credential_account_id(
+        &self,
+    ) -> impl Future<Output = Result<Option<AccountId>, AccountOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let session = config.session.lock().await;
+            let Some(saved_credential) = config.credentials.load()? else {
+                return Ok(session.as_ref().map(|session| session.account_id.clone()));
+            };
+            let Some(account_id) = saved_credential.account_id().cloned() else {
+                return Ok(None);
+            };
+            if session
+                .as_ref()
+                .is_some_and(|session| session.account_id != account_id)
+            {
+                return Err(AccountOperationError::AccountMismatch);
+            }
+            Ok(Some(account_id))
+        })
+    }
+
     /// Connects a Microsoft 365 work account and stores its refresh token.
     ///
     /// # Errors
     ///
     /// Returns an authorization, browser, network, profile, or credential-store
-    /// error when sign-in cannot complete.
+    /// error when sign-in cannot complete. Returns
+    /// [`AccountOperationError::AccountAlreadyConnected`] when this provider
+    /// already has an active account session, or
+    /// [`AccountOperationError::SavedAccountIdentityUnavailable`] when an
+    /// unverified saved credential blocks replacement sign-in.
     fn connect_account(
         &self,
         cancellation: AccountOperationCancellation,
@@ -168,11 +219,25 @@ impl AccountProvider for MicrosoftGraphProvider {
 
         worker::run_with_account_cancellation(
             move |_cancellation: CancellationToken| async move {
+                {
+                    let session = config.session.lock().await;
+                    if session.is_some() {
+                        return Err(AccountOperationError::AccountAlreadyConnected);
+                    }
+                    ensure_saved_credential_can_be_replaced(&config, None)?;
+                }
                 let authorized =
                     authorize_profile(&config, AccountPermissionRequest::Current).await?;
                 let mut session = config.session.lock().await;
+                if session.is_some() {
+                    return Err(AccountOperationError::AccountAlreadyConnected);
+                }
+                ensure_saved_credential_can_be_replaced(&config, Some(authorized.profile.id()))?;
                 commit_cancellation.begin_credential_commit()?;
-                config.credentials.save(&authorized.refresh_token)?;
+                config.credentials.save(
+                    &CredentialIdentity::Verified(authorized.profile.id().clone()),
+                    &authorized.refresh_token,
+                )?;
                 *session = Some(ProviderSession {
                     account_id: authorized.profile.id().clone(),
                     access_token: Some(authorized.access_token),
@@ -201,7 +266,10 @@ impl AccountProvider for MicrosoftGraphProvider {
                 }
                 let mut session = config.session.lock().await;
                 commit_cancellation.begin_credential_commit()?;
-                config.credentials.save(&authorized.refresh_token)?;
+                config.credentials.save(
+                    &CredentialIdentity::Verified(authorized.profile.id().clone()),
+                    &authorized.refresh_token,
+                )?;
                 *session = Some(ProviderSession {
                     account_id: authorized.profile.id().clone(),
                     access_token: Some(authorized.access_token),
@@ -219,11 +287,25 @@ impl AccountProvider for MicrosoftGraphProvider {
     /// # Errors
     ///
     /// Returns a credential-store error when Secret Service cannot remove the
-    /// token.
+    /// token, [`AccountOperationError::SavedAccountIdentityUnavailable`] when
+    /// the credential has no Graph-verified identity, or
+    /// [`AccountOperationError::AccountMismatch`] when the saved identity does
+    /// not match the active provider session.
     fn sign_out(&self) -> impl Future<Output = Result<(), AccountOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         worker::run(move |_cancellation: CancellationToken| async move {
             let mut session = config.session.lock().await;
+            if let Some(saved_credential) = config.credentials.load()? {
+                let Some(saved_account_id) = saved_credential.account_id() else {
+                    return Err(AccountOperationError::SavedAccountIdentityUnavailable);
+                };
+                if session
+                    .as_ref()
+                    .is_some_and(|session| &session.account_id != saved_account_id)
+                {
+                    return Err(AccountOperationError::AccountMismatch);
+                }
+            }
             config.credentials.delete()?;
             *session = None;
             Ok(())
@@ -542,35 +624,68 @@ async fn ensure_access_token(
     {
         return Ok(Arc::clone(access_token));
     }
-    let refresh_token = config
+    let saved_credential = config
         .credentials
         .load()?
         .ok_or(MailOperationError::SignInRequired)?;
+    if saved_credential.account_id() != Some(account_id) {
+        return Err(MailOperationError::AccountMismatch);
+    }
     let client = http_client::build_client().map_err(|_| MailOperationError::ServiceUnavailable)?;
-    refresh_access_token(config, &mut session, refresh_token, client).await
+    refresh_access_token(config, &mut session, saved_credential, client).await
 }
 
 async fn refresh_access_token(
     config: &ProviderConfig,
     session: &mut Option<ProviderSession>,
-    refresh_token: RefreshToken,
+    saved_credential: SavedRefreshToken,
     client: Client,
 ) -> Result<Arc<AccessToken>, MailOperationError> {
     let response = identity::refresh(
         config.client_id,
         &config.endpoints,
         client,
-        refresh_token.clone(),
+        saved_credential.token().clone(),
     )
     .await?;
-    let replacement_token = response.refresh_token().cloned().unwrap_or(refresh_token);
-    config.credentials.save(&replacement_token)?;
+    let replacement_token = response
+        .refresh_token()
+        .cloned()
+        .unwrap_or_else(|| saved_credential.token().clone());
     let access_token = Arc::new(response.access_token().clone());
     let Some(account_session) = session.as_mut() else {
         return Err(MailOperationError::SignInRequired);
     };
+    config.credentials.save(
+        &CredentialIdentity::Verified(account_session.account_id.clone()),
+        &replacement_token,
+    )?;
     account_session.access_token = Some(Arc::clone(&access_token));
     Ok(access_token)
+}
+
+/// Checks that replacement keeps any verified saved account ID.
+///
+/// # Errors
+///
+/// Returns [`AccountOperationError::SavedAccountIdentityUnavailable`] when
+/// the saved ID is unverified, or [`AccountOperationError::AccountMismatch`]
+/// when the known profile has a different ID. Returns a credential-store
+/// error when the saved credential cannot be read.
+fn ensure_saved_credential_can_be_replaced(
+    config: &ProviderConfig,
+    account_id: Option<&AccountId>,
+) -> Result<(), AccountOperationError> {
+    let Some(saved_credential) = config.credentials.load()? else {
+        return Ok(());
+    };
+    let Some(saved_account_id) = saved_credential.account_id() else {
+        return Err(AccountOperationError::SavedAccountIdentityUnavailable);
+    };
+    if account_id.is_some_and(|account_id| account_id != saved_account_id) {
+        return Err(AccountOperationError::AccountMismatch);
+    }
+    Ok(())
 }
 
 async fn map_mail_result<T>(
@@ -843,7 +958,7 @@ mod tests {
 
     use crate::{
         CallbackPort,
-        credential::RefreshTokenStore,
+        credential::{CredentialIdentity, RefreshTokenStore, SavedRefreshToken},
         error::GraphError,
         graph_url::GraphAuthority,
         identity::{BrowserLauncher, Endpoints},
@@ -864,7 +979,7 @@ mod tests {
     use super::{MicrosoftGraphProvider, ProviderConfig, ProviderSession};
 
     struct MemoryRefreshTokenStore {
-        token: Mutex<Option<RefreshToken>>,
+        credential: Mutex<Option<SavedRefreshToken>>,
         fail_next_delete: AtomicBool,
         save_pause: Mutex<Option<(Arc<Barrier>, oneshot::Sender<()>)>>,
     }
@@ -872,10 +987,28 @@ mod tests {
     impl MemoryRefreshTokenStore {
         fn new(token: Option<RefreshToken>) -> Self {
             Self {
-                token: Mutex::new(token),
+                credential: Mutex::new(token.map(|token| {
+                    SavedRefreshToken::with_identity(
+                        CredentialIdentity::Unverified {
+                            expected_account_id: None,
+                        },
+                        token,
+                    )
+                })),
                 fail_next_delete: AtomicBool::new(false),
                 save_pause: Mutex::new(None),
             }
+        }
+
+        fn with_verified_token(token: RefreshToken, account_id: AccountId) -> Self {
+            let store = Self::new(None);
+            *store
+                .credential
+                .lock()
+                .expect("synthetic credential mutex is not poisoned") = Some(
+                SavedRefreshToken::with_identity(CredentialIdentity::Verified(account_id), token),
+            );
+            store
         }
 
         fn fail_next_delete(&self) {
@@ -894,29 +1027,36 @@ mod tests {
         }
 
         fn token_value(&self) -> Option<String> {
-            self.token
+            self.credential
                 .lock()
                 .expect("synthetic credential mutex is not poisoned")
                 .as_ref()
-                .map(|token| token.token().expose_secret().to_owned())
+                .map(|credential| credential.token().token().expose_secret().to_owned())
         }
     }
 
     impl RefreshTokenStore for MemoryRefreshTokenStore {
-        fn load(&self) -> Result<Option<RefreshToken>, AccountOperationError> {
-            self.token
+        fn load(&self) -> Result<Option<SavedRefreshToken>, AccountOperationError> {
+            self.credential
                 .lock()
                 .map(|token| token.clone())
                 .map_err(|_| AccountOperationError::CredentialStoreUnavailable)
         }
 
-        fn save(&self, token: &RefreshToken) -> Result<(), AccountOperationError> {
+        fn save(
+            &self,
+            identity: &CredentialIdentity,
+            token: &RefreshToken,
+        ) -> Result<(), AccountOperationError> {
             {
                 let mut saved = self
-                    .token
+                    .credential
                     .lock()
                     .map_err(|_| AccountOperationError::CredentialStoreUnavailable)?;
-                *saved = Some(token.clone());
+                *saved = Some(SavedRefreshToken::with_identity(
+                    identity.clone(),
+                    token.clone(),
+                ));
             }
             let save_pause = self
                 .save_pause
@@ -934,7 +1074,7 @@ mod tests {
             if self.fail_next_delete.swap(false, Ordering::SeqCst) {
                 return Err(AccountOperationError::CredentialStoreUnavailable);
             }
-            self.token
+            self.credential
                 .lock()
                 .map(|mut saved| *saved = None)
                 .map_err(|_| AccountOperationError::CredentialStoreUnavailable)
@@ -1537,9 +1677,12 @@ mod tests {
             })
             .await;
         let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
-        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
-            "synthetic-old-refresh",
-        ))));
+        let expected_account_id =
+            AccountId::try_from("account-mail".to_owned()).expect("synthetic ID is valid");
+        let credentials = Arc::new(MemoryRefreshTokenStore::with_verified_token(
+            refresh_token("synthetic-old-refresh"),
+            expected_account_id.clone(),
+        ));
         let provider = synthetic_provider(&server, browser_sender, credentials.clone());
 
         let profile = provider
@@ -1661,9 +1804,12 @@ mod tests {
     async fn cancelling_sign_in_releases_the_loopback_callback_listener() {
         let server = MockServer::start_async().await;
         let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
-        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
-            "synthetic-existing-refresh",
-        ))));
+        let existing_account_id =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        let credentials = Arc::new(MemoryRefreshTokenStore::with_verified_token(
+            refresh_token("synthetic-existing-refresh"),
+            existing_account_id,
+        ));
         let provider = synthetic_provider(&server, browser_sender, credentials.clone());
         let cancellation = AccountOperationCancellation::new();
         let task_cancellation = cancellation.clone();
@@ -1758,6 +1904,12 @@ mod tests {
             credentials.token_value().as_deref(),
             Some("synthetic-rotated-refresh")
         );
+        let saved_credential = credentials
+            .load()
+            .expect("synthetic credential can be read")
+            .expect("verified credential remains saved");
+        assert_eq!(saved_credential.account_id(), Some(profile.id()));
+        assert_eq!(saved_credential.expected_account_id(), Some(profile.id()));
         token_refresh.assert_async().await;
         profile_request.assert_async().await;
     }
@@ -1786,9 +1938,12 @@ mod tests {
             })
             .await;
         let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
-        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
-            "synthetic-old-refresh",
-        ))));
+        let expected_account_id =
+            AccountId::try_from("saved-account".to_owned()).expect("synthetic ID is valid");
+        let credentials = Arc::new(MemoryRefreshTokenStore::with_verified_token(
+            refresh_token("synthetic-old-refresh"),
+            expected_account_id.clone(),
+        ));
         let provider = synthetic_provider(&server, browser_sender, credentials.clone());
 
         assert_eq!(
@@ -1798,6 +1953,15 @@ mod tests {
         assert_eq!(
             credentials.token_value().as_deref(),
             Some("synthetic-rotated-refresh")
+        );
+        let pending_identity = credentials
+            .load()
+            .expect("synthetic credential can be read")
+            .expect("pending credential remains saved");
+        assert!(pending_identity.account_id().is_none());
+        assert_eq!(
+            pending_identity.expected_account_id(),
+            Some(&expected_account_id)
         );
         token_refresh.assert_async().await;
         profile_request.assert_async().await;
@@ -1831,6 +1995,166 @@ mod tests {
             Some("synthetic-rejected-refresh")
         );
         token_refresh.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn restore_mismatch_remains_pending_after_provider_restart() {
+        let server = MockServer::start_async().await;
+        let first_refresh = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("refresh_token=synthetic-original-refresh");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-first-access","expires_in":3600,"refresh_token":"synthetic-first-rotated","scope":"User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let second_refresh = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("refresh_token=synthetic-first-rotated");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-second-access","expires_in":3600,"refresh_token":"synthetic-second-rotated","scope":"User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let first_profile = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-first-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"returned-account","displayName":"Ada Example"}"#);
+            })
+            .await;
+        let second_profile = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-second-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"returned-account","displayName":"Ada Example"}"#);
+            })
+            .await;
+        let expected_account_id =
+            AccountId::try_from("expected-account".to_owned()).expect("synthetic ID is valid");
+        let credentials = Arc::new(MemoryRefreshTokenStore::with_verified_token(
+            refresh_token("synthetic-original-refresh"),
+            expected_account_id.clone(),
+        ));
+        let (browser_sender, _) = mpsc::unbounded_channel();
+        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
+
+        assert_eq!(
+            provider.restore_account().await,
+            Err(AccountOperationError::AccountMismatch)
+        );
+        let pending_after_mismatch = credentials
+            .load()
+            .expect("pending credential can be read")
+            .expect("rotated credential remains saved");
+        assert_eq!(pending_after_mismatch.account_id(), None);
+        assert_eq!(
+            pending_after_mismatch.expected_account_id(),
+            Some(&expected_account_id)
+        );
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-first-rotated")
+        );
+        assert!(provider.config.session.lock().await.is_none());
+
+        let (restart_browser_sender, _) = mpsc::unbounded_channel();
+        let restarted_provider =
+            synthetic_provider(&server, restart_browser_sender, credentials.clone());
+        assert_eq!(
+            restarted_provider.restore_account().await,
+            Err(AccountOperationError::AccountMismatch)
+        );
+        assert_eq!(
+            restarted_provider.sign_out().await,
+            Err(AccountOperationError::SavedAccountIdentityUnavailable)
+        );
+        let pending_after_restart = credentials
+            .load()
+            .expect("pending credential can be read after restart")
+            .expect("pending credential remains saved after restart");
+        assert_eq!(pending_after_restart.account_id(), None);
+        assert_eq!(
+            pending_after_restart.expected_account_id(),
+            Some(&expected_account_id)
+        );
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-second-rotated")
+        );
+        first_refresh.assert_async().await;
+        second_refresh.assert_async().await;
+        first_profile.assert_async().await;
+        second_profile.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn unverified_credential_blocks_replacement_and_sign_out() {
+        let server = MockServer::start_async().await;
+        let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
+            "synthetic-legacy-refresh",
+        ))));
+        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
+
+        assert_eq!(
+            provider
+                .connect_account(AccountOperationCancellation::new())
+                .await,
+            Err(AccountOperationError::SavedAccountIdentityUnavailable)
+        );
+        assert!(browser_receiver.try_recv().is_err());
+        assert_eq!(
+            provider.sign_out().await,
+            Err(AccountOperationError::SavedAccountIdentityUnavailable)
+        );
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-legacy-refresh")
+        );
+        assert!(provider.config.session.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn routine_refresh_rejects_an_unverified_credential() {
+        let server = MockServer::start_async().await;
+        let refresh_request = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/token");
+                then.status(500);
+            })
+            .await;
+        let (browser_sender, _) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
+            "synthetic-legacy-refresh",
+        ))));
+        let provider = synthetic_provider(&server, browser_sender, credentials);
+        let account_id =
+            AccountId::try_from("active-account".to_owned()).expect("synthetic ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: account_id.clone(),
+            access_token: None,
+        });
+
+        assert_eq!(
+            provider.list_folders(&account_id).await,
+            Err(MailOperationError::AccountMismatch)
+        );
+        refresh_request.assert_calls_async(0).await;
     }
 
     #[tokio::test]
@@ -1959,12 +2283,13 @@ mod tests {
             })
             .await;
         let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
-        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
-            "synthetic-old-refresh",
-        ))));
-        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
         let expected_account =
             AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        let credentials = Arc::new(MemoryRefreshTokenStore::with_verified_token(
+            refresh_token("synthetic-old-refresh"),
+            expected_account.clone(),
+        ));
+        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
         *provider.config.session.lock().await = Some(ProviderSession {
             account_id: expected_account.clone(),
             access_token: Some(access_token("synthetic-old-access")),
