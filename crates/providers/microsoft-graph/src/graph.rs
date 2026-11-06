@@ -1521,12 +1521,12 @@ mod tests {
         CalendarDeltaRequest, CalendarDeltaResponse, WellKnownMailFolder,
     };
     use einfach_mail_domain::{
-        AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarEventCreation,
-        CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft, CalendarOccurrence,
-        CalendarOccurrenceTime, CalendarTimeZoneId, CalendarViewRange, CalendarViewReference,
-        EditableCalendarEvent, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
-        MailRecipient, MailReplyDraft, MailReplySource, MailSubject, MessageDeltaChange, MessageId,
-        MessageMetadata, MessageOrigin, ReadState,
+        AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaProgress,
+        CalendarEventCreation, CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft,
+        CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId, CalendarViewRange,
+        CalendarViewReference, EditableCalendarEvent, FolderId, FolderReference,
+        FollowUpFlagStatus, MailDraft, MailRecipient, MailReplyDraft, MailReplySource, MailSubject,
+        MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, ReadState,
     };
 
     use super::{

@@ -26,8 +26,8 @@ use crate::{
 };
 use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError,
-    CalendarProvider, MailOperationError, MailProvider, MailSendProviderError, MessageDeltaRequest,
+    CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
+    MailOperationError, MailProvider, MailSendProviderError, MessageDeltaRequest,
     MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{

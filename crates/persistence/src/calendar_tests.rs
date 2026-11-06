@@ -1,6 +1,6 @@
 use std::time::{Duration, UNIX_EPOCH};
 
-use einfach_mail_application::{CalendarCache, CalendarCacheError};
+use einfach_mail_application::{CalendarCache, CalendarCacheError, CalendarDeltaRequest};
 use einfach_mail_domain::{
     AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
     CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion, CalendarOccurrencePatch,
