@@ -1597,11 +1597,12 @@ fn uncertain_event_deletion_requires_sync_for_each_previously_synced_account_vie
             .await
             .expect("source view completes its recovery sync");
         assert!(
-            !workflow
+            workflow
                 .load_cached_view(&source_view)
                 .await
                 .expect("reconciled source view is readable")
-                .calendar_write_sync_required()
+                .calendar_write_sync_required(),
+            "the source view remains gated while another account view needs recovery"
         );
         assert_eq!(
             workflow.delete_event(&source_editable).await,
@@ -2042,12 +2043,14 @@ fn uncertain_update_requires_sync_for_each_previously_synced_account_view() {
                 .sync_view(view)
                 .await
                 .expect("each view independently reconciles the appointment");
-            assert!(
-                !workflow
+            assert_eq!(
+                workflow
                     .load_cached_view(view)
                     .await
                     .expect("reconciled view is readable")
-                    .calendar_write_sync_required()
+                    .calendar_write_sync_required(),
+                view == &source_view,
+                "every account view stays gated until the last recovery sync completes"
             );
             if view == &source_view {
                 assert!(

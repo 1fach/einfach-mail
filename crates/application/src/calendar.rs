@@ -546,7 +546,8 @@ impl CalendarSnapshot {
         self.pending_creation.as_ref()
     }
 
-    /// Returns whether a complete sync is required before changing events in this view.
+    /// Returns whether this view or another account view needs a successful sync
+    /// before editing or deleting events.
     #[must_use]
     pub fn calendar_write_sync_required(&self) -> bool {
         self.calendar_write_sync_required
@@ -678,6 +679,16 @@ struct CalendarWriteRecovery {
     sync_required_views: std::collections::HashSet<CalendarViewReference>,
 }
 
+impl CalendarWriteRecovery {
+    fn requires_edit_or_delete_sync(&self, view: &CalendarViewReference) -> bool {
+        !self.synchronized_views.contains(view)
+            || self
+                .sync_required_views
+                .iter()
+                .any(|required_view| required_view.account_id() == view.account_id())
+    }
+}
+
 impl<P, C> CalendarWorkflow<P, C>
 where
     P: CalendarProvider,
@@ -722,8 +733,7 @@ where
             .write_recovery
             .lock()
             .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
-        let calendar_write_sync_required = !recovery.synchronized_views.contains(view)
-            || recovery.sync_required_views.contains(view);
+        let calendar_write_sync_required = recovery.requires_edit_or_delete_sync(view);
         Ok(CalendarSnapshot {
             events,
             sync_state,
@@ -861,8 +871,9 @@ where
     /// [`CalendarWorkflowError::OperationInProgress`] when another calendar
     /// operation owns the account, or
     /// [`CalendarWorkflowError::CalendarWriteSyncRequired`] when this view has
-    /// not completed a successful sync or needs recovery after an uncertain
-    /// calendar write. Returns [`CalendarWorkflowError::InvalidEditableEvent`]
+    /// not completed a successful sync or another view for the account needs
+    /// recovery after a calendar write. Returns
+    /// [`CalendarWorkflowError::InvalidEditableEvent`]
     /// when the provider returns a snapshot for another event. Returns
     /// [`CalendarWorkflowError::StateUnavailable`] when workflow state is poisoned.
     pub async fn editable_event(
@@ -902,7 +913,8 @@ where
     /// [`CalendarWorkflowError::OperationInProgress`] when another calendar
     /// operation owns the account, or
     /// [`CalendarWorkflowError::CalendarWriteSyncRequired`] when this view has
-    /// not completed a successful sync or needs recovery, or
+    /// not completed a successful sync or another view for the account needs
+    /// recovery, or
     /// [`CalendarWorkflowError::StateUnavailable`] when workflow state is poisoned. Returns
     /// [`CalendarWorkflowError::InvalidUpdateConfirmation`] when the provider
     /// returns different event values. A cache failure after Graph confirmation
@@ -961,8 +973,8 @@ where
     /// Returns a provider error for a rejected, stale, or uncertain deletion,
     /// [`CalendarWorkflowError::OperationInProgress`] when another operation
     /// owns the account, or [`CalendarWorkflowError::CalendarWriteSyncRequired`]
-    /// when the source view needs a successful sync. A cache failure after
-    /// Graph confirms deletion is returned as
+    /// when the source view has not completed a sync or another account view
+    /// needs recovery. A cache failure after Graph confirms deletion is returned as
     /// [`CalendarEventDeletionOutcome::DeletedButNotCached`].
     pub async fn delete_event(
         &self,
@@ -1006,12 +1018,7 @@ where
             .write_recovery
             .lock()
             .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
-        if !recovery.synchronized_views.contains(view)
-            || recovery
-                .sync_required_views
-                .iter()
-                .any(|required_view| required_view.account_id() == view.account_id())
-        {
+        if recovery.requires_edit_or_delete_sync(view) {
             Err(CalendarWorkflowError::CalendarWriteSyncRequired)
         } else {
             Ok(())

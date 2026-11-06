@@ -581,7 +581,9 @@ where
             .text_color(colors.destructive)
             .child(calendar_error_message(error, !self.events.is_empty()));
         if self.calendar_write_sync_required {
-            status = status.child("Sync this week before editing or deleting appointments.");
+            status = status.child(
+                "Sync each calendar week you opened this session before editing or deleting appointments.",
+            );
         }
         status.into_any_element()
     }
@@ -593,7 +595,7 @@ where
             }
             CalendarStatus::Syncing => ("Refreshing calendar events…".to_owned(), Role::Status),
             CalendarStatus::UpToDate if self.calendar_write_sync_required => (
-                "Sync this week before editing or deleting appointments.".to_owned(),
+                "Sync each calendar week you opened this session before editing or deleting appointments.".to_owned(),
                 Role::Alert,
             ),
             CalendarStatus::UpToDate => match self
