@@ -182,7 +182,7 @@ fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static s
             "Microsoft will review the existing delegated access: User.Read, Mail.Read, Calendars.Read, and offline_access."
         }
         AccountPermissionRequest::MailReadWrite => {
-            "Microsoft grants Mail.ReadWrite, which can create, read, update, and delete mail in this account. Einfach Mail requests it when Microsoft denies a read-state change, follow-up flag change, or message move. It uses the permission to set read state, update or clear follow-up flags, and move messages between folders. This permission review does not perform the action or send mail, and it does not request Mail.Send. Continue opens Microsoft in your system browser."
+            "Microsoft grants Mail.ReadWrite, which can create, read, update, and delete mail in this account. Einfach Mail requests it when Microsoft denies a read-state change, follow-up flag change, message move, or message deletion. It uses the permission to set read state, update or clear follow-up flags, move messages between folders, and delete selected messages after confirmation. This permission review does not perform the action or send mail, and it does not request Mail.Send. Continue opens Microsoft in your system browser."
         }
         AccountPermissionRequest::CalendarReadWrite => {
             "Microsoft grants Calendars.ReadWrite the ability to create, read, update, and delete calendar events. Einfach Mail requests it for supported one-off timed appointments after Microsoft denies an event change. This review does not repeat the failed action. Continue opens Microsoft in your system browser. Reopen Calendar and retry the event after review."
@@ -713,7 +713,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 div()
                     .text_sm()
                     .text_color(colors.muted_foreground)
-                    .child("Initial sign-in requests User.Read, Mail.Read, Calendars.Read, and offline_access. Mail.Read lets Einfach Mail read your mail, and Calendars.Read lets it read your primary calendar. If Microsoft denies a read-state change, follow-up flag change, or message move, a separate review can request Mail.ReadWrite, which permits creating, reading, updating, and deleting mail. The app uses this access to set messages read or unread, update or clear follow-up flags, and move messages between folders. It does not request Mail.Send or calendar-write permissions."),
+                    .child("Initial sign-in requests User.Read, Mail.Read, Calendars.Read, and offline_access. Mail.Read lets Einfach Mail read your mail, and Calendars.Read lets it read your primary calendar. If Microsoft denies a read-state change, follow-up flag change, message move, or message deletion, a separate review can request Mail.ReadWrite, which permits creating, reading, updating, and deleting mail. The app uses this access to set messages read or unread, update or clear follow-up flags, move messages between folders, and delete selected messages after confirmation. If Microsoft denies a supported calendar change, a separate review can request Calendars.ReadWrite, which permits creating, reading, updating, and deleting calendar events. Einfach Mail uses it to create one-off timed appointments, update the title or time of supported standalone appointments you organize that have no attendees, and delete those appointments after confirmation. It does not create recurring or all-day events, send invitations, or create online meetings. The app does not request Mail.Send."),
             )
     }
 
@@ -1126,11 +1126,13 @@ mod tests {
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
         AccountProvider, AccountSession, AccountSessionFactory, AccountSessionFuture,
-        AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome, CalendarSession,
+        AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome,
+        CalendarEventDeletionOutcome, CalendarEventUpdateOutcome, CalendarSession,
         CalendarSnapshot, CalendarSyncReport, CalendarWorkflowError, MailCacheError, MailSession,
     };
     use einfach_mail_domain::{
-        AccountId, AccountProfile, CalendarEventCreation, CalendarViewReference,
+        AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
+        CalendarViewReference, EditableCalendarEvent,
     };
 
     #[derive(Clone, Default)]
@@ -1203,6 +1205,16 @@ mod tests {
             ))))
         }
 
+        fn editable_event<'a>(
+            &'a self,
+            _: &'a CalendarOccurrence,
+        ) -> AccountSessionFuture<'a, Result<EditableCalendarEvent, CalendarWorkflowError>>
+        {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
         fn create_event<'a>(
             &'a self,
             _: &'a CalendarEventCreation,
@@ -1217,6 +1229,26 @@ mod tests {
             &'a self,
             _: &'a CalendarEventCreation,
         ) -> AccountSessionFuture<'a, Result<(), CalendarWorkflowError>> {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn update_event<'a>(
+            &'a self,
+            _: &'a CalendarEventUpdate,
+        ) -> AccountSessionFuture<'a, Result<CalendarEventUpdateOutcome, CalendarWorkflowError>>
+        {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn delete_event<'a>(
+            &'a self,
+            _: &'a EditableCalendarEvent,
+        ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>>
+        {
             Box::pin(ready(Err(CalendarWorkflowError::Cache(
                 CalendarCacheError::Unavailable,
             ))))
@@ -1745,6 +1777,7 @@ mod tests {
             super::permission_review_disclosure(AccountPermissionRequest::MailReadWrite);
         assert!(disclosure.contains("create, read, update, and delete mail"));
         assert!(disclosure.contains("move messages between folders"));
+        assert!(disclosure.contains("delete selected messages after confirmation"));
         assert!(disclosure.contains("does not request Mail.Send"));
         assert_eq!(
             *permission_request

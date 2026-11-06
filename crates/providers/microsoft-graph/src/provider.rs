@@ -26,12 +26,12 @@ use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
     CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarOperationError, CalendarProvider,
     MailOperationError, MailProvider, MailSendProviderError, MessageDeltaRequest,
-    MessageDeltaResponse,
+    MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, CalendarEventCreation, CalendarViewReference, FolderReference,
-    FollowUpFlagStatus, MailDraft, MailFolder, MailMessage, MailReplyDraft, MessageBody, MessageId,
-    ReadState,
+    AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
+    CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
+    MailFolder, MailMessage, MailReplyDraft, MessageBody, MessageId, ReadState,
 };
 
 const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
@@ -248,6 +248,23 @@ impl MailProvider for MicrosoftGraphProvider {
         })
     }
 
+    fn well_known_folder(
+        &self,
+        account_id: &AccountId,
+        folder: WellKnownMailFolder,
+    ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let account_id = account_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let token = ensure_access_token(&config, &account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let folder_result = graph_api
+                .well_known_folder(&account_id, folder, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, &account_id, &token, folder_result).await
+        })
+    }
+
     fn list_messages(
         &self,
         folder: &FolderReference,
@@ -444,6 +461,69 @@ impl CalendarProvider for MicrosoftGraphProvider {
             map_calendar_result(&config, &account_id, &token, event).await
         })
     }
+
+    fn editable_event(
+        &self,
+        event: &CalendarOccurrence,
+    ) -> impl Future<Output = Result<EditableCalendarEvent, CalendarOperationError>> + Send + '_
+    {
+        let config = Arc::clone(&self.config);
+        let event = event.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = event.reference().account_id().clone();
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_calendar)?;
+            let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
+            let editable = graph_api
+                .editable_calendar_event(&event, Arc::clone(&token))
+                .await;
+            map_calendar_result(&config, &account_id, &token, editable).await
+        })
+    }
+
+    fn update_event(
+        &self,
+        update: &CalendarEventUpdate,
+    ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let update = update.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = update
+                .source()
+                .occurrence()
+                .reference()
+                .account_id()
+                .clone();
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_calendar)?;
+            let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
+            let event = graph_api
+                .update_calendar_event(&update, Arc::clone(&token))
+                .await;
+            map_calendar_result(&config, &account_id, &token, event).await
+        })
+    }
+
+    fn delete_event(
+        &self,
+        event: &EditableCalendarEvent,
+    ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let event = event.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = event.occurrence().reference().account_id().clone();
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_calendar)?;
+            let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
+            let result = graph_api
+                .delete_calendar_event(&event, Arc::clone(&token))
+                .await;
+            map_calendar_result(&config, &account_id, &token, result).await
+        })
+    }
 }
 
 async fn ensure_access_token(
@@ -542,6 +622,15 @@ fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
         GraphError::CalendarEventCreationOutcomeUnknown => {
             CalendarOperationError::CreationOutcomeUnknown
         }
+        GraphError::CalendarEventNotEditable => CalendarOperationError::EventNotEditable,
+        GraphError::CalendarEventChanged => CalendarOperationError::EventChanged,
+        GraphError::CalendarEventUpdateOutcomeUnknown => {
+            CalendarOperationError::UpdateOutcomeUnknown
+        }
+        GraphError::CalendarEventDeletionRejected => CalendarOperationError::EventDeletionRejected,
+        GraphError::CalendarEventDeletionOutcomeUnknown => {
+            CalendarOperationError::DeleteOutcomeUnknown
+        }
         GraphError::RateLimited { retry_after } => {
             CalendarOperationError::RateLimited { retry_after }
         }
@@ -613,6 +702,11 @@ fn map_graph_error(error: GraphError) -> MailOperationError {
         | GraphError::SendOutcomeUnknown
         | GraphError::CalendarEventCreationRejected
         | GraphError::CalendarEventCreationOutcomeUnknown
+        | GraphError::CalendarEventUpdateOutcomeUnknown
+        | GraphError::CalendarEventDeletionRejected
+        | GraphError::CalendarEventDeletionOutcomeUnknown
+        | GraphError::CalendarEventNotEditable
+        | GraphError::CalendarEventChanged
         | GraphError::InvalidToken => MailOperationError::ServiceUnavailable,
     }
 }
@@ -636,6 +730,11 @@ fn map_profile_graph_error(error: GraphError) -> AccountOperationError {
         | GraphError::MessageMoveOutcomeUnknown
         | GraphError::CalendarEventCreationRejected
         | GraphError::CalendarEventCreationOutcomeUnknown
+        | GraphError::CalendarEventUpdateOutcomeUnknown
+        | GraphError::CalendarEventDeletionRejected
+        | GraphError::CalendarEventDeletionOutcomeUnknown
+        | GraphError::CalendarEventNotEditable
+        | GraphError::CalendarEventChanged
         | GraphError::RateLimited { .. } => AccountOperationError::ServiceUnavailable,
     }
 }
@@ -677,9 +776,12 @@ fn map_send_graph_error(error: GraphError) -> MailSendProviderError {
         | GraphError::MessageUpdateOutcomeUnknown
         | GraphError::MessageMoveOutcomeUnknown
         | GraphError::CalendarEventCreationRejected
-        | GraphError::CalendarEventCreationOutcomeUnknown => {
-            MailSendProviderError::ServiceUnavailable
-        }
+        | GraphError::CalendarEventCreationOutcomeUnknown
+        | GraphError::CalendarEventUpdateOutcomeUnknown
+        | GraphError::CalendarEventDeletionRejected
+        | GraphError::CalendarEventDeletionOutcomeUnknown
+        | GraphError::CalendarEventNotEditable
+        | GraphError::CalendarEventChanged => MailSendProviderError::ServiceUnavailable,
     }
 }
 
@@ -750,7 +852,7 @@ mod tests {
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
         AccountProvider, AccountWorkflow, CalendarProvider, MailOperationError, MailProvider,
-        MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse,
+        MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
     };
     use einfach_mail_domain::{
         AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrenceTime,
@@ -1111,6 +1213,51 @@ mod tests {
             Err(MailOperationError::AccountMismatch)
         );
         move_request.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn well_known_folder_lookup_is_account_scoped() {
+        let server = MockServer::start_async().await;
+        let lookup = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/deleteditems")
+                    .query_param("$select", "id,displayName,isHidden")
+                    .header("authorization", "Bearer synthetic-deleted-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"deleted-folder","displayName":"Gelöschte Elemente","isHidden":false}"#);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let provider = synthetic_provider(
+            &server,
+            browser_sender,
+            Arc::new(MemoryRefreshTokenStore::new(None)),
+        );
+        let account =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: account.clone(),
+            access_token: Some(access_token("synthetic-deleted-access")),
+        });
+
+        let folder = provider
+            .well_known_folder(&account, WellKnownMailFolder::DeletedItems)
+            .await
+            .expect("synthetic Deleted Items folder resolves");
+        let other_account =
+            AccountId::try_from("other-account".to_owned()).expect("synthetic account ID is valid");
+
+        assert_eq!(folder.account_id(), &account);
+        assert_eq!(folder.folder_id().as_str(), "deleted-folder");
+        assert_eq!(
+            provider
+                .well_known_folder(&other_account, WellKnownMailFolder::DeletedItems)
+                .await,
+            Err(MailOperationError::AccountMismatch)
+        );
+        lookup.assert_calls_async(1).await;
     }
 
     #[test]
