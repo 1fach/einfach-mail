@@ -61,7 +61,7 @@ The private repository plan does not support required branch protection. Run the
 
 ## Run the Linux desktop app
 
-To enable the account view's sign-in action, set `EINFACH_MAIL_ENTRA_CLIENT_ID` to the client ID of a public Microsoft Entra app registration. Set `EINFACH_MAIL_ENTRA_CALLBACK_PORT` to the nonzero port registered for `http://127.0.0.1/<port>/callback`. The app does not use a client secret. It requests delegated `User.Read` and `offline_access`, reads the signed-in profile through Graph `/me`, and stores the refresh token in Linux Secret Service.
+To enable the account view's sign-in action, set `EINFACH_MAIL_ENTRA_CLIENT_ID` to the client ID of a public Microsoft Entra app registration. Set `EINFACH_MAIL_ENTRA_CALLBACK_PORT` to the nonzero port registered for `http://127.0.0.1/<port>/callback`. The app does not use a client secret. Initial sign-in requests delegated `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access`, reads the signed-in profile through Graph `/me`, and stores the refresh token in Linux Secret Service. If Microsoft denies an explicit read-state action, a separate consent review can request `Mail.ReadWrite`, which permits creating, reading, updating, and deleting mail. The app uses that grant for existing mail-reading features and to set messages read or unread; it adds no create or delete actions and does not request `Mail.Send`. See [ADR 0015](../decisions/0015-idempotent-message-read-state-update.md).
 
 Run the app from the repository root:
 

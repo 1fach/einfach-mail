@@ -1,4 +1,4 @@
-# ADR 0039: Use one listbox for weekly agenda navigation
+# ADR 0042: Use one listbox for weekly agenda navigation
 
 - Status: Accepted
 - Date: 2026-11-05

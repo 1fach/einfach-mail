@@ -2,25 +2,35 @@
 
 use std::{
     collections::HashSet,
-    sync::{Arc, Mutex},
+    future::Future,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
 use einfach_mail_domain::{
-    AccountId, CalendarViewReference, FolderReference, MailFolder, MailMessage, MessageBody,
-    MessageDeltaProgress, MessageId,
+    AccountId, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
+    MailMessage, MailReplyDraft, MailSendOperationId, MessageBody, MessageDeltaProgress, MessageId,
+    PendingMailSend, ReadState,
 };
 use thiserror::Error;
 
 use crate::{
     AccountCacheFactory, AccountSession, AccountSessionFactory, AccountSessionFuture,
     CalendarProvider, CalendarSession, CalendarWorkflow, MailCache, MailCacheError,
-    MailOperationError, MailProvider, MailSession, MessageBodyForDisplay, MessageDeltaResponse,
-    account_session::AccountSessionWorkflow, prepare_message_body_for_display,
+    MailOperationError, MailProvider, MailSendProviderError, MailSession, MessageBodyForDisplay,
+    MessageDeltaResponse, WellKnownMailFolder, account_session::AccountSessionWorkflow,
+    prepare_message_body_for_display,
 };
 
 const INITIAL_SYNC_WINDOW: Duration = Duration::from_secs(90 * 24 * 60 * 60);
 const MAX_PAGES_PER_FOLDER_ROUND: usize = 1_000;
+
+fn mail_folder_is_visible(folders: &[MailFolder], reference: &FolderReference) -> bool {
+    folders.iter().any(|folder| folder.reference() == reference)
+}
 const MAX_SYNC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DELTA_RESETS_PER_ATTEMPT: usize = 1;
 
@@ -33,6 +43,18 @@ pub enum MailWorkflowError {
     /// The encrypted local cache could not read or commit mail data.
     #[error("the local mail cache is unavailable")]
     Cache(#[from] MailCacheError),
+    /// The destination is not another visible folder in the same account.
+    #[error("the selected destination folder is unavailable")]
+    InvalidMoveDestination,
+    /// A previous successful sync is required in the current account session.
+    #[error("mail must sync successfully before moving messages in this session")]
+    AccountSyncRequired,
+    /// The message already belongs to the requested well-known folder.
+    #[error("the message is already in the requested folder")]
+    AlreadyInWellKnownFolder(WellKnownMailFolder),
+    /// The requested well-known folder is not visible in the account's folder list.
+    #[error("the requested well-known folder is unavailable")]
+    WellKnownFolderUnavailable(WellKnownMailFolder),
     /// Another mail operation already owns this account or folder.
     #[error("a mail operation is already active for this account or folder")]
     OperationInProgress,
@@ -53,6 +75,75 @@ pub enum MailWorkflowError {
     ClockUnavailable,
     /// The synchronization reservation could not be read or released.
     #[error("the mail workflow state is unavailable")]
+    StateUnavailable,
+    /// A previous message update requires a complete folder sync before another write.
+    #[error("the folder must sync before another message update")]
+    FolderSyncRequired,
+}
+
+/// A send result that needs no further provider request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MailSendOutcome {
+    /// Graph accepted the submission and the local marker was removed.
+    Accepted,
+    /// Graph accepted the submission, but the local marker remains for resolution.
+    AcceptedNeedsResolution(PendingMailSend),
+    /// Graph may have accepted the submission; the marker remains and must not be replayed.
+    OutcomeUnknown(PendingMailSend),
+}
+
+enum MailSubmission {
+    NewMessage(MailDraft),
+    Reply(MailReplyDraft),
+}
+
+/// A user-safe error from staging, submitting, or explicitly resolving a send.
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum MailSendWorkflowError {
+    /// The encrypted local cache could not read or update the operation marker.
+    #[error("the local mail cache could not update the send operation")]
+    Cache(#[from] MailCacheError),
+    /// The provider rejected the operation or its account did not match.
+    #[error("the mail provider rejected the send operation")]
+    Provider(#[from] MailSendProviderError),
+    /// The source message has been removed from the encrypted account cache.
+    #[error("the reply source is no longer available in the local mail cache")]
+    ReplySourceNotCached,
+    /// The provider rejected the operation, but its local marker could not be cleared.
+    #[error("the provider rejected the operation but the local send marker remains")]
+    RejectedNeedsResolution {
+        /// The rejected operation that remains in the cache.
+        pending: Box<PendingMailSend>,
+        /// The provider's definitive rejection.
+        provider: MailSendProviderError,
+        /// The failure that prevented clearing the marker.
+        cache: MailCacheError,
+    },
+    /// The account already has a send operation that needs user resolution.
+    #[error("a previous send operation must be resolved first")]
+    PendingResolutionRequired(PendingMailSend),
+    /// Another send or mail operation already owns the account.
+    #[error("another mail operation is in progress")]
+    OperationInProgress,
+    /// The in-memory send reservation could not be read or updated.
+    #[error("the mail send workflow state is unavailable")]
+    StateUnavailable,
+}
+
+/// A user-safe error from clearing an unresolved send marker.
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum MailSendResolutionError {
+    /// The encrypted local cache could not read or update the operation marker.
+    #[error("the local mail cache could not update the send operation")]
+    Cache(#[from] MailCacheError),
+    /// Another send operation remains unresolved.
+    #[error("a previous send operation must be resolved first")]
+    PendingResolutionRequired(PendingMailSend),
+    /// Another send or mail operation already owns the account.
+    #[error("another mail operation is in progress")]
+    OperationInProgress,
+    /// The in-memory send reservation could not be read or updated.
+    #[error("the mail send workflow state is unavailable")]
     StateUnavailable,
 }
 
@@ -109,6 +200,64 @@ pub enum MailSyncProgress {
     Rebuilding,
 }
 
+/// Describes the result after Graph confirms a message's requested read state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadStateUpdateOutcome {
+    /// Graph and the encrypted cache both contain the requested state.
+    ConfirmedAndCached(ReadState),
+    /// Graph confirmed the state, but the encrypted cache needs a later sync.
+    ConfirmedNeedsSync {
+        /// The read state Graph confirmed.
+        state: ReadState,
+        /// The cache error that prevented the confirmed state from being stored.
+        cache_error: MailCacheError,
+    },
+}
+
+/// Describes the result after the provider confirms a message's follow-up flag status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FollowUpFlagUpdateOutcome {
+    /// The provider and encrypted cache contain the requested status.
+    ConfirmedAndCached(FollowUpFlagStatus),
+    /// The provider confirmed the status, but the cache needs a later folder sync.
+    ConfirmedNeedsSync {
+        /// The status confirmed by the provider.
+        status: FollowUpFlagStatus,
+        /// The cache error that prevented the update from being stored.
+        cache_error: MailCacheError,
+    },
+}
+
+/// Describes the local cache state after the provider confirms a message move.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MessageMoveOutcome {
+    /// The provider and encrypted cache both contain the moved message.
+    ConfirmedAndCached,
+    /// The provider confirmed the move, but a later account sync must repair the cache.
+    ConfirmedNeedsSync,
+}
+
+/// Describes a confirmed move into a well-known folder and the cache result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WellKnownFolderMoveOutcome {
+    destination_folder: FolderReference,
+    cache_outcome: MessageMoveOutcome,
+}
+
+impl WellKnownFolderMoveOutcome {
+    /// Returns the account's resolved destination folder.
+    #[must_use]
+    pub fn destination_folder(&self) -> &FolderReference {
+        &self.destination_folder
+    }
+
+    /// Returns the encrypted cache result after the provider confirms the move.
+    #[must_use]
+    pub fn cache_outcome(&self) -> MessageMoveOutcome {
+        self.cache_outcome
+    }
+}
+
 impl MailSyncReport {
     /// Returns the number of visible folders visited.
     #[must_use]
@@ -128,6 +277,7 @@ pub struct MailWorkflow<P, C> {
     provider: P,
     cache: C,
     reservations: Arc<Mutex<ActiveOperations>>,
+    account_sync_ready: AtomicBool,
 }
 
 /// Creates account sessions and shares operation reservations among them.
@@ -135,7 +285,6 @@ pub struct AccountSessionWorkflowFactory<P, F> {
     provider: P,
     cache_factory: F,
     reservations: Arc<Mutex<ActiveOperations>>,
-    calendar_reservations: Arc<Mutex<HashSet<CalendarViewReference>>>,
 }
 
 impl<P, F> AccountSessionWorkflowFactory<P, F> {
@@ -146,7 +295,6 @@ impl<P, F> AccountSessionWorkflowFactory<P, F> {
             provider,
             cache_factory,
             reservations: Arc::new(Mutex::new(ActiveOperations::default())),
-            calendar_reservations: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -174,7 +322,211 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             provider,
             cache,
             reservations,
+            account_sync_ready: AtomicBool::new(false),
         }
+    }
+
+    /// Returns the account's unresolved send marker without contacting Graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the account does not own the cache or the
+    /// encrypted marker cannot be read.
+    pub async fn load_pending_send(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Option<PendingMailSend>, MailCacheError> {
+        self.cache.load_pending_send(account_id).await
+    }
+
+    /// Stages and submits one message without retrying ambiguous outcomes.
+    ///
+    /// The body remains in memory and is never written to the cache. A
+    /// confirmed acceptance clears the marker; an unknown response leaves it
+    /// for explicit user resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error for a definitive rejection, a cache error
+    /// before dispatch, [`MailSendWorkflowError::PendingResolutionRequired`]
+    /// when another send remains unresolved, or
+    /// [`MailSendWorkflowError::OperationInProgress`] when the account is busy.
+    pub async fn send_message(
+        &self,
+        account_id: &AccountId,
+        draft: MailDraft,
+        created_at: SystemTime,
+    ) -> Result<MailSendOutcome, MailSendWorkflowError> {
+        let _reservation = self.reserve_send(account_id)?;
+        self.ensure_no_pending_send(account_id).await?;
+        let pending =
+            draft.pending_send(account_id.clone(), MailSendOperationId::new(), created_at);
+        self.stage_send_marker(&pending).await?;
+        self.submit_staged_send(account_id, MailSubmission::NewMessage(draft), pending)
+            .await
+    }
+
+    /// Stages and submits one plain-text reply to a still-cached message.
+    ///
+    /// The reply body remains in memory. The encrypted marker records only the
+    /// source message metadata; a reply request is never automatically retried.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailSendWorkflowError::ReplySourceNotCached`] when the source
+    /// has left the cache, [`MailSendWorkflowError::Provider`] for an account
+    /// mismatch or definitive provider rejection, a cache error before dispatch,
+    /// or the same unresolved-operation errors as [`Self::send_message`].
+    pub async fn reply_to_message(
+        &self,
+        account_id: &AccountId,
+        draft: MailReplyDraft,
+        created_at: SystemTime,
+    ) -> Result<MailSendOutcome, MailSendWorkflowError> {
+        let _reservation = self.reserve_send(account_id)?;
+        if draft.source().account_id() != account_id {
+            return Err(MailSendProviderError::AccountMismatch.into());
+        }
+        self.ensure_no_pending_send(account_id).await?;
+        let pending = self.stage_reply_send(&draft, created_at).await?;
+        self.submit_staged_send(account_id, MailSubmission::Reply(draft), pending)
+            .await
+    }
+
+    /// Stores source metadata after confirming the reply source remains cached.
+    async fn stage_reply_send(
+        &self,
+        draft: &MailReplyDraft,
+        created_at: SystemTime,
+    ) -> Result<PendingMailSend, MailSendWorkflowError> {
+        let Some((source, _)) = self
+            .cache
+            .read_message(draft.source().folder(), draft.source().message_id())
+            .await?
+        else {
+            return Err(MailSendWorkflowError::ReplySourceNotCached);
+        };
+        let pending = draft.pending_send(
+            MailSendOperationId::new(),
+            source.metadata().subject(),
+            created_at,
+        );
+        self.stage_send_marker(&pending).await?;
+        Ok(pending)
+    }
+
+    async fn ensure_no_pending_send(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<(), MailSendWorkflowError> {
+        if let Some(pending) = self.cache.load_pending_send(account_id).await? {
+            return Err(MailSendWorkflowError::PendingResolutionRequired(pending));
+        }
+        Ok(())
+    }
+
+    async fn stage_send_marker(
+        &self,
+        pending: &PendingMailSend,
+    ) -> Result<(), MailSendWorkflowError> {
+        match self.cache.stage_pending_send(pending).await {
+            Ok(()) => Ok(()),
+            Err(MailCacheError::SendAlreadyPending) => {
+                match self.cache.load_pending_send(pending.account_id()).await? {
+                    Some(pending) => Err(MailSendWorkflowError::PendingResolutionRequired(pending)),
+                    None => Err(MailCacheError::SendAlreadyPending.into()),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn submit_staged_send(
+        &self,
+        account_id: &AccountId,
+        submission: MailSubmission,
+        pending: PendingMailSend,
+    ) -> Result<MailSendOutcome, MailSendWorkflowError> {
+        let provider_result = match submission {
+            MailSubmission::NewMessage(draft) => self.provider.send_mail(account_id, draft).await,
+            MailSubmission::Reply(draft) => self.provider.reply_to_message(account_id, draft).await,
+        };
+        match provider_result {
+            Ok(()) => self.finish_accepted_send(account_id, pending).await,
+            Err(MailSendProviderError::OutcomeUnknown) => {
+                Ok(MailSendOutcome::OutcomeUnknown(pending))
+            }
+            Err(error) => self.finish_rejected_send(account_id, pending, error).await,
+        }
+    }
+
+    async fn finish_rejected_send(
+        &self,
+        account_id: &AccountId,
+        pending: PendingMailSend,
+        error: MailSendProviderError,
+    ) -> Result<MailSendOutcome, MailSendWorkflowError> {
+        match self
+            .cache
+            .clear_pending_send(account_id, pending.operation_id())
+            .await
+        {
+            Ok(()) => Err(MailSendWorkflowError::Provider(error)),
+            Err(cache) => Err(MailSendWorkflowError::RejectedNeedsResolution {
+                pending: Box::new(pending),
+                provider: error,
+                cache,
+            }),
+        }
+    }
+
+    async fn finish_accepted_send(
+        &self,
+        account_id: &AccountId,
+        pending: PendingMailSend,
+    ) -> Result<MailSendOutcome, MailSendWorkflowError> {
+        match self
+            .cache
+            .clear_pending_send(account_id, pending.operation_id())
+            .await
+        {
+            Ok(()) => Ok(MailSendOutcome::Accepted),
+            Err(_) => Ok(MailSendOutcome::AcceptedNeedsResolution(pending)),
+        }
+    }
+
+    /// Clears a matching unresolved marker after explicit user review.
+    ///
+    /// This method never sends or retries a message.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error for an account mismatch or failed transaction,
+    /// [`MailSendResolutionError::PendingResolutionRequired`] when another
+    /// operation is pending, or [`MailSendResolutionError::OperationInProgress`]
+    /// while another mail operation owns the account.
+    pub async fn resolve_pending_send(
+        &self,
+        account_id: &AccountId,
+        operation_id: MailSendOperationId,
+    ) -> Result<(), MailSendResolutionError> {
+        let _reservation = self.reserve_send(account_id).map_err(|error| match error {
+            MailSendWorkflowError::OperationInProgress => {
+                MailSendResolutionError::OperationInProgress
+            }
+            MailSendWorkflowError::StateUnavailable => MailSendResolutionError::StateUnavailable,
+            _ => MailSendResolutionError::StateUnavailable,
+        })?;
+        let Some(pending) = self.cache.load_pending_send(account_id).await? else {
+            return Ok(());
+        };
+        if pending.operation_id() != operation_id {
+            return Err(MailSendResolutionError::PendingResolutionRequired(pending));
+        }
+        self.cache
+            .clear_pending_send(account_id, operation_id)
+            .await?;
+        Ok(())
     }
 
     /// Synchronizes every visible folder and commits each page with its checkpoint.
@@ -199,6 +551,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         progress_handler: &(dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> Result<MailSyncReport, MailWorkflowError> {
         let _reservation = self.reserve_account(account_id)?;
+        self.account_sync_ready.store(false, Ordering::Release);
         let initial_cutoff = sync_started_at
             .checked_sub(INITIAL_SYNC_WINDOW)
             .ok_or(MailWorkflowError::ClockUnavailable)?;
@@ -212,6 +565,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         let page_count = self
             .sync_folders(&folders, initial_cutoff, progress_handler)
             .await?;
+        self.account_sync_ready.store(true, Ordering::Release);
         Ok(MailSyncReport {
             folder_count: folders.len(),
             page_count,
@@ -330,6 +684,18 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         Ok(self.cache.load_sync_state(folder).await?)
     }
 
+    /// Returns whether a folder recovery marker blocks message writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cache error when the marker cannot be read.
+    pub async fn folder_write_sync_required(
+        &self,
+        folder: &FolderReference,
+    ) -> Result<bool, MailWorkflowError> {
+        Ok(self.cache.folder_write_sync_required(folder).await?)
+    }
+
     /// Opens a cached message and fetches its body only when it is not already cached.
     ///
     /// The returned body is safe for the native reader. Raw content remains in the cache.
@@ -362,12 +728,340 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         })
     }
 
+    /// Sets a cached message's read state after Graph confirms the requested value.
+    ///
+    /// The operation commits a recovery marker before dispatching the provider request. A complete
+    /// folder delta round clears the marker after an unknown outcome or process exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the request is rejected, a cache error when the message is
+    /// absent or the marker cannot be committed, [`MailWorkflowError::FolderSyncRequired`] while
+    /// an earlier update awaits reconciliation, or [`MailWorkflowError::OperationInProgress`]
+    /// when another operation owns the account or folder.
+    pub async fn set_message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        requested: ReadState,
+    ) -> Result<ReadStateUpdateOutcome, MailWorkflowError> {
+        let _reservation = self.prepare_message_write(folder, message_id).await?;
+
+        let confirmed = self
+            .confirm_message_update(
+                folder,
+                requested,
+                self.provider
+                    .set_message_read_state(folder, message_id, requested),
+            )
+            .await?;
+
+        self.store_confirmed_read_state(folder, message_id, confirmed)
+            .await
+    }
+
+    async fn store_confirmed_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        confirmed: ReadState,
+    ) -> Result<ReadStateUpdateOutcome, MailWorkflowError> {
+        match self
+            .cache
+            .set_message_read_state(folder, message_id, confirmed)
+            .await
+        {
+            Ok(()) => Ok(ReadStateUpdateOutcome::ConfirmedAndCached(confirmed)),
+            Err(cache_error) => Ok(ReadStateUpdateOutcome::ConfirmedNeedsSync {
+                state: confirmed,
+                cache_error,
+            }),
+        }
+    }
+
+    /// Sets a cached message's follow-up flag status after the provider confirms it.
+    ///
+    /// A SQLCipher recovery marker is committed before the provider request. A complete folder
+    /// delta round removes the marker after an unknown outcome or process exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the request is rejected, a cache error when the message is
+    /// absent or the marker cannot be committed, [`MailWorkflowError::FolderSyncRequired`] while
+    /// an earlier update awaits reconciliation, or [`MailWorkflowError::OperationInProgress`]
+    /// when another operation owns the account or folder.
+    pub async fn set_message_follow_up_flag_status(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        requested: FollowUpFlagStatus,
+    ) -> Result<FollowUpFlagUpdateOutcome, MailWorkflowError> {
+        let _reservation = self.prepare_message_write(folder, message_id).await?;
+        let confirmed = self
+            .confirm_message_update(
+                folder,
+                requested,
+                self.provider
+                    .set_message_follow_up_flag_status(folder, message_id, requested),
+            )
+            .await?;
+
+        match self
+            .cache
+            .set_message_follow_up_flag_status(folder, message_id, confirmed)
+            .await
+        {
+            Ok(()) => Ok(FollowUpFlagUpdateOutcome::ConfirmedAndCached(confirmed)),
+            Err(cache_error) => Ok(FollowUpFlagUpdateOutcome::ConfirmedNeedsSync {
+                status: confirmed,
+                cache_error,
+            }),
+        }
+    }
+
+    /// Moves a cached message between two visible folders in one account.
+    ///
+    /// The operation holds both folder reservations through provider dispatch
+    /// and the cache transaction. A confirmed provider move remains successful
+    /// when the cache transaction fails; the caller then synchronizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailWorkflowError::InvalidMoveDestination`] for identical,
+    /// cross-account, or non-visible folders, a cache error when the folder
+    /// tree or source message is unavailable, or a provider error when Graph
+    /// does not confirm the move,
+    /// or [`MailWorkflowError::OperationInProgress`] when an affected scope is busy.
+    pub async fn move_message(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+        destination_folder: &FolderReference,
+    ) -> Result<MessageMoveOutcome, MailWorkflowError> {
+        validate_move_folder_pair(source_folder, destination_folder)?;
+        let _reservation =
+            self.reserve_folders(&[source_folder.clone(), destination_folder.clone()])?;
+        self.ensure_account_sync_ready()?;
+        self.ensure_visible_move_folders(
+            source_folder,
+            destination_folder,
+            MailWorkflowError::InvalidMoveDestination,
+        )
+        .await?;
+        self.ensure_move_folders_writable(source_folder, destination_folder)
+            .await?;
+        self.ensure_cached_message(source_folder, message_id)
+            .await?;
+        self.confirm_and_cache_move(source_folder, message_id, destination_folder)
+            .await
+    }
+
+    /// Moves a cached message into a well-known folder in the active account.
+    ///
+    /// The workflow reserves the source before resolving the destination, then
+    /// holds both folder reservations through provider confirmation and cache reconciliation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailWorkflowError::AccountSyncRequired`] before a successful
+    /// session sync, [`MailWorkflowError::AlreadyInWellKnownFolder`] when the
+    /// source is already the requested folder,
+    /// [`MailWorkflowError::WellKnownFolderUnavailable`] when the resolved
+    /// destination is not visible in this account,
+    /// [`MailWorkflowError::FolderSyncRequired`] when either folder needs
+    /// reconciliation, a cache or provider error when the message cannot be
+    /// moved, or [`MailWorkflowError::OperationInProgress`] when an affected
+    /// scope is busy.
+    pub async fn move_message_to_well_known_folder(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+        destination: WellKnownMailFolder,
+    ) -> Result<WellKnownFolderMoveOutcome, MailWorkflowError> {
+        let _source_reservation = self.reserve_folders(std::slice::from_ref(source_folder))?;
+        self.ensure_account_sync_ready()?;
+        self.ensure_cached_message(source_folder, message_id)
+            .await?;
+
+        let destination_folder = self
+            .resolve_well_known_folder(source_folder, destination)
+            .await?;
+
+        let _destination_reservation =
+            self.reserve_folders(std::slice::from_ref(&destination_folder))?;
+        self.ensure_visible_move_folders(
+            source_folder,
+            &destination_folder,
+            MailWorkflowError::WellKnownFolderUnavailable(destination),
+        )
+        .await?;
+        self.ensure_move_folders_writable(source_folder, &destination_folder)
+            .await?;
+        let cache_outcome = self
+            .confirm_and_cache_move(source_folder, message_id, &destination_folder)
+            .await?;
+        Ok(WellKnownFolderMoveOutcome {
+            destination_folder,
+            cache_outcome,
+        })
+    }
+
+    async fn resolve_well_known_folder(
+        &self,
+        source_folder: &FolderReference,
+        destination: WellKnownMailFolder,
+    ) -> Result<FolderReference, MailWorkflowError> {
+        let destination_folder = self
+            .provider
+            .well_known_folder(source_folder.account_id(), destination)
+            .await?;
+        if destination_folder.account_id() != source_folder.account_id() {
+            return Err(MailWorkflowError::WellKnownFolderUnavailable(destination));
+        }
+        if source_folder == &destination_folder {
+            return Err(MailWorkflowError::AlreadyInWellKnownFolder(destination));
+        }
+        Ok(destination_folder)
+    }
+
+    async fn ensure_visible_move_folders(
+        &self,
+        source_folder: &FolderReference,
+        destination_folder: &FolderReference,
+        destination_unavailable: MailWorkflowError,
+    ) -> Result<(), MailWorkflowError> {
+        let folders = self.cache.list_folders(source_folder.account_id()).await?;
+        if !mail_folder_is_visible(&folders, source_folder) {
+            return Err(MailWorkflowError::InvalidMoveDestination);
+        }
+        if !mail_folder_is_visible(&folders, destination_folder) {
+            return Err(destination_unavailable);
+        }
+        Ok(())
+    }
+
+    async fn ensure_cached_message(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> Result<(), MailWorkflowError> {
+        if self
+            .cache
+            .read_message(source_folder, message_id)
+            .await?
+            .is_some()
+        {
+            Ok(())
+        } else {
+            Err(MailCacheError::MessageNotCached.into())
+        }
+    }
+
+    async fn ensure_move_folders_writable(
+        &self,
+        source_folder: &FolderReference,
+        destination_folder: &FolderReference,
+    ) -> Result<(), MailWorkflowError> {
+        for folder in [source_folder, destination_folder] {
+            if self.cache.folder_write_sync_required(folder).await? {
+                return Err(MailWorkflowError::FolderSyncRequired);
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_account_sync_ready(&self) -> Result<(), MailWorkflowError> {
+        if self.account_sync_ready.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(MailWorkflowError::AccountSyncRequired)
+        }
+    }
+
+    async fn confirm_and_cache_move(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+        destination_folder: &FolderReference,
+    ) -> Result<MessageMoveOutcome, MailWorkflowError> {
+        let mut reconciliation = MoveReconciliationGuard::new(&self.account_sync_ready);
+        if let Err(error) = self
+            .provider
+            .move_message(source_folder, message_id, destination_folder)
+            .await
+        {
+            if error != MailOperationError::MoveOutcomeUnknown {
+                reconciliation.complete();
+            }
+            return Err(error.into());
+        }
+        match self
+            .cache
+            .move_message(source_folder, destination_folder, message_id)
+            .await
+        {
+            Ok(()) => {
+                reconciliation.complete();
+                Ok(MessageMoveOutcome::ConfirmedAndCached)
+            }
+            Err(_) => Ok(MessageMoveOutcome::ConfirmedNeedsSync),
+        }
+    }
+
+    async fn prepare_message_write(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> Result<OperationReservation, MailWorkflowError> {
+        let reservation = self.reserve_folders(std::slice::from_ref(folder))?;
+        if self.cache.folder_write_sync_required(folder).await? {
+            return Err(MailWorkflowError::FolderSyncRequired);
+        }
+        if self
+            .cache
+            .message_read_state(folder, message_id)
+            .await?
+            .is_none()
+        {
+            return Err(MailCacheError::MessageNotCached.into());
+        }
+        self.cache.require_folder_write_sync(folder).await?;
+        Ok(reservation)
+    }
+
+    async fn confirm_message_update<T, F>(
+        &self,
+        folder: &FolderReference,
+        requested: T,
+        provider_update: F,
+    ) -> Result<T, MailWorkflowError>
+    where
+        T: Copy + Eq + Send,
+        F: Future<Output = Result<T, MailOperationError>> + Send,
+    {
+        let confirmed = match provider_update.await {
+            Ok(confirmed) => confirmed,
+            Err(MailOperationError::MessageUpdateOutcomeUnknown) => {
+                return Err(MailOperationError::MessageUpdateOutcomeUnknown.into());
+            }
+            Err(error) => {
+                self.cache
+                    .clear_folder_write_sync_requirement(folder)
+                    .await?;
+                return Err(error.into());
+            }
+        };
+        (confirmed == requested)
+            .then_some(confirmed)
+            .ok_or_else(|| MailOperationError::MessageUpdateOutcomeUnknown.into())
+    }
+
     async fn read_or_fetch_message_body(
         &self,
         folder: &FolderReference,
         message_id: &MessageId,
     ) -> Result<(MailMessage, MessageBody, bool), MailWorkflowError> {
-        let _reservation = self.reserve_folder(folder)?;
+        let _reservation = self.reserve_folders(std::slice::from_ref(folder))?;
         let Some((message, cached_body)) = self.cache.read_message(folder, message_id).await?
         else {
             return Err(MailCacheError::MessageNotCached.into());
@@ -388,26 +1082,32 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// Returns a cache error when the account does not own this cache or removal fails.
     pub async fn remove_account_cache(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
+        let _reservation =
+            reserve_account(&self.reservations, account_id).map_err(MailCacheError::from)?;
         self.cache.remove_account(account_id).await?;
         Ok(())
     }
 
-    fn reserve_folder(
+    /// Atomically reserves every requested folder against account and folder operations.
+    fn reserve_folders(
         &self,
-        folder: &FolderReference,
+        folders: &[FolderReference],
     ) -> Result<OperationReservation, MailWorkflowError> {
+        let folders = folders.iter().cloned().collect::<HashSet<_>>();
         let mut reservations = self
             .reservations
             .lock()
             .map_err(|_| MailWorkflowError::StateUnavailable)?;
-        if reservations.accounts.contains(folder.account_id())
-            || !reservations.folders.insert(folder.clone())
-        {
+        if folders.iter().any(|folder| {
+            reservations.accounts.contains(folder.account_id())
+                || reservations.folders.contains(folder)
+        }) {
             return Err(MailWorkflowError::OperationInProgress);
         }
+        reservations.folders.extend(folders.iter().cloned());
         Ok(OperationReservation {
             reservations: Arc::clone(&self.reservations),
-            key: ReservationKey::Folder(folder.clone()),
+            key: ReservationKey::Folders(folders),
         })
     }
 
@@ -415,22 +1115,20 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         &self,
         account: &AccountId,
     ) -> Result<OperationReservation, MailWorkflowError> {
-        let mut reservations = self
-            .reservations
-            .lock()
-            .map_err(|_| MailWorkflowError::StateUnavailable)?;
-        if reservations.accounts.contains(account)
-            || reservations
-                .folders
-                .iter()
-                .any(|folder| folder.account_id() == account)
-        {
-            return Err(MailWorkflowError::OperationInProgress);
-        }
-        reservations.accounts.insert(account.clone());
-        Ok(OperationReservation {
-            reservations: Arc::clone(&self.reservations),
-            key: ReservationKey::Account(account.clone()),
+        reserve_account(&self.reservations, account).map_err(|error| match error {
+            AccountReservationError::OperationInProgress => MailWorkflowError::OperationInProgress,
+            AccountReservationError::StateUnavailable => MailWorkflowError::StateUnavailable,
+        })
+    }
+
+    fn reserve_send(
+        &self,
+        account: &AccountId,
+    ) -> Result<OperationReservation, MailSendWorkflowError> {
+        self.reserve_account(account).map_err(|error| match error {
+            MailWorkflowError::OperationInProgress => MailSendWorkflowError::OperationInProgress,
+            MailWorkflowError::StateUnavailable => MailSendWorkflowError::StateUnavailable,
+            _ => MailSendWorkflowError::StateUnavailable,
         })
     }
 }
@@ -455,7 +1153,7 @@ where
                 Arc::new(CalendarWorkflow::with_reservations(
                     self.provider.clone(),
                     cache,
-                    Arc::clone(&self.calendar_reservations),
+                    Arc::clone(&self.reservations),
                 ));
             Ok(Arc::new(AccountSessionWorkflow::new(
                 mail_workflow,
@@ -468,8 +1166,53 @@ where
         &'a self,
         account_id: &'a AccountId,
     ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
-        Box::pin(self.cache_factory.remove_for_account(account_id))
+        Box::pin(async move {
+            let _reservation =
+                reserve_account(&self.reservations, account_id).map_err(MailCacheError::from)?;
+            self.cache_factory.remove_for_account(account_id).await
+        })
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum AccountReservationError {
+    OperationInProgress,
+    StateUnavailable,
+}
+
+impl From<AccountReservationError> for MailCacheError {
+    fn from(error: AccountReservationError) -> Self {
+        match error {
+            AccountReservationError::OperationInProgress => Self::OperationInProgress,
+            AccountReservationError::StateUnavailable => Self::Unavailable,
+        }
+    }
+}
+
+pub(crate) fn reserve_account(
+    active: &Arc<Mutex<ActiveOperations>>,
+    account: &AccountId,
+) -> Result<OperationReservation, AccountReservationError> {
+    let mut reservations = active
+        .lock()
+        .map_err(|_| AccountReservationError::StateUnavailable)?;
+    if reservations.accounts.contains(account)
+        || reservations
+            .folders
+            .iter()
+            .any(|folder| folder.account_id() == account)
+        || reservations
+            .calendar_views
+            .iter()
+            .any(|view| view.account_id() == account)
+    {
+        return Err(AccountReservationError::OperationInProgress);
+    }
+    reservations.accounts.insert(account.clone());
+    Ok(OperationReservation {
+        reservations: Arc::clone(active),
+        key: ReservationKey::Account(account.clone()),
+    })
 }
 
 fn request_cursor(
@@ -481,20 +1224,81 @@ fn request_cursor(
     }
 }
 
+fn validate_move_folder_pair(
+    source_folder: &FolderReference,
+    destination_folder: &FolderReference,
+) -> Result<(), MailWorkflowError> {
+    if source_folder.account_id() == destination_folder.account_id()
+        && source_folder != destination_folder
+    {
+        Ok(())
+    } else {
+        Err(MailWorkflowError::InvalidMoveDestination)
+    }
+}
+
+pub(crate) fn reserve_calendar_view(
+    active: &Arc<Mutex<ActiveOperations>>,
+    view: &CalendarViewReference,
+) -> Result<OperationReservation, AccountReservationError> {
+    let mut reservations = active
+        .lock()
+        .map_err(|_| AccountReservationError::StateUnavailable)?;
+    if reservations.accounts.contains(view.account_id())
+        || !reservations.calendar_views.insert(view.clone())
+    {
+        return Err(AccountReservationError::OperationInProgress);
+    }
+    Ok(OperationReservation {
+        reservations: Arc::clone(active),
+        key: ReservationKey::CalendarView(view.clone()),
+    })
+}
+
 #[derive(Default)]
-struct ActiveOperations {
+pub(crate) struct ActiveOperations {
     accounts: HashSet<AccountId>,
     folders: HashSet<FolderReference>,
+    calendar_views: HashSet<CalendarViewReference>,
 }
 
 enum ReservationKey {
     Account(AccountId),
-    Folder(FolderReference),
+    Folders(HashSet<FolderReference>),
+    CalendarView(CalendarViewReference),
 }
 
-struct OperationReservation {
+pub(crate) struct OperationReservation {
     reservations: Arc<Mutex<ActiveOperations>>,
     key: ReservationKey,
+}
+
+/// Marks the session unsynchronized when a move ends without a definitive outcome.
+#[must_use = "dropping an unresolved move guard blocks message moves until sync"]
+struct MoveReconciliationGuard<'a> {
+    account_sync_ready: &'a AtomicBool,
+    complete: bool,
+}
+
+impl<'a> MoveReconciliationGuard<'a> {
+    fn new(account_sync_ready: &'a AtomicBool) -> Self {
+        Self {
+            account_sync_ready,
+            complete: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.complete = true;
+    }
+}
+
+impl Drop for MoveReconciliationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.account_sync_ready.store(false, Ordering::Release);
+        }
+    }
 }
 
 impl Drop for OperationReservation {
@@ -504,8 +1308,13 @@ impl Drop for OperationReservation {
                 ReservationKey::Account(account) => {
                     reservations.accounts.remove(account);
                 }
-                ReservationKey::Folder(folder) => {
-                    reservations.folders.remove(folder);
+                ReservationKey::Folders(folders) => {
+                    for folder in folders {
+                        reservations.folders.remove(folder);
+                    }
+                }
+                ReservationKey::CalendarView(view) => {
+                    reservations.calendar_views.remove(view);
                 }
             }
         }
