@@ -1,0 +1,186 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+// This file tests the folder copying with IMAP. In particular, we're
+// going to test copying local folders to imap servers, but other tests
+// could be added.
+
+var { MessageGenerator } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
+);
+var { PromiseTestUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
+);
+
+var gEmptyLocal1, gEmptyLocal2, gEmptyLocal3, gNotEmptyLocal4, gNotEmptyLocal5;
+
+var { MailServices } = ChromeUtils.importESModule(
+  "resource:///modules/MailServices.sys.mjs"
+);
+
+add_setup(function () {
+  setupIMAPPump();
+
+  gEmptyLocal1 = localAccountUtils.rootFolder.createLocalSubfolder("empty 1");
+  gEmptyLocal2 = localAccountUtils.rootFolder.createLocalSubfolder("empty 2");
+  gEmptyLocal3 = localAccountUtils.rootFolder.createLocalSubfolder("empty 3");
+  gNotEmptyLocal4 =
+    localAccountUtils.rootFolder.createLocalSubfolder("not empty 4");
+  gNotEmptyLocal5 =
+    localAccountUtils.rootFolder.createLocalSubfolder("not empty 5");
+
+  const messageGenerator = new MessageGenerator();
+  const message = messageGenerator.makeMessage();
+  gNotEmptyLocal4.QueryInterface(Ci.nsIMsgLocalMailFolder);
+  gNotEmptyLocal4.addMessage(message.toMessageString());
+  gNotEmptyLocal5.QueryInterface(Ci.nsIMsgLocalMailFolder);
+  gNotEmptyLocal5.addMessage(messageGenerator.makeMessage().toMessageString());
+
+  // these hacks are required because we've created the inbox before
+  // running initial folder discovery, and adding the folder bails
+  // out before we set it as verified online, so we bail out, and
+  // then remove the INBOX folder since it's not verified.
+  IMAPPump.inbox.hierarchyDelimiter = "/";
+  IMAPPump.inbox.verifiedAsOnlineFolder = true;
+});
+
+add_task(async function copyFolder1() {
+  const copyListener = new PromiseTestUtils.PromiseCopyListener();
+  MailServices.copy.copyFolder(
+    gEmptyLocal1,
+    IMAPPump.inbox,
+    false,
+    copyListener,
+    null
+  );
+  await copyListener.promise;
+});
+
+add_task(async function copyFolder2() {
+  const copyListener = new PromiseTestUtils.PromiseCopyListener();
+  MailServices.copy.copyFolder(
+    gEmptyLocal2,
+    IMAPPump.inbox,
+    false,
+    copyListener,
+    null
+  );
+  await copyListener.promise;
+});
+
+add_task(async function copyFolder3() {
+  const copyListener = new PromiseTestUtils.PromiseCopyListener();
+  MailServices.copy.copyFolder(
+    gEmptyLocal3,
+    IMAPPump.inbox,
+    false,
+    copyListener,
+    null
+  );
+  await copyListener.promise;
+});
+
+add_task(function verifyFolders() {
+  const folder1 = IMAPPump.inbox.getChildNamed("empty 1");
+  const folder2 = IMAPPump.inbox.getChildNamed("empty 2");
+  const folder3 = IMAPPump.inbox.getChildNamed("empty 3");
+  Assert.notStrictEqual(folder1, null);
+  Assert.notStrictEqual(folder2, null);
+  Assert.notStrictEqual(folder3, null);
+});
+
+add_task(async function moveImapFolder1() {
+  const folder1 = IMAPPump.inbox.getChildNamed("empty 1");
+  const folder2 = IMAPPump.inbox.getChildNamed("empty 2");
+  const copyListener = new PromiseTestUtils.PromiseCopyListener();
+  MailServices.copy.copyFolder(folder2, folder1, true, copyListener, null);
+  await copyListener.promise;
+});
+
+add_task(async function moveImapFolder2() {
+  const folder1 = IMAPPump.inbox.getChildNamed("empty 1");
+  const folder3 = IMAPPump.inbox.getChildNamed("empty 3");
+  const copyListener = new PromiseTestUtils.PromiseCopyListener();
+  MailServices.copy.copyFolder(folder3, folder1, true, copyListener, null);
+  await copyListener.promise;
+});
+
+add_task(function verifyImapFolders() {
+  const folder1 = IMAPPump.inbox.getChildNamed("empty 1");
+  const folder2 = folder1.getChildNamed("empty 2");
+  const folder3 = folder1.getChildNamed("empty 3");
+  Assert.notStrictEqual(folder1, null);
+  Assert.notStrictEqual(folder2, null);
+  Assert.notStrictEqual(folder3, null);
+});
+
+// The folder pane offers this copy through "Copy To" and through a copy-drag,
+// so the source folder must survive it and the copy must carry the messages.
+add_task(async function copyImapFolderWithinAccount() {
+  let copyListener = new PromiseTestUtils.PromiseCopyListener();
+  MailServices.copy.copyFolder(
+    gNotEmptyLocal5,
+    IMAPPump.inbox,
+    false,
+    copyListener,
+    null
+  );
+  await copyListener.promise;
+
+  const source = IMAPPump.inbox
+    .getChildNamed("not empty 5")
+    .QueryInterface(Ci.nsIMsgImapMailFolder);
+  const destination = IMAPPump.inbox.getChildNamed("empty 1");
+
+  // Only messages the source folder knows about are copied, so sync it first.
+  let listener = new PromiseTestUtils.PromiseUrlListener();
+  source.updateFolderWithListener(null, listener);
+  await listener.promise;
+  Assert.equal([...source.messages].length, 1, "source folder is populated");
+
+  copyListener = new PromiseTestUtils.PromiseCopyListener();
+  MailServices.copy.copyFolder(source, destination, false, copyListener, null);
+  await copyListener.promise;
+
+  const copied = destination
+    .getChildNamed("not empty 5")
+    .QueryInterface(Ci.nsIMsgImapMailFolder);
+  listener = new PromiseTestUtils.PromiseUrlListener();
+  copied.updateFolderWithListener(null, listener);
+  await listener.promise;
+
+  Assert.equal(
+    [...copied.messages].length,
+    1,
+    "the copy should hold the message of the source folder"
+  );
+  Assert.equal(
+    [...source.messages].length,
+    1,
+    "the source folder should remain in place with its message"
+  );
+});
+
+add_task(async function testImapFolderCopyFailure() {
+  IMAPPump.daemon.commandToFail = "APPEND";
+  const copyListener = new PromiseTestUtils.PromiseCopyListener();
+  MailServices.copy.copyFolder(
+    gNotEmptyLocal4,
+    IMAPPump.inbox,
+    false,
+    copyListener,
+    null
+  );
+  await Assert.rejects(
+    copyListener.promise,
+    e => {
+      return e.message == Cr.NS_MSG_ERROR_IMAP_COMMAND_FAILED;
+    },
+    "NS_MSG_ERROR_IMAP_COMMAND_FAILED should be the cause of the error"
+  );
+});
+
+add_task(function teardown() {
+  teardownIMAPPump();
+});

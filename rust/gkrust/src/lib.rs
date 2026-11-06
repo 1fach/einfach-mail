@@ -1,0 +1,13 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+// Add new crates to Cargo.toml and build them here to get into gkrust/libxul
+extern crate gkrust_shared as _;
+
+extern crate ews_xpcom as _;
+extern crate graph_xpcom as _;
+extern crate mailnews_string_glue as _;
+extern crate mailnews_ui_glue as _;
+extern crate protocol_client_service as _;
+extern crate sys_tray as _;

@@ -1,0 +1,63 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#ifndef COMM_MAILNEWS_LOCAL_SRC_NSMAILBOXSERVICE_H_
+#define COMM_MAILNEWS_LOCAL_SRC_NSMAILBOXSERVICE_H_
+
+#include "nscore.h"
+#include "nsISupports.h"
+
+#include "nsIMsgFolder.h"
+#include "nsIMsgMessageService.h"
+#include "nsIMsgWindow.h"
+#include "nsMailboxUrl.h"
+#include "nsIURI.h"
+#include "nsIUrlListener.h"
+#include "nsIProtocolHandler.h"
+
+class nsMailboxService : public nsIMsgMessageService,
+                         public nsIMsgMessageFetchPartService,
+                         public nsIProtocolHandler {
+ public:
+  nsMailboxService();
+  static nsresult NewURI(const nsACString& aSpec, const char* aOriginCharset,
+                         nsIURI* aBaseURI, nsIURI** _retval);
+
+  /**
+   * Create a pop3:// URI from a spec containing a ?uidl= query parameter.
+   * Encodes folder URI and message key so Pop3Channel can find the folder
+   * and reconstruct the original message URI.
+   */
+  static nsresult CreatePop3URI(const nsACString& aSpec, nsIURI* aBaseURI,
+                                nsIURI** _retval);
+
+  NS_DECL_ISUPPORTS
+  NS_DECL_NSIMSGMESSAGESERVICE
+  NS_DECL_NSIMSGMESSAGEFETCHPARTSERVICE
+  NS_DECL_NSIPROTOCOLHANDLER
+
+ protected:
+  virtual ~nsMailboxService();
+
+  // helper functions used by the service
+  nsresult PrepareMessageUrl(const nsACString& aSrcMsgMailboxURI,
+                             nsIUrlListener* aUrlListener,
+                             MailboxAction aMailboxAction,
+                             nsIMsgMailNewsUrl** aMailboxUrl,
+                             nsIMsgWindow* msgWindow);
+
+  nsresult RunMailboxUrl(nsIURI* aMailboxUrl,
+                         nsISupports* aDisplayConsumer = nullptr);
+
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY nsresult FetchMessage(
+      const nsACString& aMessageURI, nsISupports* aDisplayConsumer,
+      nsIMsgWindow* aMsgWindow, nsIUrlListener* aUrlListener,
+      const char* aFileName, /* only used by open attachment */
+      MailboxAction mailboxAction, bool aAutodetectCharset, nsIURI** aURL);
+
+  nsresult DecomposeMailboxURI(const nsACString& aMessageURI,
+                               nsIMsgFolder** aFolder, nsMsgKey* aMsgKey);
+};
+
+#endif  // COMM_MAILNEWS_LOCAL_SRC_NSMAILBOXSERVICE_H_

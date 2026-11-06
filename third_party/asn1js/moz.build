@@ -1,0 +1,17 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, you can obtain one at http://mozilla.org/MPL/2.0/.
+
+EXTRA_JS_MODULES += [
+    "asn1js.mjs",
+]
+
+LICENSES += ["asn1js"]
+LICENSES["asn1js"].title = "ASN1.js License"
+LICENSES["asn1js"].notice = """
+<p>This license applies to the following files:</p>
+"""
+
+LICENSED_UNDER = [
+    "asn1js",
+]

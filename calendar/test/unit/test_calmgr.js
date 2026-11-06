@@ -1,0 +1,534 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+var { cal } = ChromeUtils.importESModule("resource:///modules/calendar/calUtils.sys.mjs");
+var { CalReadableStreamFactory } = ChromeUtils.importESModule(
+  "resource:///modules/CalReadableStreamFactory.sys.mjs"
+);
+var { XPCOMUtils } = ChromeUtils.importESModule("resource://gre/modules/XPCOMUtils.sys.mjs");
+
+ChromeUtils.defineESModuleGetters(this, {
+  CalEvent: "resource:///modules/CalEvent.sys.mjs",
+});
+
+/**
+ * Tests the calICalendarManager interface.
+ *
+ * @implements {calICalendarManagerObserver}
+ */
+class CalendarManagerObserver {
+  QueryInterface = ChromeUtils.generateQI(["calICalendarManagerObserver"]);
+
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.registered = [];
+    this.unregistering = [];
+    this.deleting = [];
+    this.orderChanged = 0;
+  }
+
+  check({ unregistering, registered, deleting, orderChanged = 0 }) {
+    equal(this.unregistering[0], unregistering);
+    equal(this.registered[0], registered);
+    equal(this.deleting[0], deleting);
+    equal(this.orderChanged, orderChanged);
+
+    this.reset();
+  }
+
+  onCalendarRegistered(calendar) {
+    this.registered.push(calendar.id);
+  }
+
+  onCalendarUnregistering(calendar) {
+    this.unregistering.push(calendar.id);
+  }
+
+  onCalendarDeleting(calendar) {
+    this.deleting.push(calendar.id);
+  }
+
+  onCalendarOrderChanged() {
+    this.orderChanged++;
+  }
+}
+
+add_task(function test_builtin_registration() {
+  function checkCalendarCount(net, rdonly, all) {
+    equal(cal.manager.networkCalendarCount, net);
+    equal(cal.manager.readOnlyCalendarCount, rdonly);
+    equal(cal.manager.calendarCount, all);
+  }
+
+  // Initially there should be no calendars.
+  checkCalendarCount(0, 0, 0);
+
+  // Create a local memory calendar, this shouldn't register any calendars.
+  const memory = cal.manager.createCalendar("memory", Services.io.newURI("moz-memory-calendar://"));
+  checkCalendarCount(0, 0, 0);
+
+  // Register an observer to test it.
+  const calmgrObserver = new CalendarManagerObserver();
+
+  let readOnly = false;
+  /** @implements {calIObserver} */
+  const calendarObserver = {
+    QueryInterface: ChromeUtils.generateQI(["calIObserver"]),
+    onPropertyChanged(aCalendar, aName, aValue) {
+      equal(aCalendar.id, memory.id);
+      equal(aName, "readOnly");
+      readOnly = aValue;
+    },
+  };
+
+  memory.addObserver(calendarObserver);
+  cal.manager.addObserver(calmgrObserver);
+
+  // Register the calendar and check if its counted and observed.
+  cal.manager.registerCalendar(memory);
+  calmgrObserver.check({ registered: memory.id });
+  checkCalendarCount(0, 0, 1);
+
+  // The calendar should now have an id.
+  notEqual(memory.id, null);
+
+  // And be in the list of calendars.
+  equal(memory, cal.manager.getCalendarById(memory.id));
+  ok(cal.manager.getCalendars().some(x => x.id == memory.id));
+
+  // Make it readonly and check if the observer caught it.
+  memory.setProperty("readOnly", true);
+  equal(readOnly, true);
+
+  // Now unregister it.
+  cal.manager.unregisterCalendar(memory);
+  calmgrObserver.check({ unregistering: memory.id });
+  checkCalendarCount(0, 0, 0);
+
+  // The calendar shouldn't be in the list of ids.
+  equal(cal.manager.getCalendarById(memory.id), null);
+  ok(cal.manager.getCalendars().every(x => x.id != memory.id));
+
+  // And finally delete it.
+  cal.manager.removeCalendar(memory, Ci.calICalendarManager.REMOVE_NO_UNREGISTER);
+  calmgrObserver.check({ deleting: memory.id });
+  checkCalendarCount(0, 0, 0);
+
+  // Now remove the observer again.
+  cal.manager.removeObserver(calmgrObserver);
+  memory.removeObserver(calendarObserver);
+
+  // Check if removing it actually worked.
+  cal.manager.registerCalendar(memory);
+  cal.manager.removeCalendar(memory);
+  memory.setProperty("readOnly", false);
+  calmgrObserver.check({});
+  equal(readOnly, true);
+  checkCalendarCount(0, 0, 0);
+});
+
+add_task(async function test_dynamic_registration() {
+  class CalendarProvider extends cal.provider.BaseClass {
+    QueryInterface = ChromeUtils.generateQI(["calICalendar"]);
+    type = "blm";
+
+    constructor() {
+      super();
+      this.initProviderBase();
+    }
+
+    getItems() {
+      return CalReadableStreamFactory.createEmptyReadableStream();
+    }
+  }
+
+  function checkCalendar(expectedCount = 1) {
+    const calendars = cal.manager.getCalendars();
+    equal(calendars.length, expectedCount);
+    const calendar = calendars[0];
+
+    if (expectedCount > 0) {
+      notEqual(calendar, null);
+    }
+    return calendar;
+  }
+
+  const calmgrObserver = new CalendarManagerObserver();
+  cal.manager.addObserver(calmgrObserver);
+  equal(cal.manager.calendarCount, 0);
+
+  // No provider registered.
+  let calendar = cal.manager.createCalendar("blm", Services.io.newURI("black-lives-matter://"));
+  equal(calendar, null);
+  ok(!cal.manager.hasCalendarProvider("blm"));
+
+  // Register dynamic provider.
+  cal.manager.registerCalendarProvider("blm", CalendarProvider);
+  calendar = cal.manager.createCalendar("blm", Services.io.newURI("black-lives-matter://"));
+  notEqual(calendar, null);
+  ok(calendar.wrappedJSObject instanceof CalendarProvider);
+  ok(cal.manager.hasCalendarProvider("blm"));
+
+  // Register a calendar using it.
+  cal.manager.registerCalendar(calendar);
+  calendar = checkCalendar();
+
+  const originalId = calendar.id;
+  calmgrObserver.check({ registered: originalId });
+
+  // Unregister the provider from under its feet.
+  cal.manager.unregisterCalendarProvider("blm");
+  calendar = checkCalendar();
+  calmgrObserver.check({ unregistering: originalId, registered: originalId });
+
+  equal(calendar.type, "blm");
+  equal(calendar.getProperty("force-disabled"), true);
+  equal(calendar.id, originalId);
+
+  // Re-register the provider should reactive it.
+  cal.manager.registerCalendarProvider("blm", CalendarProvider);
+  calendar = checkCalendar();
+  calmgrObserver.check({ unregistering: originalId, registered: originalId });
+
+  equal(calendar.type, "blm");
+  notEqual(calendar.getProperty("force-disabled"), true);
+  equal(calendar.id, originalId);
+
+  // Make sure calendar is loaded from prefs.
+  cal.manager.unregisterCalendarProvider("blm");
+  calmgrObserver.check({ unregistering: originalId, registered: originalId });
+
+  cal.manager.wrappedJSObject.mCache = null;
+  calmgrObserver.check({});
+
+  calendar = checkCalendar();
+  equal(calendar.type, "blm");
+  equal(calendar.getProperty("force-disabled"), true);
+  equal(calendar.id, originalId);
+
+  // Unregister the calendar for cleanup.
+  cal.manager.unregisterCalendar(calendar);
+  checkCalendar(0);
+  calmgrObserver.check({ unregistering: originalId });
+});
+
+add_task(function test_calobserver() {
+  function checkCounters(add, modify, del, alladd, allmodify, alldel) {
+    equal(calcounter.addItem, add);
+    equal(calcounter.modifyItem, modify);
+    equal(calcounter.deleteItem, del);
+    equal(allcounter.addItem, alladd === undefined ? add : alladd);
+    equal(allcounter.modifyItem, allmodify === undefined ? modify : allmodify);
+    equal(allcounter.deleteItem, alldel === undefined ? del : alldel);
+    resetCounters();
+  }
+  function resetCounters() {
+    calcounter = { addItem: 0, modifyItem: 0, deleteItem: 0 };
+    allcounter = { addItem: 0, modifyItem: 0, deleteItem: 0 };
+  }
+
+  // First of all we need a local calendar to work on and some variables
+  const memory = cal.manager.createCalendar("memory", Services.io.newURI("moz-memory-calendar://"));
+  const memory2 = cal.manager.createCalendar(
+    "memory",
+    Services.io.newURI("moz-memory-calendar://")
+  );
+  let calcounter, allcounter;
+
+  // These observers will end up counting calls which we will use later on
+  /** @implements {calIObserver} */
+  const calobs = {
+    QueryInterface: ChromeUtils.generateQI(["calIObserver"]),
+    onAddItem: () => calcounter.addItem++,
+    onModifyItem: () => calcounter.modifyItem++,
+    onDeleteItem: () => calcounter.deleteItem++,
+  };
+  /** @implements {calIObserver} */
+  const allobs = {
+    QueryInterface: ChromeUtils.generateQI(["calIObserver"]),
+    onAddItem: () => allcounter.addItem++,
+    onModifyItem: () => allcounter.modifyItem++,
+    onDeleteItem: () => allcounter.deleteItem++,
+  };
+
+  // Set up counters and observers
+  resetCounters();
+  cal.manager.registerCalendar(memory);
+  cal.manager.registerCalendar(memory2);
+  cal.manager.addCalendarObserver(allobs);
+  memory.addObserver(calobs);
+
+  // Add an item
+  const item = new CalEvent();
+  item.id = cal.getUUID();
+  item.startDate = cal.dtz.now();
+  item.endDate = cal.dtz.now();
+  memory.addItem(item);
+  checkCounters(1, 0, 0);
+
+  // Modify the item
+  const newItem = item.clone();
+  newItem.title = "title";
+  memory.modifyItem(newItem, item);
+  checkCounters(0, 1, 0);
+
+  // Delete the item
+  newItem.generation++; // circumvent generation checks for easier code
+  memory.deleteItem(newItem);
+  checkCounters(0, 0, 1);
+
+  // Now check the same for adding the item to a calendar only observed by the
+  // calendar manager. The calcounters should still be 0, but the calendar
+  // manager counter should have an item added, modified and deleted
+  memory2.addItem(item);
+  memory2.modifyItem(newItem, item);
+  memory2.deleteItem(newItem);
+  checkCounters(0, 0, 0, 1, 1, 1);
+
+  // Remove observers
+  memory.removeObserver(calobs);
+  cal.manager.removeCalendarObserver(allobs);
+
+  // Make sure removing it actually worked
+  memory.addItem(item);
+  memory.modifyItem(newItem, item);
+  memory.deleteItem(newItem);
+  checkCounters(0, 0, 0);
+
+  cal.manager.unregisterCalendar(memory);
+  cal.manager.unregisterCalendar(memory2);
+});
+
+add_task(function test_removeModes() {
+  function checkCounts(modes, shouldDelete, expectCount, extraFlags = 0) {
+    if (cal.manager.calendarCount == baseCalendarCount) {
+      cal.manager.registerCalendar(memory);
+      equal(cal.manager.calendarCount, baseCalendarCount + 1);
+    }
+    deleteCalled = false;
+    removeModes = modes;
+
+    cal.manager.removeCalendar(memory, extraFlags);
+    equal(cal.manager.calendarCount, baseCalendarCount + expectCount);
+    equal(deleteCalled, shouldDelete);
+  }
+  function mockCalendar(memory) {
+    const oldGetProperty = memory.wrappedJSObject.getProperty;
+    memory.wrappedJSObject.getProperty = function (name) {
+      if (name == "capabilities.removeModes") {
+        return removeModes;
+      }
+      return oldGetProperty.apply(this, arguments);
+    };
+
+    const oldDeleteCalendar = memory.wrappedJSObject.deleteCalendar;
+    memory.wrappedJSObject.deleteCalendar = function () {
+      deleteCalled = true;
+      return oldDeleteCalendar.apply(this, arguments);
+    };
+  }
+
+  // For better readability
+  const SHOULD_DELETE = true,
+    SHOULD_NOT_DELETE = false;
+
+  const memory = cal.manager.createCalendar("memory", Services.io.newURI("moz-memory-calendar://"));
+  const baseCalendarCount = cal.manager.calendarCount;
+  let removeModes = null;
+  let deleteCalled = false;
+
+  mockCalendar(memory);
+
+  checkCounts([], SHOULD_NOT_DELETE, 1);
+  checkCounts(["unsubscribe"], SHOULD_NOT_DELETE, 0);
+  checkCounts(["unsubscribe", "delete"], SHOULD_DELETE, 0);
+  checkCounts(
+    ["unsubscribe", "delete"],
+    SHOULD_NOT_DELETE,
+    0,
+    Ci.calICalendarManager.REMOVE_NO_DELETE
+  );
+  checkCounts(["delete"], SHOULD_DELETE, 0);
+});
+
+add_task(function test_calprefs() {
+  let prop;
+  let memory = cal.manager.createCalendar("memory", Services.io.newURI("moz-memory-calendar://"));
+  cal.manager.registerCalendar(memory);
+  const memid = memory.id;
+
+  // First set a few values, one of each relevant type
+  memory.setProperty("stringpref", "abc");
+  memory.setProperty("boolpref", true);
+  memory.setProperty("intpref", 123);
+  memory.setProperty("bigintpref", 1394548721296);
+  memory.setProperty("floatpref", 0.5);
+
+  // Before checking the value, reinitialize the memory calendar with the
+  // same id to make sure the pref value isn't just cached
+  memory = cal.manager.createCalendar("memory", Services.io.newURI("moz-memory-calendar://"));
+  memory.id = memid;
+
+  // First test the standard types
+  prop = memory.getProperty("stringpref");
+  equal(typeof prop, "string");
+  equal(prop, "abc");
+
+  prop = memory.getProperty("boolpref");
+  equal(typeof prop, "boolean");
+  equal(prop, true);
+
+  prop = memory.getProperty("intpref");
+  equal(typeof prop, "number");
+  equal(prop, 123);
+
+  // These two are a special case test for bug 979262
+  prop = memory.getProperty("bigintpref");
+  equal(typeof prop, "number");
+  equal(prop, 1394548721296);
+
+  prop = memory.getProperty("floatpref");
+  equal(typeof prop, "number");
+  equal(prop, 0.5);
+
+  // Check if changing pref types works. We need to reset the calendar again
+  // because retrieving the value just cached it again.
+  memory = cal.manager.createCalendar("memory", Services.io.newURI("moz-memory-calendar://"));
+  memory.id = memid;
+
+  cal.manager.setCalendarPref_(memory, "boolpref", "kinda true");
+  prop = memory.getProperty("boolpref");
+  equal(typeof prop, "string");
+  equal(prop, "kinda true");
+
+  // Check if unsetting a pref works
+  memory.setProperty("intpref", null);
+  memory = cal.manager.createCalendar("memory", Services.io.newURI("moz-memory-calendar://"));
+  memory.id = memid;
+  prop = memory.getProperty("intpref");
+  Assert.strictEqual(prop, null);
+
+  cal.manager.unregisterCalendar(cal.manager.getCalendarById(memid));
+});
+
+add_task(async function test_getCalendars_listOrder() {
+  function create() {
+    const calendar = cal.manager.createCalendar(
+      "memory",
+      Services.io.newURI("moz-memory-calendar://")
+    );
+    calendar.id = cal.getUUID();
+    cal.manager.registerCalendar(calendar);
+    return cal.manager.getCalendarById(calendar.id);
+  }
+  function listOrder() {
+    return cal.manager.getCalendars().map(calendar => calendar.id);
+  }
+  function rememberedOrder() {
+    return Services.prefs.getStringPref("calendar.list.sortOrder", "").split(" ");
+  }
+
+  const a = create();
+  const b = create();
+  const c = create();
+  Assert.deepEqual(listOrder(), [a.id, b.id, c.id], "new calendars should be added at the end");
+  Assert.deepEqual(rememberedOrder(), [a.id, b.id, c.id], "the order should be remembered");
+
+  const observer = new CalendarManagerObserver();
+  cal.manager.addObserver(observer);
+
+  cal.manager.setCalendarOrder([c.id, a.id, b.id]);
+  Assert.deepEqual(
+    listOrder(),
+    [c.id, a.id, b.id],
+    "reordering the calendar list should reorder the calendars"
+  );
+  Assert.deepEqual(rememberedOrder(), [c.id, a.id, b.id], "the new order should be remembered");
+  observer.check({ orderChanged: 1 });
+
+  cal.manager.setCalendarOrder([b.id]);
+  Assert.deepEqual(
+    listOrder(),
+    [b.id, c.id, a.id],
+    "calendars the new order doesn't mention should keep their order at the end"
+  );
+  observer.check({ orderChanged: 1 });
+
+  // A calendar is registered again when its provider is enabled or disabled.
+  cal.manager.wrappedJSObject.updateCalendarRegistration([cal.manager.getCalendarById(c.id)]);
+  Assert.deepEqual(
+    listOrder(),
+    [b.id, c.id, a.id],
+    "a calendar registered again should keep its place"
+  );
+  observer.check({ unregistering: c.id, registered: c.id });
+
+  cal.manager.unregisterCalendar(cal.manager.getCalendarById(c.id));
+  Assert.deepEqual(listOrder(), [b.id, a.id], "an unregistered calendar should be gone");
+  Assert.deepEqual(rememberedOrder(), [b.id, a.id], "it should be forgotten from the order too");
+  observer.check({ unregistering: c.id });
+
+  cal.manager.removeObserver(observer);
+  for (const calendar of cal.manager.getCalendars()) {
+    cal.manager.unregisterCalendar(calendar);
+  }
+  Services.prefs.clearUserPref("calendar.list.sortOrder");
+});
+
+add_task(function test_realmRewrite() {
+  /**
+   * Run a WWW-Authenticate header through the realm rewriting of the
+   * http-on-examine-response observer.
+   *
+   * @param {string} header - The WWW-Authenticate header.
+   * @param {string} [name] - The name of the calendar.
+   * @returns {string} the rewritten header.
+   */
+  function rewrite(header, name = "Cal") {
+    let result = header;
+    const channel = {
+      QueryInterface: ChromeUtils.generateQI(["nsIHttpChannel"]),
+      notificationCallbacks: {
+        getInterface: () => ({ name, getProperty: () => null }),
+      },
+      getResponseHeader: () => header,
+      setResponseHeader(headerName, value) {
+        result = value;
+      },
+    };
+    cal.manager.observe(channel, "http-on-examine-response");
+    return result;
+  }
+
+  equal(
+    rewrite('Basic realm="Server"'),
+    'Basic realm="Server (Cal)"',
+    "the name should be appended"
+  );
+  equal(
+    rewrite('Digest realm="A \\"B\\" \\\\", nonce="x"'),
+    'Digest realm="A \\"B\\" \\\\ (Cal)", nonce="x"',
+    "escaped characters in the realm should be skipped"
+  );
+  equal(
+    rewrite('Basic realm="Server"', 'My "Cal"'),
+    'Basic realm="Server (My \\"Cal\\")"',
+    "quotes in the name should be escaped"
+  );
+  equal(
+    rewrite('Basic realm="Server"', "Cal $&"),
+    'Basic realm="Server (Cal $&)"',
+    "the name should be inserted literally"
+  );
+  equal(
+    rewrite('Basic realm="x\\"y'),
+    'Basic realm="x\\"y',
+    "an unterminated realm should be kept"
+  );
+  const unterminated = 'Basic realm="' + "\\".repeat(100000);
+  equal(rewrite(unterminated), unterminated, "many backslashes should be handled quickly");
+});

@@ -1,0 +1,1288 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+
+"use strict";
+
+// This test frequently takes longer than the allowed time.
+requestLongerTimeout(2);
+
+const tabmail = document.getElementById("tabmail");
+registerCleanupFunction(() => {
+  tabmail.closeOtherTabs(tabmail.tabInfo[0]);
+});
+
+// Increase this value to slow the test down if you want to see what it is doing.
+const MOUSE_DELAY = 0;
+
+let win, doc;
+
+let resizingEvents = 0;
+let resizedEvents = 0;
+let collapsedEvents = 0;
+let expandedEvents = 0;
+
+// This object keeps the test simple by removing the differences between
+// horizontal and vertical, and which pane is controlled by the splitter.
+const testRunner = {
+  outer: null, // The container for the splitter and panes.
+  splitter: null, // The splitter.
+  resizedIsBefore: null, // Whether resized is before the splitter.
+  resized: null, // The pane the splitter controls the size of.
+  fill: null, // The pane that splitter doesn't control.
+  dimension: null, // Which dimension the splitter resizes.
+
+  getSize(element) {
+    return element.getBoundingClientRect()[this.dimension];
+  },
+
+  assertElementSizes(size, msg = "") {
+    Assert.equal(
+      this.getSize(this.resized),
+      size,
+      `Resized element should take up the expected ${this.dimension}: ${msg}`
+    );
+    Assert.equal(
+      this.getSize(this.fill),
+      500 - size,
+      `Fill element should take up the rest of the ${this.dimension}: ${msg}`
+    );
+  },
+
+  assertSplitterSize(size, msg = "") {
+    Assert.equal(
+      this.splitter[this.dimension],
+      size,
+      `Splitter ${this.dimension} should match expected ${size}: ${msg}`
+    );
+  },
+
+  get minSizeProperty() {
+    return this.dimension == "width" ? "minWidth" : "minHeight";
+  },
+
+  get maxSizeProperty() {
+    return this.dimension == "width" ? "maxWidth" : "maxHeight";
+  },
+
+  get collapseSizeAttribute() {
+    return this.dimension == "width" ? "collapse-width" : "collapse-height";
+  },
+
+  setCollapseSize(size) {
+    this.splitter.setAttribute(this.collapseSizeAttribute, size);
+  },
+
+  clearCollapseSize() {
+    this.splitter.removeAttribute(this.collapseSizeAttribute);
+  },
+
+  /**
+   * Wait for the splitter to resize its target element.
+   *
+   * @param {number} targetSize - Target size for the element resized by the
+   *   splitter.
+   */
+  async waitForSizeTo(targetSize) {
+    info(`Expecting resize to ${targetSize}px...`);
+    const mutationObserver = BrowserTestUtils.waitForMutationCondition(
+      this.splitter.parentNode,
+      {
+        attributes: true,
+        attributeFilter: ["style"],
+      },
+      () => this.getSize(this.resized) == targetSize
+    );
+    await mutationObserver;
+  },
+
+  /**
+   * Wait for the mouse move lock in the splitter to be released, so we can
+   * affect the splitter again. Will time out after a few seconds.
+   *
+   * As opposed to waitForCondition this uses requestAnimationFrame to wait,
+   * since that's what's used to release the mouse move lock.
+   */
+  async waitForMousemoveLock() {
+    const MAX_WAIT = 2000;
+    const waitEnd = Date.now() + MAX_WAIT;
+    if (this.splitter._mouseMoveBlocked) {
+      info("Waiting for mouse move lock to be released...");
+    }
+    while (this.splitter._mouseMoveBlocked && Date.now() < waitEnd) {
+      await new Promise(resolve => win.requestAnimationFrame(resolve));
+    }
+    if (Date.now() > waitEnd) {
+      console.error("Timed out waiting for mouse move lock to be released!");
+    }
+  },
+
+  async synthMouse(position, type = "mousemove", otherPosition = 50) {
+    let x, y;
+    if (!this.resizedIsBefore) {
+      position = 500 - position;
+    }
+    if (this.dimension == "width") {
+      [x, y] = [position, otherPosition];
+    } else {
+      [x, y] = [otherPosition, position];
+    }
+    AccessibilityUtils.suppressClickHandling(true);
+    EventUtils.synthesizeMouse(
+      this.splitter.parentNode,
+      x,
+      y,
+      { type, buttons: 1 },
+      win
+    );
+    AccessibilityUtils.suppressClickHandling(false);
+
+    if (MOUSE_DELAY) {
+      // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
+      await new Promise(resolve => setTimeout(resolve, MOUSE_DELAY));
+    }
+
+    if (type == "mousemove") {
+      await this.waitForMousemoveLock();
+    } else {
+      // Use the request animation frame of the tab, since that's also what the
+      // splitter uses.
+      await new Promise(resolve => win.requestAnimationFrame(resolve));
+    }
+  },
+};
+
+add_setup(async function () {
+  // This test needs enough space to run.
+  window.resizeTo(screen.availWidth, screen.availHeight);
+
+  const tab = tabmail.openTab("contentTab", {
+    url: "chrome://mochitests/content/browser/comm/mail/base/test/browser/widgets/files/paneSplitter.xhtml",
+  });
+
+  await BrowserTestUtils.browserLoaded(tab.browser);
+  tab.browser.focus();
+
+  win = tab.browser.contentWindow;
+  doc = win.document;
+
+  win.addEventListener("splitter-resizing", () => resizingEvents++);
+  win.addEventListener("splitter-resized", () => resizedEvents++);
+  win.addEventListener("splitter-collapsed", () => collapsedEvents++);
+  win.addEventListener("splitter-expanded", () => expandedEvents++);
+
+  window.windowUtils.disableNonTestMouseEvents(true);
+  await TestUtils.waitForCondition(
+    () => doc.documentElement.scrollTopMax == 0,
+    "waiting for window to be large enough to run the test"
+  );
+
+  registerCleanupFunction(() => {
+    window.windowUtils.disableNonTestMouseEvents(false);
+  });
+});
+
+add_task(async function testAccessibilityState() {
+  const splitter = doc.getElementById("splitter1");
+  Assert.equal(
+    splitter.getAttribute("role"),
+    "separator",
+    "pane splitter should expose separator semantics"
+  );
+  Assert.equal(
+    splitter.getAttribute("aria-orientation"),
+    "vertical",
+    "horizontal resize splitter should expose a vertical separator"
+  );
+  Assert.equal(
+    splitter.tabIndex,
+    0,
+    "standalone pane splitter should be reachable from the keyboard"
+  );
+
+  const selfResizeSplitter = doc.getElementById("splitter7");
+  Assert.equal(
+    selfResizeSplitter.tabIndex,
+    -1,
+    "embedded resize handles should not enter the normal tab order"
+  );
+});
+
+add_task(async function test_explicitTabIndex() {
+  const splitter = doc.getElementById("splitter1");
+  Assert.equal(
+    splitter.tabIndex,
+    0,
+    "An ordinary splitter should be in the tab order"
+  );
+  splitter.tabIndex = -1;
+  const width = splitter.width;
+  splitter.width = 250;
+  Assert.equal(
+    splitter.tabIndex,
+    -1,
+    "Resizing should preserve an explicit negative tabindex"
+  );
+  splitter.focus();
+  Assert.equal(
+    doc.activeElement,
+    splitter,
+    "A splitter with negative tabindex should still accept programmatic focus"
+  );
+  for (const tabIndex of [-1, 0]) {
+    splitter.tabIndex = tabIndex;
+    splitter.isDisabled = true;
+    Assert.equal(
+      splitter.tabIndex,
+      -1,
+      "Disabling should remove the splitter from the tab order"
+    );
+    splitter.isDisabled = false;
+    Assert.equal(
+      splitter.tabIndex,
+      tabIndex,
+      "Re-enabling should restore the consumer's tabindex"
+    );
+  }
+  splitter.width = width;
+
+  const initiallyDisabled = doc.createElement("hr", { is: "pane-splitter" });
+  initiallyDisabled.id = "initiallyDisabledSplitter";
+  initiallyDisabled.setAttribute("resize-id", "splitter1-before");
+  initiallyDisabled.tabIndex = -1;
+  initiallyDisabled.isDisabled = true;
+  splitter.parentNode.append(initiallyDisabled);
+  initiallyDisabled.isDisabled = false;
+  Assert.equal(
+    initiallyDisabled.tabIndex,
+    -1,
+    "Enabling an initially disabled splitter should preserve its explicit tabindex"
+  );
+  initiallyDisabled.remove();
+});
+
+add_task(async function test_accessibilityAfterSettingWidth() {
+  const splitter = doc.getElementById("splitter1");
+  const resized = doc.getElementById("splitter1-before");
+  const originalWidth = splitter.width;
+  splitter.width = 250;
+  Assert.equal(
+    resized.getBoundingClientRect().width,
+    250,
+    "Setting the preferred width should resize the pane"
+  );
+  Assert.equal(
+    Number(splitter.getAttribute("aria-valuenow")),
+    resized.getBoundingClientRect().width,
+    "The accessible value should describe the new width after layout"
+  );
+  splitter.width = originalWidth;
+  Assert.equal(
+    Number(splitter.getAttribute("aria-valuenow")),
+    resized.getBoundingClientRect().width,
+    "Restoring the preferred width should restore the accessible value"
+  );
+});
+
+add_task(async function testKeyboardResize() {
+  const splitter = doc.getElementById("splitter1");
+  const resized = doc.getElementById("splitter1-before");
+  const eventTypes = [
+    "splitter-before-resize",
+    "splitter-resizing",
+    "splitter-resize-end",
+    "splitter-resized",
+  ];
+  const events = [];
+  const listener = event => events.push(event.type);
+  for (const eventType of eventTypes) {
+    splitter.addEventListener(eventType, listener);
+  }
+
+  splitter.focus();
+  Assert.equal(
+    doc.activeElement,
+    splitter,
+    "standalone pane splitter should receive keyboard focus"
+  );
+  EventUtils.synthesizeKey("KEY_ArrowRight", { repeat: 3 }, win);
+
+  Assert.equal(
+    resized.getBoundingClientRect().width,
+    230,
+    "typematic input should resize for every repeated keydown"
+  );
+  Assert.equal(
+    splitter.getAttribute("aria-valuenow"),
+    "230",
+    "accessible value should match the resized pane"
+  );
+  Assert.deepEqual(
+    events,
+    eventTypes,
+    "typematic input should send one resize lifecycle"
+  );
+
+  for (const eventType of eventTypes) {
+    splitter.removeEventListener(eventType, listener);
+  }
+  splitter.width = null;
+  await nextFrame();
+});
+
+add_task(async function testHorizontalBefore() {
+  const outer = doc.getElementById("horizontal-before");
+  const resized = outer.querySelector(".resized");
+  const splitter = outer.querySelector(`hr[is="pane-splitter"]`);
+  const fill = outer.querySelector(".fill");
+
+  Assert.equal(resized.clientWidth, 200);
+  Assert.equal(fill.clientWidth, 300);
+  Assert.equal(win.getComputedStyle(splitter).cursor, "ew-resize");
+
+  splitter.scrollIntoView({
+    behavior: "instant",
+    block: "nearest",
+  });
+
+  testRunner.outer = outer;
+  testRunner.splitter = splitter;
+  testRunner.resizedIsBefore = true;
+  testRunner.resized = resized;
+  testRunner.fill = fill;
+  testRunner.dimension = "width";
+
+  await subtestDrag();
+  await subtestDragSizeBounds();
+  await subtestDragAutoCollapse();
+  await subtestCollapseExpand();
+});
+
+add_task(async function testHorizontalAfter() {
+  const outer = doc.getElementById("horizontal-after");
+  const fill = outer.querySelector(".fill");
+  const splitter = outer.querySelector(`hr[is="pane-splitter"]`);
+  const resized = outer.querySelector(".resized");
+
+  Assert.equal(fill.clientWidth, 300);
+  Assert.equal(resized.clientWidth, 200);
+  Assert.equal(win.getComputedStyle(splitter).cursor, "ew-resize");
+
+  splitter.scrollIntoView({
+    behavior: "instant",
+    block: "nearest",
+  });
+
+  testRunner.outer = outer;
+  testRunner.splitter = splitter;
+  testRunner.resizedIsBefore = false;
+  testRunner.resized = resized;
+  testRunner.fill = fill;
+  testRunner.dimension = "width";
+
+  await subtestDrag();
+  await subtestDragSizeBounds();
+  await subtestDragAutoCollapse();
+  await subtestCollapseExpand();
+});
+
+add_task(async function testVerticalBefore() {
+  const outer = doc.getElementById("vertical-before");
+  const resized = outer.querySelector(".resized");
+  const splitter = outer.querySelector(`hr[is="pane-splitter"]`);
+  const fill = outer.querySelector(".fill");
+
+  Assert.equal(resized.clientHeight, 200);
+  Assert.equal(fill.clientHeight, 300);
+  Assert.equal(win.getComputedStyle(splitter).cursor, "ns-resize");
+
+  splitter.scrollIntoView({
+    behavior: "instant",
+    block: "nearest",
+  });
+
+  testRunner.outer = outer;
+  testRunner.splitter = splitter;
+  testRunner.resizedIsBefore = true;
+  testRunner.resized = resized;
+  testRunner.fill = fill;
+  testRunner.dimension = "height";
+
+  await subtestDrag();
+  await subtestDragSizeBounds();
+  await subtestDragAutoCollapse();
+  await subtestCollapseExpand();
+});
+
+add_task(async function testVerticalAfter() {
+  const outer = doc.getElementById("vertical-after");
+  const fill = outer.querySelector(".fill");
+  const splitter = outer.querySelector(`hr[is="pane-splitter"]`);
+  const resized = outer.querySelector(".resized");
+
+  testRunner.outer = outer;
+  testRunner.splitter = splitter;
+  testRunner.resizedIsBefore = false;
+  testRunner.resized = resized;
+  testRunner.fill = fill;
+  testRunner.dimension = "height";
+
+  Assert.equal(fill.clientHeight, 300);
+  Assert.equal(resized.clientHeight, 200);
+  Assert.equal(win.getComputedStyle(splitter).cursor, "ns-resize");
+
+  splitter.scrollIntoView({
+    behavior: "instant",
+    block: "nearest",
+  });
+
+  await subtestDrag();
+  await subtestDragSizeBounds();
+  await subtestDragAutoCollapse();
+  await subtestCollapseExpand();
+});
+
+add_task(async function testStringSizeRestore() {
+  const outer = doc.getElementById("horizontal-before");
+  const splitter = doc.getElementById("splitter1");
+  const resized = doc.getElementById("splitter1-before");
+
+  splitter.width = "175";
+  await nextFrame();
+
+  Assert.equal(
+    splitter.width,
+    175,
+    "width strings should be stored as numbers"
+  );
+  Assert.equal(
+    outer.style.getPropertyValue("--splitter1-width"),
+    "175px",
+    "string width should be applied as a pixel size"
+  );
+  assertCloseTo(
+    resized.getBoundingClientRect().width,
+    175,
+    "string width should restore the resized pane width"
+  );
+
+  splitter.width = null;
+});
+
+add_task(async function testResizeWithWindowHorizontal() {
+  const outer = doc.getElementById("window-resize-splitter");
+  const beforeSplitter = doc.getElementById("splitter5");
+  const splitter = doc.getElementById("splitter5-2");
+  const before = doc.getElementById("resizeSplitter-before");
+  const fill = doc.getElementById("resizeSplitter-after");
+  const resized = doc.getElementById("resizeSplitter-after2");
+
+  splitter.resizeWithWindow = false;
+  outer.style.width = "900px";
+  await nextFrame();
+
+  assertCloseTo(
+    before.getBoundingClientRect().width,
+    200,
+    "element before the splitter should keep its default width before enabling resize-with-window"
+  );
+  assertCloseTo(
+    fill.getBoundingClientRect().width,
+    498,
+    "flexible element should keep its default width before enabling resize-with-window"
+  );
+  assertCloseTo(
+    resized.getBoundingClientRect().width,
+    200,
+    "resize-with-window element should keep its default width before enabling resize-with-window"
+  );
+
+  splitter.resizeWithWindow = true;
+  await nextFrame();
+
+  const beforeWidth = before.getBoundingClientRect().width;
+  const fillWidth = fill.getBoundingClientRect().width;
+  const resizedWidth = resized.getBoundingClientRect().width;
+
+  Assert.equal(
+    before.style.getPropertyPriority("width"),
+    "",
+    "element before the splitter should not be locked before resize-with-window has an active size"
+  );
+  Assert.equal(
+    fill.style.getPropertyPriority("width"),
+    "",
+    "flexible element should not be locked before resize-with-window has an active size"
+  );
+  assertCloseTo(
+    beforeWidth,
+    200,
+    "element before the splitter should keep its default width when resize-with-window is enabled"
+  );
+  assertCloseTo(
+    fillWidth,
+    498,
+    "flexible element should keep its default width when resize-with-window is enabled"
+  );
+  assertCloseTo(
+    resizedWidth,
+    200,
+    "resize-with-window element should keep its default width when resize-with-window is enabled"
+  );
+
+  outer.style.width = "1000px";
+  await nextFrame();
+
+  assertCloseTo(
+    before.getBoundingClientRect().width,
+    beforeWidth,
+    "locked element before the splitter should keep its width"
+  );
+  assertCloseTo(
+    fill.getBoundingClientRect().width,
+    fillWidth + 100,
+    "flexible element should take up added width before resize-with-window has an active size"
+  );
+  assertCloseTo(
+    resized.getBoundingClientRect().width,
+    resizedWidth,
+    "resize-with-window element should keep its default width before it has an active size"
+  );
+
+  splitter.resizeWithWindow = false;
+  beforeSplitter.width = 420;
+  await nextFrame();
+  splitter.resizeWithWindow = true;
+  await nextFrame();
+
+  outer.style.pointerEvents = "auto";
+  await nextFrame();
+  const largeBeforeWidth = before.getBoundingClientRect().width;
+  const largeFillWidth = fill.getBoundingClientRect().width;
+  const splitterRect = splitter.getBoundingClientRect();
+  const dragStartX = splitterRect.left + splitterRect.width / 2;
+  const dragStartY = splitterRect.top + splitterRect.height / 2;
+  const dragDelta = 100;
+
+  Assert.greater(
+    largeBeforeWidth,
+    beforeWidth,
+    "element before the splitter should be enlarged before the resize-with-window drag"
+  );
+  Assert.equal(
+    before.style.getPropertyPriority("width"),
+    "",
+    "element before the splitter should not be locked before a resize-with-window drag"
+  );
+  Assert.equal(
+    fill.style.getPropertyPriority("width"),
+    "",
+    "flexible element should not be locked before a resize-with-window drag"
+  );
+
+  AccessibilityUtils.suppressClickHandling(true);
+  EventUtils.synthesizeMouseAtPoint(
+    dragStartX,
+    dragStartY,
+    { type: "mousedown", buttons: 1 },
+    win
+  );
+  Assert.ok(!!splitter._dragStartInfo, "resize-with-window drag should start");
+  Assert.equal(
+    before.style.getPropertyPriority("width"),
+    "important",
+    "element before the adjacent flexible pane should stay locked during a resize-with-window drag"
+  );
+  Assert.equal(
+    fill.style.getPropertyPriority("width"),
+    "",
+    "adjacent flexible element should unlock during a resize-with-window drag"
+  );
+
+  EventUtils.synthesizeMouseAtPoint(
+    dragStartX - dragDelta,
+    dragStartY,
+    { type: "mousemove", buttons: 1 },
+    win
+  );
+  await nextFrame();
+  const liveBeforeWidth = before.getBoundingClientRect().width;
+  const liveFillWidth = fill.getBoundingClientRect().width;
+
+  assertCloseTo(
+    liveBeforeWidth,
+    largeBeforeWidth,
+    "element before the adjacent flexible pane should keep its width during the resize-with-window drag"
+  );
+  Assert.less(
+    liveFillWidth,
+    largeFillWidth,
+    "adjacent flexible element should shrink during the resize-with-window drag"
+  );
+
+  EventUtils.synthesizeMouseAtPoint(
+    dragStartX - dragDelta,
+    dragStartY,
+    { type: "mouseup" },
+    win
+  );
+  AccessibilityUtils.suppressClickHandling(false);
+  await nextFrame();
+  Assert.equal(
+    before.style.getPropertyPriority("width"),
+    "important",
+    "element before the splitter should remain locked after a resize-with-window drag"
+  );
+  Assert.equal(
+    fill.style.getPropertyPriority("width"),
+    "important",
+    "flexible element should remain locked after a resize-with-window drag"
+  );
+  assertCloseTo(
+    before.getBoundingClientRect().width,
+    largeBeforeWidth,
+    "element before the adjacent flexible pane should keep its width after release"
+  );
+  assertCloseTo(
+    fill.getBoundingClientRect().width,
+    liveFillWidth,
+    "flexible element should keep the live dragged width after release"
+  );
+
+  outer.style.width = "1100px";
+  await nextFrame();
+  assertCloseTo(
+    before.getBoundingClientRect().width,
+    liveBeforeWidth,
+    "locked element before the splitter should not resize with the window after a resize-with-window drag"
+  );
+  assertCloseTo(
+    fill.getBoundingClientRect().width,
+    liveFillWidth,
+    "locked flexible element should not resize with the window after a resize-with-window drag"
+  );
+
+  splitter.resizeWithWindow = false;
+  splitter.width = null;
+  beforeSplitter.width = null;
+  outer.style.width = null;
+  outer.style.pointerEvents = null;
+});
+
+add_task(async function testResizeWithWindowVertical() {
+  const outer = doc.getElementById("window-resize-splitter-vertical");
+  const splitter = doc.getElementById("splitter6");
+  const before = doc.getElementById("resizeSplitter-vertical-before");
+  const resized = doc.getElementById("resizeSplitter-vertical-after");
+
+  splitter.resizeWithWindow = false;
+  outer.style.height = "500px";
+  await nextFrame();
+
+  assertCloseTo(
+    before.getBoundingClientRect().height,
+    120,
+    "element before the splitter should keep its default height before enabling resize-with-window"
+  );
+  assertCloseTo(
+    resized.getBoundingClientRect().height,
+    380,
+    "resize-with-window element should keep its default height before enabling resize-with-window"
+  );
+
+  splitter.resizeWithWindow = true;
+  await nextFrame();
+
+  const beforeHeight = before.getBoundingClientRect().height;
+  const resizedHeight = resized.getBoundingClientRect().height;
+
+  Assert.equal(
+    before.style.getPropertyPriority("height"),
+    "",
+    "element before the splitter should not be locked before resize-with-window has an active size"
+  );
+  assertCloseTo(
+    beforeHeight,
+    120,
+    "element before the splitter should keep its default height when resize-with-window is enabled"
+  );
+  assertCloseTo(
+    resizedHeight,
+    380,
+    "resize-with-window element should keep its default height when resize-with-window is enabled"
+  );
+
+  outer.style.height = "600px";
+  await nextFrame();
+
+  assertCloseTo(
+    before.getBoundingClientRect().height,
+    beforeHeight + 80,
+    "flexible element before the splitter should take up added height before resize-with-window has an active size"
+  );
+  assertCloseTo(
+    resized.getBoundingClientRect().height,
+    resizedHeight + 20,
+    "resize-with-window element should keep using the default grid track before it has an active size"
+  );
+
+  splitter.height = "180";
+  await nextFrame();
+  let restoredHeight = resized.getBoundingClientRect().height;
+
+  Assert.equal(
+    splitter.height,
+    180,
+    "height strings should be stored as numbers"
+  );
+  assertCloseTo(
+    restoredHeight,
+    180,
+    "resize-with-window element should apply a restored string height"
+  );
+  Assert.equal(
+    outer.style.getPropertyValue("--splitter6-height"),
+    "100%",
+    "restored resize-with-window element should remain flexible"
+  );
+
+  outer.style.pointerEvents = "auto";
+  await nextFrame();
+  const splitterRect = splitter.getBoundingClientRect();
+  const dragStartX = splitterRect.left + splitterRect.width / 2;
+  const dragStartY = splitterRect.top + splitterRect.height / 2;
+  const dragDelta = 40;
+
+  AccessibilityUtils.suppressClickHandling(true);
+  EventUtils.synthesizeMouseAtPoint(
+    dragStartX,
+    dragStartY,
+    { type: "mousedown", buttons: 1 },
+    win
+  );
+  Assert.ok(!!splitter._dragStartInfo, "resize-with-window drag should start");
+  EventUtils.synthesizeMouseAtPoint(
+    dragStartX,
+    dragStartY - dragDelta,
+    { type: "mousemove", buttons: 1 },
+    win
+  );
+  await nextFrame();
+  restoredHeight += dragDelta;
+  assertCloseTo(
+    resized.getBoundingClientRect().height,
+    restoredHeight,
+    "resize-with-window element should keep the live dragged height"
+  );
+  EventUtils.synthesizeMouseAtPoint(
+    dragStartX,
+    dragStartY - dragDelta,
+    { type: "mouseup" },
+    win
+  );
+  AccessibilityUtils.suppressClickHandling(false);
+  await nextFrame();
+  Assert.equal(
+    outer.style.getPropertyValue("--splitter6-height"),
+    "100%",
+    "dragged resize-with-window element should resume flexible sizing"
+  );
+
+  splitter.collapse();
+  await nextFrame();
+  Assert.equal(resized.getBoundingClientRect().height, 0);
+  Assert.equal(
+    before.style.getPropertyPriority("height"),
+    "",
+    "locked element should be unlocked while the resized pane is collapsed"
+  );
+
+  splitter.expand();
+  await nextFrame();
+  Assert.equal(
+    before.style.getPropertyPriority("height"),
+    "important",
+    "locked element should be relocked when the resized pane expands"
+  );
+  Assert.equal(
+    outer.style.getPropertyValue("--splitter6-height"),
+    "100%",
+    "expanded resize-with-window element should resume flexible sizing"
+  );
+  assertCloseTo(
+    resized.getBoundingClientRect().height,
+    restoredHeight,
+    "resize-with-window element should restore its previous height on expand"
+  );
+
+  splitter.height = null;
+  splitter.resizeWithWindow = false;
+  outer.style.height = null;
+  outer.style.pointerEvents = null;
+});
+
+function assertCloseTo(actual, expected, msg) {
+  Assert.lessOrEqual(
+    Math.abs(actual - expected),
+    1,
+    `${msg}: got ${actual}, expected ${expected}`
+  );
+}
+
+async function nextFrame() {
+  await new Promise(resolve => win.requestAnimationFrame(resolve));
+}
+
+async function subtestDrag() {
+  info("subtestDrag");
+  resizingEvents = 0;
+  resizedEvents = 0;
+
+  const originalPosition = testRunner.getSize(testRunner.resized);
+  let position = 200;
+
+  await testRunner.synthMouse(position, "mousedown");
+
+  await testRunner.synthMouse(position, "mousemove", 25);
+  Assert.equal(resizingEvents, 0, "moving up the splitter does nothing");
+  await testRunner.synthMouse(position, "mousemove", 75);
+  Assert.equal(resizingEvents, 0, "moving down the splitter does nothing");
+
+  position--;
+  await testRunner.synthMouse(position);
+  Assert.equal(resizingEvents, 0, "moving 1px does nothing");
+
+  position--;
+  await testRunner.synthMouse(position);
+  Assert.equal(resizingEvents, 0, "moving 2px does nothing");
+
+  position--;
+  await testRunner.synthMouse(position);
+  Assert.equal(resizingEvents, 1, "a resizing event fired");
+
+  // Drag in steps to the left-hand/top end.
+  for (; position >= 0; position -= 50) {
+    const mutationObserver = testRunner.waitForSizeTo(position);
+    await testRunner.synthMouse(position);
+    await mutationObserver;
+    testRunner.assertElementSizes(position);
+  }
+
+  // Drag beyond the left-hand/top end.
+  position = -50;
+  await testRunner.synthMouse(position);
+  testRunner.assertElementSizes(0);
+
+  // Drag in steps to the right-hand/bottom end.
+  for (let pos = 0; pos <= 500; pos += 50) {
+    const mutationObserver = testRunner.waitForSizeTo(pos);
+    await testRunner.synthMouse(pos);
+    await mutationObserver;
+    testRunner.assertElementSizes(pos);
+  }
+
+  // Drag beyond the right-hand/bottom end.
+  position = 550;
+  await testRunner.synthMouse(position);
+  testRunner.assertElementSizes(500);
+
+  // Drop.
+  position = 400;
+  Assert.equal(resizingEvents, 1, "no more resizing events fired");
+  Assert.equal(resizedEvents, 0, "no resized events fired");
+  await testRunner.synthMouse(position);
+  await testRunner.synthMouse(position, "mouseup");
+  testRunner.assertElementSizes(400);
+  Assert.equal(resizingEvents, 1, "no more resizing events fired");
+  Assert.equal(resizedEvents, 1, "a resized event fired");
+
+  // Pick up again.
+  await testRunner.synthMouse(position, "mousedown");
+
+  // Move.
+  for (; position >= originalPosition; position -= 50) {
+    await testRunner.synthMouse(position);
+  }
+
+  // Drop.
+  Assert.equal(resizingEvents, 2, "a resizing event fired");
+  Assert.equal(resizedEvents, 1, "no more resized events fired");
+  await testRunner.synthMouse(position, "mouseup");
+  testRunner.assertElementSizes(originalPosition);
+  Assert.equal(resizingEvents, 2, "no more resizing events fired");
+  Assert.equal(resizedEvents, 2, "a resized event fired");
+}
+
+async function subtestDragSizeBounds() {
+  info("subtestDragSizeBounds");
+
+  const { splitter, resized, fill, minSizeProperty, maxSizeProperty } =
+    testRunner;
+
+  // Various min or max sizes to set on the resized and fill elements.
+  // NOTE: the sum of the max sizes is greater than 500px.
+  // Moreover, the resized element's min size is below 200px, and the max size
+  // above it. Similarly, the fill element's min size is below 300px. This
+  // ensures that the initial sizes of 200px and 300px are within their
+  // respective min-max bounds.
+  // NOTE: We do not set a max size on the fill element. The grid layout does
+  // not handle this. Nor is it an expected usage of the splitter.
+  for (const [minResized, min] of [
+    [null, 0],
+    ["100.5px", 100.5],
+  ]) {
+    for (const [maxResized, expectMax1] of [
+      [null, 500],
+      ["360px", 360],
+    ]) {
+      for (const [minFill, expectMax2] of [
+        [null, 500],
+        ["148px", 352],
+      ]) {
+        info(`Bounds [${minResized}, ${maxResized}] and [${minFill}, none]`);
+        const max = Math.min(expectMax1, expectMax2);
+        info(`Overall bound [${min}px, ${max}px]`);
+
+        // Construct a set of positions we are interested in.
+        const roundMin = Math.floor(min);
+        const roundMax = Math.ceil(max);
+        const positionSet = [-50, 150, 350, 550];
+        // Include specific positions around the minimum and maximum points.
+        positionSet.push(roundMin - 1, roundMin, roundMin + 1);
+        positionSet.push(roundMax - 1, roundMax, roundMax + 1);
+        positionSet.sort();
+
+        // Reset the splitter.
+        splitter.width = null;
+        splitter.height = null;
+
+        resized.style[minSizeProperty] = minResized;
+        resized.style[maxSizeProperty] = maxResized;
+        fill.style[minSizeProperty] = minFill;
+
+        testRunner.assertElementSizes(200, "initial position");
+        await testRunner.synthMouse(200, "mousedown");
+
+        for (const position of positionSet) {
+          const size = Math.min(Math.max(position, min), max);
+          const mutationObserver = testRunner.waitForSizeTo(size);
+          await testRunner.synthMouse(position);
+          await mutationObserver;
+          testRunner.assertElementSizes(size, `Moved forward to ${position}`);
+          testRunner.assertSplitterSize(size, `Moved forward to ${position}`);
+        }
+
+        await testRunner.synthMouse(500);
+        await testRunner.synthMouse(500, "mouseup");
+        testRunner.assertElementSizes(max, "positioned at max");
+        testRunner.assertSplitterSize(max, "positioned at max");
+
+        // Reverse.
+        await testRunner.synthMouse(max, "mousedown");
+
+        for (const position of positionSet.reverse()) {
+          const size = Math.min(Math.max(position, min), max);
+          const mutationObserver = testRunner.waitForSizeTo(size);
+          await testRunner.synthMouse(position);
+          await mutationObserver;
+          testRunner.assertElementSizes(size, `Moved backward to ${position}`);
+          testRunner.assertSplitterSize(size, `Moved backward to ${position}`);
+        }
+
+        await testRunner.synthMouse(0);
+        await testRunner.synthMouse(0, "mouseup");
+        testRunner.assertElementSizes(min, "positioned at min");
+        testRunner.assertSplitterSize(min, "positioned at min");
+      }
+    }
+  }
+
+  // Reset.
+  splitter.width = null;
+  splitter.height = null;
+  resized.style[minSizeProperty] = null;
+  resized.style[maxSizeProperty] = null;
+  fill.style[minSizeProperty] = null;
+}
+
+async function subtestDragAutoCollapse() {
+  info("subtestDragAutoCollapse");
+  testRunner.setCollapseSize(78);
+
+  collapsedEvents = 0;
+  expandedEvents = 0;
+
+  const { splitter } = testRunner;
+
+  const originalPosition = 200;
+
+  // Drag in steps toward the left-hand/top end.
+  await testRunner.synthMouse(200, "mousedown");
+  for (const position of [180, 160, 140, 120, 100, 80, 78]) {
+    const mutationObserver = testRunner.waitForSizeTo(position);
+    await testRunner.synthMouse(position);
+    await mutationObserver;
+    testRunner.assertElementSizes(
+      position,
+      `Should have ${position} size at ${position}`
+    );
+    Assert.ok(!splitter.isCollapsed, `Should not be collapsed at ${position}`);
+  }
+
+  // For the first 20 pixels inside the minimum size, nothing happens.
+  for (const position of [74, 68, 64, 60, 58]) {
+    const mutationObserver = testRunner.waitForSizeTo(78);
+    await testRunner.synthMouse(position);
+    await mutationObserver;
+    testRunner.assertElementSizes(
+      78,
+      `Should be at collapse-size at ${position}`
+    );
+    Assert.ok(!splitter.isCollapsed, `Should not be collapsed at ${position}`);
+  }
+
+  // Then the pane collapses.
+  await testRunner.synthMouse(57);
+  Assert.equal(collapsedEvents, 1, "collapsed event fired");
+  for (const position of [57, 55, 51, 40, 20, 0, -20]) {
+    await testRunner.synthMouse(position);
+    testRunner.assertElementSizes(0, `Should have no size at ${position}`);
+    Assert.ok(splitter.isCollapsed, `Should be collapsed at ${position}`);
+  }
+
+  await testRunner.synthMouse(-20, "mouseup");
+  testRunner.assertElementSizes(
+    0,
+    "Should be at min size after releasing mouse"
+  );
+  Assert.ok(splitter.isCollapsed, "Should be collapsed after releasing mouse");
+
+  // Drag it from the collapsed state. Offset by 1px so we can grab the
+  // collapsed splitter.
+  await testRunner.synthMouse(1, "mousedown");
+  for (const position of [1, 9, 17, 20]) {
+    await testRunner.synthMouse(position);
+    testRunner.assertElementSizes(
+      0,
+      `Should still have no size at ${position}`
+    );
+    Assert.ok(splitter.isCollapsed, `Should still be collapsed at ${position}`);
+  }
+
+  const expandedEventPromise = BrowserTestUtils.waitForEvent(
+    win,
+    "splitter-expanded"
+  );
+  // Then the pane expands. For the first 20 pixels, nothing happens.
+  await testRunner.synthMouse(21); // 1px offset from mousedown.
+  await expandedEventPromise;
+  Assert.equal(expandedEvents, 1, "expanded event fired");
+  for (const position of [40, 60, 78]) {
+    const mutationObserver = testRunner.waitForSizeTo(78);
+    await testRunner.synthMouse(position + 1); // 1px offset from mousedown.
+    await mutationObserver;
+    testRunner.assertElementSizes(
+      78,
+      `Should expand to collapse-size at ${position}`
+    );
+    Assert.ok(
+      !splitter.isCollapsed,
+      `Should no longer be collapsed at ${position}`
+    );
+  }
+
+  for (const position of [79, 100, 120, 200, 250, 300, 400, 450]) {
+    const mutationObserver = testRunner.waitForSizeTo(position);
+    await testRunner.synthMouse(position + 1); // 1px offset from mousedown.
+    await mutationObserver;
+    testRunner.assertElementSizes(
+      position,
+      `Should have ${position} size at ${position}`
+    );
+    Assert.ok(!splitter.isCollapsed, `Should not be collapsed at ${position}`);
+  }
+
+  await testRunner.synthMouse(450, "mouseup");
+  testRunner.assertElementSizes(
+    450,
+    "Should be at final size after releasing mouse"
+  );
+  Assert.ok(
+    !splitter.isCollapsed,
+    "Should not be collapsed after releasing mouse"
+  );
+
+  // Test that collapse and expand can happen in the same drag.
+  await testRunner.synthMouse(450, "mousedown");
+  let position;
+  let expectedSize;
+  for ([position, expectedSize] of [
+    [58, 78],
+    [57, 0],
+    [58, 78],
+    [57, 0],
+  ]) {
+    await testRunner.synthMouse(position);
+    testRunner.assertElementSizes(
+      expectedSize,
+      `Should have ${expectedSize} size at ${position}`
+    );
+  }
+  Assert.equal(collapsedEvents, 3, "collapsed events fired");
+  Assert.equal(expandedEvents, 2, "expanded events fired");
+  await testRunner.synthMouse(position, "mouseup");
+
+  // Test that expansion from collapsed reverts to normal behaviour after
+  // dragging out to the minimum size. Offset by 1px so we can grab the
+  // collapsed splitter.
+  await testRunner.synthMouse(1, "mousedown");
+  for ([position, expectedSize] of [
+    [0, 0],
+    [10, 0],
+    [20, 78],
+    [40, 78],
+    [60, 78],
+    [40, 0],
+    [60, 78],
+    [40, 0],
+    [80, 80],
+    [100, 100],
+  ]) {
+    const mutationObserver = testRunner.waitForSizeTo(expectedSize);
+    await testRunner.synthMouse(position + 1); // 1px offset from mousedown.
+    await mutationObserver;
+    testRunner.assertElementSizes(
+      expectedSize,
+      `Should have ${expectedSize} size at ${position}`
+    );
+  }
+  Assert.equal(collapsedEvents, 5, "collapsed events fired");
+  Assert.equal(expandedEvents, 5, "expanded events fired");
+  await testRunner.synthMouse(position, "mouseup");
+
+  // Restore the original position.
+  await testRunner.synthMouse(position, "mousedown");
+  position = originalPosition;
+  await testRunner.synthMouse(position);
+  await testRunner.synthMouse(position, "mouseup");
+  testRunner.assertElementSizes(originalPosition);
+
+  testRunner.clearCollapseSize();
+}
+
+async function subtestCollapseExpand() {
+  info("subtestCollapseExpand");
+  collapsedEvents = 0;
+  expandedEvents = 0;
+
+  const { splitter } = testRunner;
+
+  const originalSize = testRunner.getSize(testRunner.resized);
+
+  // Collapse.
+  Assert.ok(!splitter.isCollapsed, "splitter is not collapsed");
+  Assert.equal(collapsedEvents, 0, "no collapsed events have fired");
+
+  splitter.collapse();
+  testRunner.assertElementSizes(0);
+  Assert.ok(splitter.isCollapsed, "splitter is collapsed");
+  Assert.equal(collapsedEvents, 1, "a collapsed event fired");
+
+  splitter.collapse();
+  Assert.ok(splitter.isCollapsed, "splitter is collapsed");
+  Assert.equal(collapsedEvents, 1, "no more collapsed events have fired");
+
+  // Expand.
+  splitter.expand();
+  testRunner.assertElementSizes(originalSize);
+  Assert.ok(!splitter.isCollapsed, "splitter is not collapsed");
+  Assert.equal(expandedEvents, 1, "an expanded event fired");
+
+  splitter.expand();
+  Assert.ok(!splitter.isCollapsed, "splitter is not collapsed");
+  Assert.equal(expandedEvents, 1, "no more expanded events have fired");
+
+  collapsedEvents = 0;
+  expandedEvents = 0;
+
+  // Collapse again. Then drag to expand.
+  splitter.collapse();
+  Assert.equal(collapsedEvents, 1, "a collapsed event fired");
+
+  testRunner.setCollapseSize(78);
+
+  // Offset by 1px so we can grab the collapsed splitter.
+  await testRunner.synthMouse(1, "mousedown");
+  await testRunner.synthMouse(201);
+  await testRunner.synthMouse(201, "mouseup");
+  testRunner.assertElementSizes(200);
+  Assert.ok(!splitter.isCollapsed, "splitter is not collapsed");
+  Assert.equal(expandedEvents, 1, "an expanded event fired");
+
+  testRunner.clearCollapseSize();
+}
+
+add_task(async function testIsDisabled() {
+  const splitters = doc.querySelectorAll(`hr[is="pane-splitter"]`);
+  Assert.greater(splitters.length, 0, "should find splitters");
+
+  for (const splitter of splitters) {
+    // Setting to true adds the disabled attribute.
+    splitter.isDisabled = true;
+    Assert.ok(
+      splitter.hasAttribute("disabled"),
+      `${splitter.id}: has disabled attribute`
+    );
+    Assert.ok(splitter.isDisabled, `${splitter.id}: isDisabled returns true`);
+
+    // Setting to false removes it.
+    splitter.isDisabled = false;
+    Assert.ok(
+      !splitter.hasAttribute("disabled"),
+      `${splitter.id}: no disabled attribute`
+    );
+    Assert.ok(!splitter.isDisabled, `${splitter.id}: isDisabled returns false`);
+
+    // Falsy values should remove the attribute.
+    splitter.isDisabled = undefined;
+    Assert.ok(
+      !splitter.hasAttribute("disabled"),
+      `${splitter.id}: undefined removes attribute`
+    );
+    splitter.isDisabled = null;
+    Assert.ok(
+      !splitter.hasAttribute("disabled"),
+      `${splitter.id}: null removes attribute`
+    );
+    splitter.isDisabled = 0;
+    Assert.ok(
+      !splitter.hasAttribute("disabled"),
+      `${splitter.id}: 0 removes attribute`
+    );
+    splitter.isDisabled = "";
+    Assert.ok(
+      !splitter.hasAttribute("disabled"),
+      `${splitter.id}: empty string removes attribute`
+    );
+
+    // Truthy values should add the attribute.
+    splitter.isDisabled = 1;
+    Assert.ok(
+      splitter.hasAttribute("disabled"),
+      `${splitter.id}: 1 adds attribute`
+    );
+    splitter.isDisabled = "false";
+    Assert.ok(
+      splitter.hasAttribute("disabled"),
+      `${splitter.id}: 'false' string adds attribute`
+    );
+    splitter.isDisabled = {};
+    Assert.ok(
+      splitter.hasAttribute("disabled"),
+      `${splitter.id}: object adds attribute`
+    );
+
+    // Clean up.
+    splitter.isDisabled = false;
+  }
+});

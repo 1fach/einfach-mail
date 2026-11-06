@@ -1,0 +1,347 @@
+<?xml version="1.0"?>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+
+<!DOCTYPE html>
+<html
+  xmlns="http://www.w3.org/1999/xhtml"
+  xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+  lightweightthemes="true"
+  scrolling="false"
+>
+  <head>
+    <title data-l10n-id="folder-props-window-title"></title>
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src chrome:; script-src chrome: 'unsafe-inline' moz-src:"
+    />
+    <link rel="stylesheet" href="chrome://global/skin/global.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/messenger.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/input-fields.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/themeableDialog.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/folderProps.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/colors.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/folderColors.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/retention.css" />
+    <link rel="localization" href="messenger/folderprops.ftl" />
+    <link rel="localization" href="messenger/retention.ftl" />
+    <script
+      defer="defer"
+      src="chrome://messenger/content/globalOverlay.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://global/content/editMenuOverlay.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://messenger/content/dialogShadowDom.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://messenger/content/folderProps.js"
+    ></script>
+  </head>
+  <html:body
+    xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  >
+    <dialog id="folderPropertiesDialog">
+      <tabbox id="folderPropTabBox">
+        <tabs id="folderPropTabs">
+          <tab id="GeneralTab" data-l10n-id="folder-props-general-tab" />
+          <tab id="Retention" data-l10n-id="retention-tab" />
+          <tab
+            id="SynchronizationTab"
+            data-l10n-id="folder-props-synchronization-tab"
+            hidefor="pop3,rss,none"
+          />
+          <tab
+            id="SharingTab"
+            data-l10n-id="folder-props-sharing-tab"
+            hidefor="pop3,rss,none,nntp,ews"
+          />
+          <tab
+            id="QuotaTab"
+            data-l10n-id="folder-props-quota-tab"
+            hidefor="pop3,rss,none,nntp,ews"
+          />
+        </tabs>
+        <tabpanels id="folderPropTabPanels">
+          <vbox id="GeneralPanel">
+            <hbox id="nameBox" align="center" class="input-container">
+              <label
+                id="nameLabel"
+                data-l10n-id="folder-props-name"
+                control="name"
+              />
+              <hbox align="center" class="input-container">
+                <html:input
+                  id="name"
+                  type="text"
+                  readonly="readonly"
+                  oninput="doEnabling()"
+                  class="input-inline"
+                  aria-labelledby="nameLabel"
+                />
+                <label
+                  id="colorLabel"
+                  data-l10n-id="folder-props-color"
+                  control="color"
+                />
+                <html:input
+                  id="color"
+                  type="color"
+                  value=""
+                  class="input-inline-color"
+                  aria-labelledby="colorLabel"
+                />
+                <button
+                  id="resetColor"
+                  data-l10n-id="folder-props-reset-color"
+                  class="toolbarbutton-1 btn-flat btn-reset"
+                />
+              </hbox>
+              <label
+                id="locationLabel"
+                data-l10n-id="folder-props-location"
+                control="location"
+              />
+              <html:input
+                id="location"
+                type="text"
+                readonly="readonly"
+                class="uri-element input-inline"
+                aria-labelledby="locationLabel"
+              />
+            </hbox>
+            <vbox>
+              <spacer height="2" />
+              <hbox align="center">
+                <label data-l10n-id="folder-props-number-of-messages" />
+                <label
+                  id="numberOfMessages"
+                  data-l10n-id="folder-props-number-unknown"
+                />
+                <spacer flex="1" />
+                <label data-l10n-id="folder-props-size-on-disk" />
+                <label
+                  id="sizeOnDisk"
+                  data-l10n-id="folder-props-size-unknown"
+                />
+              </hbox>
+              <spacer height="2" />
+            </vbox>
+            <checkbox
+              id="folderIncludeInGlobalSearch"
+              data-l10n-id="folder-props-include-in-global-search"
+              hidefor="nntp"
+            />
+            <checkbox
+              id="folderCheckForNewMessages"
+              data-l10n-id="folder-props-check-for-new-messages"
+              hidefor="pop3,none,nntp"
+            />
+            <separator class="thin" />
+            <hbox>
+              <description
+                id="folderRebuildSummaryExplanation"
+                data-l10n-id="folder-props-rebuild-summary-explanation"
+                flex="1"
+              ></description>
+              <vbox>
+                <button
+                  id="folderRebuildSummaryButton"
+                  data-l10n-id="folder-props-rebuild-summary"
+                  oncommand="RebuildSummaryInformation(event)"
+                  align="center"
+                />
+              </vbox>
+            </hbox>
+          </vbox>
+
+          <vbox id="RetentionPanel" align="start">
+            <description
+              id="retention-description"
+              data-l10n-id="retention-description"
+              hidefor="imap,pop3"
+            >
+            </description>
+            <description
+              id="retention-description-imap"
+              data-l10n-id="retention-description-imap"
+              hidefor="pop3,rss,none,nntp,ews"
+            >
+            </description>
+            <description
+              id="retention-description-pop"
+              data-l10n-id="retention-description-pop"
+              hidefor="imap,rss,none,nntp,ews"
+            >
+            </description>
+            <separator class="thin" />
+            <hbox align="center" class="indent">
+              <checkbox
+                wsm_persist="true"
+                id="retention-use-default"
+                data-l10n-id="retention-use-default"
+                checked=""
+                oncommand="onUseDefaultRetentionSettings()"
+              />
+            </hbox>
+            <separator class="thin" />
+            <vbox class="indent">
+              <radiogroup
+                wsm_persist="true"
+                id="retention-retain-by"
+                aria-labelledby="retention-use-default"
+                class="indent"
+              >
+                <radio
+                  wsm_persist="true"
+                  id="retention-retain-all"
+                  value="1"
+                  data-l10n-id="retention-retain-all"
+                  oncommand="onCheckKeepMsg()"
+                />
+
+                <hbox flex="1" align="center">
+                  <radio
+                    wsm_persist="true"
+                    id="retention-retain-by-num-headers"
+                    value="3"
+                    data-l10n-id="retention-retain-by-num-headers"
+                    oncommand="onCheckKeepMsg()"
+                  />
+                  <html:input
+                    id="retention-num-headers-to-keep"
+                    type="number"
+                    class="size4 input-inline"
+                    min="1"
+                    value="2000"
+                    wsm_persist="true"
+                    aria-labelledby="retention-retain-by-num-headers retention-num-headers-to-keep retention-messages"
+                  />
+                  <label
+                    id="retention-messages"
+                    class="retention-unit-label"
+                    data-l10n-id="retention-messages"
+                    control="retention-num-headers-to-keep"
+                  />
+                </hbox>
+                <hbox flex="1" align="center">
+                  <radio
+                    wsm_persist="true"
+                    id="retention-retain-by-age"
+                    value="2"
+                    data-l10n-id="retention-retain-by-age"
+                    oncommand="onCheckKeepMsg()"
+                  />
+                  <html:input
+                    id="retention-days-to-keep-headers"
+                    type="number"
+                    class="size4 input-inline"
+                    min="1"
+                    value="30"
+                    wsm_persist="true"
+                    aria-labelledby="retention-retain-by-age retention-days-to-keep-headers retention-days-old"
+                  />
+                  <label
+                    id="retention-days-old"
+                    class="retention-unit-label"
+                    data-l10n-id="retention-days-old"
+                    control="retention-days-to-keep-headers"
+                  />
+                </hbox>
+              </radiogroup>
+              <separator class="thin" />
+              <checkbox
+                id="retention-always-keep-starred"
+                wsm_persist="true"
+                data-l10n-id="retention-always-keep-starred"
+                observes="retention-retain-by"
+                checked=""
+              />
+              <separator class="thin" />
+              <description
+                id="retention-removal-warning"
+                data-l10n-id="retention-removal-warning"
+                class="indent"
+              />
+            </vbox>
+          </vbox>
+
+          <vbox id="SyncPanel" align="start">
+            <vbox>
+              <checkbox
+                id="offline.selectForOfflineFolder"
+                data-l10n-id="folder-props-select-for-offline"
+                hidefor="nntp"
+                wsm_persist="true"
+              />
+              <checkbox
+                id="offline.selectForOfflineNewsgroup"
+                data-l10n-id="folder-props-select-newsgroup-for-offline"
+                hidefor="imap,ews"
+                wsm_persist="true"
+              />
+            </vbox>
+            <button
+              id="offline.offlineFolderDownloadButton"
+              data-l10n-id="folder-props-download-now"
+              orient="right"
+              hidefor="nntp"
+              oncommand="onOfflineFolderDownload()"
+            />
+            <button
+              id="offline.offlineNewsgroupDownloadButton"
+              data-l10n-id="folder-props-download-newsgroup-now"
+              orient="right"
+              hidefor="imap,ews"
+              oncommand="onOfflineFolderDownload()"
+            />
+          </vbox>
+
+          <vbox id="SharingPanel">
+            <hbox align="start">
+              <label id="folderTypeLabel" data-l10n-id="folder-props-type" />
+              <label value="" id="folderType.text" />
+            </hbox>
+            <vbox align="start">
+              <label value="" id="folderDescription.text" />
+              <label value=" " />
+              <label
+                id="permissionsDescLabel"
+                data-l10n-id="folder-props-permissions"
+              />
+              <description id="folderPermissions.text"></description>
+            </vbox>
+            <vbox id="folderOtherUsers" align="start" hidden="hidden">
+              <label value=" " />
+              <label data-l10n-id="folder-props-other-users" />
+              <description id="folderOtherUsersText"></description>
+            </vbox>
+            <spacer flex="1" />
+            <vbox align="start">
+              <button
+                id="imap.FolderPrivileges"
+                data-l10n-id="folder-props-privileges"
+                hidefor="pop3,none,rss,nntp,ews"
+                oncommand="onFolderPrivileges()"
+                orient="right"
+              />
+            </vbox>
+          </vbox>
+
+          <vbox id="quotaPanel">
+            <label id="folderQuotaStatus" flex="1" />
+            <hbox id="folderQuotaData" hidden="hidden">
+              <html:ul id="quotaDetails"></html:ul>
+            </hbox>
+          </vbox>
+        </tabpanels>
+      </tabbox>
+    </dialog>
+  </html:body>
+</html>

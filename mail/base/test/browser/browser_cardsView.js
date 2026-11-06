@@ -1,0 +1,425 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+
+const { MessageGenerator } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
+);
+const { click_through_appmenu } = ChromeUtils.importESModule(
+  "resource://testing-common/mail/WindowHelpers.sys.mjs"
+);
+const { ensure_cards_view, prepare_thread_row_descendant_click } =
+  ChromeUtils.importESModule(
+    "resource://testing-common/MailViewHelpers.sys.mjs"
+  );
+
+const tabmail = document.getElementById("tabmail");
+const about3Pane = tabmail.currentAbout3Pane;
+const { threadPane, threadTree } = about3Pane;
+let rootFolder,
+  testFolder,
+  emptyFolder,
+  testMessages,
+  displayContext,
+  displayButton;
+
+async function clickThreadRow(row, event = {}) {
+  await prepare_thread_row_descendant_click(row, AccessibilityUtils);
+  EventUtils.synthesizeMouseAtCenter(row, event, about3Pane);
+  AccessibilityUtils.resetEnv();
+}
+
+add_setup(async function () {
+  const account = MailServices.accounts.createLocalMailAccount();
+  account.addIdentity(MailServices.accounts.createIdentity());
+  rootFolder = account.incomingServer.rootFolder.QueryInterface(
+    Ci.nsIMsgLocalMailFolder
+  );
+  testFolder = rootFolder
+    .createLocalSubfolder("cardsView")
+    .QueryInterface(Ci.nsIMsgLocalMailFolder);
+  emptyFolder = rootFolder
+    .createLocalSubfolder("emptyFolder")
+    .QueryInterface(Ci.nsIMsgLocalMailFolder);
+
+  const generator = new MessageGenerator();
+  testFolder.addMessageBatch(
+    generator
+      .makeMessages({ count: 5 })
+      .map(message => message.toMessageString())
+  );
+  testMessages = [...testFolder.messages];
+
+  about3Pane.displayFolder(testFolder.URI);
+  about3Pane.paneLayout.messagePaneVisible = false;
+
+  registerCleanupFunction(() => {
+    MailServices.accounts.removeAccount(account, false);
+    about3Pane.paneLayout.messagePaneVisible = true;
+    about3Pane.folderTree.focus();
+  });
+});
+
+add_task(async function testSwitchToCardsView() {
+  Assert.equal(
+    threadTree.getAttribute("rows"),
+    "thread-card",
+    "The tree view should have a card layout"
+  );
+
+  await click_through_appmenu(
+    [{ id: "appmenu_View" }, { id: "appmenu_MessagePaneLayout" }],
+    { id: "appmenu_messagePaneClassic" },
+    window
+  );
+
+  Assert.equal(
+    threadTree.getAttribute("rows"),
+    "thread-card",
+    "tree view in cards layout"
+  );
+
+  displayContext = about3Pane.document.getElementById(
+    "threadPaneDisplayContext"
+  );
+  displayButton = about3Pane.document.getElementById("threadPaneDisplayButton");
+  let shownPromise = BrowserTestUtils.waitForEvent(
+    displayContext,
+    "popupshown"
+  );
+  EventUtils.synthesizeMouseAtCenter(displayButton, {}, about3Pane);
+  await shownPromise;
+
+  Assert.ok(
+    displayContext
+      .querySelector("#threadPaneCardsView")
+      .hasAttribute("checked"),
+    "The cards view menuitem should be checked"
+  );
+
+  let hiddenPromise = BrowserTestUtils.waitForEvent(
+    displayContext,
+    "popuphidden"
+  );
+  const switchedToTable = BrowserTestUtils.waitForAttribute(
+    "rows",
+    threadTree,
+    "thread-row"
+  );
+  displayContext.activateItem(
+    displayContext.querySelector("#threadPaneTableView")
+  );
+  await switchedToTable;
+  EventUtils.synthesizeKey("KEY_Escape", {});
+  await hiddenPromise;
+
+  await click_through_appmenu(
+    [{ id: "appmenu_View" }, { id: "appmenu_MessagePaneLayout" }],
+    { id: "appmenu_messagePaneVertical" },
+    window
+  );
+
+  Assert.equal(
+    threadTree.getAttribute("rows"),
+    "thread-row",
+    "The tree view should not switch to a card layout"
+  );
+  Assert.equal(
+    threadTree.table.body.getAttribute("role"),
+    "treegrid",
+    "The message list table should be presented as Tree Grid View"
+  );
+  Assert.equal(
+    threadTree.getRowAtIndex(0).getAttribute("role"),
+    "row",
+    "The message row should be presented as Row Item"
+  );
+
+  displayContext = about3Pane.document.getElementById(
+    "threadPaneDisplayContext"
+  );
+  displayButton = about3Pane.document.getElementById("threadPaneDisplayButton");
+  shownPromise = BrowserTestUtils.waitForEvent(displayContext, "popupshown");
+  EventUtils.synthesizeMouseAtCenter(displayButton, {}, about3Pane);
+  await shownPromise;
+
+  Assert.ok(
+    displayContext
+      .querySelector("#threadPaneTableView")
+      .hasAttribute("checked"),
+    "The table view menuitem should be checked"
+  );
+
+  hiddenPromise = BrowserTestUtils.waitForEvent(displayContext, "popuphidden");
+  const switchedToCards = BrowserTestUtils.waitForAttribute(
+    "rows",
+    threadTree,
+    "thread-card"
+  );
+  displayContext.activateItem(
+    displayContext.querySelector("#threadPaneCardsView")
+  );
+  await switchedToCards;
+  EventUtils.synthesizeKey("KEY_Escape", {});
+  await hiddenPromise;
+  await new Promise(resolve => about3Pane.requestAnimationFrame(resolve));
+
+  Assert.equal(
+    threadTree.getAttribute("rows"),
+    "thread-card",
+    "tree view in cards layout"
+  );
+  Assert.equal(
+    threadTree.table.body.getAttribute("role"),
+    "treegrid",
+    "The message list table should remain as Tree Grid View"
+  );
+  Assert.equal(
+    threadTree.getRowAtIndex(0).getAttribute("role"),
+    "row",
+    "The message row should remain as Row Item"
+  );
+  Assert.equal(
+    threadTree.getRowAtIndex(0).querySelector("td").getAttribute("role"),
+    "gridcell",
+    "The message card should be presented as Grid Cell"
+  );
+
+  const tableRow = threadTree.getRowAtIndex(1);
+  const tableData = tableRow.querySelector(".card-container");
+  const rowHeight = getComputedStyle(tableRow).getPropertyValue("height");
+  const containerHeightNoPadding = getComputedStyle(tableData)
+    .getPropertyValue("height")
+    .slice(0, -2);
+  // Add 4 px of padding to the computed height.
+  const containerHeight = parseFloat(containerHeightNoPadding) + 4;
+  Assert.equal(
+    rowHeight,
+    `${containerHeight}px`,
+    "The message and content container height should be the same"
+  );
+
+  const row = threadTree.getRowAtIndex(0);
+  const star = row.querySelector(".button-star");
+  Assert.ok(BrowserTestUtils.isVisible(star), "star icon should be visible");
+  const tag = row
+    .querySelector("thread-card-tags")
+    .shadowRoot.querySelector(".tag-icon");
+  Assert.ok(BrowserTestUtils.isHidden(tag), "tag icon should be hidden");
+  const attachment = row.querySelector(".attachment-icon");
+  Assert.ok(
+    BrowserTestUtils.isHidden(attachment),
+    "attachment icon should be hidden"
+  );
+
+  // Switching to horizontal view shouldn't affect the list layout.
+  await click_through_appmenu(
+    [{ id: "appmenu_View" }, { id: "appmenu_MessagePaneLayout" }],
+    { id: "appmenu_messagePaneClassic" },
+    window
+  );
+
+  Assert.equal(
+    threadTree.getAttribute("rows"),
+    "thread-card",
+    "tree view in cards layout"
+  );
+  about3Pane.folderTree.focus();
+});
+
+add_task(async function testTagsInVerticalView() {
+  await ensure_cards_view(document);
+  about3Pane.folderTree.focus();
+
+  const getCardTags = row => row.querySelector("thread-card-tags");
+  const getTagIcon = tags => tags.shadowRoot.querySelector(".tag-icon");
+
+  const row = threadTree.getRowAtIndex(1);
+  Assert.ok(
+    getCardTags(row),
+    "the selected row should contain thread-card-tags"
+  );
+
+  await clickThreadRow(row);
+  Assert.ok(row.classList.contains("selected"), "the row should be selected");
+
+  const tags = getCardTags(row);
+  const tagIcon = getTagIcon(tags);
+  Assert.ok(BrowserTestUtils.isHidden(tagIcon), "tag icon should be hidden");
+
+  const importantTag = MailServices.tags.getTagForKey("$label1");
+
+  EventUtils.synthesizeKey("1", {}, about3Pane);
+  await TestUtils.waitForCondition(
+    () => BrowserTestUtils.isVisible(tagIcon),
+    "Waiting for the Important tag icon to become visible"
+  );
+  Assert.ok(BrowserTestUtils.isVisible(tagIcon), "tag icon should be visible");
+  Assert.equal(tags.title, importantTag, "the important tag should be set");
+
+  const row2 = threadTree.getRowAtIndex(2);
+  await clickThreadRow(row2);
+  Assert.ok(
+    row2.classList.contains("selected"),
+    "the third row should be selected"
+  );
+
+  const tags2 = getCardTags(row2);
+  const tagIcon2 = getTagIcon(tags2);
+  Assert.ok(BrowserTestUtils.isHidden(tagIcon2), "tag icon should be hidden");
+
+  const workTag = MailServices.tags.getTagForKey("$label2");
+
+  EventUtils.synthesizeKey("2", {}, about3Pane);
+  await TestUtils.waitForCondition(
+    () => BrowserTestUtils.isVisible(tagIcon2),
+    "Waiting for the Work tag icon to become visible"
+  );
+  Assert.ok(BrowserTestUtils.isVisible(tagIcon2), "tag icon should be visible");
+  Assert.equal(tags2.title, workTag, "the work tag should be set");
+
+  const shownPromise = BrowserTestUtils.waitForEvent(
+    displayContext,
+    "popupshown"
+  );
+  EventUtils.synthesizeMouseAtCenter(displayButton, {}, about3Pane);
+  await shownPromise;
+
+  Assert.ok(
+    displayContext
+      .querySelector("#threadPaneCardsView")
+      .hasAttribute("checked"),
+    "The cards view menuitem should be checked"
+  );
+
+  const hiddenPromise = BrowserTestUtils.waitForEvent(
+    displayContext,
+    "popuphidden"
+  );
+  const switchedToTable = BrowserTestUtils.waitForAttribute(
+    "rows",
+    threadTree,
+    "thread-row"
+  );
+
+  // Switch back to a table layout and horizontal view.
+  displayContext.activateItem(
+    displayContext.querySelector("#threadPaneTableView")
+  );
+  await switchedToTable;
+  EventUtils.synthesizeKey("KEY_Escape", {});
+  await hiddenPromise;
+
+  Assert.equal(
+    threadTree.getAttribute("rows"),
+    "thread-row",
+    "tree view in table layout"
+  );
+
+  await ensure_cards_view(document);
+  about3Pane.folderTree.focus();
+
+  const rowAfterSwitch = threadTree.getRowAtIndex(1);
+  const row2AfterSwitch = threadTree.getRowAtIndex(2);
+  Assert.equal(
+    getCardTags(rowAfterSwitch).title,
+    importantTag,
+    "Important tag should still be shown after switching views"
+  );
+  Assert.equal(
+    getCardTags(row2AfterSwitch).title,
+    workTag,
+    "Work tag should still be shown after switching views"
+  );
+});
+
+/**
+ * This test Checks that:
+ * Clicking on the kebab button of a row selects that row.
+ * If other rows are selected or multiselection, only the row clicked should be selected.
+ * The menu popup opens.
+ */
+add_task(async function testMessageMenuButton() {
+  const row1 = threadTree.getRowAtIndex(1);
+  const row2 = threadTree.getRowAtIndex(2);
+  const menuContext = about3Pane.document.getElementById("mailContext");
+  const menuButton = row1.querySelector(".tree-button-more");
+  await clickThreadRow(row1);
+  await clickThreadRow(row2, { shiftKey: true });
+  Assert.ok(row1.classList.contains("selected"), "Row 1 should be selected");
+  Assert.ok(row2.classList.contains("selected"), "Row 2 should be selected");
+  EventUtils.synthesizeMouseAtCenter(menuButton, {}, about3Pane);
+  await BrowserTestUtils.waitForPopupEvent(menuContext, "shown");
+  Assert.ok(
+    BrowserTestUtils.isVisible(menuContext),
+    "The message card's menu should be visible"
+  );
+  Assert.ok(
+    row1.classList.contains("selected"),
+    "The row that was clicked should be selected"
+  );
+  Assert.ok(
+    !row2.classList.contains("selected"),
+    "The row that wasn't clicked should be unselected"
+  );
+  menuContext.hidePopup();
+  await BrowserTestUtils.waitForPopupEvent(menuContext, "hidden");
+  about3Pane.folderTree.focus();
+});
+
+add_task(async function test_status_indicator_fluent() {
+  await ensure_cards_view(document);
+  about3Pane.folderTree.focus();
+
+  let tableRow = threadTree.getRowAtIndex(1);
+  let readStatus = tableRow.querySelector(".read-status");
+
+  Assert.ok(
+    BrowserTestUtils.isVisible(readStatus),
+    "The status indicator should be visible"
+  );
+  Assert.equal(
+    document.l10n.getAttributes(readStatus).id,
+    "tree-list-view-row-new-status",
+    "A new message should have the correct fluent ID for the status indicator"
+  );
+
+  about3Pane.paneLayout.messagePaneVisible = true;
+  await clickThreadRow(tableRow);
+  await BrowserTestUtils.waitForEvent(window, "MsgLoaded");
+  await TestUtils.waitForCondition(
+    () => testMessages.at(1).isRead,
+    "waiting for message 0 to be marked as read"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(readStatus),
+    "The status indicator should be hidden after selecting the row"
+  );
+
+  about3Pane.displayFolder(emptyFolder.URI);
+  await TestUtils.waitForTick();
+
+  const allMessagesLoadedPromise = BrowserTestUtils.waitForEvent(
+    about3Pane,
+    "allMessagesLoaded"
+  );
+  about3Pane.displayFolder(testFolder.URI);
+  await allMessagesLoadedPromise;
+  await TestUtils.waitForTick();
+
+  tableRow = about3Pane.threadTree.getRowAtIndex(2);
+  // Rows are only filled on the animation frame after their index is set, so
+  // wait for one before inspecting the row's content.
+  await new Promise(resolve => about3Pane.requestAnimationFrame(resolve));
+
+  readStatus = tableRow.querySelector(".read-status");
+  Assert.ok(
+    BrowserTestUtils.isVisible(readStatus),
+    "The status indicator should be visible"
+  );
+  Assert.equal(
+    document.l10n.getAttributes(readStatus).id,
+    "tree-list-view-row-not-read-status",
+    "An unread message should have the correct fluent ID for the status indicator"
+  );
+});

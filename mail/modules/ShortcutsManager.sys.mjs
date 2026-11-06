@@ -1,0 +1,410 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/**
+ * Module used to collect all global shortcuts that can (will) be customizable.
+ * Use the shortcuts[] array to add global shortcuts that need to work on the
+ * whole window. The `context` property allows using the same shortcut for
+ * different context. The event handling needs to be defined in the window.
+ */
+
+import { AppConstants } from "resource://gre/modules/AppConstants.sys.mjs";
+
+export const ShortcutsManager = {
+  /**
+   * Fluent modifiers mapping to allow updating strings without changing all the
+   * IDs in the shortcuts.ftl file. This is needed because the IDs are
+   * dynamically generated.
+   *
+   * @type {object}
+   */
+  fluentModifiersMapping: {
+    "meta-shift-alt-shortcut-key": "meta-shift-alt-shortcut-key2",
+    "ctrl-shift-alt-shortcut-key": "ctrl-shift-alt-shortcut-key2",
+    "meta-ctrl-shift-alt-shortcut-key": "meta-ctrl-shift-alt-shortcut-key2",
+  },
+
+  /**
+   * Fluent key mapping to allow using the localized version of specific keys.
+   * This map will not list all keys used because strings like numbers or
+   * special international characters won't need to be translated. But keys like
+   * "Enter", "Del", "Spacebar", etc., will need a localized version to be used
+   * in tooltips or acceltext.
+   */
+  fluentKeyMapping: {
+    enter: "shortcut-key-enter",
+  },
+
+  /**
+   * Data set for a shortcut.
+   *
+   * @typedef {object} Shortcut
+   * @property {string} id - The id for this shortcut.
+   * @property {string} name - The name of this shortcut. TODO: This should use
+   *   fluent to be translatable in the future, once we decide to expose this
+   *   array and make it customizable.
+   * @property {?string} key - The keyboard key used by this shortcut, or null
+   *   if the shortcut is disabled.
+   * @property {object} modifiers - The list of modifiers expected by this
+   *   shortcut in order to be triggered, organized per platform.
+   * @property {string[]} context - An array of strings representing the context
+   *   string to filter out duplicated shortcuts, if necessary.
+   */
+  /**
+   * @type {Shortcut[]}
+   */
+  shortcuts: [
+    /* Numbers. */
+    {
+      id: "space-mail",
+      name: "Open the Mail space",
+      key: "1",
+      modifiers: {
+        win: {
+          metaKey: false,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: true,
+        },
+        macosx: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+        linux: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+      },
+      context: [],
+    },
+    {
+      id: "space-addressbook",
+      name: "Open the Address Book space",
+      key: "2",
+      modifiers: {
+        win: {
+          metaKey: false,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: true,
+        },
+        macosx: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+        linux: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+      },
+      context: [],
+    },
+    {
+      id: "space-calendar",
+      name: "Open the Calendar space",
+      key: "3",
+      modifiers: {
+        win: {
+          metaKey: false,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: true,
+        },
+        macosx: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+        linux: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+      },
+      context: [],
+    },
+    {
+      id: "space-tasks",
+      name: "Open the Tasks space",
+      key: "4",
+      modifiers: {
+        win: {
+          metaKey: false,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: true,
+        },
+        macosx: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+        linux: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+      },
+      context: [],
+    },
+    {
+      id: "space-chat",
+      name: "Open the Chat space",
+      key: "5",
+      modifiers: {
+        win: {
+          metaKey: false,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: true,
+        },
+        macosx: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+        linux: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+      },
+      context: [],
+    },
+    {
+      id: "space-toggle",
+      name: "Toggle the Spaces Toolbar",
+      key: null, // Disabled shortcut.
+      modifiers: {
+        win: {
+          metaKey: false,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: false,
+        },
+        macosx: {
+          metaKey: false,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: false,
+        },
+        linux: {
+          metaKey: false,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: false,
+        },
+      },
+      context: [],
+    },
+    /* Characters. */
+    {
+      id: "search-messages",
+      name: "Open the Search Messages dialog",
+      key: "F",
+      modifiers: {
+        win: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: true,
+          altKey: false,
+        },
+        macosx: {
+          metaKey: true,
+          ctrlKey: false,
+          shiftKey: true,
+          altKey: false,
+        },
+        linux: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: true,
+          altKey: false,
+        },
+      },
+      context: [],
+    },
+    /* Compose window */
+    {
+      id: "send-message",
+      name: "Send the currently composing message",
+      key: "Enter",
+      modifiers: {
+        win: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+        macosx: {
+          metaKey: true,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: false,
+        },
+        linux: {
+          metaKey: false,
+          ctrlKey: true,
+          shiftKey: false,
+          altKey: false,
+        },
+      },
+      context: ["compose"],
+    },
+    /* Special characters. */
+  ],
+
+  /**
+   * Find the matching shortcut from a keydown DOM Event.
+   *
+   * @param {KeyboardEvent} event - The keyboard event to match.
+   * @param {?string} context - The context string to filter out duplicated
+   *   shortcuts, if necessary.
+   * @returns {?Shortcut} - The matching shortcut, or null if nothing matches.
+   * @throws {Error} If multiple shortcuts match the event, since we don't
+   *   want to allow multiple shortcuts to run at the same time.
+   */
+  matches(event, context = null) {
+    const found = [];
+    const normalizedKey = event.key.toLowerCase();
+    for (const shortcut of this.shortcuts) {
+      // No need to run any other condition if the base key doesn't match.
+      // Compare case insensitive because this is not consistent across
+      // platforms. We check for the shift key specifically below anyway.
+      if (shortcut.key?.toLowerCase() != normalizedKey) {
+        continue;
+      }
+
+      // Skip this key if we require a context not present, or we don't require
+      // a context and key has some.
+      if (
+        (context && !shortcut.context.includes(context)) ||
+        (!context && shortcut.context.length)
+      ) {
+        continue;
+      }
+
+      // Perfectly match all modifiers to prevent false positives. Missing
+      // modifier properties are treated as not pressed.
+      const mods = {
+        metaKey: false,
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        ...shortcut.modifiers[AppConstants.platform],
+      };
+      if (
+        mods.metaKey == event.metaKey &&
+        mods.ctrlKey == event.ctrlKey &&
+        mods.shiftKey == event.shiftKey &&
+        mods.altKey == event.altKey
+      ) {
+        found.push(shortcut);
+      }
+    }
+
+    if (found.length > 1) {
+      // Trigger an error since we don't want to allow multiple shortcuts to
+      // run at the same time. If this happens, we got a problem!
+      throw new Error(
+        `Multiple shortcuts (${found
+          .map(f => f.id)
+          .join(
+            ","
+          )}) are conflicting with the keydown event. KEY: ${event.key} | CTRL: ${event.ctrlKey} | META: ${event.metaKey} | SHIFT: ${event.shiftKey} | ALT: ${event.altKey} | CONTEXT: ${context}`
+      );
+    }
+
+    return found[0] ?? null;
+  },
+
+  /**
+   * The generated shortcut and aria strings of a shortcut.
+   *
+   * @typedef {object} ShortcutStrings
+   * @property {string} localizedShortcut - The shortcut in a human-readable,
+   *   localized and platform-specific form.
+   * @property {string} ariaKeyShortcuts - The shortcut in a form appropriate
+   *   for the aria-keyshortcuts attribute.
+   */
+  /**
+   * Generate a string that will be used to create the fluent ID to visually
+   * represent the keyboard shortcut.
+   *
+   * @param {string} id - The ID of the requested shortcut.
+   * @returns {?ShortcutStrings} The generated shortcut strings, or null if the
+   *   shortcut doesn't exist or is disabled.
+   */
+  async getShortcutStrings(id) {
+    const shortcut = this.shortcuts.find(s => s.id == id);
+    if (!shortcut?.key) {
+      return null;
+    }
+
+    const platform = AppConstants.platform;
+    const string = [];
+    const aria = [];
+    if (shortcut.modifiers[platform].metaKey) {
+      string.push("meta");
+      aria.push("Meta");
+    }
+
+    if (shortcut.modifiers[platform].ctrlKey) {
+      string.push("ctrl");
+      aria.push("Control");
+    }
+
+    if (shortcut.modifiers[platform].shiftKey) {
+      string.push("shift");
+      aria.push("Shift");
+    }
+
+    if (shortcut.modifiers[platform].altKey) {
+      string.push("alt");
+      aria.push("Alt");
+    }
+    string.push("shortcut-key");
+
+    // If the shortcut used is only a single letter, always uppercase it.
+    let keyToPrint = shortcut.key.toUpperCase();
+    // Check if the used shortcut is localizable and use the formatted value.
+    // E.g.: Enter, Del, Space.
+    if (this.fluentKeyMapping[shortcut.key.toLowerCase()]) {
+      keyToPrint = await this.l10n.formatValue(
+        `shortcut-key-${shortcut.key.toLowerCase()}`
+      );
+    }
+    aria.push(keyToPrint);
+
+    // Check if the ID was updated in the fluent file and replace it.
+    let stringId = string.join("-");
+    stringId = this.fluentModifiersMapping[stringId] || stringId;
+
+    const value = await this.l10n.formatValue(stringId, {
+      key: keyToPrint,
+    });
+
+    return { localizedShortcut: value, ariaKeyShortcuts: aria.join("+") };
+  },
+};
+
+ChromeUtils.defineLazyGetter(
+  ShortcutsManager,
+  "l10n",
+  () => new Localization(["messenger/shortcuts.ftl"])
+);

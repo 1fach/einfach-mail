@@ -1,0 +1,16 @@
+[DEFAULT]
+
+subsuite = "enterprise"
+
+run-if = ["enterprise"]
+
+["test_felt_thunderbird_about_config_blocked.py"]
+
+["test_felt_thunderbird_enterprise_toolbar_button.py"]
+
+["test_felt_thunderbird_fxa.py"]
+run-if = ["sync"]
+
+["test_felt_thunderbird_signout.py"]
+
+["test_felt_thunderbird_starts.py"]

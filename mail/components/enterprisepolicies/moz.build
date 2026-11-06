@@ -1,0 +1,26 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+with Files("**"):
+    BUG_COMPONENT = ("Thunderbird", "OS Integration")
+
+DIRS += [
+    "helpers",
+    "schemas",
+]
+
+TEST_DIRS += ["tests"]
+
+EXTRA_JS_MODULES.policies += [
+    "Policies.sys.mjs",
+]
+
+TESTING_JS_MODULES.policies_browser += [
+    "/browser/components/enterprisepolicies/Policies.sys.mjs",
+    "/browser/components/enterprisepolicies/schemas/policies-schema.json",
+]
+
+JAR_MANIFESTS += [
+    "jar.mn",
+]

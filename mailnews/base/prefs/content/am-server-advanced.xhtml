@@ -1,0 +1,472 @@
+<?xml version="1.0"?>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+
+<!DOCTYPE html>
+<html
+  xmlns="http://www.w3.org/1999/xhtml"
+  xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+  scrolling="false"
+>
+  <head>
+    <title data-l10n-id="account-settings-advanced-server-title"></title>
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src chrome:; script-src chrome: 'unsafe-inline' moz-src:; style-src chrome: 'unsafe-inline'"
+    />
+    <link rel="stylesheet" href="chrome://messenger/skin/input-fields.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/accountManage.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/icons.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/variables.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/folderMenus.css" />
+    <link rel="localization" href="messenger/accountSettings.ftl" />
+    <script
+      defer="defer"
+      src="chrome://messenger/content/globalOverlay.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://global/content/editMenuOverlay.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://messenger/content/am-server-advanced.js"
+    ></script>
+  </head>
+  <html:body
+    xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  >
+    <dialog buttons="accept,cancel" style="width: 100vw; height: 100vh">
+      <stringbundle
+        id="bundle_prefs"
+        src="chrome://messenger/locale/prefs.properties"
+      />
+
+      <label id="serverPrettyName" />
+
+      <separator class="thin" />
+
+      <!-- IMAP Panel -->
+      <vbox id="imapPanel">
+        <hbox align="center">
+          <label
+            id="serverDirectoryLabel"
+            data-l10n-id="account-settings-imap-server-directory"
+            control="serverDirectory"
+          />
+          <hbox flex="1" class="input-container">
+            <html:input
+              id="serverDirectory"
+              type="text"
+              class="input-inline"
+              aria-labelledby="serverDirectoryLabel"
+              amsa_persist="true"
+            />
+          </hbox>
+        </hbox>
+
+        <checkbox
+          id="usingSubscription"
+          amsa_persist="true"
+          data-l10n-id="account-settings-imap-show-subscribed-folders"
+        />
+
+        <checkbox
+          id="dualUseFolders"
+          amsa_persist="true"
+          data-l10n-id="account-settings-imap-dual-use-folders"
+        />
+
+        <separator class="groove" />
+        <hbox align="center">
+          <label
+            id="maximumConnectionsNumberLabel"
+            control="maximumConnectionsNumber"
+            data-l10n-id="account-settings-imap-maximum-connections"
+          />
+          <html:input
+            id="maximumConnectionsNumber"
+            type="number"
+            class="size3 input-inline"
+            min="1"
+            max="1000"
+            amsa_persist="true"
+            aria-labelledby="maximumConnectionsNumberLabel"
+          />
+        </hbox>
+
+        <separator class="groove" />
+        <description
+          data-l10n-id="account-settings-imap-namespace-description"
+        />
+        <hbox class="indent">
+          <vbox>
+            <hbox flex="1" align="center">
+              <label
+                id="personalNamespaceLabel"
+                control="personalNamespace"
+                data-l10n-id="account-settings-imap-personal-namespace"
+              />
+            </hbox>
+            <hbox flex="1" align="center">
+              <label
+                id="publicNamespaceLabel"
+                control="publicNamespace"
+                data-l10n-id="account-settings-imap-public-namespace"
+              />
+            </hbox>
+            <hbox flex="1" align="center">
+              <label
+                id="otherUsersNamespaceLabel"
+                control="otherUsersNamespace"
+                data-l10n-id="account-settings-imap-other-users-namespace"
+              />
+            </hbox>
+          </vbox>
+          <vbox>
+            <html:input
+              id="personalNamespace"
+              type="text"
+              class="input-inline"
+              aria-labelledby="personalNamespaceLabel"
+              amsa_persist="true"
+            />
+            <html:input
+              id="publicNamespace"
+              type="text"
+              class="input-inline"
+              aria-labelledby="publicNamespaceLabel"
+              amsa_persist="true"
+            />
+            <html:input
+              id="otherUsersNamespace"
+              type="text"
+              class="input-inline"
+              aria-labelledby="otherUsersNamespaceLabel"
+              amsa_persist="true"
+            />
+          </vbox>
+        </hbox>
+        <hbox class="indent">
+          <checkbox
+            id="overrideNamespaces"
+            amsa_persist="true"
+            data-l10n-id="account-settings-imap-override-namespaces"
+          />
+        </hbox>
+      </vbox>
+
+      <!-- POP3 Panel -->
+      <vbox id="pop3Panel">
+        <label
+          flex="1"
+          control="folderStorage"
+          data-l10n-id="account-settings-pop-inbox-description"
+        />
+        <hbox align="center">
+          <radiogroup
+            id="folderStorage"
+            flex="1"
+            orient="horizontal"
+            amsa_persist="true"
+            onselect="updateInboxAccount(this.selectedIndex == 1)"
+          >
+            <vbox flex="1">
+              <hbox>
+                <radio
+                  id="deferToCurrentAccount"
+                  value="currentAccount"
+                  data-l10n-id="account-settings-pop-inbox-current-account"
+                />
+              </hbox>
+              <vbox flex="1">
+                <hbox>
+                  <radio
+                    id="deferToOtherAccount"
+                    value="otherAccount"
+                    data-l10n-id="account-settings-pop-inbox-other-account"
+                  >
+                  </radio>
+                  <menulist
+                    id="deferredServerFolderPicker"
+                    class="folderMenuItem"
+                    flex="1"
+                    aria-labelledby="deferToServer"
+                  >
+                    <menupopup
+                      is="folder-menupopup"
+                      id="deferredServerPopup"
+                      expandFolders="false"
+                      mode="deferred"
+                      oncommand="this.selectFolder(event.target._folder)"
+                    />
+                  </menulist>
+                </hbox>
+                <checkbox
+                  id="deferGetNewMail"
+                  amsa_persist="true"
+                  data-l10n-id="account-settings-pop-include-server"
+                  class="indent"
+                />
+              </vbox>
+            </vbox>
+          </radiogroup>
+        </hbox>
+      </vbox>
+
+      <!-- custom OAuth fields, shared by IMAP and POP3 -->
+      <vbox id="oauth2CustomDetailsContainer">
+        <separator class="groove" />
+        <checkbox
+          id="oauth2UseCustomDetails"
+          amsa_persist="true"
+          data-l10n-id="oauth2-use-custom-details"
+          oncommand="onChangeOAuth2CustomDetails(this)"
+        />
+        <hbox class="indent">
+          <!-- Labels -->
+          <vbox>
+            <hbox flex="1" align="center">
+              <label
+                id="oauth2ClientIdLabel"
+                data-l10n-id="oauth2-client-id-label"
+                control="oauth2ClientId"
+              />
+            </hbox>
+            <hbox flex="1" align="center">
+              <label
+                id="oauth2AuthorizationEndpointLabel"
+                data-l10n-id="oauth2-authorization-endpoint-label"
+                control="oauth2AuthorizationEndpoint"
+              />
+            </hbox>
+            <hbox flex="1" align="center">
+              <label
+                id="oauth2TokenEndpointLabel"
+                data-l10n-id="oauth2-token-endpoint-label"
+                control="oauth2TokenEndpoint"
+              />
+            </hbox>
+            <hbox flex="1" align="center">
+              <label
+                id="oauth2ScopesLabel"
+                data-l10n-id="oauth2-scopes-label"
+                control="oauth2Scopes"
+              />
+            </hbox>
+            <hbox flex="1" align="center">
+              <label
+                id="oauth2RedirectionEndpointLabel"
+                data-l10n-id="oauth2-redirection-endpoint-label"
+                control="oauth2RedirectionEndpoint"
+              />
+            </hbox>
+            <hbox flex="1" align="center">
+              <label
+                id="oauth2ClientSecretLabel"
+                data-l10n-id="oauth2-client-secret-label"
+                control="oauth2ClientSecret"
+              />
+            </hbox>
+            <hbox flex="1" align="center">
+              <label
+                id="oauth2IssuerIdentifierLabel"
+                data-l10n-id="oauth2-issuer-identifier-label"
+                control="oauth2IssuerIdentifier"
+              />
+            </hbox>
+          </vbox>
+          <!-- Input Fields -->
+          <vbox flex="1">
+            <html:input
+              id="oauth2ClientId"
+              type="text"
+              class="input-inline"
+              aria-labelledby="oauth2ClientIdLabel"
+              amsa_persist="true"
+            />
+            <html:input
+              id="oauth2AuthorizationEndpoint"
+              type="url"
+              class="input-inline"
+              aria-labelledby="oauth2AuthorizationEndpointLabel"
+              amsa_persist="true"
+            />
+            <html:input
+              id="oauth2TokenEndpoint"
+              type="url"
+              class="input-inline"
+              aria-labelledby="oauth2TokenEndpointLabel"
+              amsa_persist="true"
+            />
+            <html:input
+              id="oauth2Scopes"
+              type="text"
+              class="input-inline"
+              aria-labelledby="oauth2ScopesLabel"
+              amsa_persist="true"
+            />
+            <html:input
+              id="oauth2RedirectionEndpoint"
+              type="url"
+              class="input-inline"
+              aria-labelledby="oauth2RedirectionEndpointLabel"
+              amsa_persist="true"
+              placeholder="http://127.0.0.1"
+            />
+            <html:input
+              id="oauth2ClientSecret"
+              type="password"
+              class="input-inline"
+              aria-labelledby="oauth2ClientSecretLabel"
+              amsa_persist="true"
+            />
+            <html:input
+              id="oauth2IssuerIdentifier"
+              type="url"
+              class="input-inline"
+              aria-labelledby="oauth2IssuerIdentifierLabel"
+              amsa_persist="true"
+            />
+          </vbox>
+        </hbox>
+        <vbox class="indent">
+          <checkbox
+            id="oauth2UsePKCE"
+            amsa_persist="true"
+            data-l10n-id="oauth2-use-pkce"
+          />
+          <checkbox
+            id="oauth2UseExternalBrowser"
+            amsa_persist="true"
+            data-l10n-id="oauth2-use-system-browser"
+          />
+        </vbox>
+      </vbox>
+
+      <!-- EWS Panel -->
+      <vbox id="ewsPanel">
+        <hbox align="center">
+          <label
+            id="exchangeUrlLabel"
+            data-l10n-id="ews-url-label"
+            control="exchangeUrl"
+          />
+          <hbox flex="1" class="input-container">
+            <html:input
+              id="exchangeUrl"
+              type="text"
+              class="input-inline"
+              aria-labelledby="exchangeUrlLabel"
+              amsa_persist="true"
+            />
+          </hbox>
+        </hbox>
+        <vbox id="exchangeOverrideOAuthDetailsContainer">
+          <separator class="groove" />
+          <checkbox
+            id="exchangeOverrideOAuthDetails"
+            amsa_persist="true"
+            data-l10n-id="ews-override-oauth-details"
+            oncommand="onChangeExchangeOAuthOverride(this)"
+          />
+          <hbox class="indent">
+            <!-- Labels -->
+            <vbox>
+              <hbox flex="1" align="center">
+                <label
+                  id="exchangeApplicationIdLabel"
+                  data-l10n-id="ews-applicationid-label"
+                  control="exchangeApplicationId"
+                />
+              </hbox>
+              <hbox flex="1" align="center">
+                <label
+                  id="exchangeTenantIdLabel"
+                  data-l10n-id="ews-tenantid-label"
+                  control="exchangeTenantId"
+                />
+              </hbox>
+              <hbox flex="1" align="center">
+                <label
+                  id="exchangeEndpointHostLabel"
+                  data-l10n-id="ews-endpointhost-label"
+                  control="exchangeEndpointHost"
+                />
+              </hbox>
+              <hbox flex="1" align="center">
+                <label
+                  id="exchangeOAuthScopesLabel"
+                  data-l10n-id="ews-oauthscopes-label"
+                  control="exchangeOAuthScopes"
+                />
+              </hbox>
+              <hbox flex="1" align="center">
+                <label
+                  id="exchangeRedirectUriLabel"
+                  data-l10n-id="ews-redirecturi-label"
+                  control="exchangeRedirectUri"
+                />
+              </hbox>
+            </vbox>
+            <!-- Input Fields -->
+            <vbox flex="1">
+              <html:input
+                id="exchangeApplicationId"
+                type="text"
+                class="input-inline"
+                aria-labelledby="exchangeApplicationIdLabel"
+                amsa_persist="true"
+              />
+              <html:input
+                id="exchangeTenantId"
+                type="text"
+                class="input-inline"
+                aria-labelledby="exchangeTenantIdLabel"
+                amsa_persist="true"
+              />
+              <html:input
+                id="exchangeEndpointHost"
+                type="text"
+                pattern="[A-Za-z0-9.\-]+"
+                class="input-inline"
+                aria-labelledby="exchangeEndpointHostLabel"
+                amsa_persist="true"
+                placeholder="login.microsoftonline.com"
+              />
+              <html:input
+                id="exchangeOAuthScopes"
+                type="text"
+                class="input-inline"
+                aria-labelledby="exchangeOAuthScopesLabel"
+                amsa_persist="true"
+              />
+              <html:input
+                id="exchangeRedirectUri"
+                type="url"
+                class="input-inline"
+                aria-labelledby="exchangeRedirectUriLabel"
+                amsa_persist="true"
+                placeholder="http://127.0.0.1"
+              />
+            </vbox>
+          </hbox>
+          <vbox class="indent">
+            <checkbox
+              id="exchangeUsePKCE"
+              amsa_persist="true"
+              data-l10n-id="oauth2-use-pkce"
+            />
+            <checkbox
+              id="exchangeUseExternalBrowser"
+              amsa_persist="true"
+              data-l10n-id="oauth2-use-system-browser"
+            />
+          </vbox>
+        </vbox>
+      </vbox>
+    </dialog>
+  </html:body>
+</html>

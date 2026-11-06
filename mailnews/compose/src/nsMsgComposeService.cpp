@@ -1,0 +1,1153 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "nsMsgComposeService.h"
+
+#include "nsIMsgMessageService.h"
+#include "nsIMsgSend.h"
+#include "nsIMsgIdentity.h"
+#include "nsIMimeConverter.h"
+#include "nsIURI.h"
+#include "nsMsgI18N.h"
+#include "nsIMsgComposeParams.h"
+#include "nsXPCOM.h"
+#include "nsISupportsPrimitives.h"
+#include "nsIWindowWatcher.h"
+#include "mozIDOMWindow.h"
+#include "nsIDocumentViewer.h"
+#include "nsIMsgWindow.h"
+#include "nsIDocShell.h"
+#include "nsPIDOMWindow.h"
+#include "mozilla/dom/Document.h"
+#include "nsIAppWindow.h"
+#include "nsIWindowMediator.h"
+#include "nsIDocShellTreeItem.h"
+#include "nsIMsgAccountManager.h"
+#include "nsIStreamConverter.h"
+#include "nsNetUtil.h"
+#include "nsIMsgMailNewsUrl.h"
+#include "nsIMsgDatabase.h"
+#include "nsIDocumentEncoder.h"
+#include "mozilla/dom/Selection.h"
+#include "mozilla/intl/Segmenter.h"
+#include "mozilla/intl/LineBreaker.h"
+#include "mimemoz2.h"
+#include "nsIURIMutator.h"
+#include "mozilla/dom/Element.h"
+#include "nsFrameLoader.h"
+#include "mozilla/Components.h"
+#include "mozilla/NullPrincipal.h"
+#include "mozilla/Preferences.h"
+
+#include "nsICommandLine.h"
+#include "nsMsgUtils.h"
+#include "nsIPrincipal.h"
+
+using namespace mozilla;
+using namespace mozilla::dom;
+
+nsMsgComposeService::nsMsgComposeService() = default;
+
+NS_IMPL_ISUPPORTS(nsMsgComposeService, nsIMsgComposeService,
+                  nsISupportsWeakReference)
+
+nsMsgComposeService::~nsMsgComposeService() { mOpenComposeWindows.Clear(); }
+
+nsresult nsMsgComposeService::Init() {
+  nsresult rv = NS_OK;
+
+  Reset();
+
+  // Since the compose service should only be initialized once, we can
+  // be pretty sure there aren't any existing compose windows open.
+  MsgCleanupTempFiles("nsmail", "tmp");
+  MsgCleanupTempFiles("nscopy", "tmp");
+  MsgCleanupTempFiles("nsemail", "eml");
+  MsgCleanupTempFiles("nsemail", "tmp");
+  MsgCleanupTempFiles("nsqmail", "tmp");
+  return rv;
+}
+
+void nsMsgComposeService::Reset() { mOpenComposeWindows.Clear(); }
+
+// Function to open a message compose window and pass an nsIMsgComposeParams
+// parameter to it.
+NS_IMETHODIMP
+nsMsgComposeService::OpenComposeWindowWithParams(const char* chrome,
+                                                 nsIMsgComposeParams* params) {
+  NS_ENSURE_ARG_POINTER(params);
+
+  nsresult rv;
+
+  // Use default identity if no identity has been specified
+  nsCOMPtr<nsIMsgIdentity> identity;
+  params->GetIdentity(getter_AddRefs(identity));
+  if (!identity) {
+    GetDefaultIdentity(getter_AddRefs(identity));
+    params->SetIdentity(identity);
+  }
+  if (!identity) {
+    // Failed to get even a default identity.
+    // Can't compose without identity (need to set up account first).
+    // If we don't have an account, the 3pane will already be showing setup.
+    return GetTo3PaneWindow();
+  }
+
+  // Create a new window.
+  nsCOMPtr<nsIWindowWatcher> wwatch =
+      mozilla::components::WindowWatcher::Service();
+  nsCOMPtr<nsISupportsInterfacePointer> msgParamsWrapper =
+      do_CreateInstance(NS_SUPPORTS_INTERFACE_POINTER_CONTRACTID, &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  msgParamsWrapper->SetData(params);
+  msgParamsWrapper->SetDataIID(&NS_GET_IID(nsIMsgComposeParams));
+
+  nsCOMPtr<mozIDOMWindowProxy> newWindow;
+  nsAutoCString chromeURL;
+  if (chrome && *chrome) {
+    chromeURL = nsDependentCString(chrome);
+  } else {
+    chromeURL =
+        "chrome://messenger/content/messengercompose/messengercompose.xhtml"_ns;
+  }
+  rv = wwatch->OpenWindow(nullptr, chromeURL, u"_blank"_ns,
+                          "all,chrome,dialog=no,status,toolbar"_ns,
+                          msgParamsWrapper, getter_AddRefs(newWindow));
+
+  return rv;
+}
+
+NS_IMETHODIMP
+nsMsgComposeService::DetermineComposeHTML(nsIMsgIdentity* aIdentity,
+                                          MSG_ComposeFormat aFormat,
+                                          bool* aComposeHTML) {
+  NS_ENSURE_ARG_POINTER(aComposeHTML);
+
+  *aComposeHTML = true;
+  switch (aFormat) {
+    case nsIMsgCompFormat::HTML:
+      *aComposeHTML = true;
+      break;
+    case nsIMsgCompFormat::PlainText:
+      *aComposeHTML = false;
+      break;
+
+    default:
+      nsCOMPtr<nsIMsgIdentity> identity = aIdentity;
+      if (!identity) GetDefaultIdentity(getter_AddRefs(identity));
+
+      if (identity) {
+        identity->GetComposeHtml(aComposeHTML);
+        if (aFormat == nsIMsgCompFormat::OppositeOfDefault)
+          *aComposeHTML = !*aComposeHTML;
+      } else {
+        // default identity not found.  Use the mail.html_compose pref to
+        // determine message compose type (HTML or PlainText).
+        *aComposeHTML = Preferences::GetBool("mail.html_compose");
+      }
+      break;
+  }
+
+  return NS_OK;
+}
+
+nsresult nsMsgComposeService::GetTo3PaneWindow() {
+  nsresult rv;
+  nsCOMPtr<nsIWindowMediator> windowMediator =
+      do_GetService(NS_WINDOWMEDIATOR_CONTRACTID, &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<mozIDOMWindowProxy> domWindow;
+  rv = windowMediator->GetMostRecentWindow(u"mail:3pane",
+                                           getter_AddRefs(domWindow));
+  NS_ENSURE_SUCCESS(rv, NS_ERROR_ABORT);
+  nsCOMPtr<nsPIDOMWindowOuter> outerWin = nsPIDOMWindowOuter::From(domWindow);
+  if (outerWin) {
+    outerWin->Focus(mozilla::dom::CallerType::System);
+    return NS_OK;
+  }
+  return NS_ERROR_ABORT;
+}
+
+MOZ_CAN_RUN_SCRIPT_FOR_DEFINITION NS_IMETHODIMP
+nsMsgComposeService::OpenComposeWindow(
+    const nsACString& msgComposeWindowURL, nsIMsgDBHdr* origMsgHdr,
+    const nsACString& originalMsgURI, MSG_ComposeType type,
+    MSG_ComposeFormat format, nsIMsgIdentity* aIdentity, const nsACString& from,
+    nsIMsgWindow* aMsgWindow, const nsACString& selectionHTML,
+    bool autodetectCharset) {
+  nsresult rv;
+
+  nsCOMPtr<nsIMsgIdentity> identity = aIdentity;
+  if (!identity) GetDefaultIdentity(getter_AddRefs(identity));
+  if (!identity) {
+    // Failed to get even a default identity.
+    // Can't compose without identity (need to set up account first).
+    // If we don't have an account, the 3pane will already be showing setup.
+    return GetTo3PaneWindow();
+  }
+
+  /* Actually, the only way to implement forward inline is to simulate a
+     template message. Maybe one day when we will have more time we can change
+     that
+  */
+  if (type == nsIMsgCompType::ForwardInline || type == nsIMsgCompType::Draft ||
+      type == nsIMsgCompType::EditTemplate ||
+      type == nsIMsgCompType::Template ||
+      type == nsIMsgCompType::ReplyWithTemplate ||
+      type == nsIMsgCompType::Redirect || type == nsIMsgCompType::EditAsNew) {
+    nsAutoCString uriToOpen(originalMsgURI);
+    char sep = (uriToOpen.FindChar('?') == kNotFound) ? '?' : '&';
+
+    // The compose type that gets transmitted to a compose window open in mime
+    // is communicated using url query parameters here.
+    if (type == nsIMsgCompType::Redirect) {
+      uriToOpen += sep;
+      uriToOpen.AppendLiteral("redirect=true");
+    } else if (type == nsIMsgCompType::EditAsNew) {
+      uriToOpen += sep;
+      uriToOpen.AppendLiteral("editasnew=true");
+    } else if (type == nsIMsgCompType::EditTemplate) {
+      uriToOpen += sep;
+      uriToOpen.AppendLiteral("edittempl=true");
+    }
+
+    nsMimeOutputType outputType;
+    if (type == nsIMsgCompType::ForwardInline ||
+        type == nsIMsgCompType::Draft) {
+      outputType = nsMimeOutput::nsMimeMessageDraftOrTemplate;
+    } else {
+      outputType = nsMimeOutput::nsMimeMessageEditorTemplate;
+    }
+    bool forwardInline = (type == nsIMsgCompType::ForwardInline);
+    bool overrideComposeFormat =
+        (format == nsIMsgCompFormat::OppositeOfDefault);
+    return RunMessageThroughMimeDraft(
+        uriToOpen, outputType, identity, originalMsgURI, origMsgHdr,
+        forwardInline, EmptyString(), /* aForwardTo */
+        overrideComposeFormat, aMsgWindow, autodetectCharset);
+  }
+
+  nsCOMPtr<nsIMsgComposeParams> pMsgComposeParams(
+      do_CreateInstance("@mozilla.org/messengercompose/composeparams;1", &rv));
+  if (NS_SUCCEEDED(rv) && pMsgComposeParams) {
+    nsCOMPtr<nsIMsgCompFields> pMsgCompFields(do_CreateInstance(
+        "@mozilla.org/messengercompose/composefields;1", &rv));
+    if (NS_SUCCEEDED(rv) && pMsgCompFields) {
+      pMsgComposeParams->SetType(type);
+      pMsgComposeParams->SetFormat(format);
+      pMsgComposeParams->SetIdentity(identity);
+      pMsgComposeParams->SetAutodetectCharset(autodetectCharset);
+
+      // When doing a reply (except with a template) see if there's a selection
+      // that we should quote
+      if (!selectionHTML.IsEmpty() &&
+          (type == nsIMsgCompType::Reply || type == nsIMsgCompType::ReplyAll ||
+           type == nsIMsgCompType::ReplyToSender ||
+           type == nsIMsgCompType::ReplyToGroup ||
+           type == nsIMsgCompType::ReplyToSenderAndGroup ||
+           type == nsIMsgCompType::ReplyToList)) {
+        pMsgComposeParams->SetHtmlToQuote(selectionHTML);
+      }
+
+      if (!originalMsgURI.IsEmpty()) {
+        if (type == nsIMsgCompType::NewsPost) {
+          nsAutoCString newsURI(originalMsgURI);
+          nsAutoCString group;
+
+          // URI is "[s]news://host[:port]/group".
+          int32_t slashpos = newsURI.RFindChar('/');
+          if (slashpos > 0) {
+            group = Substring(newsURI, slashpos + 1);
+
+          } else {
+            group = originalMsgURI;
+          }
+          nsAutoCString unescapedName;
+          MsgUnescapeString(group,
+                            nsINetUtil::ESCAPE_URL_FILE_BASENAME |
+                                nsINetUtil::ESCAPE_URL_FORCED,
+                            unescapedName);
+          pMsgCompFields->SetNewsgroups(NS_ConvertUTF8toUTF16(unescapedName));
+        } else {
+          pMsgComposeParams->SetOriginalMsgURI(originalMsgURI);
+          pMsgComposeParams->SetOrigMsgHdr(origMsgHdr);
+          pMsgCompFields->SetFrom(NS_ConvertUTF8toUTF16(from));
+        }
+      }
+
+      pMsgComposeParams->SetComposeFields(pMsgCompFields);
+
+      rv = OpenComposeWindowWithParams(
+          PromiseFlatCString(msgComposeWindowURL).get(), pMsgComposeParams);
+    }
+  }
+  return rv;
+}
+
+namespace {
+
+// Parsed fields from a mailto: URL that are used to populate the compose
+// window.
+struct ParsedMailtoFields {
+  nsCString to;
+  nsCString cc;
+  nsCString bcc;
+  nsCString subject;
+  nsCString body;
+  nsCString html;
+  nsCString reference;
+  nsCString newsgroup;
+  MSG_ComposeFormat format = nsIMsgCompFormat::Default;
+};
+
+// Unescape and decode a mailto header value.
+nsCString UnescapeAndConvert(nsIMimeConverter* aMimeConverter,
+                             const nsACString& aEscaped) {
+  if (aEscaped.IsEmpty()) {
+    return ""_ns;
+  }
+  nsAutoCString out;
+  MsgUnescapeString(aEscaped, 0, out);
+  nsAutoCString decoded;
+  nsresult rv = aMimeConverter->DecodeMimeHeaderToUTF8(out, "UTF_8", false,
+                                                       true, decoded);
+  if (NS_SUCCEEDED(rv) && !decoded.IsEmpty()) {
+    return decoded;
+  }
+  return out;
+}
+
+/**
+ * Parse a mailto: URL spec and extract the fields used to populate a compose
+ * window.
+ *
+ * The following RFC 6068 parameters are handled: to, cc, bcc, subject, body,
+ * in-reply-to, references. Thunderbird-specific additions: html-part,
+ * html-body, newsgroups.
+ *
+ * from=, followup-to=, organization=, reply-to= and priority= are
+ * intentionally ignored for security and privacy reasons. Any unrecognised
+ * parameter names are silently dropped.
+ */
+nsresult ParseMailtoSpec(const nsACString& aSpec, ParsedMailtoFields& aFields) {
+  // Find the query string (everything after '?').
+  int32_t queryStart = aSpec.FindChar('?');
+
+  if (queryStart >= 0) {
+    // Extract the 'to' part (everything between "mailto:" and '?').
+    nsAutoCString toPart(
+        Substring(aSpec, 7 /* strlen("mailto:") */, queryStart - 7));
+    if (!toPart.IsEmpty()) {
+      MsgUnescapeString(toPart, 0, aFields.to);
+    }
+  } else {
+    // No query string - the entire remainder is the 'to' address.
+    nsAutoCString toPart(Substring(aSpec, 7));
+    if (!toPart.IsEmpty()) {
+      MsgUnescapeString(toPart, 0, aFields.to);
+    }
+    return NS_OK;
+  }
+
+  // Build escaped parts from the query string.
+  nsCString escapedTo = aFields.to;
+  nsCString escapedCc;
+  nsCString escapedBcc;
+  nsCString escapedSubject;
+  nsCString escapedBody;
+  nsCString escapedHtml;
+  nsCString escapedReference;
+  nsCString escapedInReplyTo;
+  nsCString escapedNewsgroup;
+
+  nsAutoCString searchPart(Substring(aSpec, queryStart + 1));
+
+  // Parse the query string manually to avoid issues with NS_strtok modifying
+  // the buffer.
+  int32_t pos = 0;
+  while (pos < (int32_t)searchPart.Length()) {
+    int32_t amp = searchPart.FindChar('&', pos);
+    nsAutoCString token;
+    if (amp >= 0) {
+      token = Substring(searchPart, pos, amp - pos);
+      pos = amp + 1;
+    } else {
+      token = Substring(searchPart, pos);
+      pos = searchPart.Length();
+    }
+
+    int32_t eq = token.FindChar('=');
+    if (eq < 0) {
+      continue;
+    }
+
+    nsCString value;
+    if (eq + 1 < (int32_t)token.Length()) {
+      value = Substring(token, eq + 1);
+    }
+    token.SetLength(eq);
+
+    nsCString decodedName;
+    MsgUnescapeString(token, 0, decodedName);
+    if (decodedName.IsEmpty()) {
+      continue;
+    }
+
+    switch (NS_ToUpper(decodedName.First())) {
+      case 'B':
+        if (decodedName.LowerCaseEqualsLiteral("bcc")) {
+          if (!escapedBcc.IsEmpty()) {
+            escapedBcc += ", "_ns;
+            escapedBcc += value;
+          } else {
+            escapedBcc = value;
+          }
+        } else if (decodedName.LowerCaseEqualsLiteral("body")) {
+          if (!escapedBody.IsEmpty()) {
+            escapedBody += "\n"_ns;
+            escapedBody += value;
+          } else {
+            escapedBody = value;
+          }
+        }
+        break;
+      case 'C':
+        if (decodedName.LowerCaseEqualsLiteral("cc")) {
+          if (!escapedCc.IsEmpty()) {
+            escapedCc += ", "_ns;
+            escapedCc += value;
+          } else {
+            escapedCc = value;
+          }
+        }
+        break;
+      case 'H':
+        if (decodedName.LowerCaseEqualsLiteral("html-part") ||
+            decodedName.LowerCaseEqualsLiteral("html-body")) {
+          escapedHtml = value;
+          aFields.format = nsIMsgCompFormat::HTML;
+        }
+        break;
+      case 'I':
+        if (decodedName.LowerCaseEqualsLiteral("in-reply-to")) {
+          escapedInReplyTo = value;
+        }
+        break;
+      case 'N':
+        if (decodedName.LowerCaseEqualsLiteral("newsgroups")) {
+          escapedNewsgroup = value;
+        }
+        break;
+      case 'R':
+        if (decodedName.LowerCaseEqualsLiteral("references")) {
+          escapedReference = value;
+        }
+        break;
+      case 'S':
+        if (decodedName.LowerCaseEqualsLiteral("subject")) {
+          escapedSubject = value;
+        }
+        break;
+      case 'T':
+        if (decodedName.LowerCaseEqualsLiteral("to")) {
+          if (!escapedTo.IsEmpty()) {
+            escapedTo += ", "_ns;
+            escapedTo += value;
+          } else {
+            escapedTo = value;
+          }
+        }
+        break;
+    }
+  }
+
+  // Get a global converter and decode all the escaped fields.
+  nsCOMPtr<nsIMimeConverter> mimeConverter =
+      mozilla::components::MimeConverter::Service();
+  NS_ENSURE_TRUE(mimeConverter, NS_ERROR_FAILURE);
+
+  aFields.to = UnescapeAndConvert(mimeConverter, escapedTo);
+  aFields.cc = UnescapeAndConvert(mimeConverter, escapedCc);
+  aFields.bcc = UnescapeAndConvert(mimeConverter, escapedBcc);
+  aFields.subject = UnescapeAndConvert(mimeConverter, escapedSubject);
+  aFields.newsgroup = UnescapeAndConvert(mimeConverter, escapedNewsgroup);
+  aFields.reference = UnescapeAndConvert(mimeConverter, escapedReference);
+
+  // Fold in-reply-to into references, but don't duplicate if it's already
+  // the last entry.
+  if (!escapedInReplyTo.IsEmpty()) {
+    nsCString inReplyTo;
+    MsgUnescapeString(escapedInReplyTo, 0, inReplyTo);
+    if (aFields.reference.IsEmpty()) {
+      aFields.reference = inReplyTo;
+    } else {
+      int32_t lastRef = aFields.reference.RFindChar('<');
+      if (lastRef == kNotFound ||
+          !StringTail(aFields.reference, lastRef).Equals(inReplyTo)) {
+        aFields.reference += " "_ns;
+        aFields.reference += inReplyTo;
+      }
+    }
+  }
+
+  if (!escapedBody.IsEmpty()) {
+    MsgUnescapeString(escapedBody, 0, aFields.body);
+  }
+  if (!escapedHtml.IsEmpty()) {
+    MsgUnescapeString(escapedHtml, 0, aFields.html);
+  }
+
+  return NS_OK;
+}
+
+}  // namespace
+
+NS_IMETHODIMP nsMsgComposeService::GetParamsForMailto(
+    nsIURI* aURI, nsIMsgIdentity* aIdentity, MSG_ComposeFormat aFormat,
+    nsIMsgComposeParams** aParams) {
+  nsresult rv = NS_OK;
+  if (aURI) {
+    nsCString spec;
+    aURI->GetSpec(spec);
+
+    ParsedMailtoFields fields;
+    rv = ParseMailtoSpec(spec, fields);
+    NS_ENSURE_SUCCESS(rv, rv);
+
+    MSG_ComposeFormat requestedComposeFormat = fields.format;
+
+    // Override the compose format only for URLs that do not require a
+    // specific format.
+    if (requestedComposeFormat == nsIMsgCompFormat::Default) {
+      requestedComposeFormat = aFormat;
+    }
+    bool composeHTMLFormat;
+    DetermineComposeHTML(aIdentity, requestedComposeFormat, &composeHTMLFormat);
+
+    // If there was an 'html-body' param, finding it will have set HTML
+    // format, so we try to use it first. If it's empty, but we are composing
+    // in HTML because of the user's prefs, the 'body' param needs to be
+    // escaped, since it's supposed to be plain text.
+    nsString rawBody;
+    nsAutoString sanitizedBody;
+    if (fields.html.IsEmpty()) {
+      if (composeHTMLFormat) {
+        nsCString escaped;
+        nsAppendEscapedHTML(fields.body, escaped);
+        CopyUTF8toUTF16(escaped, sanitizedBody);
+      } else {
+        CopyUTF8toUTF16(fields.body, rawBody);
+      }
+    } else {
+      CopyUTF8toUTF16(fields.html, rawBody);
+    }
+
+    if (!rawBody.IsEmpty() && composeHTMLFormat) {
+      // For security reasons, we must sanitize the message body before
+      // accepting any HTML.
+      rv = HTMLSanitize(rawBody, sanitizedBody);  // from mimemoz2.h
+      if (NS_FAILED(rv)) {
+        // Something went wrong with parsing; fall back to plain text compose.
+        composeHTMLFormat = false;
+      }
+    }
+
+    nsCOMPtr<nsIMsgComposeParams> pMsgComposeParams(do_CreateInstance(
+        "@mozilla.org/messengercompose/composeparams;1", &rv));
+    if (NS_SUCCEEDED(rv) && pMsgComposeParams) {
+      pMsgComposeParams->SetType(nsIMsgCompType::MailToUrl);
+      pMsgComposeParams->SetFormat(composeHTMLFormat
+                                       ? nsIMsgCompFormat::HTML
+                                       : nsIMsgCompFormat::PlainText);
+      if (aIdentity) {
+        pMsgComposeParams->SetIdentity(aIdentity);
+      }
+
+      nsCOMPtr<nsIMsgCompFields> pMsgCompFields(do_CreateInstance(
+          "@mozilla.org/messengercompose/composefields;1", &rv));
+      if (pMsgCompFields) {
+        pMsgCompFields->SetTo(NS_ConvertUTF8toUTF16(fields.to));
+        pMsgCompFields->SetCc(NS_ConvertUTF8toUTF16(fields.cc));
+        pMsgCompFields->SetBcc(NS_ConvertUTF8toUTF16(fields.bcc));
+        pMsgCompFields->SetNewsgroups(NS_ConvertUTF8toUTF16(fields.newsgroup));
+        pMsgCompFields->SetReferences(fields.reference.get());
+        pMsgCompFields->SetSubject(NS_ConvertUTF8toUTF16(fields.subject));
+        pMsgCompFields->SetBody(composeHTMLFormat ? sanitizedBody : rawBody);
+        pMsgComposeParams->SetComposeFields(pMsgCompFields);
+
+        NS_ADDREF(*aParams = pMsgComposeParams);
+        return NS_OK;
+      }
+    }
+  }
+
+  *aParams = nullptr;
+  return NS_ERROR_FAILURE;
+}
+
+NS_IMETHODIMP nsMsgComposeService::OpenComposeWindowWithURI(
+    const char* aMsgComposeWindowURL, nsIURI* aURI, nsIMsgIdentity* identity,
+    MSG_ComposeFormat aFormat) {
+  nsCOMPtr<nsIMsgComposeParams> pMsgComposeParams;
+  nsresult rv = GetParamsForMailto(aURI, identity, aFormat,
+                                   getter_AddRefs(pMsgComposeParams));
+  NS_ENSURE_SUCCESS(rv, rv);
+  return OpenComposeWindowWithParams(aMsgComposeWindowURL, pMsgComposeParams);
+}
+
+NS_IMETHODIMP nsMsgComposeService::InitCompose(nsIMsgComposeParams* aParams,
+                                               mozIDOMWindowProxy* aWindow,
+                                               nsIDocShell* aDocShell,
+                                               nsIMsgCompose** _retval) {
+  nsresult rv;
+  nsCOMPtr<nsIMsgCompose> msgCompose =
+      do_CreateInstance("@mozilla.org/messengercompose/compose;1", &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  rv = msgCompose->Initialize(aParams, aWindow, aDocShell);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  NS_IF_ADDREF(*_retval = msgCompose);
+  return rv;
+}
+
+nsresult nsMsgComposeService::GetDefaultIdentity(nsIMsgIdentity** _retval) {
+  NS_ENSURE_ARG_POINTER(_retval);
+  *_retval = nullptr;
+
+  nsresult rv;
+  nsCOMPtr<nsIMsgAccountManager> accountManager =
+      mozilla::components::AccountManager::Service();
+  nsCOMPtr<nsIMsgAccount> defaultAccount;
+  rv = accountManager->GetDefaultAccount(getter_AddRefs(defaultAccount));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  return defaultAccount ? defaultAccount->GetDefaultIdentity(_retval) : NS_OK;
+}
+
+class nsMsgTemplateReplyHelper final : public nsIStreamListener,
+                                       public nsIUrlListener {
+ public:
+  NS_DECL_ISUPPORTS
+  NS_DECL_NSIURLLISTENER
+  NS_DECL_NSISTREAMLISTENER
+  NS_DECL_NSIREQUESTOBSERVER
+
+  nsMsgTemplateReplyHelper();
+
+  nsCOMPtr<nsIMsgDBHdr> mHdrToReplyTo;
+  nsCOMPtr<nsIMsgDBHdr> mTemplateHdr;
+  nsCOMPtr<nsIMsgWindow> mMsgWindow;
+  nsCOMPtr<nsIMsgIdentity> mIdentity;
+  nsCString mTemplateBody;
+  bool mInMsgBody;
+  char mLastBlockChars[3];
+
+ private:
+  ~nsMsgTemplateReplyHelper();
+};
+
+NS_IMPL_ISUPPORTS(nsMsgTemplateReplyHelper, nsIStreamListener,
+                  nsIRequestObserver, nsIUrlListener)
+
+nsMsgTemplateReplyHelper::nsMsgTemplateReplyHelper() {
+  mInMsgBody = false;
+  memset(mLastBlockChars, 0, sizeof(mLastBlockChars));
+}
+
+nsMsgTemplateReplyHelper::~nsMsgTemplateReplyHelper() {}
+
+NS_IMETHODIMP nsMsgTemplateReplyHelper::OnStartRunningUrl(nsIURI* aUrl) {
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsMsgTemplateReplyHelper::OnStopRunningUrl(nsIURI* aUrl,
+                                                         nsresult aExitCode) {
+  NS_ENSURE_SUCCESS(aExitCode, aExitCode);
+  nsresult rv;
+
+  // create the compose params object
+  nsCOMPtr<nsIMsgComposeParams> pMsgComposeParams(
+      do_CreateInstance("@mozilla.org/messengercompose/composeparams;1", &rv));
+  if (NS_FAILED(rv) || (!pMsgComposeParams)) return rv;
+  nsCOMPtr<nsIMsgCompFields> compFields =
+      do_CreateInstance("@mozilla.org/messengercompose/composefields;1", &rv);
+
+  nsCString replyTo;
+  mHdrToReplyTo->GetStringProperty("replyTo", replyTo);
+  if (replyTo.IsEmpty()) mHdrToReplyTo->GetAuthor(replyTo);
+  compFields->SetTo(NS_ConvertUTF8toUTF16(replyTo));
+
+  nsString body;
+  nsString templateSubject, replySubject;
+
+  mHdrToReplyTo->GetMime2DecodedSubject(replySubject);
+  mTemplateHdr->GetMime2DecodedSubject(templateSubject);
+  nsString subject(u"Auto: "_ns);  // RFC 3834 3.1.5.
+  subject.Append(templateSubject);
+  if (!replySubject.IsEmpty()) {
+    subject.AppendLiteral(u" (was: ");
+    subject.Append(replySubject);
+    subject.Append(u')');
+  }
+
+  compFields->SetSubject(subject);
+  compFields->SetRawHeader("Auto-Submitted", "auto-replied"_ns);
+
+  nsCString charset;
+  rv = mTemplateHdr->GetCharset(charset);
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = nsMsgI18NConvertToUnicode(charset, mTemplateBody, body);
+  NS_WARNING_ASSERTION(NS_SUCCEEDED(rv),
+                       "couldn't convert templ body to unicode");
+  compFields->SetBody(body);
+
+  nsCString msgUri;
+  nsCOMPtr<nsIMsgFolder> folder;
+  mHdrToReplyTo->GetFolder(getter_AddRefs(folder));
+  folder->GetUriForMsg(mHdrToReplyTo, msgUri);
+  // populate the compose params
+  pMsgComposeParams->SetType(nsIMsgCompType::ReplyWithTemplate);
+  pMsgComposeParams->SetFormat(nsIMsgCompFormat::Default);
+  pMsgComposeParams->SetIdentity(mIdentity);
+  pMsgComposeParams->SetComposeFields(compFields);
+  pMsgComposeParams->SetOriginalMsgURI(msgUri);
+
+  // create the nsIMsgCompose object to send the object
+  nsCOMPtr<nsIMsgCompose> pMsgCompose(
+      do_CreateInstance("@mozilla.org/messengercompose/compose;1", &rv));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  /** initialize nsIMsgCompose, Send the message, wait for send completion
+   * response **/
+
+  rv = pMsgCompose->Initialize(pMsgComposeParams, nullptr, nullptr);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  RefPtr<mozilla::dom::Promise> promise;
+  return pMsgCompose->SendMsg(nsIMsgSend::nsMsgDeliverNow, mIdentity, nullptr,
+                              nullptr, getter_AddRefs(promise));
+}
+
+NS_IMETHODIMP
+nsMsgTemplateReplyHelper::OnStartRequest(nsIRequest* request) { return NS_OK; }
+
+NS_IMETHODIMP
+nsMsgTemplateReplyHelper::OnStopRequest(nsIRequest* request, nsresult status) {
+  if (NS_SUCCEEDED(status)) {
+    // now we've got the message body in mTemplateBody -
+    // need to set body in compose params and send the reply.
+  }
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsMsgTemplateReplyHelper::OnDataAvailable(nsIRequest* request,
+                                          nsIInputStream* inStream,
+                                          uint64_t srcOffset, uint32_t count) {
+  nsresult rv = NS_OK;
+
+  char readBuf[1024];
+
+  uint64_t available;
+  uint32_t readCount;
+  uint32_t maxReadCount = sizeof(readBuf) - 1;
+
+  rv = inStream->Available(&available);
+  while (NS_SUCCEEDED(rv) && available > 0) {
+    uint32_t bodyOffset = 0, readOffset = 0;
+    if (!mInMsgBody && mLastBlockChars[0]) {
+      memcpy(readBuf, mLastBlockChars, 3);
+      readOffset = 3;
+      maxReadCount -= 3;
+    }
+    if (maxReadCount > available) maxReadCount = (uint32_t)available;
+    memset(readBuf, 0, sizeof(readBuf));
+    rv = inStream->Read(readBuf + readOffset, maxReadCount, &readCount);
+    available -= readCount;
+    readCount += readOffset;
+    // we're mainly interested in the msg body, so we need to
+    // find the header/body delimiter of a blank line. A blank line
+    // looks like <CR><CR>, <LF><LF>, or <CRLF><CRLF>
+    if (!mInMsgBody) {
+      for (uint32_t charIndex = 0; charIndex < readCount && !bodyOffset;
+           charIndex++) {
+        if (readBuf[charIndex] == '\r' || readBuf[charIndex] == '\n') {
+          if (charIndex + 1 < readCount) {
+            if (readBuf[charIndex] == readBuf[charIndex + 1]) {
+              // got header+body separator
+              bodyOffset = charIndex + 2;
+              break;
+            } else if ((charIndex + 3 < readCount) &&
+                       !strncmp(readBuf + charIndex, "\r\n\r\n", 4)) {
+              bodyOffset = charIndex + 4;
+              break;
+            }
+          }
+        }
+      }
+      mInMsgBody = bodyOffset != 0;
+      if (!mInMsgBody && readCount > 3)  // still in msg hdrs
+        memmove(mLastBlockChars, readBuf + readCount - 3, 3);
+    }
+    mTemplateBody.Append(readBuf + bodyOffset);
+  }
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsMsgComposeService::ReplyWithTemplate(
+    nsIMsgDBHdr* aMsgHdr, const nsACString& templateUri,
+    nsIMsgWindow* aMsgWindow, nsIMsgIncomingServer* aServer) {
+  // To reply with template, we need the message body of the template.
+  // I think we're going to need to stream the template message to ourselves,
+  // and construct the body, and call setBody on the compFields.
+  nsresult rv;
+  const nsPromiseFlatCString& templateUriFlat = PromiseFlatCString(templateUri);
+  nsCOMPtr<nsIMsgAccountManager> accountManager =
+      mozilla::components::AccountManager::Service();
+  nsCOMPtr<nsIMsgAccount> account;
+  rv = accountManager->FindAccountForServer(aServer, getter_AddRefs(account));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsTArray<RefPtr<nsIMsgIdentity>> identities;
+  rv = account->GetIdentities(identities);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsAutoCString recipients;
+  aMsgHdr->GetRecipients(recipients);
+
+  nsAutoCString ccList;
+  aMsgHdr->GetCcList(ccList);
+
+  // Go through the identities to see to whom this was addressed.
+  // In case we get no match, this is likely a list/bulk/bcc/spam mail and we
+  // shouldn't reply. RFC 3834 2.
+  nsCOMPtr<nsIMsgIdentity> identity;  // identity to reply from
+  for (auto anIdentity : identities) {
+    nsAutoCString identityEmail;
+    anIdentity->GetEmail(identityEmail);
+
+    if (CaseInsensitiveFindInReadable(identityEmail, recipients) ||
+        CaseInsensitiveFindInReadable(identityEmail, ccList)) {
+      identity = anIdentity;
+      break;
+    }
+  }
+  if (!identity)  // Found no match -> don't reply.
+    return NS_ERROR_ABORT;
+
+  RefPtr<nsMsgTemplateReplyHelper> helper = new nsMsgTemplateReplyHelper;
+
+  helper->mHdrToReplyTo = aMsgHdr;
+  helper->mMsgWindow = aMsgWindow;
+  helper->mIdentity = identity;
+
+  nsAutoCString replyTo;
+  aMsgHdr->GetStringProperty("replyTo", replyTo);
+  if (replyTo.IsEmpty()) aMsgHdr->GetAuthor(replyTo);
+  if (replyTo.IsEmpty()) return NS_ERROR_FAILURE;  // nowhere to send the reply
+
+  nsCOMPtr<nsIMsgFolder> templateFolder;
+  nsCOMPtr<nsIMsgDatabase> templateDB;
+  nsCString templateMsgHdrUri;
+  const char* query = PL_strstr(templateUriFlat.get(), "?messageId=");
+  if (!query) return NS_ERROR_FAILURE;
+
+  nsAutoCString folderUri(Substring(templateUriFlat.get(), query));
+  rv = GetExistingFolder(folderUri, getter_AddRefs(templateFolder));
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = templateFolder->GetMsgDatabase(getter_AddRefs(templateDB));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  const char* subject = PL_strstr(templateUriFlat.get(), "&subject=");
+  if (subject) {
+    const char* subjectEnd = subject + strlen(subject);
+    nsAutoCString messageId(Substring(query + 11, subject));
+    nsAutoCString subjectString(Substring(subject + 9, subjectEnd));
+    templateDB->GetMsgHdrForMessageID(messageId,
+                                      getter_AddRefs(helper->mTemplateHdr));
+    if (helper->mTemplateHdr)
+      templateFolder->GetUriForMsg(helper->mTemplateHdr, templateMsgHdrUri);
+    // to use the subject, we'd need to expose a method to find a message by
+    // subject, or painfully iterate through messages...We'll try to make the
+    // message-id not change when saving a template first.
+  }
+  if (templateMsgHdrUri.IsEmpty()) {
+    // ### probably want to return a specific error and
+    // have the calling code disable the filter.
+    NS_ASSERTION(false, "failed to get msg hdr");
+    return NS_ERROR_FAILURE;
+  }
+  // we need to convert the template uri, which is of the form
+  // <folder uri>?messageId=<messageId>&subject=<subject>
+  nsCOMPtr<nsIMsgMessageService> msgService;
+  rv = GetMessageServiceFromURI(templateMsgHdrUri, getter_AddRefs(msgService));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<nsIURI> dummyNull;
+  rv = msgService->StreamMessage(templateMsgHdrUri, helper, aMsgWindow, helper,
+                                 false,  // convert data
+                                 ""_ns, false, getter_AddRefs(dummyNull));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<nsIMsgFolder> folder;
+  aMsgHdr->GetFolder(getter_AddRefs(folder));
+  if (!folder) return NS_ERROR_NULL_POINTER;
+
+  // We're sending a new message. Conceptually it's a reply though, so mark the
+  // original message as replied.
+  return folder->AddMessageDispositionState(
+      aMsgHdr, nsIMsgFolder::nsMsgDispositionState_Replied);
+}
+
+NS_IMETHODIMP
+nsMsgComposeService::ForwardMessage(const nsAString& forwardTo,
+                                    nsIMsgDBHdr* aMsgHdr,
+                                    nsIMsgWindow* aMsgWindow,
+                                    nsIMsgIncomingServer* aServer,
+                                    uint32_t aForwardType) {
+  NS_ENSURE_ARG_POINTER(aMsgHdr);
+
+  if (!Preferences::GetBool("mail.filters.forward.enabled", true)) {
+    return NS_OK;
+  }
+
+  nsresult rv;
+  if (aForwardType == nsIMsgComposeService::kForwardAsDefault) {
+    int32_t forwardPref = Preferences::GetInt("mail.forward_message_mode");
+    // 0=default as attachment 2=forward as inline with attachments,
+    // (obsolete 4.x value)1=forward as quoted (mapped to 2 in mozilla)
+    aForwardType = forwardPref == 0 ? nsIMsgComposeService::kForwardAsAttachment
+                                    : nsIMsgComposeService::kForwardInline;
+  }
+  nsCString msgUri;
+
+  nsCOMPtr<nsIMsgFolder> folder;
+  aMsgHdr->GetFolder(getter_AddRefs(folder));
+  NS_ENSURE_TRUE(folder, NS_ERROR_NULL_POINTER);
+
+  folder->GetUriForMsg(aMsgHdr, msgUri);
+
+  nsAutoCString uriToOpen(msgUri);
+
+  // get the MsgIdentity for the above key using AccountManager
+  nsCOMPtr<nsIMsgAccountManager> accountManager =
+      mozilla::components::AccountManager::Service();
+  nsCOMPtr<nsIMsgAccount> account;
+  nsCOMPtr<nsIMsgIdentity> identity;
+
+  rv = accountManager->FindAccountForServer(aServer, getter_AddRefs(account));
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = account->GetDefaultIdentity(getter_AddRefs(identity));
+  // Use default identity if no identity has been found on this account
+  if (NS_FAILED(rv) || !identity) {
+    rv = GetDefaultIdentity(getter_AddRefs(identity));
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  if (aForwardType == nsIMsgComposeService::kForwardInline)
+    return RunMessageThroughMimeDraft(
+        uriToOpen, nsMimeOutput::nsMimeMessageDraftOrTemplate, identity,
+        uriToOpen, aMsgHdr, true, forwardTo, false, aMsgWindow, false);
+
+  // create the compose params object
+  nsCOMPtr<nsIMsgComposeParams> pMsgComposeParams(
+      do_CreateInstance("@mozilla.org/messengercompose/composeparams;1", &rv));
+  NS_ENSURE_SUCCESS(rv, rv);
+  nsCOMPtr<nsIMsgCompFields> compFields =
+      do_CreateInstance("@mozilla.org/messengercompose/composefields;1", &rv);
+
+  compFields->SetTo(forwardTo);
+  // populate the compose params
+  pMsgComposeParams->SetType(nsIMsgCompType::ForwardAsAttachment);
+  pMsgComposeParams->SetFormat(nsIMsgCompFormat::Default);
+  pMsgComposeParams->SetIdentity(identity);
+  pMsgComposeParams->SetComposeFields(compFields);
+  pMsgComposeParams->SetOriginalMsgURI(uriToOpen);
+  // create the nsIMsgCompose object to send the object
+  nsCOMPtr<nsIMsgCompose> pMsgCompose(
+      do_CreateInstance("@mozilla.org/messengercompose/compose;1", &rv));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // Initialize nsIMsgCompose, Send the message.
+  rv = pMsgCompose->Initialize(pMsgComposeParams, nullptr, nullptr);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  RefPtr<Promise> promise;
+  rv = pMsgCompose->SendMsg(nsIMsgSend::nsMsgDeliverNow, identity, nullptr,
+                            nullptr, getter_AddRefs(promise));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // nsMsgCompose::ProcessReplyFlags usually takes care of marking messages
+  // as forwarded. ProcessReplyFlags is normally called from
+  // nsMsgComposeSendListener::OnStopSending but for this case the msgCompose
+  // object is not set so ProcessReplyFlags won't get called.
+  // Therefore, let's just mark it here instead.
+  return folder->AddMessageDispositionState(
+      aMsgHdr, nsIMsgFolder::nsMsgDispositionState_Forwarded);
+}
+
+NS_IMETHODIMP
+nsMsgComposeService::RegisterComposeDocShell(nsIDocShell* aDocShell,
+                                             nsIMsgCompose* aComposeObject) {
+  NS_ENSURE_ARG_POINTER(aDocShell);
+  NS_ENSURE_ARG_POINTER(aComposeObject);
+
+  nsresult rv;
+
+  // add the msg compose / dom window mapping to our hash table
+  nsWeakPtr weakDocShell = do_GetWeakReference(aDocShell, &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+  nsWeakPtr weakMsgComposePtr = do_GetWeakReference(aComposeObject);
+  NS_ENSURE_SUCCESS(rv, rv);
+  mOpenComposeWindows.InsertOrUpdate(weakDocShell, weakMsgComposePtr);
+
+  return rv;
+}
+
+NS_IMETHODIMP
+nsMsgComposeService::UnregisterComposeDocShell(nsIDocShell* aDocShell) {
+  NS_ENSURE_ARG_POINTER(aDocShell);
+
+  nsresult rv;
+  nsWeakPtr weakDocShell = do_GetWeakReference(aDocShell, &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  mOpenComposeWindows.Remove(weakDocShell);
+
+  return rv;
+}
+
+NS_IMETHODIMP
+nsMsgComposeService::GetMsgComposeForDocShell(nsIDocShell* aDocShell,
+                                              nsIMsgCompose** aComposeObject) {
+  NS_ENSURE_ARG_POINTER(aDocShell);
+  NS_ENSURE_ARG_POINTER(aComposeObject);
+
+  if (!mOpenComposeWindows.Count()) return NS_ERROR_FAILURE;
+
+  // get the weak reference for our dom window
+  nsresult rv;
+  nsWeakPtr weakDocShell = do_GetWeakReference(aDocShell, &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsWeakPtr weakMsgComposePtr;
+
+  if (!mOpenComposeWindows.Get(weakDocShell, getter_AddRefs(weakMsgComposePtr)))
+    return NS_ERROR_FAILURE;
+
+  nsCOMPtr<nsIMsgCompose> msgCompose = do_QueryReferent(weakMsgComposePtr, &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  NS_IF_ADDREF(*aComposeObject = msgCompose);
+  return rv;
+}
+
+/**
+ * Run the aMsgURI message through libmime. We set various attributes of the
+ * nsIMimeStreamConverter so mimedrft.cpp will know what to do with the message
+ * when its done streaming. Usually that will be opening a compose window
+ * with the contents of the message, but if forwardTo is non-empty, mimedrft.cpp
+ * will forward the contents directly.
+ *
+ * @param aMsgURI URI to stream, which is the msgUri + any extra terms, e.g.,
+ *                "redirect=true".
+ * @param aOutType  nsMimeOutput::nsMimeMessageDraftOrTemplate or
+ *                  nsMimeOutput::nsMimeMessageEditorTemplate
+ * @param aIdentity identity to use for the new message
+ * @param aOriginalMsgURI msgURI w/o any extra terms
+ * @param aOrigMsgHdr nsIMsgDBHdr corresponding to aOriginalMsgURI
+ * @param aForwardInline true if doing a forward inline
+ * @param aForwardTo  e-mail address to forward msg to. This is used for
+ *                     forward inline message filter actions.
+ * @param aOverrideComposeFormat True if the user had shift key down when
+                                 doing a command that opens the compose window,
+ *                               which means we switch the compose window used
+ *                               from the default.
+ * @param aMsgWindow msgWindow to pass into LoadMessage.
+ */
+nsresult nsMsgComposeService::RunMessageThroughMimeDraft(
+    const nsACString& aMsgURI, nsMimeOutputType aOutType,
+    nsIMsgIdentity* aIdentity, const nsACString& aOriginalMsgURI,
+    nsIMsgDBHdr* aOrigMsgHdr, bool aForwardInline, const nsAString& aForwardTo,
+    bool aOverrideComposeFormat, nsIMsgWindow* aMsgWindow,
+    bool autodetectCharset) {
+  nsCOMPtr<nsIMsgMessageService> messageService;
+  nsresult rv =
+      GetMessageServiceFromURI(aMsgURI, getter_AddRefs(messageService));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // Create a mime parser (nsIMimeStreamConverter)to do the conversion.
+  nsCOMPtr<nsIMimeStreamConverter> mimeConverter = do_CreateInstance(
+      "@mozilla.org/streamconv;1?from=message/rfc822&to=application/xhtml+xml",
+      &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  mimeConverter->SetMimeOutputType(
+      aOutType);  // Set the type of output for libmime
+  mimeConverter->SetForwardInline(aForwardInline);
+  if (!aForwardTo.IsEmpty()) {
+    mimeConverter->SetForwardInlineFilter(true);
+    mimeConverter->SetForwardToAddress(aForwardTo);
+  }
+  mimeConverter->SetOverrideComposeFormat(aOverrideComposeFormat);
+  mimeConverter->SetIdentity(aIdentity);
+  mimeConverter->SetOriginalMsgURI(aOriginalMsgURI);
+  mimeConverter->SetOrigMsgHdr(aOrigMsgHdr);
+
+  nsCOMPtr<nsIURI> url;
+  bool fileUrl = StringBeginsWith(aMsgURI, "file:"_ns);
+  nsCString mailboxUri(aMsgURI);
+  if (fileUrl) {
+    // We loaded a .eml file from a file: url. Construct equivalent mailbox url.
+    mailboxUri.Replace(0, 5, "mailbox:"_ns);
+    mailboxUri.AppendLiteral("&number=0");
+    // Need this to prevent nsMsgCompose::TagEmbeddedObjects from setting
+    // inline images as moz-do-not-send.
+    mimeConverter->SetOriginalMsgURI(mailboxUri);
+  }
+  if (fileUrl || PromiseFlatCString(aMsgURI).Find(
+                     "&type=application/x-message-display") >= 0)
+    rv = NS_NewURI(getter_AddRefs(url), mailboxUri);
+  else
+    rv = messageService->GetUrlForUri(aMsgURI, aMsgWindow, getter_AddRefs(url));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<nsIMsgMailNewsUrl> mailnewsurl = do_QueryInterface(url);
+  if (mailnewsurl) {
+    // If the current protocol uses `nsIMsgMailNewsUrl`, call `SetSpecInternal`
+    // so the base URL is parsed as the message service will expect.
+    rv = mailnewsurl->SetSpecInternal(mailboxUri);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  // if we are forwarding a message and that message used a charset override
+  // then forward that as auto-detect flag, too.
+  nsCOMPtr<nsIMsgI18NUrl> i18nUrl(do_QueryInterface(url));
+  if (i18nUrl) (void)i18nUrl->SetAutodetectCharset(autodetectCharset);
+
+  nsCOMPtr<nsIPrincipal> nullPrincipal =
+      NullPrincipal::CreateWithoutOriginAttributes();
+
+  nsCOMPtr<nsIChannel> channel;
+  rv = NS_NewInputStreamChannel(
+      getter_AddRefs(channel), url, nullptr, nullPrincipal,
+      nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_SEC_CONTEXT_IS_NULL,
+      nsIContentPolicy::TYPE_OTHER);
+  NS_ASSERTION(NS_SUCCEEDED(rv), "NS_NewChannel failed.");
+  if (NS_FAILED(rv)) return rv;
+
+  nsCOMPtr<nsIStreamConverter> converter = do_QueryInterface(mimeConverter);
+  rv = converter->AsyncConvertData(nullptr, nullptr, nullptr, channel);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  // Now, just plug the two together and get the hell out of the way!
+  nsCOMPtr<nsIStreamListener> streamListener = do_QueryInterface(mimeConverter);
+  nsCOMPtr<nsIURI> dummyNull;
+  return messageService->StreamMessage(aMsgURI, streamListener, aMsgWindow,
+                                       nullptr, false, ""_ns, false,
+                                       getter_AddRefs(dummyNull));
+}

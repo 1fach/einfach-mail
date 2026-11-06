@@ -1,0 +1,654 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+use ews::copy_folder::CopyFolder;
+use ews::copy_item::CopyItem;
+use ews::move_folder::MoveFolder;
+use ews::move_item::MoveItem;
+use nserror::{NS_ERROR_INVALID_ARG, NS_OK, nsresult};
+use nsstring::{nsACString, nsCString};
+use protocol_shared::{
+    client::ProtocolClient,
+    safe_xpcom::{
+        SafeExchangeFolderListener, SafeExchangeMessageCreateListener,
+        SafeExchangeMessageFetchListener, SafeExchangeMessageSyncListener,
+        SafeExchangeSimpleOperationListener, SafeUrlListener, uri::SafeUri,
+    },
+    xpcom_io,
+};
+use std::sync::Arc;
+use thin_vec::ThinVec;
+use url::Url;
+use xpcom::{
+    RefPtr,
+    interfaces::{
+        IExchangeClient, IExchangeFolderListener, IExchangeMessageCreateListener,
+        IExchangeMessageFetchListener, IExchangeMessageSyncListener,
+        IExchangeSimpleOperationListener, nsIInputStream, nsIMsgIncomingServer, nsIURI,
+        nsIUrlListener,
+    },
+    xpcom_method,
+};
+
+use client::XpComEwsClient;
+
+use crate::{server_version::get_root_pref_branch, telemetry_recorder::OFFICE365_BASE_DOMAINS};
+
+mod client;
+mod error;
+mod headerblock;
+mod outgoing;
+mod response_parser;
+mod server_version;
+pub mod telemetry_recorder;
+
+/// `XpcomEwsBridge` provides an XPCOM interface implementation for mediating
+/// between C++ consumers and an async Rust EWS client.
+#[xpcom::xpcom(implement(IExchangeClient), atomic)]
+pub struct XpcomEwsBridge {
+    client: Arc<XpComEwsClient<nsIMsgIncomingServer>>,
+    incoming_server_key: nsCString,
+}
+
+impl XpcomEwsBridge {
+    /// Instantiates a new [`XpcomEwsBridge`] and returns it as an
+    /// [`IExchangeClient`].
+    // See the documentation for `OperationSender::new()` regarding the use of
+    // `Arc`.
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn new_client(
+        endpoint: &nsACString,
+        server: RefPtr<nsIMsgIncomingServer>,
+    ) -> Result<RefPtr<IExchangeClient>, nsresult> {
+        log::debug!("Initializing XpcomEwsBridge with endpoint {endpoint}");
+
+        let endpoint_url = Url::parse(&endpoint.to_utf8()).or(Err(NS_ERROR_INVALID_ARG))?;
+
+        let mut incoming_server_key = nsCString::new();
+        unsafe { server.GetKey(&raw mut *incoming_server_key) }.to_result()?;
+
+        let client = XpComEwsClient::new(endpoint_url, server)?;
+        let client = Arc::new(client);
+
+        // If the client successfully initialized and the user is connecting to an Office365
+        // account, set the pref value to indicate that they've set up an Office365+EWS account.
+        // This operation is best-effort; failures here do not affect the client initialization.
+        let _ = maybe_set_ews_o365_pref(endpoint);
+
+        let bridge = XpcomEwsBridge::allocate(InitXpcomEwsBridge {
+            client,
+            incoming_server_key,
+        });
+        bridge.query_interface().ok_or(nserror::NS_ERROR_FAILURE)
+    }
+
+    xpcom_method!(incoming_server_key => GetIncomingServerKey() -> nsACString);
+    fn incoming_server_key(&self) -> Result<nsCString, nsresult> {
+        Ok(self.incoming_server_key.clone())
+    }
+
+    xpcom_method!(base_uri => GetBaseURI() -> *const nsIURI);
+    fn base_uri(&self) -> Result<RefPtr<nsIURI>, nsresult> {
+        let uri = self.client.url().to_string();
+        let uri = SafeUri::new(uri)?;
+        Ok(uri.into())
+    }
+
+    xpcom_method!(running => GetRunning() -> bool);
+    fn running(&self) -> Result<bool, nsresult> {
+        Ok(self.client.running())
+    }
+
+    xpcom_method!(idle => GetIdle() -> bool);
+    fn idle(&self) -> Result<bool, nsresult> {
+        Ok(self.client.idle())
+    }
+
+    xpcom_method!(shutdown => Shutdown());
+    fn shutdown(&self) -> Result<(), nsresult> {
+        let client = self.client.clone();
+        moz_task::spawn_local("shutdown", client.shutdown()).detach();
+        Ok(())
+    }
+
+    xpcom_method!(check_connectivity => CheckConnectivity(listener: *const nsIUrlListener) -> *const nsIURI);
+    fn check_connectivity(&self, listener: &nsIUrlListener) -> Result<RefPtr<nsIURI>, nsresult> {
+        // Get the EWS client and make a request to check connectivity to the
+        // EWS server.
+        let client = self.client.clone();
+
+        // Extract the client's URL and turn it into an `nsIURI`.
+        let uri = client.url().to_string();
+        let uri = SafeUri::new(uri)?;
+
+        moz_task::spawn_local(
+            "check_connectivity",
+            client.check_connectivity(uri.clone(), SafeUrlListener::new(listener)),
+        )
+        .detach();
+
+        Ok(uri.into())
+    }
+
+    xpcom_method!(sync_folder_hierarchy => SyncFolderHierarchy(
+        listener: *const IExchangeFolderListener,
+        sync_state: *const nsACString
+    ));
+    fn sync_folder_hierarchy(
+        &self,
+        listener: &IExchangeFolderListener,
+        sync_state: &nsACString,
+    ) -> Result<(), nsresult> {
+        // We can't use `Option` across XPCOM, but we want to use one internally
+        // so we don't send an empty string for sync state.
+        let sync_state = if sync_state.is_empty() {
+            None
+        } else {
+            Some(sync_state.to_utf8().into_owned())
+        };
+
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "sync_folder_hierarchy",
+            client.sync_folder_hierarchy(SafeExchangeFolderListener::new(listener), sync_state),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(create_folder => CreateFolder(
+        listener: *const IExchangeSimpleOperationListener,
+        parent_id: *const nsACString,
+        name: *const nsACString
+    ));
+    fn create_folder(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        parent_id: &nsACString,
+        name: &nsACString,
+    ) -> Result<(), nsresult> {
+        if parent_id.is_empty() || name.is_empty() {
+            return Err(NS_ERROR_INVALID_ARG);
+        }
+
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "create_folder",
+            client.create_folder(
+                SafeExchangeSimpleOperationListener::new(listener),
+                parent_id.to_utf8().into(),
+                name.to_utf8().into(),
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(delete_folder => DeleteFolder(
+        listener: *const IExchangeSimpleOperationListener,
+        folder_id: *const nsACString
+    ));
+    fn delete_folder(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        folder_id: &nsACString,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "delete_folder",
+            client.delete_folder(
+                SafeExchangeSimpleOperationListener::new(listener),
+                folder_id.to_string(),
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(empty_folder => EmptyFolder(
+        listener: *const IExchangeSimpleOperationListener,
+        folder_id: *const nsACString,
+        subfolder_ids: *const ThinVec<nsCString>,
+        message_ids: *const ThinVec<nsCString>
+    ));
+    fn empty_folder(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        folder_id: &nsACString,
+        subfolder_ids: &ThinVec<nsCString>,
+        message_ids: &ThinVec<nsCString>,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        let subfolder_ids = subfolder_ids.iter().map(ToString::to_string).collect();
+        let message_ids = message_ids.iter().map(ToString::to_string).collect();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "empty_folder",
+            client.empty_folder(
+                SafeExchangeSimpleOperationListener::new(listener),
+                folder_id.to_string(),
+                subfolder_ids,
+                message_ids,
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(update_folder => UpdateFolder(
+        listener: *const IExchangeSimpleOperationListener,
+        folder_id: *const nsACString,
+        folder_name: *const nsACString
+    ));
+    fn update_folder(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        folder_id: &nsACString,
+        folder_name: &nsACString,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "update_folder",
+            client.update_folder(
+                SafeExchangeSimpleOperationListener::new(listener),
+                folder_id.to_utf8().into_owned(),
+                folder_name.to_utf8().into_owned(),
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(sync_messages_for_folder => SyncMessagesForFolder(
+        listener: *const IExchangeMessageSyncListener,
+        folder_id: *const nsACString,
+        sync_state: *const nsACString
+    ));
+    fn sync_messages_for_folder(
+        &self,
+        listener: &IExchangeMessageSyncListener,
+        folder_id: &nsACString,
+        sync_state: &nsACString,
+    ) -> Result<(), nsresult> {
+        // We can't use `Option` across XPCOM, but we want to use one internally
+        // so we don't send an empty string for sync state.
+        let sync_state = if sync_state.is_empty() {
+            None
+        } else {
+            Some(sync_state.to_utf8().into_owned())
+        };
+
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "sync_messages_for_folder",
+            client.sync_messages_for_folder(
+                SafeExchangeMessageSyncListener::new(listener),
+                folder_id.to_utf8().into_owned(),
+                sync_state,
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(get_message => GetMessage(
+        callbacks: *const IExchangeMessageFetchListener,
+        id: *const nsACString
+    ));
+    fn get_message(
+        &self,
+        listener: &IExchangeMessageFetchListener,
+        id: &nsACString,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "get_message",
+            client.get_message(
+                SafeExchangeMessageFetchListener::new(listener),
+                id.to_utf8().into(),
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(change_read_status => ChangeReadStatus(
+        listener: *const IExchangeSimpleOperationListener,
+        message_ids: *const ThinVec<nsCString>,
+        is_read: bool
+    ));
+    fn change_read_status(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        message_ids: &ThinVec<nsCString>,
+        is_read: bool,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "change_read_status",
+            client.change_read_status(
+                SafeExchangeSimpleOperationListener::new(listener),
+                message_ids.clone(),
+                is_read,
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(change_flag_status => ChangeFlagStatus(
+        listener: *const IExchangeSimpleOperationListener,
+        message_ids: *const ThinVec<nsCString>,
+        is_flagged: bool
+    ));
+    fn change_flag_status(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        message_ids: &ThinVec<nsCString>,
+        is_flagged: bool,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "change_flag_status",
+            client.change_flag_status(
+                SafeExchangeSimpleOperationListener::new(listener),
+                message_ids.clone(),
+                is_flagged,
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(change_read_status_all => ChangeReadStatusAll(
+        listener: *const IExchangeSimpleOperationListener,
+        folder_ids: *const ThinVec<nsCString>,
+        is_read: bool,
+        suppress_read_receipts: bool
+    ));
+    fn change_read_status_all(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        folder_ids: &ThinVec<nsCString>,
+        is_read: bool,
+        suppress_read_receipts: bool,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "change_read_status_all",
+            client.change_read_status_all(
+                SafeExchangeSimpleOperationListener::new(listener),
+                folder_ids.clone(),
+                is_read,
+                suppress_read_receipts,
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(create_message => CreateMessage(
+        listener: *const IExchangeMessageCreateListener,
+        folder_id: *const nsACString,
+        is_draft: bool,
+        is_read: bool,
+        message_stream: *const nsIInputStream
+    ));
+    fn create_message(
+        &self,
+        listener: &IExchangeMessageCreateListener,
+        folder_id: &nsACString,
+        is_draft: bool,
+        is_read: bool,
+        message_stream: &nsIInputStream,
+    ) -> Result<(), nsresult> {
+        let content = xpcom_io::read_stream(message_stream)?;
+
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "save_message",
+            client.create_message(
+                folder_id.to_utf8().into(),
+                is_draft,
+                is_read,
+                content,
+                SafeExchangeMessageCreateListener::new(listener),
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(move_items => MoveItems(
+        listener: *const IExchangeSimpleOperationListener,
+        destination_folder_id: *const nsACString,
+        item_ids: *const ThinVec<nsCString>
+    ));
+    fn move_items(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        destination_folder_id: &nsACString,
+        item_ids: &ThinVec<nsCString>,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        moz_task::spawn_local(
+            "move_items",
+            client.copy_move_item::<MoveItem>(
+                SafeExchangeSimpleOperationListener::new(listener),
+                destination_folder_id.to_string(),
+                item_ids.iter().map(ToString::to_string).collect(),
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(copy_items => CopyItems(
+        listener: *const IExchangeSimpleOperationListener,
+        destination_folder_id: *const nsACString,
+        item_ids: *const ThinVec<nsCString>
+    ));
+    fn copy_items(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        destination_folder_id: &nsACString,
+        item_ids: &ThinVec<nsCString>,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        moz_task::spawn_local(
+            "copy_items",
+            client.copy_move_item::<CopyItem>(
+                SafeExchangeSimpleOperationListener::new(listener),
+                destination_folder_id.to_string(),
+                item_ids.iter().map(ToString::to_string).collect(),
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(move_folders => MoveFolders(
+        listener: *const IExchangeSimpleOperationListener,
+        destination_folder_id: *const nsACString,
+        folder_ids: *const ThinVec<nsCString>
+    ));
+    fn move_folders(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        destination_folder_id: &nsACString,
+        folder_ids: &ThinVec<nsCString>,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        moz_task::spawn_local(
+            "move_folders",
+            client.copy_move_folder::<MoveFolder>(
+                SafeExchangeSimpleOperationListener::new(listener),
+                destination_folder_id.to_string(),
+                folder_ids.iter().map(ToString::to_string).collect(),
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(copy_folders => CopyFolders(
+        callbacks: *const IExchangeSimpleOperationListener,
+        destination_folder_id: *const nsACString,
+        folder_ids: *const ThinVec<nsCString>
+    ));
+    fn copy_folders(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        destination_folder_id: &nsACString,
+        folder_ids: &ThinVec<nsCString>,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        moz_task::spawn_local(
+            "copy_folders",
+            client.copy_move_folder::<CopyFolder>(
+                SafeExchangeSimpleOperationListener::new(listener),
+                destination_folder_id.to_string(),
+                folder_ids.iter().map(ToString::to_string).collect(),
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(delete_messages => DeleteMessages(
+        listener: *const IExchangeSimpleOperationListener,
+        ews_ids: *const ThinVec<nsCString>
+    ));
+    fn delete_messages(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        ews_ids: &ThinVec<nsCString>,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        // The client operation is async and we want it to survive the end of
+        // this scope, so spawn it as a detached `moz_task`.
+        moz_task::spawn_local(
+            "delete_messages",
+            client.delete_messages(
+                SafeExchangeSimpleOperationListener::new(listener),
+                ews_ids.clone(),
+            ),
+        )
+        .detach();
+
+        Ok(())
+    }
+
+    xpcom_method!(mark_items_as_junk => MarkItemsAsJunk(
+        listener: *const IExchangeSimpleOperationListener,
+        ews_ids: *const ThinVec<nsCString>,
+        is_junk: bool,
+        legacyDestinationFolderId: *const nsACString
+    ));
+    fn mark_items_as_junk(
+        &self,
+        listener: &IExchangeSimpleOperationListener,
+        ews_ids: &ThinVec<nsCString>,
+        is_junk: bool,
+        legacy_destination_folder_id: &nsACString,
+    ) -> Result<(), nsresult> {
+        let client = self.client.clone();
+
+        moz_task::spawn_local(
+            "mark_items_as_junk",
+            client.mark_as_junk(
+                SafeExchangeSimpleOperationListener::new(listener),
+                ews_ids.clone(),
+                is_junk,
+                legacy_destination_folder_id.to_string(),
+            ),
+        )
+        .detach();
+        Ok(())
+    }
+}
+
+/// If the given `endpoint` is an Office365 account, set a pref to indicate the user has configured
+/// an Office365 Account with EWS.
+///
+/// Returns an error if the endpoint cannot be parsed or if the pref cannot be set.
+///
+/// # Arguments
+///
+/// * `endpoint` - The EWS endpoint URL string
+fn maybe_set_ews_o365_pref(endpoint: &nsACString) -> Result<(), nsresult> {
+    // Parse the endpoint URL. If parsing fails, we can't determine the server type.
+    let server_url = Url::parse(&endpoint.to_utf8()).or(Err(NS_ERROR_INVALID_ARG))?;
+
+    // Extract the host (domain) from the URL. This matches the behavior in `record_telemetry`.
+    let domain = server_url.host_str().ok_or(NS_ERROR_INVALID_ARG)?;
+
+    // Check if the domain ends with any of the known Office365 base domains.
+    if OFFICE365_BASE_DOMAINS
+        .into_iter()
+        .any(|o365_base_domain| domain.ends_with(o365_base_domain))
+    {
+        // Set the preference to indicate this is an Office365+EWS account.
+        let root_pref_branch = get_root_pref_branch().or(Err(nserror::NS_ERROR_FAILURE))?;
+        // SAFETY: get_root_pref_branch will only return Ok with a non-null pointer.
+        unsafe {
+            root_pref_branch.SetBoolPref(c"mail.exchange.hasMicrosoft365EwsAccount".as_ptr(), true);
+        }
+    }
+
+    Ok(())
+}

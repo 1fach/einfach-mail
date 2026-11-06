@@ -1,0 +1,36 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+Library("bz2")
+
+# Honor --with-system-bz2
+if CONFIG["MZLA_SYSTEM_BZIP2"]:
+    OS_LIBS += CONFIG["MZLA_BZIP2_LIBS"]
+else:
+    include("../rnpdefs.mozbuild")
+
+    COMPILE_FLAGS["WARNINGS_CFLAGS"] += [
+        "-Wno-unreachable-code-return",
+    ]
+
+    SOURCES += [
+        "blocksort.c",
+        "bzlib.c",
+        "compress.c",
+        "crctable.c",
+        "decompress.c",
+        "huffman.c",
+        "randtable.c",
+    ]
+
+LICENSES += ["bzip2"]
+LICENSES["bzip2"].title = "Bzip2 License"
+LICENSES["bzip2"].text = "LICENSE"
+LICENSES["bzip2"].notice = """
+<p>This license applies to files in <code>third_party/bzip2</code>.</p>
+"""
+
+LICENSED_UNDER += [
+    "bzip2",
+]

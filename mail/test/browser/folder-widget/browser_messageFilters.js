@@ -1,0 +1,1062 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/*
+ * Test various properties of the message filters.
+ */
+
+"use strict";
+
+var { create_ldap_address_book } = ChromeUtils.importESModule(
+  "resource://testing-common/mail/AddressBookHelpers.sys.mjs"
+);
+var { be_in_folder, create_folder } = ChromeUtils.importESModule(
+  "resource://testing-common/mail/FolderDisplayHelpers.sys.mjs"
+);
+var { make_message_sets_in_folders } = ChromeUtils.importESModule(
+  "resource://testing-common/mail/MessageInjectionHelpers.sys.mjs"
+);
+var { NNTP_PORT, setupLocalServer, setupNNTPDaemon } =
+  ChromeUtils.importESModule(
+    "resource://testing-common/mail/NNTPHelpers.sys.mjs"
+  );
+var { click_menus_in_sequence, promise_new_window } =
+  ChromeUtils.importESModule(
+    "resource://testing-common/mail/WindowHelpers.sys.mjs"
+  );
+
+var { MailServices } = ChromeUtils.importESModule(
+  "resource:///modules/MailServices.sys.mjs"
+);
+
+var folderA, NNTPAccount;
+var localServer;
+
+add_setup(async function () {
+  setupNNTPDaemon();
+
+  folderA = await create_folder("FolderToolbarA");
+  // we need one message to select and open
+  await make_message_sets_in_folders([folderA], [{ count: 1 }]);
+
+  localServer = setupLocalServer(NNTP_PORT);
+  NNTPAccount = MailServices.accounts.findAccountForServer(localServer);
+
+  registerCleanupFunction(() => {
+    folderA.deleteSelf(null);
+    // For some peculiar reason, removing won't work in --verify mode
+    // if we remove the account here.
+    //  MailServices.accounts.removeAccount(NNTPAccount);
+    // Some tests that open new windows don't return focus to the main window
+    // in a way that satisfies mochitest, and the test times out.
+    Services.focus.focusedWindow = window;
+  });
+});
+
+/**
+ * Wait for a popup to reach a state, reporting the state it is stuck in
+ * instead of hanging until the whole test times out.
+ *
+ * Using this instead of BrowserTestUtils.waitForPopupEvent() as there is some
+ * flakiness (when not in headless mode), so time out quickly.
+ *
+ * @param {Element} popup - A menupopup or panel. Only popups have a state, so
+ *   anything else would wait for an event that can never fire.
+ * @param {"open"|"closed"} wanted - The state to wait for.
+ * @param {string} msg - Assertion message.
+ */
+async function waitForPopupState(popup, wanted, msg) {
+  if (typeof popup?.state != "string") {
+    throw new Error(
+      `${msg} - expected a popup, got ${popup?.localName ?? typeof popup}`
+    );
+  }
+  try {
+    await TestUtils.waitForCondition(() => popup.state == wanted, msg);
+  } catch (e) {
+    throw new Error(`${msg} - popup is stuck in state "${popup.state}": ${e}`);
+  }
+  Assert.equal(popup.state, wanted, msg);
+}
+
+/**
+ * Tests the keyboard navigation on the message filters window, ensures that the
+ * new filter toolbarbutton and it's dropdown work correctly.
+ */
+add_task(async function key_navigation_test() {
+  const filterc = await openFiltersDialogs();
+  try {
+    const filterWinDoc = filterc.document;
+    const BUTTONS_SELECTOR = `toolbarbutton:not([disabled],[is="toolbarbutton-menu-button"]),dropmarker, button:not([hidden])`;
+    const filterButtonList = filterWinDoc.getElementById("filterActionButtons");
+    const navigableButtons =
+      filterButtonList.querySelectorAll(BUTTONS_SELECTOR);
+    const menupopupNewFilter =
+      filterWinDoc.getElementById("newFilterMenupopup");
+
+    EventUtils.synthesizeKey("KEY_Tab", {}, filterc);
+    Assert.equal(
+      filterWinDoc.activeElement.id,
+      navigableButtons[0].id,
+      "focused on the first filter action button"
+    );
+
+    for (const button of navigableButtons) {
+      if (!filterWinDoc.getElementById(button.id).disabled) {
+        Assert.equal(
+          filterWinDoc.activeElement.id,
+          button.id,
+          "focused on the correct filter action button"
+        );
+
+        if (button.id == "newButtontoolbarbutton") {
+          function openEmptyDialog(fec) {
+            fec.document.getElementById("filterName").value = " ";
+            fec.close();
+          }
+
+          let dialogPromise = BrowserTestUtils.promiseAlertDialog(
+            null,
+            "chrome://messenger/content/FilterEditor.xhtml",
+            {
+              callback: openEmptyDialog,
+            }
+          );
+          EventUtils.synthesizeKey("KEY_Enter", {}, filterc);
+          dialogPromise = BrowserTestUtils.promiseAlertDialog(
+            null,
+            "chrome://messenger/content/FilterEditor.xhtml",
+            {
+              callback: openEmptyDialog,
+            }
+          );
+          // Simulate Space keypress.
+          EventUtils.synthesizeKey(" ", {}, filterc);
+          await dialogPromise;
+
+          Assert.equal(
+            filterWinDoc.activeElement.id,
+            button.id,
+            "Correct btn is focused after opening and closing new filter editor"
+          );
+        } else if (button.id == "newButtondropmarker") {
+          await new Promise(resolve => filterc.requestAnimationFrame(resolve));
+
+          EventUtils.synthesizeKey("KEY_Enter", {}, filterc);
+          await waitForPopupState(
+            menupopupNewFilter,
+            "open",
+            `Enter should open #${menupopupNewFilter.id}`
+          );
+          EventUtils.synthesizeKey("KEY_Escape", {}, filterc);
+          await waitForPopupState(
+            menupopupNewFilter,
+            "closed",
+            `Esc should close #${menupopupNewFilter.id}`
+          );
+
+          await new Promise(resolve => filterc.requestAnimationFrame(resolve));
+
+          // Simulate Space keypress.
+          EventUtils.synthesizeKey(" ", {}, filterc);
+          await waitForPopupState(
+            menupopupNewFilter,
+            "open",
+            `Space should open #${menupopupNewFilter.id}`
+          );
+          EventUtils.synthesizeKey("KEY_Escape", {}, filterc);
+          await waitForPopupState(
+            menupopupNewFilter,
+            "closed",
+            `Esc should close #${menupopupNewFilter.id}`
+          );
+          Assert.equal(
+            filterWinDoc.activeElement.id,
+            button.id,
+            "The correct btn should be focused after closing the menupopup"
+          );
+        }
+      }
+      EventUtils.synthesizeKey("KEY_Tab", {}, filterc);
+    }
+  } finally {
+    // Close the window even when an assertion fails, or the next test
+    // can't open its own filter list.
+    await BrowserTestUtils.closeWindow(filterc);
+  }
+}).skip(AppConstants.platform == "macosx");
+
+add_task(async function test_forward_filter_action_visibility() {
+  await be_in_folder(folderA);
+  const filterWindow = await openFiltersDialogs();
+
+  async function checkForwardAction(filterEditor, enabled) {
+    try {
+      const forwardAction = filterEditor.document.querySelector(
+        ".forward-message-action"
+      );
+      Assert.ok(forwardAction, "Forward action should exist in the menu");
+
+      Assert.equal(
+        filterEditor.getComputedStyle(forwardAction).display == "none",
+        !enabled,
+        `Forward action should be ${enabled ? "visible" : "hidden"}`
+      );
+
+      if (!enabled) {
+        const replyAction = filterEditor.document.querySelector(
+          ".reply-message-action"
+        );
+        const leadingSeparator = filterEditor.document.querySelector(
+          ".forward-reply-leading-separator"
+        );
+
+        Assert.ok(replyAction, "Reply action should exist in the menu");
+        Assert.ok(leadingSeparator, "Leading separator should exist");
+
+        Assert.equal(
+          filterEditor.getComputedStyle(leadingSeparator).display == "none",
+          replyAction.hidden,
+          "Leading separator should be hidden only when Reply is also hidden"
+        );
+      }
+    } finally {
+      filterEditor.close();
+    }
+  }
+
+  async function openEditorAndCheck(enabled) {
+    const dialogPromise = BrowserTestUtils.promiseAlertDialog(
+      null,
+      "chrome://messenger/content/FilterEditor.xhtml",
+      {
+        callback(filterEditor) {
+          return checkForwardAction(filterEditor, enabled);
+        },
+      }
+    );
+
+    EventUtils.synthesizeMouseAtCenter(
+      filterWindow.document.getElementById("newButton"),
+      {},
+      filterWindow
+    );
+    await dialogPromise;
+  }
+
+  try {
+    await SpecialPowers.pushPrefEnv({
+      clear: [["mail.filters.forward.enabled"]],
+    });
+    await openEditorAndCheck(true);
+
+    await SpecialPowers.pushPrefEnv({
+      set: [["mail.filters.forward.enabled", false]],
+    });
+    await SimpleTest.promiseFocus(filterWindow);
+    await openEditorAndCheck(false);
+  } finally {
+    await SpecialPowers.popPrefEnv();
+    await BrowserTestUtils.closeWindow(filterWindow);
+  }
+});
+
+/*
+ * Test that the message filter list shows newsgroup servers.
+ */
+add_task(async function test_message_filter_shows_newsgroup_server() {
+  await be_in_folder(folderA);
+
+  const filterc = await openFiltersDialogs();
+  await SimpleTest.promiseFocus(filterc);
+
+  // Get the newsgroups to pop up.
+  const serverMenu = filterc.document.getElementById("serverMenu");
+  let popupshown = BrowserTestUtils.waitForEvent(serverMenu, "popupshown");
+  EventUtils.synthesizeMouseAtCenter(serverMenu, {}, serverMenu.documentGlobal);
+  await popupshown;
+
+  const nntp = serverMenu.firstElementChild.children.item(1);
+  Assert.equal(
+    nntp.label,
+    "localhost",
+    "should show 'localhost' nntp server item in menu"
+  );
+  popupshown = BrowserTestUtils.waitForEvent(nntp, "popupshown");
+  EventUtils.synthesizeMouseAtCenter(nntp, {}, nntp.documentGlobal);
+  await popupshown;
+
+  Assert.equal(nntp.itemCount, 5, "All five items should show");
+  await BrowserTestUtils.closeWindow(filterc);
+});
+
+/* A helper function that opens up the new filter dialog (assuming that the
+ * main filters dialog is already open), creates a simple filter, and then
+ * closes the dialog.
+ */
+async function create_simple_filter() {
+  const filterc = await openFiltersDialogs();
+
+  async function fill_in_filter_fields(fec) {
+    const filterName = fec.document.getElementById("filterName");
+    filterName.value = "A Simple Filter";
+    fec.document.getElementById("searchAttr0").value = Ci.nsMsgSearchAttrib.To;
+    fec.document.getElementById("searchOp0").value = Ci.nsMsgSearchOp.Is;
+    const searchVal = fec.document.getElementById("searchVal0").input;
+    searchVal.setAttribute("value", "test@foo.invalid");
+    const firstRemoveButton = fec.document
+      .getElementById("searchRow0")
+      .getElementsByClassName("small-button")[1];
+    Assert.ok(
+      firstRemoveButton.disabled,
+      "The only search row should not be removable"
+    );
+
+    const filterActions = fec.document.getElementById("filterActionList");
+    const firstAction = filterActions.getItemAtIndex(0);
+    firstAction.setAttribute("value", "markasflagged");
+
+    // Test that pressing Enter adds another search row and does not close
+    // the dialog. Remove the second row afterwards.
+    EventUtils.synthesizeMouseAtCenter(searchVal, {}, fec);
+    EventUtils.synthesizeKey("KEY_Enter", {}, fec);
+    await new Promise(resolve => requestIdleCallback(resolve));
+    Assert.ok(
+      !firstRemoveButton.disabled,
+      "The first search row should be removable when another row exists"
+    );
+    EventUtils.synthesizeMouseAtCenter(
+      fec.document
+        .getElementById("searchRow1")
+        .getElementsByClassName("small-button")[1],
+      {},
+      fec
+    );
+
+    fec.document.querySelector("dialog").acceptDialog();
+  }
+
+  // Let's open the filter editor.
+  const dialogPromise = BrowserTestUtils.promiseAlertDialog(
+    null,
+    "chrome://messenger/content/FilterEditor.xhtml",
+    {
+      callback: fill_in_filter_fields,
+    }
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    filterc.document.getElementById("newButton"),
+    {},
+    filterc
+  );
+  await dialogPromise;
+
+  return filterc;
+}
+
+/**
+ * Open the Message Filters dialog by clicking the menus.
+ */
+async function openFiltersDialogs() {
+  const filterListPromise = promise_new_window("mailnews:filterlist");
+
+  if (AppConstants.platform == "macosx") {
+    // Can't click the menus on mac.
+    window.MsgFilters();
+    return filterListPromise;
+  }
+  // Show menubar so we can click it.
+  document.getElementById("toolbar-menubar").removeAttribute("autohide");
+  // Open the "Tools | Message Filters…", a.k.a. "tasksMenu » filtersCmd".
+  EventUtils.synthesizeMouseAtCenter(
+    document.getElementById("tasksMenu"),
+    {},
+    window
+  );
+  await click_menus_in_sequence(document.getElementById("taskPopup"), [
+    { id: "filtersCmd" },
+  ]);
+  return filterListPromise;
+}
+
+/**
+ * Test that the address books can appear in the message filter dropdown
+ */
+add_task(async function test_address_books_appear_in_message_filter_dropdown() {
+  // Create a remote address book - we don't want this to appear in the
+  // dropdown.
+  const ldapAb = create_ldap_address_book("Some LDAP Address Book");
+
+  // Sanity check - this LDAP book should be remote.
+  Assert.ok(ldapAb.isRemote);
+
+  const filterc = await openFiltersDialogs();
+
+  // Prepare a function to deal with the filter editor once it
+  // has opened
+  function filterEditorOpened(fec) {
+    fec.document.getElementById("searchAttr0").value = Ci.nsMsgSearchAttrib.To;
+    fec.document.getElementById("searchOp0").value = Ci.nsMsgSearchOp.IsInAB;
+    const abList = fec.document.getElementById("searchVal0").input;
+
+    // We should have 2 address books here - one for the Personal Address
+    // Book, and one for Collected Addresses.  The LDAP address book should
+    // not be shown, since it isn't a local address book.
+    Assert.equal(
+      abList.itemCount,
+      2,
+      "Should have 2 address books in the filter menu list."
+    );
+    fec.close();
+  }
+
+  // Let's open the filter editor.
+  const dialogPromise = BrowserTestUtils.promiseAlertDialog(
+    null,
+    "chrome://messenger/content/FilterEditor.xhtml",
+    {
+      callback: filterEditorOpened,
+    }
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    filterc.document.getElementById("newButton"),
+    {},
+    filterc
+  );
+  await dialogPromise;
+
+  await BrowserTestUtils.closeWindow(filterc);
+});
+
+/**
+ * Tests that elements can be added to the list of custom headers.
+ *
+ * This test is a bit complex and involves a bunch of callbacks, so here's a
+ * summary of what it does:
+ *
+ *  - it opens the message filters dialog,
+ *  - then it opens the filter editor dialog by clicking on the "New" button
+ *  - while the filter editor dialog is open, `filter_editor_callback` is run
+ *  - `filter_editor_callback` opens the custom headers dialog by selecting the
+ *    relevant option in the search attributes drop-down
+ *  - while the custom headers dialog is open, `custom_headers_callback` is run
+ *  - `custom_headers_callback` tests that it can add a new header to the list
+ *    in that dialog
+ *  - then the dialogs are closed one after the other, and everyone's happy
+ */
+add_task(async function test_custom_headers_can_be_added() {
+  const customHeaderName = "X-Foo";
+
+  const filtersDialog = await openFiltersDialogs();
+
+  /**
+   * The callback run when opening the custom headers dialog.
+   *
+   * @param {window} win - The window object for the custom headers dialog.
+   */
+  async function custom_headers_callback(win) {
+    info("Opening custom headers dialog");
+
+    // Make sure the window has loaded and has focus.
+    await SimpleTest.promiseFocus(win);
+
+    // Write the header's name in the input field. The "Add" button has some
+    // logic that relies on input events being sent to enable/disable it, so
+    // it's better to simulate the user typing the name rather than setting the
+    // `value` attribute directly.
+    const input = win.document.getElementById("headerInput");
+    EventUtils.synthesizeMouseAtCenter(input, {}, win);
+    for (const c of customHeaderName) {
+      await BrowserTestUtils.synthesizeKey(c, {}, win.browsingContext);
+    }
+
+    // After we click on the "Add" button, the custom headers list (which is
+    // currently empty) shouldn't be empty anymore.
+    const listPromise = TestUtils.waitForCondition(() => {
+      const headers = win.document
+        .getElementById("headerList")
+        .getElementsByTagName("richlistitem");
+      return headers.length != 0;
+    }, "the header list should not stay empty");
+
+    const button = win.document.getElementById("addButton");
+    EventUtils.synthesizeMouseAtCenter(button, {}, win);
+    await listPromise;
+
+    // Check the new length and content of the list.
+    const headers = win.document
+      .getElementById("headerList")
+      .getElementsByTagName("richlistitem");
+
+    Assert.equal(headers.length, 1, "the header list should have 1 item");
+
+    const headerLabel = headers[0].getElementsByTagName("label")[0];
+
+    Assert.equal(
+      headerLabel.getAttribute("value"),
+      customHeaderName,
+      "the custom header should have the correct name"
+    );
+
+    info("Closing custom headers dialog");
+    win.close();
+  }
+
+  /**
+   * The callback run when opening the filter editor dialog.
+   *
+   * @param {window} win - The window object for the filter editor dialog.
+   */
+  async function filter_editor_callback(win) {
+    info("Opening filter editor dialog");
+
+    // Make sure the window has loaded and has focus.
+    await SimpleTest.promiseFocus(win);
+
+    const menu = win.document
+      .getElementById("searchAttr0")
+      .getElementsByTagName("menulist")[0];
+
+    EventUtils.synthesizeMouseAtCenter(menu, {}, win);
+    await BrowserTestUtils.waitForPopupEvent(menu.menupopup, "shown");
+
+    const customizeOption = menu.menupopup.querySelector(
+      `menuitem[value="${Ci.nsMsgSearchAttrib.OtherHeader}"]`
+    );
+
+    // The custom headers dialog opens upon clicking the "Customize" option in
+    // the search attributes drop-down.
+    const customHeadersDialogPromise = BrowserTestUtils.promiseAlertDialog(
+      null,
+      "chrome://messenger/content/CustomHeaders.xhtml",
+      {
+        callback: custom_headers_callback,
+      }
+    );
+    menu.menupopup.activateItem(customizeOption);
+    await BrowserTestUtils.waitForPopupEvent(menu.menupopup, "hidden");
+    await customHeadersDialogPromise;
+
+    // Ensure the window is in focus, otherwise we won't be able to close it.
+    await SimpleTest.promiseFocus(win);
+
+    info("Closing filter editor dialog");
+    win.close();
+  }
+
+  // Open the filter editor.
+  const filterEditorDialogPromise = BrowserTestUtils.promiseAlertDialog(
+    null,
+    "chrome://messenger/content/FilterEditor.xhtml",
+    {
+      callback: filter_editor_callback,
+    }
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    filtersDialog.document.getElementById("newButton"),
+    {},
+    filtersDialog
+  );
+  await filterEditorDialogPromise;
+
+  await BrowserTestUtils.closeWindow(filtersDialog);
+});
+
+/**
+ * Test that if the user has started running a filter, and the
+ * "quit-application-requested" notification is fired, the user
+ * is given a dialog asking whether or not to quit.
+ *
+ * This also tests whether or not cancelling quit works.
+ */
+add_task(async function test_can_cancel_quit_on_filter_changes() {
+  const filterWin = await create_simple_filter();
+
+  filterWin.gRunningFilters = true; // simulate running
+
+  const cancelQuit = Cc["@mozilla.org/supports-PRBool;1"].createInstance(
+    Ci.nsISupportsPRBool
+  );
+
+  // Prevent the quit. Confusingly, the accept button is labelled Stop.
+  const stopPromise = BrowserTestUtils.promiseAlertDialog("accept");
+  // Trigger the quit-application-request notification
+  Services.obs.notifyObservers(cancelQuit, "quit-application-requested");
+  await stopPromise;
+
+  // Since we returned false on the confirmation dialog,
+  // we should be cancelling the quit - so cancelQuit.data
+  // should now be true
+  Assert.ok(cancelQuit.data, "Didn't cancel the quit");
+  filterWin.gRunningFilters = false; // reset
+});
+
+/**
+ * Test that if the user has started running a filter, and the
+ * "quit-application-requested" notification is fired, the user
+ * is given a dialog asking whether or not to quit.
+ *
+ * This also tests whether or not allowing quit works.
+ */
+add_task(async function test_can_quit_on_filter_changes() {
+  const filterWin = Services.wm.getMostRecentWindow("mailnews:filterlist");
+
+  // There should already be 1 filter defined from previous test.
+  const filterCount = filterWin.document.getElementById("filterList").itemCount;
+  Assert.equal(filterCount, 1, "should have 1 filter from prev test");
+
+  filterWin.gRunningFilters = true; // simulate running
+
+  const cancelQuit = Cc["@mozilla.org/supports-PRBool;1"].createInstance(
+    Ci.nsISupportsPRBool
+  );
+
+  // Allow the quit. The cancel button is labelled Continue.
+  const continuePromise = BrowserTestUtils.promiseAlertDialog("cancel");
+  // Trigger the quit-application-request notification
+  Services.obs.notifyObservers(cancelQuit, "quit-application-requested");
+  await continuePromise;
+
+  // Since we returned true on the confirmation dialog,
+  // we should be allowing the quit - so cancelQuit.data
+  // should now be false
+  Assert.ok(!cancelQuit.data, "Cancelled the quit");
+
+  EventUtils.synthesizeMouseAtCenter(
+    filterWin.document.querySelector("#filterList richlistitem"),
+    {},
+    filterWin
+  );
+
+  const deleteAlertPromise = BrowserTestUtils.promiseAlertDialogOpen(
+    "",
+    "chrome://global/content/commonDialog.xhtml",
+    {
+      async callback(win) {
+        EventUtils.synthesizeKey("KEY_Enter", {}, win);
+      },
+    }
+  );
+  EventUtils.synthesizeKey("KEY_Delete", {}, filterWin);
+  await deleteAlertPromise;
+
+  Assert.equal(
+    filterWin.document.getElementById("filterList").itemCount,
+    0,
+    "Previously created filter should have been deleted."
+  );
+
+  await BrowserTestUtils.closeWindow(filterWin);
+});
+
+async function create_simple_subject_filter(filterc) {
+  async function fill_in_filter_fields(fec) {
+    const filterName = fec.document.getElementById("filterName");
+    filterName.value = "A Simple Newsgroup Filter";
+    fec.document.getElementById("searchAttr0").value =
+      Ci.nsMsgSearchAttrib.Subject;
+    fec.document.getElementById("searchOp0").value = Ci.nsMsgSearchOp.Contains;
+    const searchVal = fec.document.getElementById("searchVal0").input;
+    searchVal.setAttribute("value", "doesnotexist");
+
+    const filterActions = fec.document.getElementById("filterActionList");
+    const firstAction = filterActions.getItemAtIndex(0);
+    firstAction.setAttribute("value", "markasflagged");
+
+    fec.document.querySelector("dialog").acceptDialog();
+  }
+
+  // Let's open the filter editor.
+  const dialogPromise = BrowserTestUtils.promiseAlertDialog(
+    null,
+    "chrome://messenger/content/FilterEditor.xhtml",
+    {
+      callback: fill_in_filter_fields,
+    }
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    filterc.document.getElementById("newButton"),
+    {},
+    filterc
+  );
+  await dialogPromise;
+}
+
+/**
+ * Test that after running a filter with a local-only action on an
+ * already-parsed folder, gRunningFilters is cleared correctly.
+ * This covers the bug where gRunningFilters stayed true permanently for
+ * filter runs that involve no URLs (offline search, local DB actions).
+ */
+add_task(async function test_filter_clears_running_state() {
+  const folder = await create_folder("FilterRunningState");
+  await make_message_sets_in_folders([folder], [{ count: 1 }]);
+  // Visit the folder to ensure its database is parsed, so filter execution
+  // uses only SearchWOUrls() and local DB actions — no URLs, no meteors.
+  await be_in_folder(folder);
+
+  info("Open the message filters dialog and create a simple filter");
+  const filterWin = await openFiltersDialogs();
+  await create_simple_subject_filter(filterWin);
+
+  info("Click the 'Run Now' button to run the filter");
+  const runFiltersButton =
+    filterWin.document.getElementById("runFiltersButton");
+  Assert.ok(!runFiltersButton.disabled, "'Run Now' button should be enabled");
+  EventUtils.synthesizeMouseAtCenter(runFiltersButton, {}, filterWin);
+
+  Assert.ok(
+    filterWin.gRunningFilters,
+    "gRunningFilters should be true while filters run"
+  );
+  info(
+    "Wait for filter execution to complete and gRunningFilters to be cleared"
+  );
+  await TestUtils.waitForCondition(
+    () => !filterWin.gRunningFilters,
+    "gRunningFilters should be cleared after filter execution completes"
+  );
+  Assert.ok(
+    !runFiltersButton.disabled,
+    "'Run Now' button should still be enabled"
+  );
+
+  await BrowserTestUtils.closeWindow(filterWin);
+});
+
+/**
+ * Test that the "Run Filters" button becomes enabled when a folder is
+ * selected and filters exist.
+ */
+add_task(async function test_run_button_disabled_state() {
+  await be_in_folder(localServer.rootFolder);
+
+  info("Open the message filters dialog on the news server.");
+  const filterWin = await openFiltersDialogs();
+
+  const runFiltersButton =
+    filterWin.document.getElementById("runFiltersButton");
+  const editFiltersButton = filterWin.document.getElementById("editButton");
+  Assert.ok(runFiltersButton.disabled, "'Run Now' button should be disabled");
+  Assert.ok(editFiltersButton.disabled, "'Edit' button should be disabled");
+
+  info("Select a newsgroup folder in the server menu.");
+  const serverMenu = filterWin.document.getElementById("serverMenu");
+  let popupshown = BrowserTestUtils.waitForEvent(serverMenu, "popupshown");
+  EventUtils.synthesizeMouseAtCenter(serverMenu, {}, serverMenu.documentGlobal);
+  await popupshown;
+
+  const nntp = serverMenu.firstElementChild.children.item(1);
+  Assert.equal(
+    nntp.label,
+    "localhost",
+    "should show 'localhost' nntp server item in menu"
+  );
+  popupshown = BrowserTestUtils.waitForEvent(nntp, "popupshown");
+  EventUtils.synthesizeMouseAtCenter(nntp, {}, nntp.documentGlobal);
+  await popupshown;
+
+  EventUtils.synthesizeKey("KEY_ArrowDown", {}, filterWin);
+  EventUtils.synthesizeKey("KEY_ArrowDown", {}, filterWin);
+  const popuphidden = BrowserTestUtils.waitForEvent(serverMenu, "popuphidden");
+  EventUtils.synthesizeKey("KEY_Enter", {}, filterWin);
+  await popuphidden;
+
+  Assert.equal(
+    serverMenu.label,
+    "test.filter",
+    "should show 'test.filter' newsgroup item in menu"
+  );
+  Assert.ok(
+    runFiltersButton.disabled,
+    "'Run Now' button should still be disabled"
+  );
+  Assert.ok(
+    editFiltersButton.disabled,
+    "'Edit' button should still be disabled"
+  );
+
+  info("Create a simple filter");
+  await create_simple_subject_filter(filterWin);
+
+  Assert.ok(
+    filterWin.gCanFilterAfterTheFact,
+    "news server should support after-the-fact filtering"
+  );
+
+  Assert.ok(
+    !runFiltersButton.disabled,
+    "'Run Now' button should now be enabled"
+  );
+  Assert.ok(!editFiltersButton.disabled, "'Edit' button should now be enabled");
+
+  info("Delete the filter");
+  const deleteAlertPromise = BrowserTestUtils.promiseAlertDialogOpen(
+    "",
+    "chrome://global/content/commonDialog.xhtml",
+    {
+      async callback(win) {
+        EventUtils.synthesizeKey("KEY_Enter", {}, win);
+      },
+    }
+  );
+  EventUtils.synthesizeKey("KEY_Delete", {}, filterWin);
+  await deleteAlertPromise;
+  Assert.ok(
+    runFiltersButton.disabled,
+    "'Run Now' button should be disabled again"
+  );
+  Assert.ok(
+    editFiltersButton.disabled,
+    "'Edit' button should be disabled again"
+  );
+
+  await BrowserTestUtils.closeWindow(filterWin);
+});
+
+/**
+ * Test that a search term whose value was left empty can't be saved. For
+ * operators like "begins with" such a term matches every message, silently
+ * misfiling all incoming mail. See bug 1896015.
+ */
+add_task(async function test_filter_with_empty_search_value() {
+  await be_in_folder(folderA);
+  const filterWin = await openFiltersDialogs();
+  const initialCount = filterWin.gCurrentFilterList.filterCount;
+
+  async function fill_in_filter_fields(fec) {
+    fec.document.getElementById("filterName").value = "Empty value filter";
+    fec.document.getElementById("searchAttr0").value =
+      Ci.nsMsgSearchAttrib.Subject;
+    fec.document.getElementById("searchOp0").value =
+      Ci.nsMsgSearchOp.BeginsWith;
+    const searchVal = fec.document.getElementById("searchVal0");
+    Assert.equal(searchVal.input.value, "", "search value should start empty");
+
+    const filterActions = fec.document.getElementById("filterActionList");
+    filterActions.getItemAtIndex(0).setAttribute("value", "markasflagged");
+
+    info("Accepting the dialog without a search value should be refused");
+    const alertPromise = BrowserTestUtils.promiseAlertDialogOpen(
+      "",
+      "chrome://global/content/commonDialog.xhtml",
+      {
+        async callback(win) {
+          const message = win.document.getElementById("infoBody").textContent;
+          Assert.stringContains(
+            message,
+            fec.document.getElementById("searchAttr0").label,
+            "the alert should name the offending search term"
+          );
+          win.document.querySelector("dialog").acceptDialog();
+        },
+      }
+    );
+    fec.document.querySelector("dialog").acceptDialog();
+    await alertPromise;
+    Assert.ok(!fec.closed, "filter editor should still be open");
+
+    info("Once the value is filled in, the filter should save");
+    searchVal.input.value = "needle";
+    fec.document.querySelector("dialog").acceptDialog();
+  }
+
+  const dialogPromise = BrowserTestUtils.promiseAlertDialog(
+    null,
+    "chrome://messenger/content/FilterEditor.xhtml",
+    {
+      callback: fill_in_filter_fields,
+    }
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    filterWin.document.getElementById("newButton"),
+    {},
+    filterWin
+  );
+  await dialogPromise;
+
+  const filterList = filterWin.gCurrentFilterList;
+  Assert.equal(
+    filterList.filterCount,
+    initialCount + 1,
+    "the filter should have been saved"
+  );
+  const filter = filterList.getFilterAt(0);
+  Assert.equal(
+    filter.filterName,
+    "Empty value filter",
+    "the new filter should be the first in the list"
+  );
+  Assert.equal(
+    filter.searchTerms[0].value.str,
+    "needle",
+    "the filter should have kept the value that was filled in"
+  );
+
+  filterList.removeFilterAt(0);
+  await BrowserTestUtils.closeWindow(filterWin);
+});
+
+/**
+ * Test that an empty value is accepted for "is", which is how a filter matches
+ * messages with an empty subject.
+ */
+add_task(async function test_filter_with_empty_search_value_is() {
+  await be_in_folder(folderA);
+  const filterWin = await openFiltersDialogs();
+  const initialCount = filterWin.gCurrentFilterList.filterCount;
+
+  async function fill_in_filter_fields(fec) {
+    fec.document.getElementById("filterName").value = "Empty subject filter";
+    fec.document.getElementById("searchAttr0").value =
+      Ci.nsMsgSearchAttrib.Subject;
+    fec.document.getElementById("searchOp0").value = Ci.nsMsgSearchOp.Is;
+    Assert.equal(
+      fec.document.getElementById("searchVal0").input.value,
+      "",
+      "search value should start empty"
+    );
+
+    const filterActions = fec.document.getElementById("filterActionList");
+    filterActions.getItemAtIndex(0).setAttribute("value", "markasflagged");
+    fec.document.querySelector("dialog").acceptDialog();
+  }
+
+  const dialogPromise = BrowserTestUtils.promiseAlertDialog(
+    null,
+    "chrome://messenger/content/FilterEditor.xhtml",
+    {
+      callback: fill_in_filter_fields,
+    }
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    filterWin.document.getElementById("newButton"),
+    {},
+    filterWin
+  );
+  await dialogPromise;
+
+  const filterList = filterWin.gCurrentFilterList;
+  Assert.equal(
+    filterList.filterCount,
+    initialCount + 1,
+    "the filter should have been saved"
+  );
+  const filter = filterList.getFilterAt(0);
+  Assert.equal(
+    filter.filterName,
+    "Empty subject filter",
+    "the new filter should be the first in the list"
+  );
+  Assert.equal(
+    filter.searchTerms[0].op,
+    Ci.nsMsgSearchOp.Is,
+    "the search term should use the is operator"
+  );
+  Assert.equal(
+    filter.searchTerms[0].value.str,
+    "",
+    "the search term should keep its empty value"
+  );
+
+  filterList.removeFilterAt(0);
+  await BrowserTestUtils.closeWindow(filterWin);
+});
+
+/**
+ * Test that a date search term whose value was cleared can't be saved. The
+ * date input is prefilled with today, but a user can empty it, and an empty
+ * date is stored as 0, which makes "is after" match every message.
+ * See bug 1896015.
+ */
+add_task(async function test_filter_with_empty_date_value() {
+  await be_in_folder(folderA);
+  const filterWin = await openFiltersDialogs();
+  const initialCount = filterWin.gCurrentFilterList.filterCount;
+  let expectedDate;
+
+  async function fill_in_filter_fields(fec) {
+    fec.document.getElementById("filterName").value = "Empty date filter";
+    fec.document.getElementById("searchAttr0").value =
+      Ci.nsMsgSearchAttrib.Date;
+    fec.document.getElementById("searchOp0").value = Ci.nsMsgSearchOp.IsAfter;
+    const searchVal = fec.document.getElementById("searchVal0");
+    const today = searchVal.input.value;
+    Assert.notEqual(today, "", "the date value should start prefilled");
+
+    const filterActions = fec.document.getElementById("filterActionList");
+    filterActions.getItemAtIndex(0).setAttribute("value", "markasflagged");
+
+    info("Accepting the dialog with a cleared date should be refused");
+    searchVal.input.value = "";
+    const alertPromise = BrowserTestUtils.promiseAlertDialogOpen(
+      "",
+      "chrome://global/content/commonDialog.xhtml",
+      {
+        async callback(win) {
+          const message = win.document.getElementById("infoBody").textContent;
+          Assert.stringContains(
+            message,
+            fec.document.getElementById("searchAttr0").label,
+            "the alert should name the offending search term"
+          );
+          win.document.querySelector("dialog").acceptDialog();
+        },
+      }
+    );
+    fec.document.querySelector("dialog").acceptDialog();
+    await alertPromise;
+    Assert.ok(!fec.closed, "filter editor should still be open");
+
+    info("Once the date is filled in again, the filter should save");
+    searchVal.input.value = today;
+    expectedDate = searchVal.getInputValue();
+    fec.document.querySelector("dialog").acceptDialog();
+  }
+
+  const dialogPromise = BrowserTestUtils.promiseAlertDialog(
+    null,
+    "chrome://messenger/content/FilterEditor.xhtml",
+    {
+      callback: fill_in_filter_fields,
+    }
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    filterWin.document.getElementById("newButton"),
+    {},
+    filterWin
+  );
+  await dialogPromise;
+
+  const filterList = filterWin.gCurrentFilterList;
+  Assert.equal(
+    filterList.filterCount,
+    initialCount + 1,
+    "the filter should have been saved"
+  );
+  const filter = filterList.getFilterAt(0);
+  Assert.equal(
+    filter.filterName,
+    "Empty date filter",
+    "the new filter should be the first in the list"
+  );
+  Assert.equal(
+    filter.searchTerms[0].op,
+    Ci.nsMsgSearchOp.IsAfter,
+    "the search term should use the is after operator"
+  );
+  Assert.notEqual(
+    filter.searchTerms[0].value.date,
+    0,
+    "the search term should not have fallen back to the epoch"
+  );
+  Assert.equal(
+    filter.searchTerms[0].value.date,
+    expectedDate,
+    "the search term should have kept the date that was filled in"
+  );
+
+  filterList.removeFilterAt(0);
+  await BrowserTestUtils.closeWindow(filterWin);
+});

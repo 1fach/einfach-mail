@@ -1,0 +1,21 @@
+From andy@anway.invalid
+Content-Type: text/html
+Subject: Big Meeting Today
+From: "Andy Anway" <andy@anway.invalid>
+To: "Bob Bell" <bob@bell.invalid>
+Message-Id: <clickable.content@made.up.invalid>
+Date: Tue, 01 Feb 2000 00:00:00 +1300
+
+<!DOCTYPE html>
+<html>
+  <head>
+    Clickable Content
+  </head>
+  <body>
+    <p>This is a page of clickable content for tests.</p>
+    <p><a id="a1" href="https://www.example.com/">https://www.example.com</a></p>
+    <p><a target="_blank" href="https://www.example.com/"><button id="button1">Button</button></a></p>
+    <p><a href="https://www.example.com/"><button id="button2">Button</button></a></p>
+    <p><button id="button3"><a target="_blank" href="https://www.example.com/">Button</a></button></p>
+  </body>
+</html>

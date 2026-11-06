@@ -1,0 +1,32 @@
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+
+<!ENTITY doNotDownloadPop3Movemail.label "To save disk space, do not download:">
+<!ENTITY doNotDownloadNntp.label "To save disk space, do not download for offline use:">
+<!ENTITY offlineNotDownload.label "Messages larger than">
+<!ENTITY offlineNotDownload.accesskey "M">
+<!ENTITY kb.label "KB">
+<!ENTITY daysOld.label "days old">
+<!ENTITY nntpNotDownloadRead.label "Read messages">
+<!ENTITY nntpNotDownloadRead.accesskey "d">
+<!ENTITY nntpDownloadMsg.label "Messages more than">
+<!ENTITY nntpDownloadMsg.accesskey "e">
+<!ENTITY offlineSelectNntp.label "Select newsgroups for offline use…">
+<!ENTITY offlineSelectNntp.accesskey "S">
+<!-- LOCALIZATION NOTE: (ageAutosyncBefore.label, ageAutosyncMiddle.label, ageAutosyncAfter.label):
+  The entities ageAutosyncBefore.label, ageAutosyncMiddle.label, and ageAutosyncAfter.label appear
+  on a single line within the scope of useAutosync.ByAge as follows:
+
+  &ageAutosyncBefore.label [textbox for autosync value] &ageAutosyncMiddle.label; [dropdown for autosync interval] &ageAutosyncAfter.label;
+-->
+<!ENTITY allAutosync.label               "Synchronize all messages locally regardless of age">
+<!ENTITY allAutosync.accesskey           "c">
+<!ENTITY ageAutosyncBefore.label         "Synchronize the most recent">
+<!ENTITY ageAutosync.accesskey           "z">
+<!ENTITY ageAutosyncMiddle.label         "">
+<!ENTITY dayAgeInterval.label            "Days">
+<!ENTITY weekAgeInterval.label           "Weeks">
+<!ENTITY monthAgeInterval.label          "Months">
+<!ENTITY yearAgeInterval.label           "Years">
+<!ENTITY ageAutosyncAfter.label          "">

@@ -1,0 +1,76 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "nsISupports.idl"
+#include "nsrootidl.idl"
+#include "nsIMimeHeaders.idl"
+#include "nsIMsgIdentity.idl"
+#include "nsIMsgHdr.idl"
+
+interface nsIURI;
+
+typedef long nsMimeOutputType;
+
+[scriptable, uuid(fdc2956e-d558-43fb-bfdd-fb9511229aa5)]
+interface nsMimeOutput : nsISupports
+{
+  const long nsMimeMessageBodyDisplay = 1;
+  const long nsMimeMessageQuoting = 2;
+  const long nsMimeMessageBodyQuoting = 3;
+  const long nsMimeMessageRaw = 4;
+  const long nsMimeMessageDraftOrTemplate = 5;
+  const long nsMimeMessageEditorTemplate = 6;
+  const long nsMimeMessageSaveAs = 7;
+  const long nsMimeMessageFilterSniffer = 8;
+  const long nsMimeMessageDecrypt = 9;
+  const long nsMimeMessageAttach = 10;
+  const long nsMimeUnknown = 11;
+};
+
+[scriptable, uuid(FA81CAA0-6261-11d3-8311-00805F2A0107)]
+interface nsIMimeStreamConverterListener : nsISupports {
+  void onHeadersReady(in nsIMimeHeaders headers);
+};
+
+/**
+ * This interface contains mailnews mime specific information for stream
+ * converters. Most of the code is just stuff that has been moved out
+ * of nsIStreamConverter.idl to make it more generic.
+ */
+[scriptable, uuid(d894c833-29c5-495b-880c-9a9f847bfdc9)]
+interface nsIMimeStreamConverter : nsISupports {
+
+  /**
+   * Set the desired mime output type on the converer.
+   */
+  void setMimeOutputType(in nsMimeOutputType aType);
+
+  /**
+   * This is used for forward inline, both as a filter action, and from the UI.
+   */
+  attribute boolean forwardInline;
+
+  /**
+   * This is used for a forward inline filter action. When streaming is done,
+   * we won't open a compose window with the editor contents.
+   */
+  attribute boolean forwardInlineFilter;
+
+  /**
+   * Address for the forward inline filter to forward the message to.
+   */
+  attribute AString forwardToAddress;
+
+  /**
+   * Use the opposite compose format, used for forward inline.
+   */
+  attribute boolean overrideComposeFormat;
+
+  /**
+   * This is used for OpenDraft, OpenEditorTemplate and Forward inline (which use OpenDraft)
+   */
+  attribute nsIMsgIdentity identity;
+  attribute AUTF8String originalMsgURI;
+  attribute nsIMsgDBHdr origMsgHdr;
+};

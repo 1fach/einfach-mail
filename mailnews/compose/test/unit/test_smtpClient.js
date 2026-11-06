@@ -1,0 +1,569 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+const { PromiseTestUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
+);
+
+const server = setupServerDaemon();
+server.start();
+registerCleanupFunction(() => {
+  server.stop();
+});
+
+/**
+ * Test sending is aborted when alwaysSTARTTLS is set, but the server doesn't
+ * support STARTTLS.
+ */
+add_task(async function testAbort() {
+  server.resetTest();
+  const smtpServer = getBasicSmtpServer(server.port);
+  const identity = getSmtpIdentity("identity@foo.invalid", smtpServer);
+  // Set to always use STARTTLS.
+  smtpServer.socketType = Ci.nsMsgSocketType.alwaysSTARTTLS;
+
+  do_test_pending();
+
+  const listener = {
+    onSendStart() {},
+    onSendStop(serverUri, status) {
+      Assert.equal(status, Cr.NS_ERROR_FAILURE);
+      do_test_finished();
+    },
+  };
+
+  const messageId = Cc["@mozilla.org/messengercompose/computils;1"]
+    .createInstance(Ci.nsIMsgCompUtils)
+    .msgGenerateMessageId(identity, null);
+
+  // Send a message.
+  const testFile = do_get_file("data/message1.eml");
+  smtpServer.sendMailMessage(
+    testFile,
+    MailServices.headerParser.parseEncodedHeaderW("to@foo.invalid"),
+    [],
+    identity,
+    "from@foo.invalid",
+    null,
+    null,
+    false,
+    messageId,
+    listener
+  );
+  server.performTest();
+});
+
+/**
+ * Test client identity extension works.
+ */
+add_task(async function testClientIdentityExtension() {
+  server.resetTest();
+  const smtpServer = getBasicSmtpServer(server.port);
+  const identity = getSmtpIdentity("identity@foo.invalid", smtpServer);
+  // Enable and set clientid to the smtp server.
+  Services.prefs.setBoolPref(
+    `mail.smtpserver.${smtpServer.key}.clientidEnabled`,
+    true
+  );
+  smtpServer.QueryInterface(Ci.nsISmtpServer).clientid = "uuid-111";
+
+  // Send a message.
+  const messageId = Cc["@mozilla.org/messengercompose/computils;1"]
+    .createInstance(Ci.nsIMsgCompUtils)
+    .msgGenerateMessageId(identity, null);
+
+  const listener = new PromiseTestUtils.PromiseMsgOutgoingListener();
+  const testFile = do_get_file("data/message1.eml");
+  smtpServer.sendMailMessage(
+    testFile,
+    MailServices.headerParser.parseEncodedHeaderW("to@foo.invalid"),
+    [],
+    identity,
+    "from@foo.invalid",
+    null,
+    null,
+    false,
+    messageId,
+    listener
+  );
+
+  await listener.promise;
+
+  // Check CLIENTID command is sent.
+  const transaction = server.playTransaction();
+  do_check_transaction(transaction, [
+    "EHLO test",
+    "CLIENTID UUID uuid-111",
+    "MAIL FROM:<from@foo.invalid> BODY=8BITMIME SIZE=159",
+    "RCPT TO:<to@foo.invalid>",
+    "DATA",
+  ]);
+});
+
+/**
+ * Test that a non-ASCII username and password reach the server UTF-8 encoded.
+ */
+add_task(async function testNonAsciiAuth() {
+  const kUsername = "üser€";
+  const kPassword = "päss€";
+
+  for (const scheme of ["PLAIN", "LOGIN", "CRAM-MD5"]) {
+    const authServer = setupServerDaemon(d => {
+      const handler = new SMTP_RFC2821_handler(d);
+      handler.kUsername = kUsername;
+      handler.kPassword = kPassword;
+      handler.kAuthRequired = true;
+      handler.kAuthSchemes = [scheme];
+      return handler;
+    });
+    authServer.start();
+
+    const smtpServer = getBasicSmtpServer(authServer.port);
+    smtpServer.authMethod =
+      scheme == "CRAM-MD5"
+        ? Ci.nsMsgAuthMethod.passwordEncrypted
+        : Ci.nsMsgAuthMethod.passwordCleartext;
+    smtpServer.username = kUsername;
+    smtpServer.password = kPassword;
+    const identity = getSmtpIdentity("identity@foo.invalid", smtpServer);
+
+    const listener = new PromiseTestUtils.PromiseMsgOutgoingListener();
+    smtpServer.sendMailMessage(
+      do_get_file("data/message1.eml"),
+      MailServices.headerParser.parseEncodedHeaderW("to@foo.invalid"),
+      [],
+      identity,
+      "from@foo.invalid",
+      null,
+      null,
+      false,
+      `<${scheme}@foo.invalid>`,
+      listener
+    );
+
+    await listener.promise;
+
+    // Reaching DATA means the server accepted the credentials it decoded.
+    do_check_transaction(authServer.playTransaction(), [
+      "EHLO test",
+      scheme == "PLAIN"
+        ? `AUTH PLAIN ${AuthPLAIN.encodeLine(kUsername, kPassword)}`
+        : `AUTH ${scheme}`,
+      "MAIL FROM:<from@foo.invalid> BODY=8BITMIME SIZE=159",
+      "RCPT TO:<to@foo.invalid>",
+      "DATA",
+    ]);
+
+    smtpServer.closeCachedConnections();
+    authServer.stop();
+  }
+});
+
+/**
+ * Test that when To and Cc/Bcc contain the same address, should send only
+ * one RCPT TO per address.
+ */
+add_task(async function testDeduplicateRecipients() {
+  server.resetTest();
+  const smtpServer = getBasicSmtpServer(server.port);
+  const identity = getSmtpIdentity("identity@foo.invalid", smtpServer);
+
+  // Send a message, notice to1 appears twice in the recipients argument.
+  const messageId = Cc["@mozilla.org/messengercompose/computils;1"]
+    .createInstance(Ci.nsIMsgCompUtils)
+    .msgGenerateMessageId(identity, null);
+
+  const listener = new PromiseTestUtils.PromiseMsgOutgoingListener();
+  const testFile = do_get_file("data/message1.eml");
+  smtpServer.sendMailMessage(
+    testFile,
+    MailServices.headerParser.parseEncodedHeaderW(
+      "to1@foo.invalid,to2@foo.invalid,to1@foo.invalid"
+    ),
+    [],
+    identity,
+    "from@foo.invalid",
+    null,
+    null,
+    false,
+    messageId,
+    listener
+  );
+
+  await listener.promise;
+
+  // Check only one RCPT TO is sent for to1.
+  const transaction = server.playTransaction();
+  do_check_transaction(transaction, [
+    "EHLO test",
+    "MAIL FROM:<from@foo.invalid> BODY=8BITMIME SIZE=159",
+    "RCPT TO:<to1@foo.invalid>",
+    "RCPT TO:<to2@foo.invalid>",
+    "DATA",
+  ]);
+});
+
+/**
+ * Test that each queued send receives its own terminal status on connection
+ * failure.
+ */
+add_task(async function testQueuedSendErrors() {
+  const failedServer = setupServerDaemon();
+  failedServer.start();
+  registerCleanupFunction(() => failedServer.stop());
+
+  const smtpServer = getBasicSmtpServer(failedServer.port);
+  const identity = getSmtpIdentity("sender@example.invalid", smtpServer);
+
+  // One client makes the second send wait. Limiting each connection to a
+  // single message makes the client QUIT and release its connection as part
+  // of completing the first send, so the later sends deterministically open
+  // fresh connections to the stopped server instead of reusing a pooled
+  // connection or racing a delayed QUIT timer.
+  Services.prefs.setIntPref(
+    "mail.smtpserver.default.max_cached_connections",
+    1
+  );
+  Services.prefs.setIntPref(
+    "mail.smtpserver.default.max_messages_per_connection",
+    1
+  );
+
+  const send = label => {
+    let resolveSendStop;
+    const sendStopPromise = new Promise(resolve => {
+      resolveSendStop = resolve;
+    });
+    const listener = {
+      onSendStart() {},
+      onSendStop(uri, status) {
+        resolveSendStop({ label, status });
+      },
+    };
+    smtpServer.sendMailMessage(
+      do_get_file("data/message1.eml"),
+      MailServices.headerParser.parseEncodedHeaderW(
+        "recipient@example.invalid"
+      ),
+      [],
+      identity,
+      "sender@example.invalid",
+      null,
+      null,
+      false,
+      `<${label}@example.invalid>`,
+      listener
+    );
+    return sendStopPromise;
+  };
+
+  const { status: firstStatus } = await send("first");
+  Assert.equal(firstStatus, Cr.NS_OK, "first send should succeed");
+
+  failedServer.stop();
+
+  const results = await Promise.all([send("second"), send("third")]);
+  Assert.deepEqual(
+    results.map(({ label }) => label).sort(),
+    ["second", "third"],
+    "each queued send should receive a terminal status"
+  );
+  for (const { label, status } of results) {
+    Assert.equal(
+      status,
+      Cr.NS_ERROR_CONNECTION_REFUSED,
+      `${label} send should fail with a connection error`
+    );
+  }
+});
+
+/**
+ * A failed 4xx retry must not disable retry for later messages on the client.
+ */
+add_task(async function testTransientFailureRetryPerMessage() {
+  let mailAttempts = 0;
+  const transientServer = setupServerDaemon(d => {
+    /**
+     *
+     */
+    class Handler extends SMTP_RFC2821_handler {
+      MAIL() {
+        mailAttempts++;
+        return "451 Requested action aborted: local error in processing";
+      }
+    }
+    return new Handler(d);
+  });
+  transientServer.start();
+  registerCleanupFunction(() => transientServer.stop());
+
+  const smtpServer = getBasicSmtpServer(transientServer.port);
+  const identity = getSmtpIdentity("sender@example.invalid", smtpServer);
+
+  const send = () => {
+    const listener = new PromiseTestUtils.PromiseMsgOutgoingListener();
+    smtpServer.sendMailMessage(
+      do_get_file("data/message1.eml"),
+      MailServices.headerParser.parseEncodedHeaderW(
+        "recipient@example.invalid"
+      ),
+      [],
+      identity,
+      "sender@example.invalid",
+      null,
+      null,
+      false,
+      `<msg-${mailAttempts}@example.invalid>`,
+      listener
+    );
+    return listener.promise.catch(() => {});
+  };
+
+  await send();
+  const afterFirst = mailAttempts;
+  Assert.equal(afterFirst, 2, "first message is tried twice");
+
+  await send();
+  Assert.equal(
+    mailAttempts - afterFirst,
+    2,
+    "second message gets its own retry"
+  );
+});
+
+/**
+ * Test that AUTH LOGIN completes successfully with arbitrary challenge strings.
+ */
+add_task(async function testAuthLoginChallenges() {
+  const challengePairs = [
+    {
+      userChallenge: "dXNlcm5hbWU6",
+      passChallenge: "cGFzc3dvcmQ6",
+      label: "lowercase",
+    },
+    {
+      userChallenge: "DXNLCM5HBWU6",
+      passChallenge: "UGFzc3dvcmQ6",
+      label: "uppercased-base64",
+    },
+    {
+      userChallenge: btoa("User Name"),
+      passChallenge: btoa("Password"),
+      label: "draft-standard",
+    },
+    {
+      userChallenge: btoa("Custom challenge"),
+      passChallenge: btoa("Custom secret"),
+      label: "arbitrary",
+    },
+    // A bare "334 " without challenge strings.
+    {
+      userChallenge: "",
+      passChallenge: "",
+      label: "bare",
+    },
+  ];
+
+  for (const { userChallenge, passChallenge, label } of challengePairs) {
+    const authServer = setupServerDaemon(d => {
+      const handler = new SMTP_RFC2821_handler(d);
+      handler.kUsername = "testuser";
+      handler.kPassword = "testpassword";
+      handler.kAuthRequired = true;
+      handler.kAuthSchemes = ["LOGIN"];
+      handler.kLoginUserChallenge = userChallenge;
+      handler.kLoginPassChallenge = passChallenge;
+      return handler;
+    });
+    authServer.start();
+
+    const smtpServer = getBasicSmtpServer(authServer.port);
+    smtpServer.authMethod = Ci.nsMsgAuthMethod.passwordCleartext;
+    smtpServer.username = "testuser";
+    smtpServer.password = "testpassword";
+    const identity = getSmtpIdentity("identity@example.invalid", smtpServer);
+
+    const listener = new PromiseTestUtils.PromiseMsgOutgoingListener();
+    smtpServer.sendMailMessage(
+      do_get_file("data/message1.eml"),
+      MailServices.headerParser.parseEncodedHeaderW(
+        "recipient@example.invalid"
+      ),
+      [],
+      identity,
+      "sender@example.invalid",
+      null,
+      null,
+      false,
+      `<login-${label.replace(/\s+/g, "-")}@example.invalid>`,
+      listener
+    );
+
+    await listener.promise;
+
+    do_check_transaction(authServer.playTransaction(), [
+      "EHLO test",
+      "AUTH LOGIN",
+      "MAIL FROM:<sender@example.invalid> BODY=8BITMIME SIZE=159",
+      "RCPT TO:<recipient@example.invalid>",
+      "DATA",
+    ]);
+
+    smtpServer.closeCachedConnections();
+    authServer.stop();
+  }
+});
+
+/**
+ * Test that AUTH LOGIN handles a non-334 server error response (e.g. 535).
+ */
+add_task(async function testAuthLoginFailure() {
+  /**
+   * SMTP handler that rejects AUTH LOGIN with a 535 error response.
+   */
+  class FailHandler extends SMTP_RFC2821_handler {
+    authLOGINStart() {
+      return "535 5.7.8 Authentication credentials invalid";
+    }
+  }
+
+  const authServer = setupServerDaemon(d => {
+    const handler = new FailHandler(d);
+    handler.kUsername = "testuser";
+    handler.kPassword = "testpassword";
+    handler.kAuthRequired = true;
+    handler.kAuthSchemes = ["LOGIN"];
+    return handler;
+  });
+  authServer.start();
+
+  const smtpServer = getBasicSmtpServer(authServer.port);
+  smtpServer.authMethod = Ci.nsMsgAuthMethod.passwordCleartext;
+  smtpServer.username = "testuser";
+  smtpServer.password = "testpassword";
+  const identity = getSmtpIdentity("identity@example.invalid", smtpServer);
+
+  const listener = new PromiseTestUtils.PromiseMsgOutgoingListener();
+  smtpServer.sendMailMessage(
+    null,
+    [],
+    [],
+    identity,
+    "sender@example.invalid",
+    null,
+    null,
+    false,
+    "<login-fail-535@example.invalid>",
+    listener
+  );
+
+  await Assert.rejects(
+    listener.promise,
+    err => err.message == Cr.NS_ERROR_FAILURE,
+    "sendMailMessage should reject with NS_ERROR_FAILURE on 535 response"
+  );
+
+  do_check_transaction(authServer.playTransaction(), [
+    "EHLO test",
+    "AUTH LOGIN",
+  ]);
+
+  smtpServer.closeCachedConnections();
+  authServer.stop();
+});
+
+/**
+ * Test that envelope addresses with line breaks can't be used to send
+ * arbitrary commands, also when the server supports SMTPUTF8.
+ */
+add_task(async function testLineBreakInEnvelopeAddress() {
+  const utf8Server = setupServerDaemon(d => {
+    const handler = new SMTP_RFC2821_handler(d);
+    handler.kCapabilities = ["8BITMIME", "SIZE", "SMTPUTF8"];
+    return handler;
+  });
+  utf8Server.start();
+  registerCleanupFunction(() => utf8Server.stop());
+
+  const kInjected = '"a\r\nRCPT TO:<attacker@evil.invalid>"@foo.invalid';
+  const send = (recipients, from) => {
+    const smtpServer = getBasicSmtpServer(utf8Server.port);
+    const identity = getSmtpIdentity(from, smtpServer);
+    const listener = new PromiseTestUtils.PromiseMsgOutgoingListener();
+    smtpServer.sendMailMessage(
+      do_get_file("data/message1.eml"),
+      recipients,
+      [],
+      identity,
+      from,
+      null,
+      null,
+      false,
+      "<linebreak@foo.invalid>",
+      listener
+    );
+    return { smtpServer, promise: listener.promise };
+  };
+
+  // The header parser unfolds addresses, so construct the recipient directly
+  // to check SmtpClient refuses it.
+  utf8Server.resetTest();
+  let { smtpServer, promise } = send(
+    [MailServices.headerParser.makeMailboxObject("", kInjected)],
+    "from@foo.invalid"
+  );
+  await Assert.rejects(
+    promise,
+    err => err.message == Cr.NS_ERROR_ILLEGAL_VALUE,
+    "sending with a line break in the recipient should fail"
+  );
+  let commands = [utf8Server.playTransaction()].flat().flatMap(t => t.them);
+  Assert.ok(
+    !commands.some(c => c.startsWith("MAIL") || c.startsWith("RCPT")),
+    "no envelope should be sent for a line break in the recipient"
+  );
+  smtpServer.closeCachedConnections();
+
+  // The sender is always parsed, which unfolds it.
+  utf8Server.resetTest();
+  ({ smtpServer, promise } = send(
+    MailServices.headerParser.parseEncodedHeaderW("to@foo.invalid"),
+    kInjected
+  ));
+  await promise;
+  commands = [utf8Server.playTransaction()].flat().flatMap(t => t.them);
+  Assert.deepEqual(
+    commands.filter(c => c.startsWith("RCPT")),
+    ["RCPT TO:<to@foo.invalid>"],
+    "no recipient should be injected through the sender"
+  );
+  smtpServer.closeCachedConnections();
+});
+
+/**
+ * Test that a reply split over several chunks is only handled once complete,
+ * and is handled in full.
+ */
+add_task(async function testSplitReply() {
+  const { SmtpClient } = ChromeUtils.importESModule(
+    "resource:///modules/SmtpClient.sys.mjs"
+  );
+  const smtpServer = getBasicSmtpServer(server.port);
+  const client = new SmtpClient(smtpServer.wrappedJSObject);
+  const responses = [];
+  client._onCommand = res => responses.push(res);
+
+  for (const chunk of ["250-first", " line\r", "\n250 la", "st line\r", "\n"]) {
+    client._parse(chunk);
+  }
+
+  Assert.equal(responses.length, 1, "the reply should be handled once");
+  Assert.equal(responses[0].statusCode, 250, "the status code should be kept");
+  Assert.equal(
+    responses[0].data,
+    "first line\nlast line",
+    "the reply text should be complete"
+  );
+  Assert.equal(client._parseRemainder, "", "nothing should be left pending");
+});

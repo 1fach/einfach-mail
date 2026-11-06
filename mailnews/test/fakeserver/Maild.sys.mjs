@@ -1,0 +1,885 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+// Much of the original code is taken from netwerk's httpserver implementation
+
+import { setTimeout } from "resource://gre/modules/Timer.sys.mjs";
+
+/**
+ * JavaScript constructors for commonly-used classes; precreating these is a
+ * speedup over doing the same from base principles.  See the docs at
+ * http://developer.mozilla.org/en/Components.Constructor for details.
+ */
+var ServerSocket = Components.Constructor(
+  "@mozilla.org/network/server-socket;1",
+  "nsIServerSocket",
+  "init"
+);
+var TLSServerSocket = Components.Constructor(
+  "@mozilla.org/network/tls-server-socket;1",
+  "nsITLSServerSocket",
+  "init"
+);
+var BinaryInputStream = Components.Constructor(
+  "@mozilla.org/binaryinputstream;1",
+  "nsIBinaryInputStream",
+  "setInputStream"
+);
+
+// Time out after 3 minutes
+var TIMEOUT = 3 * 60 * 1000;
+
+/**
+ * Copies everything arriving on an input stream to an output stream.
+ *
+ * @param {nsIAsyncInputStream} input
+ * @param {nsIOutputStream} output
+ * @param {Function} onClose - Called once either stream is closed.
+ */
+function pumpStream(input, output, onClose) {
+  const callback = {
+    onInputStreamReady(stream) {
+      try {
+        const available = stream.available();
+        if (available) {
+          const data = new BinaryInputStream(stream).readBytes(available);
+          output.write(data, data.length);
+          output.flush();
+        }
+      } catch (e) {
+        onClose();
+        return;
+      }
+      stream.asyncWait(callback, 0, 0, Services.tm.mainThread);
+    },
+    QueryInterface: ChromeUtils.generateQI(["nsIInputStreamCallback"]),
+  };
+  input.asyncWait(callback, 0, 0, Services.tm.mainThread);
+}
+
+/**
+ * The main server handling class. A fake server consists of three parts, this
+ * server implementation (which handles the network communication), the handler
+ * (which handles the state for a connection), and the daemon (which handles
+ * the state for the logical server). To make a new server, one needs to pass
+ * in a function to create handlers--not the handlers themselves--and the
+ * backend daemon. Since each handler presumably needs access to the logical
+ * server daemon, that is passed into the handler creation function. A new
+ * handler will be constructed for every connection made.
+ *
+ * As the core code is inherently single-threaded, it is guaranteed that all of
+ * the calls to the daemon will be made on the same thread, so you do not have
+ * to worry about reentrancy in daemon calls.
+ *
+ * Typical usage:
+ *
+ * function createHandler(daemon) {
+ *   return new handler(daemon);
+ * }
+ * do_test_pending();
+ * var server = new nsMailServer(createHandler, serverDaemon);
+ * // Port to use. I tend to like using 1024 + default port number myself.
+ * server.start(port);
+ *
+ * // Set up a connection the server...
+ * server.performTest();
+ * transaction = server.playTransaction();
+ * // Verify that the transaction is correct...
+ *
+ * server.resetTest();
+ * // Set up second test...
+ * server.performTest();
+ * transaction = server.playTransaction();
+ *
+ * // Finished with tests
+ * server.stop();
+ *
+ * var thread = Services.tm.currentThread;
+ * while (thread.hasPendingEvents())
+ *   thread.processNextEvent(true);
+ *
+ * do_test_finished();
+ */
+export class nsMailServer {
+  static debugNone = 0;
+  static debugRecv = 1;
+  static debugRecvSend = 2;
+  static debugAll = 3;
+
+  constructor(handlerCreator, daemon) {
+    this._debug = nsMailServer.debugNone;
+
+    /** The port on which this server listens. */
+    this._port = -1;
+
+    /** The socket associated with this. */
+    this._socket = null;
+
+    /**
+     * True if the socket in this is closed (and closure notifications have been
+     * sent and processed if the socket was ever opened), false otherwise.
+     */
+    this._socketClosed = true;
+
+    /**
+     * Should we log transactions?  This only matters if you want to inspect the
+     * protocol traffic.  Defaults to true because this was written for protocol
+     * testing.
+     */
+    this._logTransactions = true;
+
+    this._handlerCreator = handlerCreator;
+    this._daemon = daemon;
+    this._readers = [];
+    this._test = false;
+    this._watchWord = undefined;
+
+    /**
+     * An array to hold refs to all the input streams below, so that they don't
+     * get GCed
+     */
+    this._inputStreams = [];
+
+    /**
+     * If set, the certificate used for connections upgraded with STARTTLS.
+     * The server itself listens without TLS.
+     *
+     * @type {?nsIX509Cert}
+     */
+    this.startTLSCert = null;
+
+    /**
+     * Readers waiting for their connection to the STARTTLS socket to be
+     * accepted.
+     *
+     * @type {nsMailReader[]}
+     */
+    this._startTLSReaders = [];
+  }
+
+  /**
+   * Returns the TLS socket that connections upgraded with STARTTLS are relayed
+   * to, creating it if needed. There is no way to upgrade an accepted socket
+   * to TLS, so after STARTTLS the bytes are passed between the client and a
+   * new connection to this socket, which does the TLS handshake with the
+   * client.
+   *
+   * @returns {nsITLSServerSocket}
+   */
+  _getStartTLSSocket() {
+    if (!this._startTLSSocket) {
+      const socket = new TLSServerSocket(-1, true, -1);
+      socket.setVersionRange(
+        Ci.nsITLSClientStatus.TLS_VERSION_1_2,
+        Ci.nsITLSClientStatus.TLS_VERSION_1_3
+      );
+      socket.serverCert = this.startTLSCert;
+      socket.setSessionTickets(false);
+      socket.asyncListen({
+        onSocketAccepted: (serverSocket, trans) => {
+          // Match the relay by port. Its address may not be known yet if it
+          // is still connecting, in which case take the oldest such relay.
+          const ports = this._startTLSReaders.map(reader => {
+            try {
+              return reader._relayTransport.getScriptableSelfAddr().port;
+            } catch (e) {
+              return null;
+            }
+          });
+          let index = ports.indexOf(trans.port);
+          if (index == -1) {
+            index = ports.indexOf(null);
+          }
+          if (index == -1) {
+            trans.close(Cr.NS_ERROR_UNEXPECTED);
+            return;
+          }
+          this._startTLSReaders.splice(index, 1)[0]._onStartTLSAccepted(trans);
+        },
+        onStopListening() {},
+        QueryInterface: ChromeUtils.generateQI(["nsIServerSocketListener"]),
+      });
+      this._startTLSSocket = socket;
+    }
+    return this._startTLSSocket;
+  }
+
+  onSocketAccepted(socket, trans) {
+    if (this._debug != nsMailServer.debugNone) {
+      dump("Received Connection from " + trans.host + ":" + trans.port + "\n");
+    }
+
+    const observer = {
+      QueryInterface: ChromeUtils.generateQI(["nsITLSServerSecurityObserver"]),
+
+      onHandshakeDone: () => {
+        // Note: must use main thread here, or we might get a GC that will cause
+        // threadsafety assertions.  We really need to fix XPConnect so that
+        // you can actually do things in multi-threaded JS.  :-(
+        input.asyncWait(reader, 0, 0, Services.tm.mainThread);
+        this._test = true;
+      },
+    };
+
+    if (this.tlsCert) {
+      const connectionInfo = trans.securityCallbacks.getInterface(
+        Ci.nsITLSServerConnectionInfo
+      );
+      connectionInfo.setSecurityObserver(observer);
+    }
+
+    const SEGMENT_SIZE = 1024;
+    const SEGMENT_COUNT = 1024;
+    const input = trans
+      .openInputStream(0, SEGMENT_SIZE, SEGMENT_COUNT)
+      .QueryInterface(Ci.nsIAsyncInputStream);
+    this._inputStreams.push(input);
+
+    const handler = this._handlerCreator(this._daemon);
+    const reader = new nsMailReader(
+      this,
+      handler,
+      trans,
+      this._debug,
+      this._logTransactions
+    );
+    this._readers.push(reader);
+
+    if (!this.tlsCert) {
+      observer.onHandshakeDone(socket, null);
+    }
+  }
+
+  onStopListening(socket, status) {
+    if (this._debug != nsMailServer.debugNone) {
+      dump("Connection Lost " + status + "\n");
+    }
+
+    this._socketClosed = true;
+    // We've been killed or we've stopped, reset the handler to the original
+    // state (e.g. to require authentication again).
+    for (var i = 0; i < this._readers.length; i++) {
+      this._readers[i]._handler.resetTest();
+      this._readers[i]._realCloseSocket();
+    }
+  }
+
+  setDebugLevel(debug) {
+    this._debug = debug;
+    for (var i = 0; i < this._readers.length; i++) {
+      this._readers[i].setDebugLevel(debug);
+    }
+  }
+
+  start(port = -1) {
+    if (this._socket) {
+      throw Components.Exception("", Cr.NS_ERROR_ALREADY_INITIALIZED);
+    }
+
+    if (port > 0) {
+      this._port = port;
+    }
+    this._socketClosed = false;
+
+    let socket;
+    if (this.tlsCert) {
+      socket = new TLSServerSocket(this._port, true, -1);
+      socket.setVersionRange(
+        Ci.nsITLSClientStatus.TLS_VERSION_1_2,
+        Ci.nsITLSClientStatus.TLS_VERSION_1_3
+      );
+      socket.serverCert = this.tlsCert;
+      socket.setSessionTickets(false);
+    } else {
+      socket = new ServerSocket(this._port, true, -1);
+    }
+
+    socket.asyncListen(this);
+    this._socket = socket;
+  }
+
+  async stop() {
+    if (!this._socket) {
+      return;
+    }
+
+    this._socket.close();
+    this._socket = null;
+    this._startTLSSocket?.close();
+    this._startTLSSocket = null;
+    this._startTLSReaders = [];
+
+    for (const reader of this._readers) {
+      await reader._realCloseSocket();
+    }
+
+    if (this._readers.some(e => e.observer.forced)) {
+      return;
+    }
+
+    // spin an event loop and wait for the socket-close notification
+    const thr = Services.tm.currentThread;
+    while (!this._socketClosed) {
+      // Don't wait for the next event, just in case there isn't one.
+      thr.processNextEvent(false);
+    }
+  }
+  stopTest() {
+    this._test = false;
+  }
+
+  get port() {
+    if (this._port == -1) {
+      this._port = this._socket.port;
+    }
+    return this._port;
+  }
+
+  // NSISUPPORTS
+
+  //
+  // see nsISupports.QueryInterface
+  //
+  QueryInterface = ChromeUtils.generateQI(["nsIServerSocketListener"]);
+
+  // NON-XPCOM PUBLIC API
+
+  /**
+   * Returns true if this server is not running (and is not in the process of
+   * serving any requests still to be processed when the server was last
+   * stopped after being run).
+   */
+  isStopped() {
+    return this._socketClosed;
+  }
+
+  /**
+   * Runs the test. It will not exit until the test has finished.
+   */
+  performTest(watchWord) {
+    this._watchWord = watchWord;
+
+    const thread = Services.tm.currentThread;
+    while (!this.isTestFinished()) {
+      thread.processNextEvent(false);
+    }
+  }
+
+  /**
+   * Returns true if the current processing test has finished.
+   */
+  isTestFinished() {
+    return this._readers.length > 0 && !this._test;
+  }
+
+  /**
+   * Returns the commands run between the server and client.
+   * The return is an object with two variables (us and them), both of which
+   * are arrays returning the commands given by each server.
+   */
+  playTransaction() {
+    if (this._readers.some(e => e.observer.forced)) {
+      throw new Error("Server timed out!");
+    }
+    if (this._readers.length == 1) {
+      return this._readers[0].transaction;
+    }
+    return this._readers.map(e => e.transaction);
+  }
+
+  /**
+   * Prepares for the next test.
+   */
+  resetTest() {
+    this._readers = this._readers.filter(function (reader) {
+      return reader._isRunning;
+    });
+    this._test = true;
+    for (var i = 0; i < this._readers.length; i++) {
+      this._readers[i]._handler.resetTest();
+    }
+  }
+}
+
+function readTo(input, count, arr) {
+  var old = new BinaryInputStream(input).readByteArray(count);
+  Array.prototype.push.apply(arr, old);
+}
+
+/**
+ * Compresses data as raw DEFLATE (RFC 1951) stored blocks. Each call ends on
+ * a block boundary, like a zlib Z_SYNC_FLUSH, so the peer can decode all of
+ * it right away. An empty input gives an empty block (00 00 00 FF FF).
+ *
+ * @param {string} data - A binary string.
+ * @returns {string} A binary string.
+ */
+function deflateStored(data) {
+  let result = "";
+  let pos = 0;
+  do {
+    const length = Math.min(data.length - pos, 0xffff);
+    result +=
+      String.fromCharCode(
+        0,
+        length & 0xff,
+        length >> 8,
+        ~length & 0xff,
+        (~length >> 8) & 0xff
+      ) + data.substring(pos, pos + length);
+    pos += length;
+  } while (pos < data.length);
+  return result;
+}
+
+/**
+ * Decompresses a raw DEFLATE (RFC 1951) stream as it arrives.
+ */
+class Inflater {
+  /**
+   * @param {function(Uint8Array):void} onData - Called with the decompressed
+   *   bytes, asynchronously and in order.
+   */
+  constructor(onData) {
+    const stream = new DecompressionStream("deflate-raw");
+    this._writer = stream.writable.getWriter();
+    stream.readable
+      .pipeTo(new WritableStream({ write: onData }))
+      .catch(e => dump(`Compressed connection failed: ${e}\n`));
+  }
+
+  /**
+   * @param {integer[]} bytes - Compressed bytes.
+   */
+  inflate(bytes) {
+    if (bytes.length) {
+      this._writer.write(new Uint8Array(bytes));
+    }
+  }
+}
+
+/**
+ * The nsMailReader service, which reads and handles the lines.
+ * All specific handling is passed off to the handler, which is responsible
+ * for maintaining its own state. The following commands are required for the
+ * handler object:
+ * onError       Called when handler[command] does not exist with both the
+ *               command and rest-of-line as arguments
+ * onStartup     Called on initialization with no arguments
+ * onMultiline   Called when in multiline with the entire line as an argument
+ * postCommand   Called after every command with this reader as the argument
+ * [command]     An untranslated command with the rest of the line as the
+ *               argument. Defined as everything to the first space
+ *
+ * All functions, except onMultiline and postCommand, treat the
+ * returned value as the text to be sent to the client; a newline at the end
+ * may be added if it does not exist, and all lone newlines are converted to
+ * CRLF sequences.
+ *
+ * The return of postCommand is ignored. The return of onMultiline is a bit
+ * complicated: it may or may not return a response string (returning one is
+ * necessary to trigger the postCommand handler).
+ *
+ * This object has the following supplemental functions for use by handlers:
+ * closeSocket  Performs a server-side socket closing
+ * send         Sends an unsolicited response to the client
+ * setMultiline Sets the multiline mode based on the argument
+ */
+class nsMailReader {
+  constructor(server, handler, transport, debug, logTransaction) {
+    this._debug = debug;
+    this._server = server;
+    this._buffer = [];
+    this._lines = [];
+    this._handler = handler;
+    this._transport = transport;
+    // We don't seem to properly handle large streams when the buffer gets
+    // exhausted, which causes issues trying to test large messages. So just
+    // allow a really big buffer.
+    var output = transport.openOutputStream(
+      Ci.nsITransport.OPEN_BLOCKING,
+      1024,
+      4096
+    );
+    this._output = output;
+    if (logTransaction) {
+      this.transaction = { us: [], them: [] };
+    } else {
+      this.transaction = null;
+    }
+
+    // Send response line
+    var response = this._handler.onStartup();
+    response = response.replace(/([^\r])\n/g, "$1\r\n");
+    if (!response.endsWith("\n")) {
+      response = response + "\r\n";
+    }
+    if (this.transaction) {
+      this.transaction.us.push(response);
+    }
+    this._output.write(response, response.length);
+    this._output.flush();
+
+    this._multiline = false;
+
+    this._isRunning = true;
+
+    this.observer = {
+      server,
+      forced: false,
+      notify() {
+        this.forced = true;
+        this.server.stopTest();
+        this.server.stop();
+      },
+      QueryInterface: ChromeUtils.generateQI(["nsITimerCallback"]),
+    };
+    this.timer = Cc["@mozilla.org/timer;1"]
+      .createInstance()
+      .QueryInterface(Ci.nsITimer);
+    this.timer.initWithCallback(
+      this.observer,
+      TIMEOUT,
+      Ci.nsITimer.TYPE_ONE_SHOT
+    );
+  }
+
+  _findLines() {
+    let last = 0;
+    for (let i = 0; i < this._buffer.length; i++) {
+      if (this._buffer[i] == 13 && this._buffer[i + 1] == 10) {
+        this._lines.push(
+          String.fromCharCode.apply(null, this._buffer.slice(last, i))
+        );
+        last = i + 2;
+      }
+    }
+
+    this._buffer = this._buffer.slice(last);
+  }
+
+  onInputStreamReady(stream) {
+    if (this.observer.forced) {
+      return;
+    }
+
+    this.timer.cancel();
+    try {
+      var bytes = stream.available();
+    } catch (e) {
+      // Someone, not us, has closed the stream. This means we can't get any
+      // more data from the stream, so we'll just go and close our socket.
+      this._realCloseSocket();
+      return;
+    }
+    this._input = stream;
+    if (this._inflater) {
+      const compressed = [];
+      readTo(stream, bytes, compressed);
+      this._inflater.inflate(compressed);
+    } else {
+      readTo(stream, bytes, this._buffer);
+      if (!this._handleLines(stream)) {
+        return;
+      }
+    }
+
+    if (this._isRunning) {
+      stream.asyncWait(this, 0, 0, Services.tm.currentThread);
+      this.timer.initWithCallback(
+        this.observer,
+        TIMEOUT,
+        Ci.nsITimer.TYPE_ONE_SHOT
+      );
+    }
+  }
+
+  /**
+   * Handles the complete lines in the buffer.
+   *
+   * @param {nsIAsyncInputStream} stream
+   * @returns {boolean} false if STARTTLS took over the connection.
+   */
+  _handleLines(stream) {
+    this._findLines();
+    while (this._lines.length > 0) {
+      var line = this._lines.shift();
+
+      if (this._debug != nsMailServer.debugNone) {
+        dump("RECV: " + line + "\n");
+      }
+
+      var response;
+      try {
+        let command;
+        if (this._multiline) {
+          response = this._handler.onMultiline(line);
+
+          if (response === undefined) {
+            continue;
+          }
+        } else {
+          // Record the transaction
+          if (this.transaction) {
+            this.transaction.them.push(line);
+          }
+
+          // Find the command and splice it out...
+          var splitter = line.indexOf(" ");
+          command = splitter == -1 ? line : line.substring(0, splitter);
+          const args = splitter == -1 ? "" : line.substring(splitter + 1);
+
+          // By convention, commands are uppercase
+          command = command.toUpperCase();
+
+          if (this._debug == nsMailServer.debugAll) {
+            dump("Received command " + command + "\n");
+          }
+
+          if (command in this._handler) {
+            response = this._handler[command](args);
+          } else {
+            response = this._handler.onError(command, args);
+          }
+        }
+
+        this._preventLFMunge = false;
+        this._handler.postCommand(this);
+
+        if (this.watchWord && command == this.watchWord) {
+          this.stopTest();
+        }
+      } catch (e) {
+        response = this._handler.onServerFault(e);
+        if (e instanceof Error) {
+          dump(e.name + ": " + e.message + "\n");
+          dump("File: " + e.fileName + " Line: " + e.lineNumber + "\n");
+          dump("Stack trace:\n" + e.stack);
+        } else {
+          dump("Exception caught: " + e + "\n");
+        }
+      }
+
+      try {
+        this.send(response, this._preventLFMunge);
+      } catch (ex) {
+        if (ex.result == Cr.NS_BASE_STREAM_CLOSED) {
+          dump("Stream closed whilst sending, this may be expected\n");
+          this._realCloseSocket();
+        } else {
+          // Some other issue, let the test see it.
+          throw ex;
+        }
+      }
+
+      if (this._signalStop) {
+        this._realCloseSocket();
+        this._signalStop = false;
+      }
+
+      if (this._startTLSPending) {
+        this._startTLSPending = false;
+        this._beginStartTLS(stream);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  closeSocket() {
+    this._signalStop = true;
+  }
+
+  /**
+   * Starts DEFLATE compression (RFC 4978) once the response to the current
+   * command has been sent. Like Dovecot, an empty deflate block is sent
+   * right after that response, in the same write.
+   */
+  startCompression() {
+    this._compressionPending = true;
+  }
+
+  /**
+   * Switches the connection to TLS once the response to the current command
+   * has been sent. Any further lines already received are discarded.
+   */
+  startTLS() {
+    if (!this._server.startTLSCert) {
+      throw new Error("The server has no startTLSCert");
+    }
+    this._startTLSPending = true;
+  }
+
+  /**
+   * Starts relaying the client connection to the STARTTLS socket.
+   *
+   * @param {nsIAsyncInputStream} clientInput
+   */
+  _beginStartTLS(clientInput) {
+    this.timer.cancel();
+    this._lines = [];
+
+    const relay = Cc["@mozilla.org/network/socket-transport-service;1"]
+      .getService(Ci.nsISocketTransportService)
+      .createTransport(
+        [],
+        "127.0.0.1",
+        this._server._getStartTLSSocket().port,
+        null,
+        null
+      );
+    const relayOutput = relay.openOutputStream(
+      Ci.nsITransport.OPEN_BLOCKING,
+      0,
+      0
+    );
+    const relayInput = relay
+      .openInputStream(0, 0, 0)
+      .QueryInterface(Ci.nsIAsyncInputStream);
+    this._server._inputStreams.push(relayInput);
+
+    const close = () => this._realCloseSocket();
+    this._buffer = [];
+    pumpStream(clientInput, relayOutput, close);
+    pumpStream(relayInput, this._output, close);
+
+    this._clientTransport = this._transport;
+    this._relayTransport = relay;
+    this._transport = null;
+    this._output = null;
+    this._server._startTLSReaders.push(this);
+  }
+
+  /**
+   * Continues the session on the connection accepted by the STARTTLS socket,
+   * once the TLS handshake with the client is done.
+   *
+   * @param {nsISocketTransport} trans
+   */
+  _onStartTLSAccepted(trans) {
+    const input = trans
+      .openInputStream(0, 1024, 1024)
+      .QueryInterface(Ci.nsIAsyncInputStream);
+    this._server._inputStreams.push(input);
+    this._transport = trans;
+    this._output = trans.openOutputStream(
+      Ci.nsITransport.OPEN_BLOCKING,
+      1024,
+      4096
+    );
+
+    trans.securityCallbacks
+      .getInterface(Ci.nsITLSServerConnectionInfo)
+      .setSecurityObserver({
+        onHandshakeDone: () => {
+          input.asyncWait(this, 0, 0, Services.tm.mainThread);
+          this.timer.initWithCallback(
+            this.observer,
+            TIMEOUT,
+            Ci.nsITimer.TYPE_ONE_SHOT
+          );
+        },
+        QueryInterface: ChromeUtils.generateQI([
+          "nsITLSServerSecurityObserver",
+        ]),
+      });
+  }
+
+  /**
+   * Send a response that was not produced by an incoming command, such as an
+   * IMAP IDLE update.
+   *
+   * @param {string} response - The response to send.
+   * @param {boolean} [preventLFMunge=false] - Whether the response already has
+   *   the exact line endings required by the protocol.
+   */
+  send(response, preventLFMunge = false) {
+    if (!preventLFMunge) {
+      response = response.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n");
+    }
+
+    if (!response.endsWith("\n")) {
+      response += "\r\n";
+    }
+
+    if (this._debug == nsMailServer.debugRecvSend) {
+      dump("SEND: " + response.split(" ", 1)[0] + "\n");
+    } else if (this._debug == nsMailServer.debugAll) {
+      for (const responseLine of response.split("\n")) {
+        dump("SEND: " + responseLine + "\n");
+      }
+    }
+
+    if (this.transaction) {
+      this.transaction.us.push(response);
+    }
+
+    if (this._compressionPending) {
+      this._compressionPending = false;
+      response += deflateStored("");
+      this._inflater = new Inflater(bytes => {
+        if (!this._isRunning) {
+          return;
+        }
+        Array.prototype.push.apply(this._buffer, bytes);
+        this._handleLines(this._input);
+      });
+      const compressed = this._buffer;
+      this._buffer = [];
+      this._inflater.inflate(compressed);
+    } else if (this._inflater) {
+      response = deflateStored(response);
+    }
+
+    this._output.write(response, response.length);
+    this._output.flush();
+  }
+
+  get isRunning() {
+    return this._isRunning;
+  }
+
+  async _realCloseSocket() {
+    this._isRunning = false;
+    this._server.stopTest();
+    const index = this._server._startTLSReaders.indexOf(this);
+    if (index != -1) {
+      this._server._startTLSReaders.splice(index, 1);
+    }
+
+    // Wait a moment, then close the connection. Closing immediately can
+    // prevent the last output stream message from reaching the client
+    // (although that's not supposed to happen).
+    await new Promise(resolve => setTimeout(resolve, 50));
+    this._transport?.close(Cr.NS_OK);
+    this._transport = null;
+    this._output = null;
+    this._relayTransport?.close(Cr.NS_OK);
+    this._relayTransport = null;
+    this._clientTransport?.close(Cr.NS_OK);
+    this._clientTransport = null;
+  }
+
+  setMultiline(multi) {
+    this._multiline = multi;
+  }
+
+  setDebugLevel(debug) {
+    this._debug = debug;
+  }
+
+  preventLFMunge() {
+    this._preventLFMunge = true;
+  }
+
+  get watchWord() {
+    return this._server._watchWord;
+  }
+
+  stopTest() {
+    this._server.stopTest();
+  }
+
+  QueryInterface = ChromeUtils.generateQI(["nsIInputStreamCallback"]);
+}

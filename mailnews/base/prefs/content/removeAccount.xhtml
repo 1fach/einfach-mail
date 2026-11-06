@@ -1,0 +1,86 @@
+<?xml version="1.0"?>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      width="600"
+      scrolling="false">
+<head>
+  <title data-l10n-id="remove-account-dialog-title"></title>
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src chrome:"
+  />
+  <link rel="stylesheet" href="chrome://global/skin/checkbox.css" />
+  <link
+    rel="stylesheet"
+    href="chrome://messenger/skin/shared/preferences/removeAccount.css"
+  />
+
+  <link rel="localization" href="branding/brand.ftl" />
+  <link rel="localization" href="messenger/removeAccount.ftl" />
+  <script defer="defer" src="chrome://messenger/content/removeAccount.js"></script>
+</head>
+<html:body xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+<dialog id="removeAccountDialog"
+        buttons="accept,disclosure,cancel"
+        defaultButton="cancel">
+  <vbox id="removeAccountSection">
+    <label id="accountName"></label>
+    <separator class="thin"/>
+    <vbox>
+      <checkbox id="removeAccount"
+                data-l10n-id="remove-account-checkbox"
+                checked=""
+                disabled="" />
+      <vbox class="indent" collapsed="collapsed">
+        <description data-l10n-id="remove-account-description"></description>
+      </vbox>
+    </vbox>
+    <vbox id="removeDataPossibility">
+      <checkbox id="removeData"
+                checked=""/>
+      <vbox class="indent" collapsed="collapsed">
+        <description id="localAccount"
+                     data-l10n-id="remove-data-local-account-description"
+                     collapsed="collapsed"></description>
+        <description id="serverAccount"
+                     data-l10n-id="remove-data-server-account-description"
+                     collapsed="collapsed"></description>
+        <description id="chatAccount"
+                     data-l10n-id="remove-data-chat-account-description"
+                     collapsed="collapsed"></description>
+        <hbox align="center">
+          <button id="showLocalDirectory"
+                  data-l10n-id="show-data-button" />
+          <label id="localDirectory" collapsed="collapsed"/>
+        </hbox>
+      </vbox>
+    </vbox>
+    <vbox id="removeOutgoingsPossibility" class="remove-list-container" collapsed="collapsed">
+      <checkbox id="removeOutgoings" checked=""/>
+      <description class="indent tip-caption"></description>
+    </vbox>
+    <vbox id="removeAddressBooksPossibility" class="remove-list-container" collapsed="collapsed">
+      <checkbox id="removeAddressBooks" checked=""/>
+      <description class="indent tip-caption"></description>
+    </vbox>
+    <vbox id="removeCalendarsPossibility" class="remove-list-container" collapsed="collapsed">
+      <checkbox id="removeCalendars" checked=""/>
+      <description class="indent tip-caption"></description>
+    </vbox>
+    <vbox id="removeLoginsPossibility" collapsed="collapsed">
+      <checkbox id="removeLogins" checked=""/>
+    </vbox>
+  </vbox>
+  <vbox id="confirmationSection" align="center" pack="center" flex="1" hidden="hidden">
+    <label id="success" hidden="hidden" data-l10n-id="remove-account-progress-success"></label>
+    <label id="failure" hidden="hidden" data-l10n-id="remove-account-progress-failure"></label>
+  </vbox>
+</dialog>
+</html:body>
+</html>

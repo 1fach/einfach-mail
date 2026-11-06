@@ -1,0 +1,1385 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/* import-globals-from ../../../mailnews/extensions/newsblog/newsblogOverlay.js */
+/* import-globals-from ../../../mailnews/search/content/searchTerm.js */
+/* import-globals-from globalOverlay.js */
+
+/* globals messageFlavorDataProvider */ // From messenger.js
+
+"use strict";
+
+ChromeUtils.importESModule("chrome://messenger/content/treecol-image.mjs", {
+  global: "current",
+});
+ChromeUtils.defineESModuleGetters(this, {
+  DBViewWrapper: "resource:///modules/DBViewWrapper.sys.mjs",
+  DragUtils: "moz-src:///comm/mail/modules/DragUtils.sys.mjs",
+  MailUtils: "resource:///modules/MailUtils.sys.mjs",
+  TagUtils: "resource:///modules/TagUtils.sys.mjs",
+  ThreadPaneColumns: "chrome://messenger/content/ThreadPaneColumns.mjs",
+  TreeSelection: "chrome://messenger/content/TreeSelection.mjs",
+  UIFontSize: "resource:///modules/UIFontSize.sys.mjs",
+});
+
+Object.defineProperty(this, "gViewWrapper", {
+  configurable: false,
+  enumerable: true,
+  get() {
+    return gFolderDisplay.view;
+  },
+});
+Object.defineProperty(this, "gDBView", {
+  configurable: false,
+  enumerable: true,
+  get() {
+    // eslint-disable-next-line no-restricted-properties
+    return gViewWrapper?.dbView;
+  },
+});
+var threadTree;
+
+var msgWindow;
+
+var gCurrentFolder;
+
+var gFolderDisplay;
+
+var gFolderPicker;
+var gStatusText;
+
+var gSearchStopButton;
+var gClearButton;
+
+// Should we try to search online?
+var gSearchOnline = false;
+
+window.addEventListener("load", searchOnLoad);
+window.addEventListener("unload", () => {
+  onSearchStop();
+  searchOnUnload();
+});
+window.addEventListener("load", ThreadPaneOnLoad, true);
+
+/**
+ * Abstraction for a widget that (roughly speaking) displays the contents of
+ *  folders.  The widget belongs to a tab and has a lifetime as long as the tab
+ *  that contains it.  This class is strictly concerned with the UI aspects of
+ *  this; the DBViewWrapper class handles the view details (and is exposed on
+ *  the 'view' attribute.)
+ *
+ * The search window subclasses this into the SearchFolderDisplayWidget rather
+ *  than us attempting to generalize everything excessively.  This is because
+ *  we hate the search window and don't want to clutter up this code for it.
+ * The standalone message display window also subclasses us; we do not hate it,
+ *  but it's not invited to our birthday party either.
+ * For reasons of simplicity and the original order of implementation, this
+ *  class does alter its behavior slightly for the benefit of the standalone
+ *  message window.  If no tab info is provided, we avoid touching tabmail
+ *  (which is good, because it won't exist!)  And now we guard against treeBox
+ *  manipulations...
+ */
+function FolderDisplayWidget() {
+  this.view = new DBViewWrapper(this);
+
+  /**
+   * The XUL tree node, as retrieved by getDocumentElementById.  The caller is
+   *  responsible for setting this.
+   */
+  this.tree = null;
+
+  /**
+   * The nsIMsgWindow corresponding to the window that holds us.  There is only
+   *  one of these per tab.  The caller is responsible for setting this.
+   */
+  this.msgWindow = null;
+
+  /**
+   * Flag to expose whether all messages are loaded or not.  Set by
+   *  onMessagesLoaded() when aAll is true.
+   */
+  this._allMessagesLoaded = false;
+
+  /** the next view index to select once the delete completes */
+  this._nextViewIndexAfterDelete = null;
+}
+FolderDisplayWidget.prototype = {
+  /**
+   * @returns {boolean} true if the selection should be summarized for this folder. This
+   *   is based on the mail.operate_on_msgs_in_collapsed_threads pref and
+   *   if we are in a newsgroup folder. XXX When bug 478167 is fixed, this
+   *   should be limited to being disabled for newsgroups that are not stored
+   *   offline.
+   */
+  get summarizeSelectionInFolder() {
+    return false;
+  },
+
+  /**
+   * @returns {nsITreeSelection} the nsITreeSelection object for our tree view.  This exists for
+   *     the benefit of message tabs that haven't been switched to yet.
+   *     We provide a fake tree selection in those cases.
+   * @protected
+   */
+  get treeSelection() {
+    // If we haven't switched to this tab yet, dbView will exist but
+    // dbView.selection won't, so use the fake tree selection instead.
+    if (this.view.dbView) {
+      return this.view.dbView.selection;
+    }
+    return null;
+  },
+
+  /**
+   * @name Columns
+   * @protected
+   */
+  // @{
+
+  /**
+   * A Map of all stock sortable columns, mapping their column ids and their
+   * sortType. Since it only includes built-in columns, this can be cached.
+   *
+   * @type {Map<string, string>}
+   */
+  BUILTIN_SORT_COLUMNS: new Map(
+    ThreadPaneColumns.getDefaultColumns()
+      .filter(c => !c.custom && c.sortKey)
+      .map(c => [c.id, c.sortKey])
+  ),
+
+  /**
+   * A Set of all stock unsortable columns. Since it only includes built-in
+   * columns, this can be cached.
+   *
+   * @type {Set<string>}
+   */
+  BUILTIN_NOSORT_COLUMNS: new Set(
+    ThreadPaneColumns.getDefaultColumns()
+      .filter(c => !c.custom && !c.sortKey)
+      .map(c => c.id)
+  ),
+
+  // @}
+
+  /**
+   * Close resources associated with the currently displayed folder because you
+   *  no longer care about this FolderDisplayWidget.
+   */
+  close() {
+    this.view.close();
+  },
+
+  /*   ===============================   */
+  /* ===== IDBViewWrapper Listener ===== */
+  /*   ===============================   */
+
+  /**
+   * @name IDBViewWrapperListener Interface
+   * @private
+   */
+  // @{
+
+  /**
+   * @returns {boolean} true if the mail view picker is visible.  This affects whether the
+   *     DBViewWrapper will actually use the persisted mail view or not.
+   */
+  get shouldUseMailViews() {
+    return false;
+  },
+
+  /**
+   * Let the viewWrapper know if we should defer message display because we
+   *  want the user to connect to the server first so password authentication
+   *  can occur.
+   *
+   * @returns {boolean} true if the folder should be shown immediately, false if we should
+   *     wait for updateFolder to complete.
+   */
+  get shouldDeferMessageDisplayUntilAfterServerConnect() {
+    return false;
+  },
+
+  /**
+   * The view wrapper tells us when it starts loading a folder, and we set the
+   *  cursor busy.  Setting the cursor busy on a per-tab basis is us being
+   *  nice to the future. Loading a folder is a blocking operation that is going
+   *  to make us unresponsive and accordingly make it very hard for the user to
+   *  change tabs.
+   */
+  onFolderLoading() {},
+
+  /**
+   * The view wrapper tells us when a search is active, and we mark the tab as
+   *  thinking so the user knows something is happening.  'Searching' in this
+   *  case is more than just a user-initiated search.  Virtual folders / saved
+   *  searches, mail views, plus the more obvious quick search are all based off
+   *  of searches and we will receive a notification for them.
+   */
+  onSearching() {},
+
+  _jsTree: {
+    QueryInterface: ChromeUtils.generateQI(["nsIMsgJSTree"]),
+    _inBatch: 0,
+    beginUpdateBatch() {},
+    endUpdateBatch() {},
+    ensureRowIsVisible(index) {
+      threadTree.scrollToIndex(index, true);
+    },
+    invalidate() {
+      threadTree.reset();
+    },
+    invalidateRange(startIndex, endIndex) {
+      threadTree.invalidateRange(startIndex, endIndex);
+    },
+    rowCountChanged(index, count) {
+      threadTree.rowCountChanged(index, count);
+    },
+    get currentIndex() {
+      return threadTree.currentIndex;
+    },
+    set currentIndex(index) {
+      threadTree.currentIndex = index;
+    },
+  },
+
+  /**
+   * Things we do on creating a view:
+   * - notify the observer service so that custom column handler providers can
+   *   add their custom columns to our view.
+   */
+  onCreatedView() {
+    // All of our messages are not displayed if the view was just created.  We
+    //  will get an onMessagesLoaded(true) nearly immediately if this is a local
+    //  folder where view creation is synonymous with having all messages.
+    this._allMessagesLoaded = false;
+    threadTree.view = gDBView;
+    threadTree.view.setJSTree(this._jsTree);
+  },
+
+  /**
+   * If our view is being destroyed and it is coming back, we want to save the
+   *  current selection so we can restore it when the view comes back.
+   */
+  onDestroyingView() {
+    // if we have no view, no messages could be loaded.
+    this._allMessagesLoaded = false;
+
+    // but the actual tree view selection (based on view indices) is a goner no
+    //  matter what, make everyone forget.
+    this.view.dbView.selection = null;
+    this._nextViewIndexAfterDelete = null;
+  },
+
+  /**
+   * Restore persisted information about what columns to display for the folder.
+   *  If we have no persisted information, we leave/set _savedColumnStates null.
+   *  The column states will be set to default values in onDisplayingFolder in
+   *  that case.
+   */
+  onLoadingFolder() {},
+
+  /**
+   * We are entering the folder for display:
+   * - set the header cache size.
+   * - Setup the columns if we did not already depersist in |onLoadingFolder|.
+   */
+  onDisplayingFolder() {},
+
+  /**
+   * Notification from DBViewWrapper that it is closing the folder.  This can
+   *  happen for reasons other than our own 'close' method closing the view.
+   *  For example, user deletion of the folder or underlying folder closes it.
+   */
+  onLeavingFolder() {},
+
+  /**
+   * Indicates whether we are done loading the messages that should be in this
+   *  folder.  This is being surfaced for testing purposes, but could be useful
+   *  to other code as well.  But don't poll this property; ask for an event
+   *  that you can hook.
+   */
+  get allMessagesLoaded() {
+    return this._allMessagesLoaded;
+  },
+
+  /**
+   * Things to do once some or all the messages that should show up in a folder
+   *  have shown up.  For a real folder, this happens when the folder is
+   *  entered. For a virtual folder, this happens when the search completes.
+   *
+   * What we do:
+   * - Any scrolling required!
+   */
+  onMessagesLoaded(aAll) {
+    this._allMessagesLoaded = aAll;
+  },
+
+  /**
+   * Just the sort or threading was changed, without changing other things.  We
+   *  will not get this notification if the view was re-created, for example.
+   */
+  onSortChanged() {
+    threadPane.restoreSortIndicator();
+  },
+
+  /**
+   * Messages (that may have been displayed) have been removed; this may impact
+   * our message selection. We might know it's coming; if we do then
+   * this._nextViewIndexAfterDelete should know what view index to select next.
+   * For the imap mark-as-deleted we won't know beforehand.
+   */
+  onMessagesRemoved() {},
+
+  /**
+   * Messages were not actually removed, but we were expecting that they would
+   *  be.  Clean-up what onMessagesRemoved would have cleaned up, namely the
+   *  next view index to select.
+   */
+  onMessageRemovalFailed() {
+    this._nextViewIndexAfterDelete = null;
+  },
+
+  /**
+   * Update the status bar to reflect our exciting message counts.
+   */
+  onMessageCountsChanged() {},
+  // @}
+  /* ===== End IDBViewWrapperListener ===== */
+
+  /* ===== Hints from the command infrastructure ===== */
+  /**
+   * @name Command Infrastructure Hints
+   * @protected
+   */
+  // @{
+
+  /**
+   * doCommand helps us out by telling us when it is telling the view to delete
+   *  some messages.  Ideally it should go through us / the DB View Wrapper to
+   *  kick off the delete in the first place, but that's a thread I don't want
+   *  to pull on right now.
+   * We use this hint to figure out the next message to display once the
+   *  deletion completes.  We do this before the deletion happens because the
+   *  selection is probably going away (except in the IMAP delete model), and it
+   *  might be too late to figure this out after the deletion happens.
+   * Our automated complement (that calls us) is updateNextMessageAfterDelete.
+   */
+  hintAboutToDeleteMessages() {
+    // save the value, even if it is nsMsgViewIndex_None.
+    this._nextViewIndexAfterDelete = this.view.dbView.msgToSelectAfterDelete;
+  },
+  // @}
+  /* ===== End hints from the command infrastructure ==== */
+
+  /**
+   * @name Command Support
+   */
+  // @{
+
+  /**
+   * Make code cleaner by allowing peoples to call doCommand on us rather than
+   *  having to do folderDisplayWidget.view.dbView.doCommand.
+   *
+   * @param {string} aCommandName - The command name to invoke.
+   */
+  doCommand(aCommandName) {
+    return this.view.dbView && this.view.dbView.doCommand(aCommandName);
+  },
+
+  /**
+   * Make code cleaner by allowing peoples to call doCommandWithFolder on us
+   *  rather than having to do:
+   *  folderDisplayWidget.view.dbView.doCommandWithFolder.
+   *
+   * @param {string} aCommandName - The command name to invoke.
+   * @param {nsIMsgFolder} aFolder - The folder context for the command.
+   */
+  doCommandWithFolder(aCommandName, aFolder) {
+    return (
+      this.view.dbView &&
+      this.view.dbView.doCommandWithFolder(aCommandName, aFolder)
+    );
+  },
+  // @}
+
+  /**
+   * @returns {?nsIMsgDBHdr} the message header for the first selected message,
+   *   or null if there is no selected message.
+   *
+   * If the user has right-clicked on a message, this method will return that
+   *  message and not the 'current index' (the dude with the dotted selection
+   *  rectangle around him.)  If you instead always want the currently
+   *  displayed message (which is not impacted by right-clicking), then you
+   *  would want to access the displayedMessage property on the
+   *  MessageDisplayWidget.  You can get to that via the messageDisplay
+   *  attribute on this object or (potentially) via the gMessageDisplay object.
+   */
+  get selectedMessage() {
+    // there are inconsistencies in hdrForFirstSelectedMessage between
+    //  nsMsgDBView and nsMsgSearchDBView in whether they use currentIndex,
+    //  do it ourselves.  (nsMsgDBView does not use currentIndex, search does.)
+    const treeSelection = this.treeSelection;
+    if (!treeSelection || !treeSelection.count) {
+      return null;
+    }
+    const minObj = {},
+      maxObj = {};
+    treeSelection.getRangeAt(0, minObj, maxObj);
+    return this.view.dbView.getMsgHdrAt(minObj.value);
+  },
+
+  /**
+   * @returns {boolean} true if there is a selected message and it's an RSS feed message;
+   *  a feed message does not have to be in an rss account folder if stored in
+   *  Tb15 and later.
+   */
+  get selectedMessageIsFeed() {
+    return FeedUtils.isFeedMessage(this.selectedMessage);
+  },
+
+  /**
+   * @returns {integer} the number of selected messages.
+   *  If summarizeSelectionInFolder is
+   *  true, then any collapsed thread roots that are selected will also
+   *  conceptually have all of the messages in that thread selected.
+   */
+  get selectedCount() {
+    return this.selectedMessages.length;
+  },
+
+  /**
+   * Provides a list of the message headers for the currently selected messages.
+   *  If summarizeSelectionInFolder is true, then any collapsed thread roots
+   *  that are selected will also (conceptually) have all of the messages in
+   *  that thread selected and they will be included in the returned list.
+   *
+   * If the user has right-clicked on a message, this will return that message
+   *  (and any collapsed children if so enabled) and not the selection prior to
+   *  the right-click.
+   *
+   * @returns {nsIMsgDBHdr} a list of the message headers for the currently
+   *   selected messages. If there are no selected messages, the result is
+   *   an empty list.
+   */
+  get selectedMessages() {
+    if (!this.view.dbView) {
+      return [];
+    }
+    return this.view.dbView.getSelectedMsgHdrs();
+  },
+};
+
+// Controller object for search results thread pane
+var nsSearchResultsController = {
+  supportsCommand(command) {
+    switch (command) {
+      case "cmd_delete":
+      case "cmd_shiftDelete":
+      case "button_delete":
+      case "cmd_open":
+      case "file_message_button":
+      case "open_in_folder_button":
+      case "saveas_vf_button":
+      case "cmd_selectAll":
+        return true;
+      default:
+        return false;
+    }
+  },
+
+  // this controller only handles commands
+  // that rely on items being selected in
+  // the search results pane.
+  isCommandEnabled(command) {
+    var enabled = true;
+
+    switch (command) {
+      case "open_in_folder_button":
+        if (gFolderDisplay.selectedCount != 1) {
+          enabled = false;
+        }
+        break;
+      case "cmd_delete":
+      case "cmd_shiftDelete":
+      case "button_delete":
+        // this assumes that advanced searches don't cross accounts
+        if (gFolderDisplay.selectedCount <= 0) {
+          enabled = false;
+        }
+        break;
+      case "saveas_vf_button":
+        // need someway to see if there are any search criteria...
+        return true;
+      case "cmd_selectAll":
+        return true;
+      default:
+        if (gFolderDisplay.selectedCount <= 0) {
+          enabled = false;
+        }
+        break;
+    }
+
+    return enabled;
+  },
+
+  doCommand(command) {
+    switch (command) {
+      case "cmd_open":
+        MsgOpenSelectedMessages();
+        return true;
+
+      case "cmd_delete":
+      case "button_delete":
+        MsgDeleteSelectedMessages(Ci.nsMsgViewCommandType.deleteMsg);
+        return true;
+
+      case "cmd_shiftDelete":
+        MsgDeleteSelectedMessages(Ci.nsMsgViewCommandType.deleteNoTrash);
+        return true;
+
+      case "open_in_folder_button":
+        OpenInFolder();
+        return true;
+
+      case "saveas_vf_button":
+        saveAsVirtualFolder();
+        return true;
+
+      case "cmd_selectAll":
+        // move the focus to the search results pane
+        threadTree.table.body.focus();
+        gFolderDisplay.doCommand(Ci.nsMsgViewCommandType.selectAll);
+        threadTree.dispatchEvent(new CustomEvent("select", { bubbles: true }));
+        return true;
+
+      default:
+        return false;
+    }
+  },
+
+  onEvent() {},
+};
+
+function UpdateMailSearch() {
+  document.commandDispatcher.updateCommands("mail-search");
+}
+
+/**
+ * Subclass the FolderDisplayWidget to deal with UI specific to the search
+ *  window.
+ */
+function SearchFolderDisplayWidget() {
+  FolderDisplayWidget.call(this);
+}
+
+SearchFolderDisplayWidget.prototype = {
+  __proto__: FolderDisplayWidget.prototype,
+
+  // folder display will want to show the thread pane; we need do nothing
+  _showThreadPane() {},
+
+  onSearching(aIsSearching) {
+    const progressBar = document.getElementById("statusbar-icon");
+    const progressBarContainer = document.getElementById(
+      "statusbar-progresspanel"
+    );
+    gClearButton.disabled = aIsSearching;
+    progressBarContainer.hidden = !aIsSearching;
+    if (aIsSearching) {
+      // Search button becomes the "stop" button
+      document.l10n.setAttributes(gSearchStopButton, "stop-button");
+      // update our toolbar equivalent
+      UpdateMailSearch("new-search");
+      // Set progress indicator to indeterminate state.
+      progressBar.removeAttribute("value");
+      // Tell the user that we're searching.
+      document.l10n.setAttributes(gStatusText, "searching-message");
+    } else {
+      // Stop button resumes being the "search" button
+      document.l10n.setAttributes(gSearchStopButton, "search-button");
+      // update our toolbar equivalent
+      UpdateMailSearch("done-search");
+      // Reset progress indicator.
+      progressBar.value = 0;
+      // Show the result of the search.
+      this.updateStatusResultText();
+    }
+  },
+
+  /**
+   * If messages were removed, we might have lost some search results and so
+   *  should update our search result text.  Also, defer to our super-class.
+   */
+  onMessagesRemoved() {
+    // result text is only for when we are not searching
+    if (!this.view.searching) {
+      this.updateStatusResultText();
+    }
+    this.__proto__.__proto__.onMessagesRemoved.call(this);
+  },
+
+  updateStatusResultText() {
+    const rowCount = this.view.dbView.rowCount;
+    if (rowCount == 0) {
+      document.l10n.setAttributes(gStatusText, "no-matches-found");
+    } else {
+      document.l10n.setAttributes(gStatusText, "matches-found", {
+        count: rowCount,
+      });
+    }
+  },
+};
+
+var threadPane = {
+  columns: null,
+  rowTemplate: null,
+
+  init() {
+    threadTree = gFolderDisplay.tree = document.getElementById("threadTree");
+    threadTree.setAttribute("rows", "thread-row");
+    threadTree.table.editable = true;
+
+    this.rowTemplate = document.getElementById("threadPaneRowTemplate");
+    this.getDefaultColumns();
+    this.applyPersistedColumnsState();
+    this.updateColumns();
+    threadTree.reset();
+
+    threadTree.addEventListener("keydown", this);
+    threadTree.addEventListener("select", this);
+    threadTree.table.addEventListener("columns-changed", this);
+    threadTree.table.addEventListener("column-resized", this);
+    threadTree.table.addEventListener("sort-changed", this);
+    threadTree.table.addEventListener("reorder-columns", this);
+    threadTree.table.addEventListener("restore-columns", this);
+    threadTree.table.addEventListener("toggle-flag", this);
+    threadTree.table.addEventListener("toggle-unread", this);
+    threadTree.table.addEventListener("toggle-spam", this);
+    threadTree.table.addEventListener("request-delete", this);
+    threadTree.table.body.addEventListener("dragstart", this);
+  },
+
+  handleEvent(event) {
+    switch (event.type) {
+      case "keydown":
+        ThreadPaneKeyDown(event);
+        break;
+      case "select":
+        ThreadPaneSelectionChanged();
+        break;
+      case "columns-changed":
+        this.onColumnsVisibilityChanged(event.detail);
+        break;
+      case "column-resized":
+        this.columns.find(column => column.id == event.detail.column).width =
+          event.detail.splitter.width;
+        this.persistColumnStates();
+        break;
+      case "sort-changed":
+        this.onSortChanged(event.detail);
+        break;
+      case "reorder-columns":
+        this.onColumnsReordered(event.detail);
+        break;
+      case "restore-columns":
+        this.restoreDefaultColumns();
+        break;
+      case "toggle-flag":
+        gDBView.applyCommandToIndices(
+          event.detail.isFlagged
+            ? Ci.nsMsgViewCommandType.unflagMessages
+            : Ci.nsMsgViewCommandType.flagMessages,
+          [event.detail.index]
+        );
+        break;
+      case "toggle-unread":
+        gDBView.applyCommandToIndices(
+          event.detail.isUnread
+            ? Ci.nsMsgViewCommandType.markMessagesRead
+            : Ci.nsMsgViewCommandType.markMessagesUnread,
+          [event.detail.index]
+        );
+        break;
+      case "toggle-spam":
+        gDBView.applyCommandToIndices(
+          event.detail.isJunk
+            ? Ci.nsMsgViewCommandType.unjunk
+            : Ci.nsMsgViewCommandType.junk,
+          [event.detail.index]
+        );
+        break;
+      case "request-delete":
+        if (
+          MailUtils.confirmDelete(
+            false,
+            gDBView,
+            gDBView.getMsgHdrAt(event.detail.index).folder
+          )
+        ) {
+          gDBView.applyCommandToIndices(Ci.nsMsgViewCommandType.deleteMsg, [
+            event.detail.index,
+          ]);
+        }
+        break;
+      case "dragstart":
+        ThreadPaneOnDragStart(event);
+        break;
+    }
+  },
+
+  restoreSortIndicator() {
+    threadTree.table.header
+      .querySelector("[aria-sort]")
+      ?.removeAttribute("aria-sort");
+
+    if (gViewWrapper._sort.length == 0) {
+      return;
+    }
+
+    const column = gViewWrapper.primarySortColumnId;
+    const header = threadTree.table.header.querySelector(`#${column}`);
+    if (header) {
+      header.ariaSort = gViewWrapper.isSortedAscending
+        ? "ascending"
+        : "descending";
+    }
+  },
+
+  updateColumns() {
+    for (const column of this.columns) {
+      const cell = this.rowTemplate.content.querySelector(
+        `.${column.id.toLowerCase()}-column`
+      );
+      cell.hidden = column.hidden;
+      this.rowTemplate.content.appendChild(cell);
+    }
+
+    threadTree.table.setColumns(this.columns);
+    this.restoreSortIndicator();
+  },
+
+  getDefaultColumns() {
+    this.columns = ThreadPaneColumns.getDefaultColumns().filter(
+      c => c.id != "threadCol"
+    );
+    this.columns.find(c => c.id == "locationCol").hidden = false;
+  },
+
+  restoreDefaultColumns() {
+    this.getDefaultColumns();
+    this.updateColumns();
+    threadTree.reset();
+    this.persistColumnStates();
+  },
+
+  applyPersistedColumnsState() {
+    if (
+      !Services.xulStore.hasValue(location.href, "threadTree", "columnStates")
+    ) {
+      return;
+    }
+
+    const columnStates = JSON.parse(
+      Services.xulStore.getValue(location.href, "threadTree", "columnStates")
+    );
+    this.columns.forEach(c => {
+      c.hidden = !columnStates[c.id]?.visible;
+      c.ordinal = parseInt(columnStates[c.id]?.ordinal, 10) ?? 0;
+      c.width = columnStates[c.id]?.width;
+    });
+    this.columns.sort(function (a, b) {
+      return a.ordinal - b.ordinal;
+    });
+  },
+
+  onColumnsReordered(data) {
+    threadPane.columns = data.columns;
+    this.persistColumnStates();
+    this.updateColumns();
+    threadTree.reset();
+  },
+
+  onColumnsVisibilityChanged(data) {
+    const column = data.value;
+    const checked = data.target.hasAttribute("checked");
+
+    const changedColumn = this.columns.find(c => c.id == column);
+    changedColumn.hidden = !checked;
+
+    this.persistColumnStates();
+    this.updateColumns(true);
+    threadTree.reset();
+  },
+
+  persistColumnStates() {
+    const newState = {};
+    for (const column of this.columns) {
+      newState[column.id] = {
+        visible: !column.hidden,
+        ordinal: column.ordinal,
+        width: column.width,
+      };
+    }
+
+    Services.xulStore.setValue(
+      location.href,
+      "threadTree",
+      "columnStates",
+      JSON.stringify(newState)
+    );
+  },
+
+  onSortChanged(data) {
+    const curSortColumnId = gViewWrapper.primarySortColumnId;
+    const newSortColumnId = data.column;
+    const newSortDirection =
+      curSortColumnId == newSortColumnId && gViewWrapper.isSortedAscending
+        ? "descending"
+        : "ascending";
+
+    gViewWrapper.sort(newSortColumnId, Ci.nsMsgViewSortOrder[newSortDirection]);
+    Services.xulStore.setValue(
+      location.href,
+      "threadTree",
+      "sortColumn",
+      newSortColumnId
+    );
+    Services.xulStore.setValue(
+      location.href,
+      "threadTree",
+      "sortDirection",
+      newSortDirection
+    );
+
+    this.restoreSortIndicator();
+  },
+};
+
+function searchOnLoad() {
+  UIFontSize.registerWindow(window);
+  TagUtils.loadTagsIntoCSS(document);
+  initializeSearchWidgets();
+  initializeSearchWindowWidgets();
+
+  // Convert persisted height attributes to CSS rules, this stops the layout
+  // engine ignoring them.
+  const searchTermsEl = document.getElementById("searchTerms");
+  if (searchTermsEl.hasAttribute("height")) {
+    searchTermsEl.style.height = `${searchTermsEl.getAttribute("height")}px`;
+  }
+  const searchResultsEl = document.getElementById("searchResults");
+  if (searchResultsEl.hasAttribute("height")) {
+    searchResultsEl.style.height = `${searchResultsEl.getAttribute("height")}px`;
+  }
+
+  gFolderDisplay = new SearchFolderDisplayWidget();
+  gFolderDisplay.msgWindow = msgWindow;
+
+  threadPane.init();
+
+  // The view is initially unsorted; get the persisted sortDirection column
+  // and set up the user's desired sort. This synthetic view is not backed by
+  // a db, so secondary sorts and custom columns are not supported here.
+  const sortColumn =
+    Services.xulStore.getValue(location.href, "threadTree", "sortColumn") ||
+    "dateCol";
+  const sortDirection =
+    Services.xulStore.getValue(location.href, "threadTree", "sortDirection") ||
+    "descending";
+
+  gViewWrapper.openSearchView();
+  gViewWrapper.sort(sortColumn, Ci.nsMsgViewSortOrder[sortDirection]);
+  threadPane.restoreSortIndicator();
+
+  if (window.arguments && window.arguments[0]) {
+    updateSearchFolderPicker(window.arguments[0].folder);
+  }
+
+  // Trigger searchTerm.js to create the first criterion.
+  onMore(null);
+  // Make sure all the buttons are configured.
+  UpdateMailSearch("onload");
+}
+
+function searchOnUnload() {
+  gFolderDisplay.close();
+  top.controllers.removeController(nsSearchResultsController);
+}
+
+function initializeSearchWindowWidgets() {
+  gFolderPicker = document.getElementById("searchableFolders");
+  gSearchStopButton = document.getElementById("search-button");
+  gClearButton = document.getElementById("clear-button");
+  hideMatchAllItem();
+
+  msgWindow = Cc["@mozilla.org/messenger/msgwindow;1"].createInstance(
+    Ci.nsIMsgWindow
+  );
+
+  gStatusText = document.getElementById("statusText");
+
+  // functionality to enable/disable buttons using nsSearchResultsController
+  // depending of whether items are selected in the search results thread pane.
+  top.controllers.insertControllerAt(0, nsSearchResultsController);
+}
+
+/**
+ * Handle click on the gSearchStopButton button (when that's labeled "Stop").
+ */
+function onSearchStop() {
+  gFolderDisplay.view.search.session.interruptSearch();
+}
+
+function onResetSearch(event) {
+  onReset(event);
+  gFolderDisplay.view.search.clear();
+
+  gStatusText.removeAttribute("data-l10n-id");
+  gStatusText.value = "";
+}
+
+function updateSearchFolderPicker(folder) {
+  gCurrentFolder = folder;
+  gFolderPicker.menupopup.selectFolder(folder);
+
+  var searchOnline = document.getElementById("checkSearchOnline");
+  // We will hide and disable the search online checkbox if we are offline, or
+  // if the folder does not support online search.
+
+  // Any offlineSupportLevel > 0 is an online server like IMAP or news.
+  if (gCurrentFolder?.server.offlineSupportLevel && !Services.io.offline) {
+    searchOnline.hidden = false;
+    searchOnline.disabled = false;
+  } else {
+    searchOnline.hidden = true;
+    searchOnline.disabled = true;
+  }
+  if (gCurrentFolder) {
+    setSearchScope(GetScopeForFolder(gCurrentFolder));
+  }
+}
+
+function updateSearchLocalSystem() {
+  setSearchScope(GetScopeForFolder(gCurrentFolder));
+}
+
+/**
+ * Refreshes the search attribute menus after editing custom headers.
+ */
+function UpdateAfterCustomHeaderChange() {
+  updateSearchAttributes();
+}
+
+function onEnterInSearchTerm() {
+  // on enter
+  // if not searching, start the search
+  // if searching, stop and then start again
+  if (gSearchStopButton.getAttribute("data-l10n-id") == "search-button") {
+    onSearch();
+  } else {
+    onSearchStop();
+    onSearch();
+  }
+}
+
+function onSearch() {
+  const viewWrapper = gFolderDisplay.view;
+  const searchTerms = getSearchTerms();
+
+  viewWrapper.beginViewUpdate();
+  viewWrapper.search.userTerms = searchTerms.length ? searchTerms : null;
+  viewWrapper.search.onlineSearch = gSearchOnline;
+  viewWrapper.searchFolders = getSearchFolders();
+  viewWrapper.endViewUpdate();
+}
+
+/**
+ * Get the current set of search terms, returning them as a list.  We filter out
+ *  dangerous and insane predicates.
+ */
+function getSearchTerms() {
+  const termCreator = gFolderDisplay.view.search.session;
+
+  const searchTerms = [];
+  // searchTerm.js stores wrapper objects in its gSearchTerms array.  Pluck
+  //  them.
+  for (let iTerm = 0; iTerm < gSearchTerms.length; iTerm++) {
+    const termWrapper = gSearchTerms[iTerm].obj;
+    const realTerm = termCreator.createTerm();
+    termWrapper.saveTo(realTerm);
+    // A header search of "" is illegal for IMAP and will cause us to
+    //  explode.  You don't want that and I don't want that.  So let's check
+    //  if the bloody term is a subject search on a blank string, and if it
+    //  is, let's secretly not add the term.  Everyone wins!
+    if (
+      realTerm.attrib != Ci.nsMsgSearchAttrib.Subject ||
+      realTerm.value.str != ""
+    ) {
+      searchTerms.push(realTerm);
+    }
+  }
+
+  return searchTerms;
+}
+
+/**
+ * @returns {nsIMsgFolder[]} the list of folders the search should cover.
+ */
+function getSearchFolders() {
+  const searchFolders = [];
+
+  if (!gCurrentFolder.isServer && !gCurrentFolder.noSelect) {
+    searchFolders.push(gCurrentFolder);
+  }
+
+  var searchSubfolders = document.getElementById(
+    "checkSearchSubFolders"
+  ).checked;
+  if (
+    gCurrentFolder &&
+    (searchSubfolders || gCurrentFolder.isServer || gCurrentFolder.noSelect)
+  ) {
+    AddSubFolders(gCurrentFolder, searchFolders);
+  }
+
+  return searchFolders;
+}
+
+function AddSubFolders(folder, outFolders) {
+  for (const nextFolder of folder.subFolders) {
+    if (!(nextFolder.flags & Ci.nsMsgFolderFlags.Virtual)) {
+      if (!nextFolder.noSelect) {
+        outFolders.push(nextFolder);
+      }
+
+      AddSubFolders(nextFolder, outFolders);
+    }
+  }
+}
+
+function AddSubFoldersToURI(folder) {
+  var returnString = "";
+
+  for (const nextFolder of folder.subFolders) {
+    if (!(nextFolder.flags & Ci.nsMsgFolderFlags.Virtual)) {
+      if (!nextFolder.noSelect && !nextFolder.isServer) {
+        if (returnString.length > 0) {
+          returnString += "|";
+        }
+        returnString += nextFolder.URI;
+      }
+      var subFoldersString = AddSubFoldersToURI(nextFolder);
+      if (subFoldersString.length > 0) {
+        if (returnString.length > 0) {
+          returnString += "|";
+        }
+        returnString += subFoldersString;
+      }
+    }
+  }
+  return returnString;
+}
+
+/**
+ * Determine the proper search scope to use for a folder, so that the user is
+ *  presented with a correct list of search capabilities. The user may manually
+ *  request on online search for certain server types. To determine if the
+ *  folder body may be searched, we ignore whether autosync is enabled,
+ *  figuring that after the user manually syncs, they would still expect that
+ *  body searches would work.
+ *
+ * The available search capabilities also depend on whether the user is
+ *  currently online or offline. Although that is also checked by the server,
+ *  we do it ourselves because we have a more complex response to offline
+ *  than the server's searchScope attribute provides.
+ *
+ * This method only works for real folders.
+ */
+function GetScopeForFolder(folder) {
+  const searchOnline = document.getElementById("checkSearchOnline");
+  if (!searchOnline.disabled && searchOnline.checked) {
+    gSearchOnline = true;
+    return folder.server.searchScope;
+  }
+  gSearchOnline = false;
+
+  // We are going to search offline. The proper search scope may depend on
+  // whether we have the body and/or junk available or not.
+  let localType;
+  try {
+    localType = folder.server.localStoreType;
+  } catch {} // On error, we'll just assume the default mailbox type
+
+  let hasBody = folder.getFlag(Ci.nsMsgFolderFlags.Offline);
+  switch (localType) {
+    case "news": {
+      // News has four offline scopes, depending on whether junk and body
+      // are available.
+      const hasJunk =
+        folder.getInheritedStringProperty(
+          "dobayes.mailnews@mozilla.org#junk"
+        ) == "true";
+      if (hasJunk && hasBody) {
+        return Ci.nsMsgSearchScope.localNewsJunkBody;
+      }
+      if (hasJunk) {
+        // and no body
+        return Ci.nsMsgSearchScope.localNewsJunk;
+      }
+      if (hasBody) {
+        // and no junk
+        return Ci.nsMsgSearchScope.localNewsBody;
+      }
+      // We don't have offline message bodies or junk processing.
+      return Ci.nsMsgSearchScope.localNews;
+    }
+    case "imap": {
+      // Junk is always enabled for imap, so the offline scope only depends on
+      // whether the body is available.
+
+      // If we are the root folder, use the server property for body rather
+      // than the folder property.
+      if (folder.isServer) {
+        const imapServer = folder.server.QueryInterface(
+          Ci.nsIImapIncomingServer
+        );
+        if (imapServer && imapServer.offlineDownload) {
+          hasBody = true;
+        }
+      }
+
+      if (!hasBody) {
+        return Ci.nsMsgSearchScope.onlineManual;
+      }
+    }
+    // fall through to default
+    default:
+      return Ci.nsMsgSearchScope.offlineMail;
+  }
+}
+
+function goUpdateSearchItems(commandset) {
+  for (var i = 0; i < commandset.children.length; i++) {
+    var commandID = commandset.children[i].getAttribute("id");
+    if (commandID) {
+      goUpdateCommand(commandID);
+    }
+  }
+}
+
+// used to toggle functionality for Search/Stop button.
+function onSearchButton(event) {
+  if (event.target.getAttribute("data-l10n-id") == "search-button") {
+    onSearch();
+  } else {
+    onSearchStop();
+  }
+}
+
+function MsgDeleteSelectedMessages(aCommandType) {
+  if (
+    !MailUtils.confirmDelete(
+      aCommandType == Ci.nsMsgViewCommandType.deleteNoTrash,
+      gDBView
+    )
+  ) {
+    return;
+  }
+  gFolderDisplay.hintAboutToDeleteMessages();
+  gFolderDisplay.doCommand(aCommandType);
+}
+
+/**
+ * Move selected messages to the destination folder
+ *
+ * @param {nsIMsgFolder} destFolder - Destination folder.
+ */
+function MoveMessageInSearch(destFolder) {
+  gFolderDisplay.hintAboutToDeleteMessages();
+  gFolderDisplay.doCommandWithFolder(
+    Ci.nsMsgViewCommandType.moveMessages,
+    destFolder
+  );
+}
+
+function OpenInFolder() {
+  MailUtils.displayMessageInFolderTab(gFolderDisplay.selectedMessage);
+}
+
+function saveAsVirtualFolder() {
+  var searchFolderURIs = gCurrentFolder.URI;
+
+  var searchSubfolders = document.getElementById(
+    "checkSearchSubFolders"
+  ).checked;
+  if (
+    gCurrentFolder &&
+    (searchSubfolders || gCurrentFolder.isServer || gCurrentFolder.noSelect)
+  ) {
+    var subFolderURIs = AddSubFoldersToURI(gCurrentFolder);
+    if (subFolderURIs.length > 0) {
+      searchFolderURIs += "|" + subFolderURIs;
+    }
+  }
+
+  var searchOnline = document.getElementById("checkSearchOnline");
+  var doOnlineSearch = searchOnline.checked && !searchOnline.disabled;
+
+  window.openDialog(
+    "chrome://messenger/content/virtualFolderProperties.xhtml",
+    "",
+    "chrome,titlebar,modal,centerscreen,resizable=yes",
+    {
+      folder: window.arguments[0].folder,
+      searchTerms: getSearchTerms(),
+      searchFolderURIs,
+      searchOnline: doOnlineSearch,
+    }
+  );
+}
+
+function MsgOpenSelectedMessages() {
+  // Toggle message body (feed summary) and content-base url in message pane or
+  // load in browser, per pref, otherwise open summary or web page in new window
+  // or tab, per that pref.
+  if (
+    gFolderDisplay.treeSelection &&
+    gFolderDisplay.treeSelection.count == 1 &&
+    gFolderDisplay.selectedMessageIsFeed
+  ) {
+    const msgHdr = gFolderDisplay.selectedMessage;
+    if (
+      document.documentElement.getAttribute("windowtype") == "mail:3pane" &&
+      FeedMessageHandler.onOpenPref ==
+        FeedMessageHandler.kOpenToggleInMessagePane
+    ) {
+      const showSummary = FeedMessageHandler.shouldShowSummary(msgHdr, true);
+      FeedMessageHandler.setContent(msgHdr, showSummary);
+      return;
+    }
+    if (
+      FeedMessageHandler.onOpenPref == FeedMessageHandler.kOpenLoadInBrowser
+    ) {
+      setTimeout(FeedMessageHandler.loadWebPage, 20, msgHdr, { browser: true });
+      return;
+    }
+  }
+
+  // This is somewhat evil. If we're in a 3pane window, we'd have a tabmail
+  // element and would pass it in here, ensuring that if we open tabs, we use
+  // this tabmail to open them. If we aren't, then we wouldn't, so
+  // displayMessages would look for a 3pane window and open tabs there.
+  MailUtils.displayMessages(
+    gFolderDisplay.selectedMessages,
+    gFolderDisplay.view,
+    document.getElementById("tabmail")
+  );
+}
+
+/**
+ * Export selected search results for dragging, with a count preview for
+ * multiple messages.
+ *
+ * @param {DragEvent} aEvent - The dragstart event.
+ */
+function ThreadPaneOnDragStart(aEvent) {
+  const messageUris = gDBView?.getURIsForSelection();
+  if (!messageUris) {
+    return;
+  }
+
+  gFolderDisplay.hintAboutToDeleteMessages();
+  const names = MailUtils.generateUniqueFilenames(
+    messageUris.map(msgUri => {
+      const msgHdr =
+        MailServices.messageServiceFromURI(msgUri).messageURIToMsgHdr(msgUri);
+      return MailUtils.getEmlFilenameBase(msgHdr) + ".eml";
+    })
+  );
+  for (const [index, msgUri] of messageUris.entries()) {
+    const msgService = MailServices.messageServiceFromURI(msgUri);
+    const msgFileName = names[index];
+
+    // When dragging messages to the filesystem:
+    // - Windows fetches application/x-moz-file-promise-url and writes it to
+    //     a file.
+    // - Linux uses the flavor data provider, if a single message is dragged.
+    //     If multiple messages are dragged AND text/x-moz-url exists, it
+    //     fetches application/x-moz-file-promise-url and writes it to a file.
+    // - MacOS always uses the flavor data provider.
+
+    // text/plain should be unnecessary, but getFlavorData can't get at
+    // text/x-moz-message for some reason.
+    aEvent.dataTransfer.mozSetDataAt("text/plain", msgUri, index);
+    aEvent.dataTransfer.mozSetDataAt("text/x-moz-message", msgUri, index);
+    const msgUrlSpec = msgService.getUrlForUri(msgUri).spec;
+    aEvent.dataTransfer.mozSetDataAt("text/x-moz-url", msgUrlSpec, index);
+    aEvent.dataTransfer.mozSetDataAt(
+      "application/x-moz-file-promise-url",
+      msgUrlSpec,
+      index
+    );
+    aEvent.dataTransfer.mozSetDataAt(
+      "application/x-moz-file-promise",
+      new messageFlavorDataProvider(),
+      index
+    );
+    aEvent.dataTransfer.mozSetDataAt(
+      "application/x-moz-file-promise-dest-filename",
+      msgFileName,
+      index
+    );
+  }
+  aEvent.dataTransfer.effectAllowed = "copyMove";
+  aEvent.dataTransfer.addElement(aEvent.target);
+  DragUtils.setMultiDragImage(aEvent, messageUris.length);
+}
+
+function ThreadPaneKeyDown(event) {
+  if (event.keyCode != KeyEvent.DOM_VK_RETURN) {
+    return;
+  }
+
+  // Prevent any thread that happens to be last selected (currentIndex) in a
+  // single or multi selection from toggling in tree.js.
+  event.stopImmediatePropagation();
+
+  MsgOpenSelectedMessages();
+}
+
+function ThreadPaneOnLoad() {
+  const tree = document.getElementById("threadTree");
+  tree.table.body.addEventListener("dblclick", event => {
+    if (event.target.closest("tr") && !event.target.closest("button")) {
+      MsgOpenSelectedMessages();
+    }
+  });
+}
+
+function ThreadPaneSelectionChanged() {
+  document.getElementById("threadTree").view.selectionChanged();
+  UpdateSelectCol();
+  UpdateMailSearch();
+}
+
+function UpdateSelectCol() {
+  const selectCol = document.getElementById("selectCol");
+  if (!selectCol) {
+    return;
+  }
+  const selection = gDBView.selection;
+  if (selection && selection.count > 0) {
+    if (gDBView.rowCount == selection.count) {
+      selectCol.classList.remove("someselected");
+      selectCol.classList.add("allselected");
+    } else {
+      selectCol.classList.remove("allselected");
+      selectCol.classList.add("someselected");
+    }
+  } else {
+    selectCol.classList.remove("allselected");
+    selectCol.classList.remove("someselected");
+  }
+}

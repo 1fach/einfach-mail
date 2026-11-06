@@ -1,0 +1,140 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "ImapTypes.idl"
+#include "nsISupports.idl"
+#include "MailNewsTypes2.idl"
+#include "nsIImapUrl.idl" // for imapMessageFlagsType
+
+typedef long nsOfflineImapOperationType;
+
+[scriptable, uuid(b5229a55-22bb-444b-be92-13d719353828)]
+
+/**
+ * nsImsgOfflineImapOperation holds server-side operations which have
+ * already been performed locally on the database and local message store
+ * but are waiting for a connection to the server to be applied there as well.
+ *
+ * They are persisted in the database - each nsIMsgOfflineImapOperation
+ * corresponds exactly to a single row of data in the offlineOps table.
+ * The object should be considered "live", so modifying fields here
+ * will immediately write to the database (or at least will be included in
+ * the next commit).
+ *
+ * nsIMsgOfflineImapOperation entries are indexed by `.messageKey`.
+ * So each message in a database can only have a single
+ * nsImsgOfflineImapOperation associated with it.
+ * However, nsIMsgOfflineImapOperation can hold combined operations
+ * e.g. set the 'starred' flag + remove a keyword + copy to another folder.
+ *
+ * Sometimes ".messageKey" will refer to a message which has already
+ * been removed from the database, awaiting the same treatment on the server.
+ */
+interface nsIMsgOfflineImapOperation : nsISupports
+{
+// type of stored imap operations
+  const long kFlagsChanged      = 0x1;  // Set IMAP flags on msg.
+
+  /**
+   * For Move operations, a pair of operations is used: kMsgMoved and kMoveResult.
+   * A kMsgMoved op is added to the source folder.
+   * A kMsgMoveResult is attached to the destination folder.
+   * The kMsgMoveResult op also holds the key(/UID) of the source message
+   * (in the source DB). This is because the message in the src DB might
+   * already be removed by the time the move operation is actually executed
+   * against the server, so we have to keep track of it.
+   */
+  const long kMsgMoved          = 0x2;
+  const long kMsgCopy           = 0x4;
+  const long kMoveResult        = 0x8;
+  const long kAppendDraft       = 0x10;
+  const long kAddedHeader       = 0x20;
+  const long kDeletedMsg        = 0x40;
+  const long kMsgMarkedDeleted  = 0x80;
+  const long kAppendTemplate    = 0x100;
+  /** Delete all msgs in folder (eg empty trash). */
+  const long kDeleteAllMsgs     = 0x200;
+  const long kAddKeywords       = 0x400;
+  const long kRemoveKeywords    = 0x800;
+
+  // Bitflags indicating which operation(s) this represents.
+  attribute nsOfflineImapOperationType operation;
+
+  // Clears the operation bit passed in.
+  // All other operation types are left as-is.
+  // For `kMsgMoved`, `kAppendTemplate` and `kAppendDraft`, this will also clear
+  // `.destinationFolderURI`.
+  // For kMsgCopy, this will remove only the _first_ `.getCopyDestination()`
+  // entry (but still clear the `kMsgCopy` bit).
+  void clearOperation(in nsOfflineImapOperationType operation);
+
+  // `.messageKey` is the primary key for nsIMsgOfflineImapOperation objects.
+  // It's the message to which the object applies.
+  // Usually this will be a real message in the database, but there are cases
+  // where the message no longer exists - message moves, for example.
+  // e.g. A message has already been deleted/moved locally and we're waiting
+  // on a network connection so we can request the corresponding actions on
+  // the server.
+  attribute nsMsgKey messageKey;
+
+  // For move/copy operations, the msg key of the source msg (in source DB).
+  attribute nsMsgKey srcMessageKey;
+
+  // For move/copy operations, the UID of the source msg.
+  attribute ImapUid srcUid;
+
+  // Writing to `.flagOperation` will:
+  // 1. set `.newFlags`
+  // 2. set the `kFlagsChanged` bit in `.operation`.
+  // 3. use a bitwise OR to add the value to the existing `.flagOperation`.
+  attribute imapMessageFlagsType flagOperation;
+
+  attribute imapMessageFlagsType newFlags; // for kFlagsChanged
+
+  attribute AUTF8String destinationFolderURI; // for move or append (not copy!)
+
+  // Setting this sets the kMoveResult bitflag in .operation.
+  attribute AUTF8String sourceFolderURI;
+
+  // Calling this sets the kAddKeywords bitflag in .operation.
+  void addKeywordToAdd(in string aKeyword);
+
+  // Calling this sets the kRemoveKeywords bitflag in .operation.
+  void addKeywordToRemove(in string aKeyword);
+
+  readonly attribute string keywordsToAdd;
+  readonly attribute string keywordsToRemove;
+
+  // Calling this sets the kMsgCopy bitflag in .operation.
+  // Can be called multiple times to copy to multiple destinations.
+  // NOTE: this doesn't affect `.destinationFolderURI`!
+  // Instead it adds to the (internal) list exposed by
+  // `.getCopyDestination()`.
+  void addMessageCopyOperation(in AUTF8String destinationBox);
+
+  // Copy destination list is separate from `.destinationFolderURI`,
+  // which is only for moves and appends.
+  // NOTES:
+  // There is an internal list of copy destination folders, but no way to
+  // access the length. Existing code only accesses the first entry,
+  // and then relies on `.clearOperation()` to remove that entry, moving the
+  // remaining items up.
+  // BUT: `.clearOperation()` also clears the `kMsgCopy` bit, so it's not
+  // clear multiple copies would ever work properly. It's hard to tell if
+  // this is a bug or some historical quirk we rely on...
+  // In any case, copying the same message to multiple folders must be rare.
+  string getCopyDestination(in long copyIndex);
+
+  attribute unsigned long msgSize;
+
+  // This is set while this offline op is being processed.
+  attribute boolean playingBack;
+};
+%{C++
+
+// {fmt} support, to make debugging and logging simpler.
+// These are defined in nsMsgOfflineImapOperation.h:
+nsCString format_as(nsOfflineImapOperationType operation);
+nsCString format_as(const nsIMsgOfflineImapOperation& offlineOp);
+%}

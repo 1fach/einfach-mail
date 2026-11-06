@@ -1,0 +1,183 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "nsNewMailnewsURI.h"
+#include "nsURLHelper.h"
+#include "nsIStandardURL.h"
+#include "nsSimpleURI.h"
+#include "nsThreadUtils.h"
+#include "MainThreadUtils.h"
+#include "mozilla/SyncRunnable.h"
+#include "nsIMsgProtocolHandler.h"
+#include "nsIComponentRegistrar.h"
+#include "nsXULAppAPI.h"
+
+#include "../../local/src/nsMailboxService.h"
+#include "../src/nsMsgMailNewsUrl.h"
+#include "../../addrbook/src/nsLDAPURL.h"
+#include "../../imap/src/nsImapService.h"
+#include "../src/nsCidProtocolHandler.h"
+#include "../../protocols/exchange/src/ExchangeUrl.h"
+#include "nsMsgUtils.h"
+
+// Instantiates a new `nsIURI` of the appropriate concrete type for the provided
+// URI spec.
+//
+// This is primarily intended to be called by `NS_NewURI` in necko for
+// handling Thunderbird-specific URI schemes.
+nsresult NS_NewMailnewsURI(nsIURI** aURI, const nsACString& aSpec,
+                           const char* aCharset /* = nullptr */,
+                           nsIURI* aBaseURI /* = nullptr */) {
+  // Mailnews URIs aren't allowed in child processes.
+  if (!XRE_IsParentProcess()) {
+    return NS_ERROR_UNKNOWN_PROTOCOL;
+  }
+
+  nsAutoCString scheme;
+  nsresult rv = net_ExtractURLScheme(aSpec, scheme);
+  if (NS_FAILED(rv)) {
+    // then aSpec is relative
+    if (!aBaseURI) {
+      return NS_ERROR_MALFORMED_URI;
+    }
+
+    rv = aBaseURI->GetScheme(scheme);
+    if (NS_FAILED(rv)) return rv;
+  }
+
+  // Creating mailbox URIs off the main thread can lead to crashes.
+  // Seems to happen when viewing PDFs.
+  if (scheme.EqualsLiteral("mailbox") ||
+      scheme.EqualsLiteral("mailbox-message")) {
+    if (NS_IsMainThread()) {
+      return nsMailboxService::NewURI(aSpec, aCharset, aBaseURI, aURI);
+    }
+    auto NewURI = [&aSpec, &aCharset, &aBaseURI, aURI, &rv]() -> auto {
+      rv = nsMailboxService::NewURI(aSpec, aCharset, aBaseURI, aURI);
+    };
+    nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction("NewURI", NewURI);
+    mozilla::SyncRunnable::DispatchToThread(
+        mozilla::GetMainThreadSerialEventTarget(), task);
+    return rv;
+  }
+
+  // If the scheme is one of the IMAP URL schemes, we need to use a mailnews
+  // URL because it parses extra query parameters such as filename= into values
+  // that are used when saving inline attachments via the m-c HTML5 rendering
+  // code.
+  if (scheme.EqualsLiteral("imap-message")) {
+    RefPtr<nsMsgMailNewsUrl> url = new nsMsgMailNewsUrl();
+    rv = url->SetSpecInternal(aSpec);
+    NS_ENSURE_SUCCESS(rv, rv);
+    url.forget(aURI);
+    return NS_OK;
+  }
+  if (scheme.EqualsLiteral("imap")) {
+    return nsImapService::NewURI(aSpec, aCharset, aBaseURI, aURI);
+  }
+  if (scheme.EqualsLiteral("smtp") || scheme.EqualsLiteral("smtps")) {
+    RefPtr<nsMsgMailNewsUrl> url = new nsMsgMailNewsUrl();
+    rv = url->SetSpecInternal(aSpec);
+    NS_ENSURE_SUCCESS(rv, rv);
+    url.forget(aURI);
+    return NS_OK;
+  }
+  if (scheme.EqualsLiteral("mailto")) {
+    return NS_MutateURI(new mozilla::net::nsSimpleURI::Mutator())
+        .SetSpec(aSpec)
+        .Finalize(aURI);
+  }
+  if (IsNewsScheme(scheme) || scheme.EqualsLiteral("pop") ||
+      scheme.EqualsLiteral("pop3")) {
+    nsCOMPtr<nsIMsgMailNewsUrl> uri =
+        do_CreateInstance("@mozilla.org/messenger/msgmailnewsurl;1", &rv);
+    NS_ENSURE_SUCCESS(rv, rv);
+    if (aBaseURI) {
+      nsAutoCString newSpec;
+      rv = aBaseURI->Resolve(aSpec, newSpec);
+      NS_ENSURE_SUCCESS(rv, rv);
+      rv = uri->SetSpecInternal(newSpec);
+    } else {
+      rv = uri->SetSpecInternal(aSpec);
+    }
+    NS_ENSURE_SUCCESS(rv, rv);
+    uri.forget(aURI);
+    return NS_OK;
+  }
+  if (scheme.EqualsLiteral("cid")) {
+    return nsCidProtocolHandler::NewURI(aSpec, aCharset, aBaseURI, aURI);
+  }
+  if (scheme.EqualsLiteral("ldap") || scheme.EqualsLiteral("ldaps")) {
+    nsCOMPtr<nsILDAPURL> url = do_CreateInstance(NS_LDAPURL_CONTRACTID, &rv);
+    NS_ENSURE_SUCCESS(rv, rv);
+    rv = url->Init(nsIStandardURL::URLTYPE_STANDARD,
+                   scheme.EqualsLiteral("ldap") ? 389 : 636, aSpec, aCharset,
+                   aBaseURI);
+    NS_ENSURE_SUCCESS(rv, rv);
+    url.forget(aURI);
+    return NS_OK;
+  }
+  if (scheme.EqualsLiteral("smile")) {
+    return NS_MutateURI(new mozilla::net::nsSimpleURI::Mutator())
+        .SetSpec(aSpec)
+        .Finalize(aURI);
+  }
+  if (scheme.EqualsLiteral("moz-cal-handle-itip") ||
+      scheme.EqualsLiteral("webcal") || scheme.EqualsLiteral("webcals")) {
+    nsCOMPtr<nsIURL> url;
+    rv = MsgNewStandardURL(aSpec, getter_AddRefs(url));
+    NS_ENSURE_SUCCESS(rv, rv);
+    url.forget(aURI);
+    return NS_OK;
+  }
+
+  if (scheme.EqualsLiteral("ews") || scheme.EqualsLiteral("ews-message") ||
+      scheme.EqualsLiteral("graph") || scheme.EqualsLiteral("graph-message") ||
+      scheme.EqualsLiteral("x-moz-ews") ||
+      scheme.EqualsLiteral("x-moz-graph")) {
+    RefPtr<ExchangeUrl> url = new ExchangeUrl();
+    if (aBaseURI) {
+      nsAutoCString newSpec;
+      rv = aBaseURI->Resolve(aSpec, newSpec);
+      NS_ENSURE_SUCCESS(rv, rv);
+      rv = url->SetSpecInternal(newSpec);
+    } else {
+      rv = url->SetSpecInternal(aSpec);
+    }
+    NS_ENSURE_SUCCESS(rv, rv);
+    url.forget(aURI);
+    return NS_OK;
+  }
+
+  rv = NS_ERROR_UNKNOWN_PROTOCOL;  // Let M-C handle it by default.
+
+  nsCOMPtr<nsIComponentRegistrar> compMgr;
+  NS_GetComponentRegistrar(getter_AddRefs(compMgr));
+  if (compMgr) {
+    nsAutoCString contractID(NS_NETWORK_PROTOCOL_CONTRACTID_PREFIX);
+    contractID += scheme;
+    bool isRegistered = false;
+    compMgr->IsContractIDRegistered(contractID.get(), &isRegistered);
+    if (isRegistered) {
+      auto NewURI = [&aSpec, &aCharset, &aBaseURI, aURI, &contractID,
+                     &rv]() -> auto {
+        nsCOMPtr<nsIMsgProtocolHandler> handler(
+            do_GetService(contractID.get()));
+        if (handler) {
+          // We recognise this URI. Use the protocol handler's result.
+          rv = handler->NewURI(aSpec, aCharset, aBaseURI, aURI);
+        }
+      };
+      if (NS_IsMainThread()) {
+        NewURI();
+      } else {
+        nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction("NewURI", NewURI);
+        mozilla::SyncRunnable::DispatchToThread(
+            mozilla::GetMainThreadSerialEventTarget(), task);
+      }
+    }
+  }
+
+  return rv;
+}

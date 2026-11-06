@@ -1,0 +1,10 @@
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+
+<!ENTITY accountWindow.title           "Account properties">
+<!ENTITY account.general               "General">
+<!ENTITY account.advanced              "Advanced Options">
+<!ENTITY account.password              "Password:">
+<!ENTITY account.alias                 "Alias:">
+<!ENTITY account.autojoin              "Auto-Joined Channels:">

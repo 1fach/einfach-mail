@@ -1,0 +1,84 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+#include calendarDialogSubviewTemplate.inc.xhtml
+
+<html:template id="calendarEventCreateEditDialogTemplate" xmlns="http://www.w3.org/1999/xhtml">
+  <header class="calendar-event-create-edit-dialog-header">
+    <div class="calendar-name"></div>
+    <div class="calendar-actions">
+      <div class="expand-control"></div>
+      <div class="more-actions">
+        <button
+          id="calendarEventCreateEditDialogMenuButton"
+          class="button icon-button icon-only button-flat menu-button"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded="false"
+          data-l10n-id="calendar-dialog-menu"
+          hidden="hidden"
+        ></button>
+        <xul:menupopup
+          id="calendarEventCreateEditDialogMenu"
+          class="no-icon-menupopup"
+        >
+          <xul:menuitem
+            id="calendarEventCreateEditDialogDeleteEvent"
+            data-l10n-id="calendar-dialog-menu-delete"
+          />
+        </xul:menupopup>
+      </div>
+      <button
+        class="button icon-button icon-only button-flat close-button"
+        data-l10n-id="calendar-dialog-close-button"
+        type="button"
+      ></button>
+    </div>
+    <div class="event-title">
+      <input
+        class="event-title-input"
+        type="text"
+        maxlength="180"
+        aria-required="true"
+        data-l10n-id="calendar-event-title-input-new"
+      />
+      <span
+        id="calendarEventCreateEditDialogTitleRequired"
+        class="event-title-required"
+        role="alert"
+        hidden="hidden"
+      ></span>
+    </div>
+  </header>
+  <calendar-dialog-subview-manager
+    class="calendar-event-create-edit-dialog-subview-container"
+    default-subview="calendarEventCreateEditDialogMainSubview"
+  >
+    <div
+      id="calendarEventCreateEditDialogMainSubview"
+      class="calendar-event-create-edit-dialog-main-subview"
+    >
+      <main class="calendar-event-create-edit-dialog-body">
+        <section
+          class="calendar-event-create-edit-dialog-subview"
+          data-subview="main"
+        >
+          <div class="calendar-event-create-edit-dialog-rows"></div>
+        </section>
+      </main>
+      <footer class="calendar-event-create-edit-dialog-footer">
+        <div class="status-select"></div>
+        <div class="privacy-select"></div>
+        <button
+          id="save"
+          data-l10n-id="calendar-event-create-edit-save-button"
+          class="button button-primary"
+          disabled="disabled"
+        >
+        </button>
+      </footer>
+    </div>
+    #include calendarEventCreateEditDescriptionSubviewTemplate.inc.xhtml
+  </calendar-dialog-subview-manager>
+</html:template>

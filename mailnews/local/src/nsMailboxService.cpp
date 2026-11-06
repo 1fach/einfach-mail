@@ -1,0 +1,662 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "msgCore.h"  // precompiled header...
+#include "nsCOMPtr.h"
+
+#include "nsMailboxService.h"
+#include "nsIMsgMailNewsUrl.h"
+#include "nsMailboxProtocol.h"
+#include "nsIMsgDatabase.h"
+#include "MailNewsTypes.h"
+#include "nsTArray.h"
+#include "nsLocalUtils.h"
+#include "nsIDocShell.h"
+#include "nsMsgUtils.h"
+#include "nsNetUtil.h"
+#include "nsIWebNavigation.h"
+#include "prprf.h"
+#include "nsIMsgHdr.h"
+#include "nsIFileURL.h"
+#include "mozilla/RefPtr.h"
+#include "mozilla/LoadInfo.h"
+#include "nsDocShellLoadState.h"
+#include "nsContentUtils.h"
+#include "nsMsgFileHdr.h"
+#include "nsIPop3IncomingServer.h"
+#include "nsLocalMailFolder.h"
+#include "nsIMsgAccountManager.h"
+#include "mozilla/Components.h"
+#include "nsQueryObject.h"
+
+using mozilla::net::LoadInfo;
+
+nsMailboxService::nsMailboxService() {}
+
+nsMailboxService::~nsMailboxService() {}
+
+NS_IMPL_ISUPPORTS(nsMailboxService, nsIMsgMessageService, nsIProtocolHandler,
+                  nsIMsgMessageFetchPartService)
+
+nsresult nsMailboxService::CopyMessage(const nsACString& aSrcMailboxURI,
+                                       nsIStreamListener* aMailboxCopyHandler,
+                                       bool moveMessage,
+                                       nsIUrlListener* aUrlListener,
+                                       nsIMsgWindow* aMsgWindow) {
+  MailboxAction mailboxAction = MailboxAction::MoveMessage;
+  if (!moveMessage) mailboxAction = MailboxAction::CopyMessage;
+  return FetchMessage(aSrcMailboxURI, aMailboxCopyHandler, aMsgWindow,
+                      aUrlListener, nullptr, mailboxAction, false, nullptr);
+}
+
+nsresult nsMailboxService::CopyMessages(
+    const nsTArray<nsMsgKey>& aMsgKeys, nsIMsgFolder* srcFolder,
+    nsIStreamListener* aMailboxCopyHandler, bool moveMessage,
+    nsIUrlListener* aUrlListener, nsIMsgWindow* aMsgWindow, nsIURI** aURL) {
+  nsresult rv = NS_OK;
+  NS_ENSURE_ARG(srcFolder);
+  NS_ENSURE_TRUE(!aMsgKeys.IsEmpty(), NS_ERROR_INVALID_ARG);
+  nsCOMPtr<nsIMsgMailNewsUrl> mailboxurl;
+
+  MailboxAction actionToUse = MailboxAction::MoveMessage;
+  if (!moveMessage) actionToUse = MailboxAction::CopyMessage;
+
+  nsCOMPtr<nsIMsgDBHdr> msgHdr;
+  nsCOMPtr<nsIMsgDatabase> db;
+  srcFolder->GetMsgDatabase(getter_AddRefs(db));
+  if (db) {
+    db->GetMsgHdrForKey(aMsgKeys[0], getter_AddRefs(msgHdr));
+    if (msgHdr) {
+      nsCString uri;
+      srcFolder->GetUriForMsg(msgHdr, uri);
+      rv = PrepareMessageUrl(uri, aUrlListener, actionToUse,
+                             getter_AddRefs(mailboxurl), aMsgWindow);
+
+      if (NS_SUCCEEDED(rv)) {
+        nsCOMPtr<nsIURI> url = mailboxurl;
+        nsCOMPtr<nsIMsgMailNewsUrl> msgUrl(do_QueryInterface(url));
+        RefPtr<nsMailboxUrl> mailboxUrl = do_QueryObject(url);
+        NS_ENSURE_TRUE(mailboxUrl, NS_ERROR_UNEXPECTED);
+        msgUrl->SetMsgWindow(aMsgWindow);
+
+        mailboxUrl->SetMoveCopyMsgKeys(aMsgKeys);
+        rv = RunMailboxUrl(url, aMailboxCopyHandler);
+      }
+    }
+  }
+  if (aURL && mailboxurl) NS_IF_ADDREF(*aURL = mailboxurl);
+
+  return rv;
+}
+
+nsresult nsMailboxService::FetchMessage(
+    const nsACString& aMessageURI, nsISupports* aDisplayConsumer,
+    nsIMsgWindow* aMsgWindow, nsIUrlListener* aUrlListener,
+    const char* aFileName, /* only used by open attachment... */
+    MailboxAction mailboxAction, bool aAutodetectCharset, nsIURI** aURL) {
+  nsresult rv = NS_OK;
+  nsCOMPtr<nsIMsgMailNewsUrl> mailboxurl;
+  MailboxAction actionToUse = mailboxAction;
+  nsCOMPtr<nsIURI> url;
+  nsCOMPtr<nsIMsgMailNewsUrl> msgUrl;
+  nsAutoCString uriString(aMessageURI);
+
+  // Forward inline of message/rfc822 attachments opened in a standalone
+  // message window have "&type=application/x-message-display" appended.
+  // Strip it and create a plain URI. File URIs skip this path — they go
+  // through PrepareMessageUrl which handles the file: → mailbox: rewrite.
+  int32_t typeIndex =
+      StringBeginsWith(aMessageURI, "file:"_ns)
+          ? -1
+          : uriString.Find("&type=application/x-message-display");
+  if (typeIndex != -1) {
+    uriString.Cut(typeIndex, sizeof("&type=application/x-message-display") - 1);
+    rv = NS_NewURI(getter_AddRefs(url), uriString.get());
+    if (NS_SUCCEEDED(rv)) {
+      mailboxurl = do_QueryInterface(url, &rv);
+    }
+  } else {
+    rv = PrepareMessageUrl(aMessageURI, aUrlListener, actionToUse,
+                           getter_AddRefs(mailboxurl), aMsgWindow);
+  }
+
+  if (NS_SUCCEEDED(rv)) {
+    url = mailboxurl;
+    msgUrl = do_QueryInterface(url);
+    msgUrl->SetMsgWindow(aMsgWindow);
+    if (aFileName) msgUrl->SetFileNameInternal(nsDependentCString(aFileName));
+  }
+
+  nsCOMPtr<nsIMsgI18NUrl> i18nurl(do_QueryInterface(msgUrl));
+  if (i18nurl) i18nurl->SetAutodetectCharset(aAutodetectCharset);
+
+  // instead of running the mailbox url like we used to, let's try to run the
+  // url in the docshell...
+  nsCOMPtr<nsIDocShell> docShell(do_QueryInterface(aDisplayConsumer, &rv));
+  // if we were given a docShell, run the url in the docshell..otherwise just
+  // run it normally.
+  if (NS_SUCCEEDED(rv) && docShell && url) {
+    // DIRTY LITTLE HACK --> if we are opening an attachment we want the
+    // docshell to treat this load as if it were a user click event. Then the
+    // dispatching stuff will be much happier.
+    RefPtr<nsDocShellLoadState> loadState = new nsDocShellLoadState(url);
+    loadState->SetLoadFlags(mailboxAction == MailboxAction::FetchPart
+                                ? nsIWebNavigation::LOAD_FLAGS_IS_LINK
+                                : nsIWebNavigation::LOAD_FLAGS_NONE);
+    if (mailboxAction == MailboxAction::FetchPart)
+      loadState->SetLoadType(LOAD_LINK);
+    loadState->SetFirstParty(false);
+    loadState->SetTriggeringPrincipal(nsContentUtils::GetSystemPrincipal());
+    rv = docShell->LoadURI(loadState, false);
+  } else
+    rv = RunMailboxUrl(url, aDisplayConsumer);
+
+  if (aURL && mailboxurl) NS_IF_ADDREF(*aURL = mailboxurl);
+
+  return rv;
+}
+
+NS_IMETHODIMP nsMailboxService::FetchMimePart(
+    nsIURI* aURI, const nsACString& aMessageURI,
+    nsIStreamListener* aStreamListener, nsIMsgWindow* aMsgWindow,
+    nsIUrlListener* aUrlListener, nsIURI** aURL) {
+  nsresult rv;
+  nsCOMPtr<nsIMsgMailNewsUrl> msgUrl(do_QueryInterface(aURI, &rv));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  msgUrl->SetMsgWindow(aMsgWindow);
+
+  // set up the url listener
+  if (aUrlListener) msgUrl->RegisterListener(aUrlListener);
+
+  return RunMailboxUrl(msgUrl, aStreamListener);
+}
+
+NS_IMETHODIMP nsMailboxService::LoadMessage(const nsACString& aMessageURI,
+                                            nsIDocShell* aDisplayConsumer,
+                                            nsIMsgWindow* aMsgWindow,
+                                            nsIUrlListener* aUrlListener,
+                                            bool aOverideCharset) {
+  nsCOMPtr<nsIURI> dummyNull;  // unused...
+  return FetchMessage(aMessageURI, aDisplayConsumer, aMsgWindow, aUrlListener,
+                      nullptr, MailboxAction::FetchMessage, aOverideCharset,
+                      getter_AddRefs(dummyNull));
+}
+
+NS_IMETHODIMP
+nsMailboxService::StreamMessage(const nsACString& aMessageURI,
+                                nsIStreamListener* aConsumer,
+                                nsIMsgWindow* aMsgWindow,
+                                nsIUrlListener* aUrlListener,
+                                bool /* aConvertData */,
+                                const nsACString& aAdditionalHeader,
+                                bool aLocalOnly, nsIURI** aURL) {
+  // The mailbox protocol object will look for "header=filter" or
+  // "header=attach" to decide if it wants to convert the data instead of
+  // using aConvertData. It turns out to be way too hard to pass aConvertData
+  // all the way over to the mailbox protocol object.
+  nsAutoCString aURIString(aMessageURI);
+  if (!aAdditionalHeader.IsEmpty()) {
+    aURIString.FindChar('?') == -1 ? aURIString += "?" : aURIString += "&";
+    aURIString += "header=";
+    aURIString += aAdditionalHeader;
+  }
+
+  return FetchMessage(aURIString, aConsumer, aMsgWindow, aUrlListener, nullptr,
+                      MailboxAction::FetchMessage, false, aURL);
+}
+
+NS_IMETHODIMP nsMailboxService::StreamHeaders(const nsACString& aMessageURI,
+                                              nsIStreamListener* aConsumer,
+                                              nsIUrlListener* aUrlListener,
+                                              bool aLocalOnly, nsIURI** aURL) {
+  NS_ENSURE_ARG_POINTER(aConsumer);
+  nsAutoCString folderURI;
+  nsMsgKey msgKey;
+  nsCOMPtr<nsIMsgFolder> folder;
+  nsresult rv =
+      DecomposeMailboxURI(aMessageURI, getter_AddRefs(folder), &msgKey);
+  if (msgKey == nsMsgKey_None) return NS_MSG_MESSAGE_NOT_FOUND;
+
+  nsCOMPtr<nsIMsgDatabase> db;
+  rv = folder->GetMsgDatabase(getter_AddRefs(db));
+  NS_ENSURE_SUCCESS(rv, rv);
+  nsCOMPtr<nsIMsgDBHdr> msgHdr;
+  rv = db->GetMsgHdrForKey(msgKey, getter_AddRefs(msgHdr));
+  NS_ENSURE_SUCCESS(rv, rv);
+  NS_ENSURE_TRUE(msgHdr, NS_MSG_MESSAGE_NOT_FOUND);
+  nsCOMPtr<nsIInputStream> inputStream;
+  rv = folder->GetMsgInputStream(msgHdr, getter_AddRefs(inputStream));
+  NS_ENSURE_SUCCESS(rv, rv);
+  return MsgStreamMsgHeaders(inputStream, aConsumer);
+}
+
+NS_IMETHODIMP nsMailboxService::IsMsgInMemCache(nsIURI* aUrl,
+                                                nsIMsgFolder* aFolder,
+                                                bool* aResult) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+nsMailboxService::SaveMessageToDisk(const nsACString& aMessageURI,
+                                    nsIFile* aFile,
+                                    nsIUrlListener* aUrlListener,
+                                    bool canonicalLineEnding,
+                                    nsIMsgWindow* aMsgWindow) {
+  nsresult rv = NS_OK;
+  nsCOMPtr<nsIMsgMailNewsUrl> mailboxurl;
+
+  rv = PrepareMessageUrl(aMessageURI, aUrlListener,
+                         MailboxAction::SaveMessageToDisk,
+                         getter_AddRefs(mailboxurl), aMsgWindow);
+
+  if (NS_SUCCEEDED(rv)) {
+    nsCOMPtr<nsIMsgMessageUrl> msgUrl = do_QueryInterface(mailboxurl);
+    if (msgUrl) {
+      msgUrl->SetMessageFile(aFile);
+      msgUrl->SetCanonicalLineEnding(canonicalLineEnding);
+    }
+
+    nsCOMPtr<nsIURI> url = mailboxurl;
+    rv = RunMailboxUrl(url);
+  }
+
+  return rv;
+}
+
+NS_IMETHODIMP nsMailboxService::GetUrlForUri(const nsACString& aMessageURI,
+                                             nsIMsgWindow* aMsgWindow,
+                                             nsIURI** aURL) {
+  NS_ENSURE_ARG_POINTER(aURL);
+  if (StringBeginsWith(aMessageURI, "file:"_ns) ||
+      PL_strstr(PromiseFlatCString(aMessageURI).get(),
+                "type=application/x-message-display") ||
+      StringBeginsWith(aMessageURI, "mailbox:"_ns))
+    return NS_NewURI(aURL, aMessageURI);
+
+  nsresult rv = NS_OK;
+  nsCOMPtr<nsIMsgMailNewsUrl> mailboxurl;
+  rv = PrepareMessageUrl(aMessageURI, nullptr, MailboxAction::FetchMessage,
+                         getter_AddRefs(mailboxurl), aMsgWindow);
+  if (NS_SUCCEEDED(rv) && mailboxurl) {
+    NS_ADDREF(*aURL = mailboxurl);
+  }
+  return rv;
+}
+
+// Takes a mailbox url, this method creates a protocol instance and loads the
+// url into the protocol instance.
+nsresult nsMailboxService::RunMailboxUrl(nsIURI* aMailboxUrl,
+                                         nsISupports* aConsumer) {
+  // create a protocol instance to run the url..
+  RefPtr<nsMailboxProtocol> protocol = new nsMailboxProtocol(aMailboxUrl);
+  // It implements nsIChannel, and all channels require loadInfo.
+  nsCOMPtr<nsILoadInfo> loadInfo = MOZ_TRY(
+      LoadInfo::Create(nsContentUtils::GetSystemPrincipal(), nullptr, nullptr,
+                       nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_SEC_CONTEXT_IS_NULL,
+                       nsIContentPolicy::TYPE_OTHER));
+  protocol->SetLoadInfo(loadInfo);
+  nsresult rv = protocol->Initialize(aMailboxUrl);
+  NS_ENSURE_SUCCESS(rv, rv);
+  return protocol->LoadUrl(aMailboxUrl, aConsumer);
+}
+
+// This function takes a message uri, converts it into a file path & msgKey
+// pair. It then turns that into a mailbox url object. It also registers a url
+// listener if appropriate. AND it can take in a mailbox action and set that
+// field on the returned url as well.
+nsresult nsMailboxService::PrepareMessageUrl(
+    const nsACString& aSrcMsgMailboxURI, nsIUrlListener* aUrlListener,
+    MailboxAction aMailboxAction, nsIMsgMailNewsUrl** aMailboxUrl,
+    nsIMsgWindow* msgWindow) {
+  nsresult rv;
+  nsCOMPtr<nsIMsgMailNewsUrl> url =
+      do_CreateInstance("@mozilla.org/messenger/mailboxurl;1", &rv);
+  if (NS_SUCCEEDED(rv) && url) {
+    RefPtr<nsMailboxUrl> mailboxUrl = do_QueryObject(url);
+    NS_ENSURE_TRUE(mailboxUrl, NS_ERROR_UNEXPECTED);
+
+    // Standalone .eml files opened via file:// URIs: build a mailbox:// URL
+    // with number=0 so the mailbox protocol treats it as a raw file.
+    if (StringBeginsWith(aSrcMsgMailboxURI, "file:"_ns)) {
+      nsCOMPtr<nsIURI> fileUri;
+      rv = NS_NewURI(getter_AddRefs(fileUri), aSrcMsgMailboxURI);
+      NS_ENSURE_SUCCESS(rv, rv);
+      nsCOMPtr<nsIFileURL> fileUrl = do_QueryInterface(fileUri, &rv);
+      NS_ENSURE_SUCCESS(rv, rv);
+      nsCOMPtr<nsIFile> file;
+      rv = fileUrl->GetFile(getter_AddRefs(file));
+      NS_ENSURE_SUCCESS(rv, rv);
+      int64_t fileSize;
+      rv = file->GetFileSize(&fileSize);
+      NS_ENSURE_SUCCESS(rv, rv);
+
+      nsAutoCString mailboxSpec(aSrcMsgMailboxURI);
+      mailboxSpec.Replace(0, 5, "mailbox:"_ns);
+      // Append number=0 with the correct separator: ? if no existing query,
+      // & if there are already query params (e.g.
+      // ?type=application/x-message-display).
+      mailboxSpec.AppendLiteral(
+          mailboxSpec.FindChar('?') == kNotFound ? "?number=0" : "&number=0");
+      rv = url->SetSpecInternal(mailboxSpec);
+      NS_ENSURE_SUCCESS(rv, rv);
+
+      mailboxUrl->SetMailboxAction(aMailboxAction);
+      mailboxUrl->SetMessageSize((uint32_t)fileSize);
+
+      if (aUrlListener) rv = url->RegisterListener(aUrlListener);
+
+      url->SetMsgWindow(msgWindow);
+      nsCOMPtr<nsIMsgMessageUrl> msgUrl = do_QueryInterface(url);
+      if (msgUrl) {
+        msgUrl->SetOriginalSpec(aSrcMsgMailboxURI);
+        msgUrl->SetUri(aSrcMsgMailboxURI);
+      }
+
+      url.forget(aMailboxUrl);
+      return rv;
+    }
+
+    // okay now generate the url string
+    char* urlSpec;
+    nsAutoCString folderURI;
+    nsMsgKey msgKey;
+    nsCString folderPath;
+    const nsPromiseFlatCString& flat = PromiseFlatCString(aSrcMsgMailboxURI);
+    const char* part = PL_strstr(flat.get(), "part=");
+    const char* header = PL_strstr(flat.get(), "header=");
+    rv = nsParseLocalMessageURI(aSrcMsgMailboxURI, folderURI, &msgKey);
+    NS_ENSURE_SUCCESS(rv, rv);
+    rv = nsLocalURI2Path(kMailboxRootURI, folderURI.get(), folderPath);
+
+    if (NS_SUCCEEDED(rv)) {
+      // set up the url spec and initialize the url with it.
+      nsAutoCString buf;
+      MsgEscapeURL(
+          folderPath,
+          nsINetUtil::ESCAPE_URL_DIRECTORY | nsINetUtil::ESCAPE_URL_FORCED,
+          buf);
+      if (part)
+        urlSpec =
+            PR_smprintf("mailbox://%s?number=%lu&%s", buf.get(), msgKey, part);
+      else if (header)
+        urlSpec = PR_smprintf("mailbox://%s?number=%lu&%s", buf.get(), msgKey,
+                              header);
+      else
+        urlSpec = PR_smprintf("mailbox://%s?number=%lu", buf.get(), msgKey);
+
+      rv = url->SetSpecInternal(nsDependentCString(urlSpec));
+      NS_ENSURE_SUCCESS(rv, rv);
+
+      PR_smprintf_free(urlSpec);
+
+      mailboxUrl->SetMailboxAction(aMailboxAction);
+
+      // set up the url listener
+      if (aUrlListener) rv = url->RegisterListener(aUrlListener);
+
+      url->SetMsgWindow(msgWindow);
+      nsCOMPtr<nsIMsgMessageUrl> msgUrl = do_QueryInterface(url);
+      if (msgUrl) {
+        msgUrl->SetOriginalSpec(aSrcMsgMailboxURI);
+        msgUrl->SetUri(aSrcMsgMailboxURI);
+      }
+
+    }  // if we got a url
+
+    url.forget(aMailboxUrl);
+  }  // if we got a url
+
+  return rv;
+}
+
+NS_IMETHODIMP nsMailboxService::GetScheme(nsACString& aScheme) {
+  aScheme = "mailbox";
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsMailboxService::AllowPort(int32_t port, const char* scheme,
+                                          bool* _retval) {
+  NS_ENSURE_ARG_POINTER(_retval);
+  // don't override anything.
+  *_retval = false;
+  return NS_OK;
+}
+
+nsresult nsMailboxService::NewURI(const nsACString& aSpec,
+                                  const char* aOriginCharset, nsIURI* aBaseURI,
+                                  nsIURI** _retval) {
+  NS_ENSURE_ARG_POINTER(_retval);
+  *_retval = 0;
+  nsresult rv;
+  nsCOMPtr<nsIMsgMailNewsUrl> aMsgUri =
+      do_CreateInstance("@mozilla.org/messenger/mailboxurl;1", &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+  // SetSpecInternal must not fail, or else the URL won't have a base URL and
+  // we'll crash later.
+  if (aBaseURI) {
+    nsAutoCString newSpec;
+    rv = aBaseURI->Resolve(aSpec, newSpec);
+    NS_ENSURE_SUCCESS(rv, rv);
+    rv = aMsgUri->SetSpecInternal(newSpec);
+    NS_ENSURE_SUCCESS(rv, rv);
+  } else {
+    rv = aMsgUri->SetSpecInternal(aSpec);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+  aMsgUri.forget(_retval);
+
+  return rv;
+}
+
+NS_IMETHODIMP nsMailboxService::NewChannel(nsIURI* aURI, nsILoadInfo* aLoadInfo,
+                                           nsIChannel** _retval) {
+  NS_ENSURE_ARG_POINTER(aURI);
+  NS_ENSURE_ARG_POINTER(_retval);
+  MOZ_ASSERT(aLoadInfo);
+  nsresult rv = NS_OK;
+  nsAutoCString spec;
+  rv = aURI->GetSpec(spec);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  if (spec.Find("?uidl=") >= 0 || spec.Find("&uidl=") >= 0) {
+    nsCOMPtr<nsIProtocolHandler> handler =
+        do_GetService("@mozilla.org/network/protocol;1?name=pop", &rv);
+    if (NS_SUCCEEDED(rv)) {
+      nsCOMPtr<nsIURI> pop3Uri;
+
+      rv = CreatePop3URI(spec, aURI, getter_AddRefs(pop3Uri));
+      NS_ENSURE_SUCCESS(rv, rv);
+      return handler->NewChannel(pop3Uri, aLoadInfo, _retval);
+    }
+  }
+
+  RefPtr<nsMailboxProtocol> protocol = new nsMailboxProtocol(aURI);
+  if (!protocol) {
+    return NS_ERROR_OUT_OF_MEMORY;
+  }
+
+  rv = protocol->Initialize(aURI);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  rv = protocol->SetLoadInfo(aLoadInfo);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  if (MsgPartUrlNeedsAttachmentDisposition(aURI)) {
+    rv = protocol->SetContentDisposition(nsIChannel::DISPOSITION_ATTACHMENT);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  protocol.forget(_retval);
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsMailboxService::Search(nsIMsgSearchSession* aSearchSession,
+                                       nsIMsgWindow* aMsgWindow,
+                                       nsIMsgFolder* aMsgFolder,
+                                       const nsACString& aMessageUri) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+nsresult nsMailboxService::DecomposeMailboxURI(const nsACString& aMessageURI,
+                                               nsIMsgFolder** aFolder,
+                                               nsMsgKey* aMsgKey) {
+  NS_ENSURE_ARG_POINTER(aFolder);
+  NS_ENSURE_ARG_POINTER(aMsgKey);
+
+  nsresult rv = NS_OK;
+  nsAutoCString folderURI;
+  rv = nsParseLocalMessageURI(aMessageURI, folderURI, aMsgKey);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  return GetOrCreateFolder(folderURI, aFolder);
+}
+
+NS_IMETHODIMP
+nsMailboxService::MessageURIToMsgHdr(const nsACString& uri,
+                                     nsIMsgDBHdr** _retval) {
+  NS_ENSURE_ARG_POINTER(_retval);
+
+  // When an .eml message file is loaded, nsMailboxService::FetchMessage
+  // creates a new 'mailbox' URI  including a 'number=0' search part from the
+  // original 'file' URI spec, which is subsequently returned as
+  //'mailbox-message' URI with additional `#0' by nsMailboxUrl::GetUri.
+  if (StringBeginsWith(uri, "mailbox-message:"_ns) &&
+      StringEndsWith(uri, "number=0#0"_ns)) {
+    nsAutoCString uriString(uri);
+    uriString.Replace(0, 16, "file:"_ns);
+    nsCOMPtr<nsIMsgDBHdr> msgHdr = new nsMsgFileHdr(uriString);
+    msgHdr.forget(_retval);
+    return NS_OK;
+  }
+
+  if (StringBeginsWith(uri, "file:"_ns)) {
+    nsCOMPtr<nsIMsgDBHdr> msgHdr = new nsMsgFileHdr(uri);
+    msgHdr.forget(_retval);
+    return NS_OK;
+  }
+
+  nsCOMPtr<nsIMsgFolder> folder;
+  nsMsgKey msgKey;
+
+  nsresult rv = DecomposeMailboxURI(uri, getter_AddRefs(folder), &msgKey);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  rv = folder->GetMsgHdr(msgKey, _retval);
+  NS_ENSURE_SUCCESS(rv, rv);
+  NS_ENSURE_TRUE(*_retval, NS_MSG_MESSAGE_NOT_FOUND);
+  return NS_OK;
+}
+
+nsresult nsMailboxService::CreatePop3URI(const nsACString& aSpec,
+                                         nsIURI* aBaseURI, nsIURI** _retval) {
+  NS_ENSURE_ARG_POINTER(_retval);
+
+  nsAutoCString folderUri(aSpec);
+  int32_t offset = folderUri.FindChar('?');
+  if (offset != kNotFound) folderUri.SetLength(offset);
+
+  const nsPromiseFlatCString& flat = PromiseFlatCString(aSpec);
+  const char* uidl = PL_strstr(flat.get(), "uidl=");
+  NS_ENSURE_TRUE(uidl, NS_ERROR_FAILURE);
+  uidl += 5;  // skip "uidl="
+  // Extract just the uidl value (up to & or end of string).
+  nsDependentCSubstring uidlValue(uidl, strlen(uidl));
+  int32_t ampPos = uidlValue.FindChar('&');
+  if (ampPos != kNotFound) {
+    uidlValue.SetLength(ampPos);
+  }
+
+  nsresult rv;
+
+  nsCOMPtr<nsIMsgFolder> folder;
+  rv = GetOrCreateFolder(folderUri, getter_AddRefs(folder));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<nsIMsgIncomingServer> server;
+
+  // Extract the message key from the spec for folder scan state lookup.
+  nsMsgKey specMsgKey = nsMsgKey_None;
+  const char* numberPart = PL_strstr(flat.get(), "number=");
+  if (numberPart) {
+    specMsgKey = strtoul(numberPart + 7, nullptr, 10);
+  }
+
+  nsLocalFolderScanState folderScanState;
+  nsCOMPtr<nsIMsgLocalMailFolder> localFolder = do_QueryInterface(folder);
+  nsCOMPtr<nsIMsgDBHdr> msgHdr;
+
+  if (specMsgKey != nsMsgKey_None && localFolder) {
+    folder->GetMsgHdr(specMsgKey, getter_AddRefs(msgHdr));
+    if (msgHdr) {
+      rv = localFolder->GetFolderScanState(&folderScanState);
+      NS_ENSURE_SUCCESS(rv, rv);
+      localFolder->GetUidlFromFolder(&folderScanState, msgHdr);
+      if (!folderScanState.m_accountKey.IsEmpty()) {
+        nsCOMPtr<nsIMsgAccountManager> accountManager =
+            mozilla::components::AccountManager::Service();
+        nsCOMPtr<nsIMsgAccount> account;
+        accountManager->GetAccount(folderScanState.m_accountKey,
+                                   getter_AddRefs(account));
+        if (account) account->GetIncomingServer(getter_AddRefs(server));
+      }
+    }
+  }
+
+  if (!server) rv = folder->GetServer(getter_AddRefs(server));
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<nsIPop3IncomingServer> popServer = do_QueryInterface(server);
+  NS_ENSURE_TRUE(popServer, NS_ERROR_FAILURE);
+
+  nsCString hostname;
+  nsCString username;
+  server->GetHostname(hostname);
+  server->GetUsername(username);
+
+  int32_t port;
+  server->GetPort(&port);
+  if (port == -1) port = 110;  // DEFAULT_POP3_PORT
+
+  nsCString escapedUsername;
+  MsgEscapeString(username, nsINetUtil::ESCAPE_XALPHAS, escapedUsername);
+
+  nsAutoCString popSpec("pop://");
+  popSpec += escapedUsername;
+  popSpec += "@";
+  popSpec += hostname;
+  popSpec += ":";
+  popSpec.AppendInt(port);
+  popSpec += "?uidl=";
+  popSpec += uidlValue;
+  if (specMsgKey != nsMsgKey_None) {
+    popSpec += "&number=";
+    popSpec.AppendInt(specMsgKey);
+  }
+  // Pass the folder URI so Pop3Channel finds the right folder,
+  // even if the account's inbox has moved (e.g. deferred-to switching).
+  // The value is appended raw because getFolderForURL expects the canonical
+  // form. Folder URIs are already percent-escaped so they can't contain
+  // literal & or # that would break query parsing.
+  popSpec += "&folderURI=";
+  popSpec += folderUri;
+
+  nsCOMPtr<nsIUrlListener> urlListener = do_QueryInterface(folder, &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  nsCOMPtr<nsIMsgMailNewsUrl> mailnewsurl =
+      do_CreateInstance("@mozilla.org/messenger/msgmailnewsurl;1", &rv);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  rv = mailnewsurl->SetSpecInternal(popSpec);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  if (urlListener) mailnewsurl->RegisterListener(urlListener);
+
+  rv = mailnewsurl->SetUsernameInternal(escapedUsername);
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  mailnewsurl.forget(_retval);
+  return NS_OK;
+}

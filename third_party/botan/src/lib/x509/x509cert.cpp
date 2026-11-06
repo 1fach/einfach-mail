@@ -1,0 +1,1093 @@
+/*
+* X.509 Certificates
+* (C) 1999-2010,2015,2017,2026 Jack Lloyd
+* (C) 2016 René Korthaus, Rohde & Schwarz Cybersecurity
+*
+* Botan is released under the Simplified BSD License (see license.txt)
+*/
+
+#include <botan/x509cert.h>
+
+#include <botan/asn1_obj.h>
+#include <botan/asn1_time.h>
+#include <botan/ber_dec.h>
+#include <botan/bigint.h>
+#include <botan/hash.h>
+#include <botan/hex.h>
+#include <botan/pk_keys.h>
+#include <botan/uri.h>
+#include <botan/x509_ext.h>
+#include <botan/x509_key.h>
+#include <botan/internal/charset.h>
+#include <sstream>
+
+namespace Botan {
+
+class X509_Certificate_Data final {
+   public:
+      X509_Serial_Number m_serial;
+      // TODO(Botan4) once negative serials are rejected this extra vector can go away
+      std::vector<uint8_t> m_serial_bits;
+      AlgorithmIdentifier m_sig_algo_inner;
+      X509_DN m_issuer_dn;
+      X509_DN m_subject_dn;
+      std::vector<uint8_t> m_issuer_dn_bits;
+      std::vector<uint8_t> m_subject_dn_bits;
+      X509_Time m_not_before;
+      X509_Time m_not_after;
+      std::vector<uint8_t> m_subject_public_key_bits;
+      std::vector<uint8_t> m_subject_public_key_bits_seq;
+      std::vector<uint8_t> m_subject_public_key_bitstring;
+      AlgorithmIdentifier m_subject_public_key_algid;
+
+      // TODO(Botan4) change this to std::array<uint8_t, 20> and getter to span
+      std::vector<uint8_t> m_subject_public_key_bitstring_sha1;
+      std::array<uint8_t, 32> m_subject_public_key_bitstring_sha256 = {};
+
+      std::vector<uint8_t> m_v2_issuer_key_id;
+      std::vector<uint8_t> m_v2_subject_key_id;
+      Extensions m_v3_extensions;
+
+      std::vector<OID> m_extended_key_usage;
+      std::vector<uint8_t> m_authority_key_id;
+      std::vector<uint8_t> m_subject_key_id;
+      std::vector<OID> m_cert_policies;
+
+      std::vector<URI> m_crl_distribution_points;
+      std::vector<URI> m_ocsp_responders;
+      std::vector<URI> m_ca_issuers;
+
+      // TODO(Botan4) change this to std::array<uint8_t, 32> and getter to span
+      std::vector<uint8_t> m_issuer_dn_bits_sha256;
+      // TODO(Botan4) change this to std::array<uint8_t, 32> and getter to span
+      std::vector<uint8_t> m_subject_dn_bits_sha256;
+      std::array<uint8_t, 20> m_issuer_dn_bits_sha1 = {};
+      std::array<uint8_t, 20> m_subject_dn_bits_sha1 = {};
+
+      std::string m_fingerprint_sha1;
+      std::string m_fingerprint_sha256;
+
+      std::array<uint8_t, 20> m_cert_data_sha1 = {};
+      std::array<uint8_t, 32> m_cert_data_sha256 = {};
+
+      AlternativeName m_subject_alt_name;
+      AlternativeName m_issuer_alt_name;
+      NameConstraints m_name_constraints;
+
+      size_t m_version = 0;
+      std::optional<size_t> m_path_len_constraint;
+      Key_Constraints m_key_constraints;
+      bool m_self_signed = false;
+      bool m_is_ca_certificate = false;
+      bool m_subject_alt_name_exists = false;
+      bool m_skip_revocation_check = false;
+};
+
+X509_Certificate::~X509_Certificate() = default;
+
+std::string X509_Certificate::PEM_label() const {
+   return "CERTIFICATE";
+}
+
+std::vector<std::string> X509_Certificate::alternate_PEM_labels() const {
+   return {"X509 CERTIFICATE"};
+}
+
+X509_Certificate::X509_Certificate(DataSource& src) {
+   load_data(src);
+}
+
+X509_Certificate::X509_Certificate(std::span<const uint8_t> in) {
+   DataSource_Memory src(in);
+   load_data(src);
+}
+
+#if defined(BOTAN_TARGET_OS_HAS_FILESYSTEM)
+X509_Certificate::X509_Certificate(std::string_view fsname) {
+   DataSource_Stream src(fsname, true);
+   load_data(src);
+}
+#endif
+
+namespace {
+
+std::unique_ptr<X509_Certificate_Data> parse_x509_cert_body(const X509_Object& obj) {
+   auto data = std::make_unique<X509_Certificate_Data>();
+
+   BER_Object public_key;
+   BER_Object v3_exts_data;
+
+   BER_Decoder(obj.signed_body(), BER_Decoder::Limits::DER())
+      .decode_optional(data->m_version, ASN1_Type(0), ASN1_Class::Constructed | ASN1_Class::ContextSpecific)
+      .decode(data->m_serial)
+      .decode(data->m_sig_algo_inner)
+      .decode(data->m_issuer_dn)
+      .start_sequence()
+      .decode(data->m_not_before)
+      .decode(data->m_not_after)
+      .end_cons()
+      .decode(data->m_subject_dn)
+      .get_next(public_key)
+      .decode_optional_string(data->m_v2_issuer_key_id, ASN1_Type::BitString, 1)
+      .decode_optional_string(data->m_v2_subject_key_id, ASN1_Type::BitString, 2)
+      .get_next(v3_exts_data)
+      .verify_end("TBSCertificate has extra data after extensions block");
+
+   if(data->m_version > 2) {
+      throw Decoding_Error("Unknown X.509 cert version " + std::to_string(data->m_version));
+   }
+   if(obj.signature_algorithm() != data->m_sig_algo_inner) {
+      throw Decoding_Error("X.509 Certificate had differing algorithm identifiers in inner and outer ID fields");
+   }
+
+   public_key.assert_is_a(ASN1_Type::Sequence, ASN1_Class::Constructed, "X.509 certificate public key");
+
+   // for general sanity convert wire version (0 based) to standards version (v1 .. v3)
+   data->m_version += 1;
+
+   data->m_serial_bits = data->m_serial.magnitude();
+   data->m_subject_dn_bits = ASN1::put_in_sequence(data->m_subject_dn.get_bits());
+   data->m_issuer_dn_bits = ASN1::put_in_sequence(data->m_issuer_dn.get_bits());
+
+   data->m_subject_public_key_bits.assign(public_key.bits(), public_key.bits() + public_key.length());
+
+   data->m_subject_public_key_bits_seq = ASN1::put_in_sequence(data->m_subject_public_key_bits);
+
+   BER_Decoder(data->m_subject_public_key_bits, BER_Decoder::Limits::DER())
+      .decode(data->m_subject_public_key_algid)
+      .decode_octet_aligned_bitstring(data->m_subject_public_key_bitstring)
+      .verify_end();
+
+   if(v3_exts_data.is_a(3, ASN1_Class::Constructed | ASN1_Class::ContextSpecific)) {
+      // Path validation will reject a v1/v2 cert with v3 extensions
+      BER_Decoder cert_extensions(v3_exts_data, BER_Decoder::Limits::DER());
+      data->m_v3_extensions.decode_from(cert_extensions, Extension_Context::Certificate);
+      cert_extensions.verify_end();
+   } else if(v3_exts_data.is_set()) {
+      throw BER_Bad_Tag("Unknown tag in X.509 cert", v3_exts_data.tagging());
+   }
+
+   // Now cache some fields from the extensions
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::Key_Usage>()) {
+      data->m_key_constraints = ext->get_constraints();
+      /*
+      RFC 5280: When the keyUsage extension appears in a certificate,
+      at least one of the bits MUST be set to 1.
+      */
+      if(data->m_key_constraints.empty()) {
+         throw Decoding_Error("Certificate has invalid encoding for KeyUsage");
+      }
+   }
+
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::Subject_Key_ID>()) {
+      data->m_subject_key_id = ext->get_key_id();
+   }
+
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::Authority_Key_ID>()) {
+      data->m_authority_key_id = ext->get_key_id();
+   }
+
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::Name_Constraints>()) {
+      data->m_name_constraints = ext->get_name_constraints();
+   }
+
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::Extended_Key_Usage>()) {
+      data->m_extended_key_usage = ext->object_identifiers();
+      /*
+      RFC 5280 section 4.2.1.12
+
+      "This extension indicates one or more purposes ..."
+
+      "If the extension is present, then the certificate MUST only be
+      used for one of the purposes indicated."
+
+      Thus we reject an EKU extension which is empty, since this indicates
+      the certificate cannot be used for any purpose.
+      */
+      if(data->m_extended_key_usage.empty()) {
+         throw Decoding_Error("Certificate has invalid empty EKU extension");
+      }
+   }
+
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::Basic_Constraints>()) {
+      /*
+      * RFC 5280 4.2.1.9 requires that conforming CAs "MUST mark the
+      * extension [basicConstraints] as critical in such certificates"
+      * but places no such requirement on validators.
+      */
+      if(ext->is_ca() == true) {
+         /*
+         * RFC 5280 section 4.2.1.3 requires that CAs include KeyUsage in all
+         * intermediate CA certificates they issue. Currently we accept it being
+         * missing, as do most other implementations. But it may be worth
+         * removing this entirely, or alternately adding a warning level
+         * validation failure for it.
+         */
+         const bool allowed_by_ku =
+            data->m_key_constraints.includes(Key_Constraints::KeyCertSign) || data->m_key_constraints.empty();
+
+         /*
+         * If the extended key usages are set then we must restrict the usage in
+         * accordance with it as well.
+         *
+         * RFC 5280 does not define any extended key usages compatible with certificate
+         * signing, but some CAs use serverAuth, clientAuth, OCSPSigning, or AnyExtendedKeyUsage
+         * for this purpose, even though clearly all of these (besides AEKU) are invalid.
+         * This check at least allows excluding a certificate which is set for only eg
+         * timestamping or code signing, and that seems about the best we can possibly enforce.
+         * OpenSSL, BoringSSL, and Go all completely ignore EKUs in determining ability to
+         * issue certs.
+         */
+         const bool allowed_by_ext_ku = [](const std::vector<OID>& ext_ku) -> bool {
+            if(ext_ku.empty()) {
+               return true;
+            }
+
+            const auto server_auth = OID::from_name("PKIX.ServerAuth");
+            const auto client_auth = OID::from_name("PKIX.ClientAuth");
+            const auto ocsp_sign = OID::from_name("PKIX.OCSPSigning");
+            const auto any_eku = OID::from_name("X509v3.AnyExtendedKeyUsage");
+
+            for(const auto& oid : ext_ku) {
+               if(oid == any_eku || oid == server_auth || oid == client_auth || oid == ocsp_sign) {
+                  return true;
+               }
+            }
+
+            return false;
+         }(data->m_extended_key_usage);
+
+         if(allowed_by_ku && allowed_by_ext_ku) {
+            data->m_is_ca_certificate = true;
+            data->m_path_len_constraint = ext->path_length_constraint();
+         }
+      }
+   }
+
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::Issuer_Alternative_Name>()) {
+      data->m_issuer_alt_name = ext->get_alt_name();
+   }
+
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::Subject_Alternative_Name>()) {
+      data->m_subject_alt_name = ext->get_alt_name();
+   }
+
+   // This will be set even if SAN parsing failed entirely eg due to a decoding error
+   // or if the SAN is empty. This is used to guard against using the CN for domain
+   // name checking.
+   const auto san_oid = OID::from_string("X509v3.SubjectAlternativeName");
+   data->m_subject_alt_name_exists = data->m_v3_extensions.extension_set(san_oid);
+
+   /*
+   * RFC 9608 Section 4:
+   *
+   *   If the noRevAvail certificate extension specified in this document is
+   *   present or the ocsp-nocheck certificate extension [RFC6960] is
+   *   present, then Step (a)(3) is skipped.  Otherwise, revocation status
+   *   determination of the certificate is performed.
+   */
+   data->m_skip_revocation_check =
+      data->m_v3_extensions.extension_set(Cert_Extension::NoRevocationAvailable::static_oid()) ||
+      data->m_v3_extensions.extension_set(Cert_Extension::OCSP_NoCheck::static_oid());
+
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::Certificate_Policies>()) {
+      data->m_cert_policies = ext->get_policy_oids();
+   }
+
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::Authority_Information_Access>()) {
+      data->m_ocsp_responders = ext->ocsp_responder_uris();
+      data->m_ca_issuers = ext->ca_issuer_uris();
+   }
+
+   if(const auto* ext = data->m_v3_extensions.get_extension_object_as<Cert_Extension::CRL_Distribution_Points>()) {
+      data->m_crl_distribution_points = ext->crl_distribution_point_uris();
+   }
+
+   /*
+   Determine if this certificate appears to be self-issued (subject == issuer).
+   This is only a heuristic used for path building so it's ok it is not precise.
+   The self-signature is verified during path validation.
+   */
+   if(data->m_subject_dn == data->m_issuer_dn) {
+      if(!data->m_subject_key_id.empty() && !data->m_authority_key_id.empty()) {
+         /*
+         Both SKID and AKID are set so we can reliably determine self-signed vs
+         self-issued by comparing the two
+         */
+         data->m_self_signed = (data->m_subject_key_id == data->m_authority_key_id);
+      } else {
+         /*
+         Without both SKID and AKID we can't determine with certainty. Assume
+         self-signed since that's by far the common case.
+         */
+         data->m_self_signed = true;
+      }
+   }
+
+   const std::vector<uint8_t> full_encoding = obj.BER_encode();
+
+   if(auto sha1 = HashFunction::create("SHA-1")) {
+      sha1->update(data->m_subject_public_key_bitstring);
+      data->m_subject_public_key_bitstring_sha1 = sha1->final_stdvec();
+      // otherwise left as empty, and we will throw if subject_public_key_bitstring_sha1 is called
+
+      sha1->update(full_encoding);
+      sha1->final(data->m_cert_data_sha1);
+      data->m_fingerprint_sha1 = format_hex_fingerprint(data->m_cert_data_sha1);
+
+      sha1->update(data->m_issuer_dn_bits);
+      sha1->final(data->m_issuer_dn_bits_sha1);
+
+      sha1->update(data->m_subject_dn_bits);
+      sha1->final(data->m_subject_dn_bits_sha1);
+   }
+
+   // SHA-256 is a hard dependency of this module
+   auto sha256 = HashFunction::create_or_throw("SHA-256");
+   sha256->update(data->m_issuer_dn_bits);
+   data->m_issuer_dn_bits_sha256 = sha256->final_stdvec();
+
+   sha256->update(data->m_subject_dn_bits);
+   data->m_subject_dn_bits_sha256 = sha256->final_stdvec();
+
+   sha256->update(full_encoding);
+   sha256->final(data->m_cert_data_sha256);
+   data->m_fingerprint_sha256 = format_hex_fingerprint(data->m_cert_data_sha256);
+
+   sha256->update(data->m_subject_public_key_bitstring);
+   sha256->final(data->m_subject_public_key_bitstring_sha256);
+
+   return data;
+}
+
+}  // namespace
+
+/*
+* Decode the TBSCertificate data
+*/
+void X509_Certificate::force_decode() {
+   m_data.reset();
+   m_data = parse_x509_cert_body(*this);
+}
+
+const X509_Certificate_Data& X509_Certificate::data() const {
+   if(m_data == nullptr) {
+      throw Invalid_State("X509_Certificate uninitialized");
+   }
+   return *m_data;
+}
+
+uint32_t X509_Certificate::x509_version() const {
+   return static_cast<uint32_t>(data().m_version);
+}
+
+bool X509_Certificate::is_self_signed() const {
+   return data().m_self_signed;
+}
+
+const X509_Time& X509_Certificate::not_before() const {
+   return data().m_not_before;
+}
+
+const X509_Time& X509_Certificate::not_after() const {
+   return data().m_not_after;
+}
+
+const AlgorithmIdentifier& X509_Certificate::subject_public_key_algo() const {
+   return data().m_subject_public_key_algid;
+}
+
+const std::vector<uint8_t>& X509_Certificate::v2_issuer_key_id() const {
+   return data().m_v2_issuer_key_id;
+}
+
+const std::vector<uint8_t>& X509_Certificate::v2_subject_key_id() const {
+   return data().m_v2_subject_key_id;
+}
+
+const std::vector<uint8_t>& X509_Certificate::subject_public_key_bits() const {
+   return data().m_subject_public_key_bits;
+}
+
+const std::vector<uint8_t>& X509_Certificate::subject_public_key_info() const {
+   return data().m_subject_public_key_bits_seq;
+}
+
+const std::vector<uint8_t>& X509_Certificate::subject_public_key_bitstring() const {
+   return data().m_subject_public_key_bitstring;
+}
+
+const std::vector<uint8_t>& X509_Certificate::subject_public_key_bitstring_sha1() const {
+   if(data().m_subject_public_key_bitstring_sha1.empty()) {
+      throw Encoding_Error("X509_Certificate::subject_public_key_bitstring_sha1 called but SHA-1 disabled in build");
+   }
+
+   return data().m_subject_public_key_bitstring_sha1;
+}
+
+std::span<const uint8_t, 32> X509_Certificate::subject_public_key_bitstring_sha256() const {
+   return data().m_subject_public_key_bitstring_sha256;
+}
+
+const std::vector<uint8_t>& X509_Certificate::authority_key_id() const {
+   return data().m_authority_key_id;
+}
+
+const std::vector<uint8_t>& X509_Certificate::subject_key_id() const {
+   return data().m_subject_key_id;
+}
+
+const std::vector<uint8_t>& X509_Certificate::serial_number() const {
+   return data().m_serial_bits;
+}
+
+const X509_Serial_Number& X509_Certificate::serial() const {
+   return data().m_serial;
+}
+
+bool X509_Certificate::is_serial_negative() const {
+   return data().m_serial.is_negative();
+}
+
+bool X509_Certificate::skip_revocation_check() const {
+   return data().m_skip_revocation_check;
+}
+
+const X509_DN& X509_Certificate::issuer_dn() const {
+   return data().m_issuer_dn;
+}
+
+const X509_DN& X509_Certificate::subject_dn() const {
+   return data().m_subject_dn;
+}
+
+const std::vector<uint8_t>& X509_Certificate::raw_issuer_dn() const {
+   return data().m_issuer_dn_bits;
+}
+
+const std::vector<uint8_t>& X509_Certificate::raw_subject_dn() const {
+   return data().m_subject_dn_bits;
+}
+
+std::span<const uint8_t, 20> X509_Certificate::certificate_data_sha1() const {
+   if(data().m_fingerprint_sha1.empty()) {
+      throw Not_Implemented("SHA-1 not available");
+   }
+   return data().m_cert_data_sha1;
+}
+
+std::span<const uint8_t, 32> X509_Certificate::certificate_data_sha256() const {
+   return data().m_cert_data_sha256;
+}
+
+bool X509_Certificate::is_CA_cert() const {
+   if(data().m_version < 3 && data().m_self_signed) {
+      return true;
+   }
+
+   return data().m_is_ca_certificate;
+}
+
+uint32_t X509_Certificate::path_limit() const {
+   if(data().m_version < 3 && data().m_self_signed) {
+      return 32;  // in theory infinite, but this is more than enough
+   }
+
+   return static_cast<uint32_t>(data().m_path_len_constraint.value_or(Cert_Extension::NO_CERT_PATH_LIMIT));
+}
+
+std::optional<size_t> X509_Certificate::path_length_constraint() const {
+   return data().m_path_len_constraint;
+}
+
+Key_Constraints X509_Certificate::constraints() const {
+   return data().m_key_constraints;
+}
+
+const std::vector<OID>& X509_Certificate::extended_key_usage() const {
+   return data().m_extended_key_usage;
+}
+
+const std::vector<OID>& X509_Certificate::certificate_policy_oids() const {
+   return data().m_cert_policies;
+}
+
+const NameConstraints& X509_Certificate::name_constraints() const {
+   return data().m_name_constraints;
+}
+
+const Extensions& X509_Certificate::v3_extensions() const {
+   return data().m_v3_extensions;
+}
+
+bool X509_Certificate::has_constraints(Key_Constraints usage) const {
+   // Unlike allowed_usage, returns false if constraints was not set
+   return constraints().includes(usage);
+}
+
+bool X509_Certificate::allowed_usage(Key_Constraints usage) const {
+   if(constraints().empty()) {
+      return true;
+   }
+   return constraints().includes(usage);
+}
+
+bool X509_Certificate::allowed_extended_usage(std::string_view usage) const {
+   return allowed_extended_usage(OID::from_string(usage));
+}
+
+bool X509_Certificate::allowed_extended_usage(const OID& usage) const {
+   const std::vector<OID>& ex = extended_key_usage();
+   if(ex.empty()) {
+      return true;
+   }
+
+   if(has_ex_constraint(usage)) {
+      return true;
+   }
+
+   return false;
+}
+
+bool X509_Certificate::allowed_usage(Usage_Type usage) const {
+   // These follow suggestions in RFC 5280 4.2.1.12
+
+   switch(usage) {
+      case Usage_Type::UNSPECIFIED:
+         return true;
+
+      case Usage_Type::TLS_SERVER_AUTH:
+         return (allowed_usage(Key_Constraints::KeyAgreement) || allowed_usage(Key_Constraints::KeyEncipherment) ||
+                 allowed_usage(Key_Constraints::DigitalSignature)) &&
+                allowed_extended_usage("PKIX.ServerAuth");
+
+      case Usage_Type::TLS_CLIENT_AUTH:
+         return (allowed_usage(Key_Constraints::DigitalSignature) || allowed_usage(Key_Constraints::KeyAgreement)) &&
+                allowed_extended_usage("PKIX.ClientAuth");
+
+      case Usage_Type::OCSP_RESPONDER:
+         return (allowed_usage(Key_Constraints::DigitalSignature) || allowed_usage(Key_Constraints::NonRepudiation)) &&
+                has_ex_constraint("PKIX.OCSPSigning");
+
+      case Usage_Type::CERTIFICATE_AUTHORITY:
+         return is_CA_cert();
+
+      case Usage_Type::ENCRYPTION:
+         return (allowed_usage(Key_Constraints::KeyEncipherment) || allowed_usage(Key_Constraints::DataEncipherment));
+   }
+
+   return false;
+}
+
+bool X509_Certificate::has_ex_constraint(std::string_view ex_constraint) const {
+   return has_ex_constraint(OID::from_string(ex_constraint));
+}
+
+bool X509_Certificate::has_ex_constraint(const OID& usage) const {
+   const auto any_eku = OID::from_name("X509v3.AnyExtendedKeyUsage");
+   const auto ocsp_eku = OID::from_name("PKIX.OCSPSigning");
+
+   for(const auto& ext_ku : extended_key_usage()) {
+      if(ext_ku == usage) {
+         return true;
+      }
+
+      /*
+      Do not accept AnyExtendedKeyUsage for OCSP due to RFC 6960 4.2.2.2:
+
+      OCSP signing delegation SHALL be designated by the inclusion of
+      id-kp-OCSPSigning in an extended key usage certificate extension
+      included in the OCSP response signer's certificate.
+      */
+      if(ext_ku == any_eku && usage != ocsp_eku) {
+         return true;
+      }
+   }
+
+   return false;
+}
+
+/*
+* Return if a certificate extension is marked critical
+*/
+bool X509_Certificate::is_critical(std::string_view ex_name) const {
+   return v3_extensions().critical_extension_set(OID::from_string(ex_name));
+}
+
+namespace {
+
+std::vector<std::string> uris_as_strings(const std::vector<URI>& uris) {
+   std::vector<std::string> out;
+   out.reserve(uris.size());
+   for(const auto& uri : uris) {
+      out.push_back(uri.original_input());
+   }
+   return out;
+}
+
+}  // namespace
+
+std::string X509_Certificate::ocsp_responder() const {
+   if(data().m_ocsp_responders.empty()) {
+      return {};
+   }
+   return data().m_ocsp_responders[0].original_input();
+}
+
+std::vector<std::string> X509_Certificate::ocsp_responders() const {
+   return uris_as_strings(data().m_ocsp_responders);
+}
+
+const std::vector<URI>& X509_Certificate::ocsp_responder_uris() const {
+   return data().m_ocsp_responders;
+}
+
+std::vector<std::string> X509_Certificate::ca_issuers() const {
+   return uris_as_strings(data().m_ca_issuers);
+}
+
+const std::vector<URI>& X509_Certificate::ca_issuer_uris() const {
+   return data().m_ca_issuers;
+}
+
+std::vector<std::string> X509_Certificate::crl_distribution_points() const {
+   return uris_as_strings(data().m_crl_distribution_points);
+}
+
+const std::vector<URI>& X509_Certificate::crl_distribution_point_uris() const {
+   return data().m_crl_distribution_points;
+}
+
+std::string X509_Certificate::crl_distribution_point() const {
+   // just returns the first (arbitrarily)
+   if(!data().m_crl_distribution_points.empty()) {
+      return data().m_crl_distribution_points[0].original_input();
+   }
+   return "";
+}
+
+std::vector<EmailAddress> X509_Certificate::subject_email_addresses() const {
+   const auto& san_emails = subject_alt_name().email_addresses();
+
+   std::vector<EmailAddress> out;
+   out.reserve(san_emails.size());
+
+   for(const auto& addr : san_emails) {
+      out.push_back(addr);
+   }
+
+   for(const auto& dn_email_str : subject_dn().get_attribute("PKCS9.EmailAddress")) {
+      if(auto parsed = EmailAddress::from_string(dn_email_str)) {
+         out.push_back(std::move(*parsed));
+      }
+   }
+
+   return out;
+}
+
+const AlternativeName& X509_Certificate::subject_alt_name() const {
+   return data().m_subject_alt_name;
+}
+
+const AlternativeName& X509_Certificate::issuer_alt_name() const {
+   return data().m_issuer_alt_name;
+}
+
+namespace {
+
+std::vector<std::string> get_cert_user_info(std::string_view req, const X509_DN& dn, const AlternativeName& alt_name) {
+   if(dn.has_field(req)) {
+      return dn.get_attribute(req);
+   } else if(req == "RFC822" || req == "Email") {
+      std::vector<std::string> out;
+      out.reserve(alt_name.email_addresses().size());
+      for(const auto& addr : alt_name.email_addresses()) {
+         out.push_back(addr.to_string());
+      }
+      return out;
+   } else if(req == "DNS") {
+      std::vector<std::string> out;
+      out.reserve(alt_name.dns_names().size());
+      for(const auto& dns : alt_name.dns_names()) {
+         out.push_back(dns.to_string());
+      }
+      return out;
+   } else if(req == "URI") {
+      std::vector<std::string> out;
+      out.reserve(alt_name.uri_names().size());
+      for(const auto& uri : alt_name.uri_names()) {
+         out.push_back(uri.original_input());
+      }
+      return out;
+   } else if(req == "IP") {
+      std::vector<std::string> ip_str;
+      for(const auto& ipv4 : alt_name.ipv4_addresses()) {
+         ip_str.push_back(ipv4.to_string());
+      }
+      return ip_str;
+   } else if(req == "IPv6") {
+      std::vector<std::string> ip_str;
+      for(const auto& ipv6 : alt_name.ipv6_addresses()) {
+         ip_str.push_back(ipv6.to_string());
+      }
+      return ip_str;
+   } else {
+      return {};
+   }
+}
+
+}  // namespace
+
+/*
+* Return information about the subject
+*/
+std::vector<std::string> X509_Certificate::subject_info(std::string_view req) const {
+   return get_cert_user_info(req, subject_dn(), subject_alt_name());
+}
+
+/*
+* Return information about the issuer
+*/
+std::vector<std::string> X509_Certificate::issuer_info(std::string_view req) const {
+   return get_cert_user_info(req, issuer_dn(), issuer_alt_name());
+}
+
+/*
+* Return the public key in this certificate
+*/
+std::unique_ptr<Public_Key> X509_Certificate::subject_public_key() const {
+   try {
+      return std::unique_ptr<Public_Key>(X509::load_key(subject_public_key_info()));
+   } catch(std::exception& e) {
+      throw Decoding_Error("X509_Certificate::subject_public_key", e);
+   }
+}
+
+std::unique_ptr<Public_Key> X509_Certificate::load_subject_public_key() const {
+   return this->subject_public_key();
+}
+
+const std::vector<uint8_t>& X509_Certificate::raw_issuer_dn_sha256() const {
+   if(data().m_issuer_dn_bits_sha256.empty()) {
+      throw Encoding_Error("X509_Certificate::raw_issuer_dn_sha256 called but SHA-256 disabled in build");
+   }
+   return data().m_issuer_dn_bits_sha256;
+}
+
+const std::vector<uint8_t>& X509_Certificate::raw_subject_dn_sha256() const {
+   if(data().m_subject_dn_bits_sha256.empty()) {
+      throw Encoding_Error("X509_Certificate::raw_subject_dn_sha256 called but SHA-256 disabled in build");
+   }
+   return data().m_subject_dn_bits_sha256;
+}
+
+std::span<const uint8_t, 20> X509_Certificate::raw_issuer_dn_sha1() const {
+   return data().m_issuer_dn_bits_sha1;
+}
+
+std::span<const uint8_t, 20> X509_Certificate::raw_subject_dn_sha1() const {
+   return data().m_subject_dn_bits_sha1;
+}
+
+std::string X509_Certificate::fingerprint(std::string_view hash_name) const {
+   /*
+   * The SHA-1 and SHA-256 fingerprints are precomputed since these
+   * are the most commonly used. Especially, SHA-256 fingerprints are
+   * used for cycle detection during path construction.
+   *
+   * If SHA-1 or SHA-256 was missing at parsing time the vectors are
+   * left empty in which case we fall back to create_hex_fingerprint
+   * which will throw if the hash is unavailable.
+   */
+   if(hash_name == "SHA-256" && !data().m_fingerprint_sha256.empty()) {
+      return data().m_fingerprint_sha256;
+   } else if(hash_name == "SHA-1" && !data().m_fingerprint_sha1.empty()) {
+      return data().m_fingerprint_sha1;
+   } else {
+      return create_hex_fingerprint(this->BER_encode(), hash_name);
+   }
+}
+
+X509_Certificate::Tag X509_Certificate::tag() const {
+   return Tag(data().m_cert_data_sha256);
+}
+
+bool X509_Certificate::matches_dns_name(const DNSName& name) const {
+   const auto& sans = subject_alt_name().dns_names();
+   if(!sans.empty()) {
+      for(const auto& san : sans) {
+         if(name.matches_wildcard(san.name())) {
+            return true;
+         }
+      }
+      return false;
+   }
+
+   /*
+   Fall back to CN for DNS name only if no SAN is included
+   We assume if the issuer knew about SAN then they would have included
+   the DNS name there if the intention was to provide such a name.
+   */
+   if(!data().m_subject_alt_name_exists) {
+      for(const auto& cn : subject_dn().get_attribute("CN")) {
+         if(auto cn_dns = DNSName::from_san_string(cn)) {
+            if(name.matches_wildcard(cn_dns->name())) {
+               return true;
+            }
+         }
+      }
+   }
+
+   return false;
+}
+
+bool X509_Certificate::matches_ip(const IPv4Address& address) const {
+   return subject_alt_name().ipv4_addresses().contains(address);
+}
+
+bool X509_Certificate::matches_ip(const IPv6Address& address) const {
+   return subject_alt_name().ipv6_addresses().contains(address);
+}
+
+bool X509_Certificate::matches_dns_name(std::string_view name) const {
+   if(name.empty()) {
+      return false;
+   }
+
+   if(auto req_ipv4 = IPv4Address::from_string(name)) {
+      return matches_ip(*req_ipv4);
+   }
+
+   if(auto req_ipv6 = IPv6Address::from_string(name)) {
+      return matches_ip(*req_ipv6);
+   }
+
+   if(auto parsed = DNSName::from_string(name)) {
+      return matches_dns_name(*parsed);
+   }
+
+   return false;
+}
+
+/*
+* Compare two certificates for equality
+*/
+bool X509_Certificate::operator==(const X509_Certificate& other) const {
+   return (this->signature() == other.signature() && this->signature_algorithm() == other.signature_algorithm() &&
+           this->signed_body() == other.signed_body());
+}
+
+bool X509_Certificate::operator<(const X509_Certificate& other) const {
+   /* If signature values are not equal, sort by lexicographic ordering of that */
+   if(this->signature() != other.signature()) {
+      return (this->signature() < other.signature());
+   }
+
+   // Then compare the signed contents
+   return this->signed_body() < other.signed_body();
+}
+
+/*
+* X.509 Certificate Comparison
+*/
+bool operator!=(const X509_Certificate& cert1, const X509_Certificate& cert2) {
+   return !(cert1 == cert2);
+}
+
+namespace {
+
+void format_alt_name(std::ostream& out, std::string_view label, const AlternativeName& alt_name) {
+   if(alt_name.is_empty()) {
+      return;
+   }
+
+   out << label << ":\n";
+
+   for(const auto& dns : alt_name.dns_names()) {
+      out << "   DNS: " << escape_control_chars(dns.to_string()) << "\n";
+   }
+   for(const auto& ipv4 : alt_name.ipv4_addresses()) {
+      out << "   IP: " << ipv4.to_string() << "\n";
+   }
+   for(const auto& ipv6 : alt_name.ipv6_addresses()) {
+      out << "   IP: " << ipv6.to_string() << "\n";
+   }
+   for(const auto& uri : alt_name.uri_names()) {
+      out << "   URI: " << escape_control_chars(uri.original_input()) << "\n";
+   }
+   for(const auto& email : alt_name.email_addresses()) {
+      out << "   Email: " << escape_control_chars(email.to_string()) << "\n";
+   }
+   for(const auto& mbox : alt_name.smtp_utf8_mailboxes()) {
+      out << "   SmtpUTF8: " << escape_control_chars(mbox.to_string()) << "\n";
+   }
+   for(const auto& dn : alt_name.directory_names()) {
+      out << "   DirName: " << dn << "\n";
+   }
+   for(const auto& oid : alt_name.registered_ids()) {
+      out << "   RegisteredID: " << oid.to_formatted_string() << "\n";
+   }
+
+   // SmtpUTF8Mailbox values are also retained verbatim in other_name_values;
+   // skip them here since they are already printed in decoded form above
+   const auto smtp_utf8_oid = OID::from_string("PKIX.SmtpUTF8Mailbox");
+   for(const auto& other : alt_name.other_name_values()) {
+      if(other.oid() == smtp_utf8_oid) {
+         continue;
+      }
+      out << "   OtherName " << other.oid().to_formatted_string() << ": " << hex_encode(other.value()) << "\n";
+   }
+}
+
+}  // namespace
+
+std::string X509_Certificate::to_string() const {
+   std::ostringstream out;
+
+   out << "Version: " << this->x509_version() << "\n";
+   out << "Subject: " << subject_dn() << "\n";
+   out << "Issuer: " << issuer_dn() << "\n";
+   out << "Issued: " << this->not_before().readable_string() << "\n";
+   out << "Expires: " << this->not_after().readable_string() << "\n";
+
+   try {
+      auto pubkey = this->subject_public_key();
+      out << "Public Key [" << pubkey->algo_name() << "-" << pubkey->key_length() << "]\n\n";
+      out << X509::PEM_encode(*pubkey) << "\n";
+   } catch(const Decoding_Error& ex) {
+      const AlgorithmIdentifier& alg_id = this->subject_public_key_algo();
+      out << "Public Key Invalid!\n"
+          << " OID: " << alg_id.oid().to_formatted_string() << "\n"
+          << " Error: " << ex.what() << "\n"
+          << " Hex: " << hex_encode(this->subject_public_key_bitstring()) << "\n";
+   }
+
+   format_alt_name(out, "Subject Alternative Name", this->subject_alt_name());
+
+   out << "Constraints:\n";
+   const Key_Constraints constraints = this->constraints();
+   if(constraints.empty()) {
+      out << " No key constraints set\n";
+   } else {
+      if(constraints.includes(Key_Constraints::DigitalSignature)) {
+         out << "   Digital Signature\n";
+      }
+      if(constraints.includes(Key_Constraints::NonRepudiation)) {
+         out << "   Non-Repudiation\n";
+      }
+      if(constraints.includes(Key_Constraints::KeyEncipherment)) {
+         out << "   Key Encipherment\n";
+      }
+      if(constraints.includes(Key_Constraints::DataEncipherment)) {
+         out << "   Data Encipherment\n";
+      }
+      if(constraints.includes(Key_Constraints::KeyAgreement)) {
+         out << "   Key Agreement\n";
+      }
+      if(constraints.includes(Key_Constraints::KeyCertSign)) {
+         out << "   Cert Sign\n";
+      }
+      if(constraints.includes(Key_Constraints::CrlSign)) {
+         out << "   CRL Sign\n";
+      }
+      if(constraints.includes(Key_Constraints::EncipherOnly)) {
+         out << "   Encipher Only\n";
+      }
+      if(constraints.includes(Key_Constraints::DecipherOnly)) {
+         out << "   Decipher Only\n";
+      }
+   }
+
+   if(this->is_CA_cert()) {
+      out << "Basic Constraints: CA";
+      if(const auto path_len = this->path_length_constraint()) {
+         out << ", path length " << *path_len;
+      }
+      out << "\n";
+   }
+
+   const std::vector<OID>& policies = this->certificate_policy_oids();
+   if(!policies.empty()) {
+      out << "Policies: "
+          << "\n";
+      for(const auto& oid : policies) {
+         out << "   " << oid.to_string() << "\n";
+      }
+   }
+
+   const std::vector<OID>& ex_constraints = this->extended_key_usage();
+   if(!ex_constraints.empty()) {
+      out << "Extended Constraints:\n";
+      for(auto&& oid : ex_constraints) {
+         out << "   " << oid.to_formatted_string() << "\n";
+      }
+   }
+
+   const NameConstraints& name_constraints = this->name_constraints();
+
+   if(!name_constraints.permitted().empty() || !name_constraints.excluded().empty()) {
+      out << "Name Constraints:\n";
+
+      if(!name_constraints.permitted().empty()) {
+         out << "   Permit";
+         for(const auto& st : name_constraints.permitted()) {
+            out << " " << st.base();
+         }
+         out << "\n";
+      }
+
+      if(!name_constraints.excluded().empty()) {
+         out << "   Exclude";
+         for(const auto& st : name_constraints.excluded()) {
+            out << " " << st.base();
+         }
+         out << "\n";
+      }
+   }
+
+   const auto& ocsp_responders = this->ocsp_responder_uris();
+   if(!ocsp_responders.empty()) {
+      out << "OCSP Responders:\n";
+      for(const auto& ocsp_responder : ocsp_responders) {
+         out << "   URI: " << ocsp_responder.original_input() << "\n";
+      }
+   }
+
+   const auto& ca_issuers = this->ca_issuer_uris();
+   if(!ca_issuers.empty()) {
+      out << "CA Issuers:\n";
+      for(const auto& ca_issuer : ca_issuers) {
+         out << "   URI: " << ca_issuer.original_input() << "\n";
+      }
+   }
+
+   for(const auto& cdp : crl_distribution_point_uris()) {
+      out << "CRL " << cdp.original_input() << "\n";
+   }
+
+   out << "Signature algorithm: " << this->signature_algorithm().oid().to_formatted_string() << "\n";
+
+   out << "Serial number: " << this->serial().to_string() << "\n";
+
+   if(!this->authority_key_id().empty()) {
+      out << "Authority keyid: " << hex_encode(this->authority_key_id()) << "\n";
+   }
+
+   if(!this->subject_key_id().empty()) {
+      out << "Subject keyid: " << hex_encode(this->subject_key_id()) << "\n";
+   }
+
+   format_alt_name(out, "Issuer Alternative Name", this->issuer_alt_name());
+
+   if(this->skip_revocation_check()) {
+      out << "Revocation status checking is disabled for this certificate\n";
+   }
+
+   if(this->is_self_signed()) {
+      out << "Certificate is self signed\n";
+   }
+
+   return out.str();
+}
+
+}  // namespace Botan
