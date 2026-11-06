@@ -14,7 +14,7 @@ Issues #23 and #31 are in draft PRs #54 and #55 after plain-text send in PR #53.
 
 Issue #27's plain-text send implementation is in draft PR #53, based on PR #52. The fallible cache-presence result flows through account opening, send staging, and no-open sign-out. The complete Linux gate passed on both final leaf branches. Keep issue #28 open for tenant consent and Graph verification.
 
-Issue #29's reply implementation is in draft PR #56, stacked on PR #55. Its older duplicate flags commit has been removed from the stack. The complete Linux gate passed on both final leaf branches. Keep issue #30 open for tenant-only consent, Reply-To, and Sent Items evidence.
+Issue #29's reply implementation merged through PR #56 into PR #55 at `6ef2dd9c63ebd176f256a5c5f09eac99ddf99751` on 2026-11-06, and issue #29 is closed. The exact-head review found no blocking issues; all four required checks passed. Synthetic Graph, workflow, persistence/restart, and headless GPUI coverage is in the stack. No live tenant or GUI was used. Keep issue #30 open for tenant-only consent, Reply-To, and Sent Items evidence.
 
 Issue #33's move merged into PR #56 through PR #57 at `1f8588607809bb18fdacd398a8751262b0a8c377` on 2026-11-06, and issue #33 is closed. The exact-head review found no blocking issues, and all four required checks passed. The Move action stays disabled until sync clears the selected folder's write marker. PR #58's account-removal and single-process changes remain in the same stack. Keep issue #34 open for tenant-only move and immutable-ID verification.
 
@@ -22,7 +22,7 @@ PR #59 merged into PR #58 at `333707c4e1eefbd96e83cfcde7948d58ef913ef3` on 2026-
 
 Review found that event creation could stage a request before the first successful sync, contrary to ADR 0026. The workflow and native UI now require a successful sync of the target view, and all account recovery views must sync before another calendar write. Synthetic workflow and headless GPUI regressions cover initial-sync and account-recovery gating. Keep issues #26, #40, and #42 open for tenant verification. ADR 0026 records OData's weak-ETag comparison rule. The documented DELETE `If-Match` behavior remains unverified in Exchange Online. No tenant, live Graph request, real mailbox, or GUI was used.
 
-Issue #48's saved sign-in identity migration remains in draft PR #63, stacked on PR #56 at `1f8588607809bb18fdacd398a8751262b0a8c377`. It retains pending identity across token rotation and restart, and blocks cache removal or replacement sign-in if identity cannot be verified. The full local Linux gate and all four required GitHub checks passed on head `4dc3785b7767ec465a0154800736e6b9cde69209`. Keep PR #63 in draft and issue #48 open through exact-head review. Live Entra and desktop Secret Service evidence remain under issue #3.
+Issue #48's saved sign-in identity migration is in draft PR #63, now based on PR #55 after PR #56 merged. Its current head `9788c96a0c429b2c38151b3df8538f506cda92c1` retains pending identity across token rotation and restart, and blocks cache removal or replacement sign-in if identity cannot be verified. All four required checks passed on that head. Keep PR #63 in draft and issue #48 open through exact-head review. Live Entra and desktop Secret Service evidence remain under issue #3.
 
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
@@ -53,14 +53,14 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 - Issue #9 remains open for real-window layout, operating-system clipboard behavior, and system-browser launch. Do not launch a GUI during this work.
 - The Issue #22 candidate is ready for stacked review on `candidate/issue-22-calendar-sync`, based on PR #47. Keep issue #22 open for manual Linux review of screen-reader announcements, focus, scrolling, and layout. Keep issue #6 open for live recurrence, time-zone, and all-day verification.
 - Draft PR #53 implements Issue #27 and is stacked on PR #52. Keep issue #27 open until review and merge, and keep issue #28 open for tenant-only consent and Graph verification.
-- Keep issue #29 open through review of PR #56. Issue #33 is closed after PR #57 merged into PR #56. Issue #43 is closed after PR #58 merged into PR #57. Keep issue #48 open through review of draft PR #63.
+- Issue #29 is closed after PR #56 merged into PR #55. Issue #33 is closed after PR #57 merged into PR #56. Issue #43 is closed after PR #58 merged into PR #57. Keep issue #48 open through review of draft PR #63.
 - Fedora GNOME Keyring evidence does not establish behavior for every Secret Service implementation.
 - Windows and macOS build, runtime, credential storage, installation, and operating-system integration remain deferred.
 
 ## Next actions
 
-1. Review PR #56's exact head after its four required checks pass. If it passes review, merge it into PR #55 and close issue #29.
-2. Review draft PR #63 against PR #56's current head. Keep issue #48 open through review.
+1. Review PR #55's current flags change after its required checks pass; PR #56's reply implementation is now part of its stack.
+2. Review draft PR #63 against PR #55. Keep issue #48 open through review.
 3. Keep PR #47 in draft until issue #8's Microsoft 365 sync check and issue #9's real-window checks pass.
 4. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
 5. Keep issues #24, #28, #30, #32, #34, #36, #38, #40, and #42 open for tenant-only consent and Graph verification.
