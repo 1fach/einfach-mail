@@ -1,4 +1,4 @@
-# ADR 0043: Block calendar actions during replacement sync
+# ADR 0044: Block calendar actions during replacement sync
 
 - Status: Accepted
 - Date: 2026-11-06

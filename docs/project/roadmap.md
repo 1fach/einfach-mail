@@ -30,7 +30,7 @@ Show and synchronize calendar events with correct time-zone and recurrence behav
 
 The accepted scope is in [ADR 0014](../decisions/0014-linux-read-only-calendar-workflow.md). The [Issue #22](https://github.com/1fach/einfach-mail/issues/22) candidate is `candidate/issue-22-calendar-sync`; PR #52's account-cache locking work is merged into it. Its native agenda uses one listbox focus stop with keyboard navigation and scroll-to-selection behavior, recorded in [ADR 0042](../decisions/0042-keyboard-navigation-for-calendar-agenda.md). Manual Linux screen-reader, focus, scrolling, and layout review remains open. No live tenant or desktop verification is claimed.
 
-[Issue #49](https://github.com/1fach/einfach-mail/issues/49) adds recovery for expired calendar delta cursors. ADR [0036](../decisions/0036-recover-expired-calendar-delta-cursors.md) is accepted. Keep its review stack ordered after PRs #47 and #50; live Graph behavior remains unverified without a Microsoft 365 test tenant.
+[Issue #49](https://github.com/1fach/einfach-mail/issues/49) adds recovery for expired calendar delta cursors. ADR [0036](../decisions/0036-recover-expired-calendar-delta-cursors.md) is accepted. PR #51 implements the recovery on `main` after PRs #47 and #50 merged. No live Graph behavior is claimed; keep issue #49 open until a Microsoft 365 tenant confirms the cursor-reset response shape.
 
 ## M4: Mail and calendar actions — in progress
 

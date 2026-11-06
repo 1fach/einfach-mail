@@ -17,7 +17,7 @@ flowchart LR
 
 PR #47 contains the M2 read-only mail candidate. The M3 branch `candidate/issue-22-calendar-sync` adds a Linux-only, read-only weekly agenda on the same account session and encrypted cache. M4 adds explicit read-state updates, follow-up flags, plain-text sends, replies to cached messages, message moves, and native Archive and Delete actions. Archive moves mail to the default Outlook Archive folder; Delete moves it to recoverable Deleted Items. ADRs [0015](../decisions/0015-idempotent-message-read-state-update.md), [0017](../decisions/0017-safe-plain-text-mail-sending.md), [0018](../decisions/0018-native-plain-text-message-reply.md), [0019](../decisions/0019-follow-up-flags-on-cached-messages.md), [0020](../decisions/0020-move-cached-messages-between-folders.md), [0039](../decisions/0039-move-messages-to-deleted-items.md), and [0040](../decisions/0040-move-messages-to-the-default-archive-folder.md) record these actions.
 
-Issue #49 adds expired calendar cursor recovery on a follow-up branch stacked on PR #50. Its accepted design is in [ADR 0036](../decisions/0036-recover-expired-calendar-delta-cursors.md).
+PR #51 implements issue #49 expired calendar cursor recovery on a branch based on `main` after PRs #47 and #50 merged. Its accepted design is in [ADR 0036](../decisions/0036-recover-expired-calendar-delta-cursors.md). Live reset-response behavior remains unverified until a Microsoft 365 tenant is available.
 
 ## Module ownership
 
