@@ -1518,7 +1518,8 @@ mod tests {
     use url::Url;
 
     use einfach_mail_application::{
-        CalendarDeltaRequest, CalendarDeltaResponse, WellKnownMailFolder,
+        CalendarDeltaRequest, CalendarDeltaResponse, MessageDeltaRequest, MessageDeltaResponse,
+        WellKnownMailFolder,
     };
     use einfach_mail_domain::{
         AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaProgress,
@@ -1592,6 +1593,323 @@ mod tests {
         assert!(request["message"].get("toRecipients").is_none());
         assert!(request["message"].get("subject").is_none());
         assert!(request.get("comment").is_none());
+    }
+
+    #[tokio::test]
+    async fn folder_listing_follows_pages_and_traverses_children() {
+        let server = MockServer::start_async().await;
+        let page_two_link = format!(
+            "{}/v1.0/me/mailFolders?$skiptoken=opaque-root-page",
+            server.base_url()
+        );
+        let root_page_one = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders")
+                    .query_param_missing("$skiptoken");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(json!({
+                        "value": [{"id": "root-inbox", "displayName": "Inbox"}],
+                        "@odata.nextLink": page_two_link,
+                    }));
+            })
+            .await;
+        let root_page_two = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders")
+                    .query_param("$skiptoken", "opaque-root-page");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(json!({
+                        "value": [{"id": "root-archive", "displayName": "Archive"}]
+                    }));
+            })
+            .await;
+        let inbox_children = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/root-inbox/childFolders");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(json!({
+                        "value": [{"id": "inbox-projects", "displayName": "Projects"}]
+                    }));
+            })
+            .await;
+        let archive_children = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/root-archive/childFolders");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(json!({"value": []}));
+            })
+            .await;
+        let projects_children = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/inbox-projects/childFolders");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(json!({"value": []}));
+            })
+            .await;
+        let (api, transport) = synthetic_graph_api(&server);
+        let account_id = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+
+        let folders = api
+            .list_folders(&account_id, synthetic_access_token())
+            .await
+            .expect("all synthetic root and child folders are listed");
+
+        assert_eq!(
+            folders
+                .iter()
+                .map(|folder| folder.reference().folder_id().as_str())
+                .collect::<Vec<_>>(),
+            ["root-inbox", "root-archive", "inbox-projects"]
+        );
+        assert_eq!(
+            folders[2]
+                .parent()
+                .expect("synthetic Projects folder has its parent")
+                .folder_id()
+                .as_str(),
+            "root-inbox"
+        );
+        root_page_one.assert_async().await;
+        root_page_two.assert_async().await;
+        inbox_children.assert_async().await;
+        archive_children.assert_async().await;
+        projects_children.assert_async().await;
+        drop(transport);
+    }
+
+    #[tokio::test]
+    async fn folder_listing_rejects_a_repeated_page_link_before_refetching() {
+        let server = MockServer::start_async().await;
+        let (api, transport) = synthetic_graph_api(&server);
+        let first_page = api
+            .authority
+            .root_folders_path()
+            .expect("synthetic root folder URL is valid");
+        let repeated_page = first_page.as_str().to_owned();
+        let root_page = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders")
+                    .query_param_missing("$skiptoken");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(json!({
+                        "value": [],
+                        "@odata.nextLink": repeated_page,
+                    }));
+            })
+            .await;
+        let account_id = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+
+        assert_eq!(
+            api.list_folders(&account_id, synthetic_access_token())
+                .await,
+            Err(GraphError::UnsafeLink)
+        );
+        root_page.assert_calls_async(1).await;
+        drop(transport);
+    }
+
+    #[tokio::test]
+    async fn message_delta_page_maps_sparse_updates_and_removals() {
+        let server = MockServer::start_async().await;
+        let delta_link = format!(
+            "{}/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=opaque-final",
+            server.base_url()
+        );
+        let response = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/inbox/messages/delta")
+                    .header("content-type", "application/json");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(json!({
+                        "value": [
+                            {"id": "synthetic-message", "subject": "Updated subject"},
+                            {"id": "synthetic-cleared-message", "subject": null},
+                            {"id": "removed-without-reason", "@removed": {}},
+                            {"id": "removed-with-reason", "@removed": {"reason": "deleted"}}
+                        ],
+                        "@odata.deltaLink": delta_link,
+                    }));
+            })
+            .await;
+        let (api, transport) = synthetic_graph_api(&server);
+        let account_id = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let folder = FolderReference::new(
+            account_id,
+            FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+        );
+
+        let MessageDeltaResponse::Page(page) = api
+            .message_delta_page(
+                &folder,
+                MessageDeltaRequest::Initial,
+                synthetic_access_token(),
+            )
+            .await
+            .expect("synthetic Graph delta page is mapped")
+        else {
+            panic!("synthetic delta response is a page");
+        };
+        let (page, _) = page.into_parts();
+        let (mut changes, _) = page.into_parts();
+        let MessageDeltaChange::Upsert { id, patch } = changes.remove(0) else {
+            panic!("synthetic metadata response is an upsert");
+        };
+        assert_eq!(id.as_str(), "synthetic-message");
+        let mut metadata = MessageMetadata::new(
+            Some("Original subject".to_owned()),
+            MessageOrigin::new(None, None),
+            SystemTime::UNIX_EPOCH,
+            ReadState::Read,
+            Some(FollowUpFlagStatus::Flagged),
+        );
+        metadata.apply_patch(patch);
+        assert_eq!(metadata.subject(), Some("Updated subject"));
+        assert_eq!(metadata.read_state(), ReadState::Read);
+        assert_eq!(metadata.received_at(), &SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            metadata.follow_up_flag_status(),
+            Some(FollowUpFlagStatus::Flagged)
+        );
+        let MessageDeltaChange::Upsert { id, patch } = changes.remove(0) else {
+            panic!("synthetic nullable metadata response is an upsert");
+        };
+        assert_eq!(id.as_str(), "synthetic-cleared-message");
+        metadata.apply_patch(patch);
+        assert_eq!(metadata.subject(), None);
+        assert_eq!(metadata.read_state(), ReadState::Read);
+        assert_eq!(metadata.received_at(), &SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            metadata.follow_up_flag_status(),
+            Some(FollowUpFlagStatus::Flagged)
+        );
+        assert!(matches!(
+            changes.remove(0),
+            MessageDeltaChange::Removed { id }
+                if id.as_str() == "removed-without-reason"
+        ));
+        assert!(matches!(
+            changes.remove(0),
+            MessageDeltaChange::Removed { id }
+                if id.as_str() == "removed-with-reason"
+        ));
+        response.assert_async().await;
+        drop(transport);
+    }
+
+    #[tokio::test]
+    async fn folder_listing_rejects_duplicate_ids_in_the_folder_tree() {
+        let server = MockServer::start_async().await;
+        let roots = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders")
+                    .query_param_missing("$skiptoken");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(json!({
+                        "value": [
+                            {"id": "root-inbox", "displayName": "Inbox"},
+                            {"id": "root-archive", "displayName": "Archive"}
+                        ]
+                    }));
+            })
+            .await;
+        let duplicate_child = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/root-inbox/childFolders");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(json!({
+                        "value": [{"id": "root-archive", "displayName": "Duplicate"}]
+                    }));
+            })
+            .await;
+        let unvisited_children = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/root-archive/childFolders");
+                then.status(200).json_body(json!({"value": []}));
+            })
+            .await;
+        let (api, transport) = synthetic_graph_api(&server);
+        let account_id = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+
+        assert_eq!(
+            api.list_folders(&account_id, synthetic_access_token())
+                .await,
+            Err(GraphError::InvalidRecord)
+        );
+        roots.assert_async().await;
+        duplicate_child.assert_async().await;
+        unvisited_children.assert_calls_async(0).await;
+        drop(transport);
+    }
+
+    #[tokio::test]
+    async fn profile_read_does_not_follow_a_graph_redirect() {
+        let server = MockServer::start_async().await;
+        let redirect = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/v1.0/me");
+                then.status(302).header("Location", "/redirected");
+            })
+            .await;
+        let redirect_target = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/redirected");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"synthetic-account"}"#);
+            })
+            .await;
+        let (api, transport) = synthetic_graph_api(&server);
+        let profile_endpoint =
+            Url::parse(&server.url("/v1.0/me")).expect("synthetic Graph profile endpoint is valid");
+
+        assert_eq!(
+            api.load_profile(&profile_endpoint, synthetic_access_token())
+                .await,
+            Err(GraphError::Transport)
+        );
+        redirect.assert_calls_async(1).await;
+        redirect_target.assert_calls_async(0).await;
+        drop(transport);
+    }
+
+    #[test]
+    fn message_delta_rejects_empty_ids_and_null_required_metadata() {
+        for payload in [
+            json!({"id": "", "subject": "Synthetic"}),
+            json!({"id": "", "@removed": {}}),
+            json!({"id": "synthetic-message", "receivedDateTime": null}),
+            json!({"id": "synthetic-message", "isRead": null}),
+        ] {
+            let wire = serde_json::from_value::<WireMessageChange>(payload)
+                .expect("synthetic Graph delta record deserializes");
+            assert_eq!(
+                MessageDeltaChange::try_from(wire),
+                Err(GraphError::InvalidRecord)
+            );
+        }
     }
 
     fn editable_event_json(
