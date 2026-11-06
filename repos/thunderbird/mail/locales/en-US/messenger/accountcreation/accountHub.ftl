@@ -1,0 +1,599 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+### Account Hub
+### Account hub is where user can setup new accounts in Thunderbird.
+
+## Header
+
+account-hub-brand = { -brand-full-name }
+
+account-hub-welcome-line = Welcome to <span data-l10n-name="brand-name">{ -brand-full-name }</span>
+
+account-hub-title = Account Hub
+
+## Footer
+
+account-hub-release-notes = Release notes
+
+account-hub-support = Support
+
+account-hub-donate = Donate
+
+## Initial setup page
+
+account-hub-email-setup-button = Email Account
+    .title = Set up an email account
+
+account-hub-calendar-setup-button = Calendar
+    .title = Set up a local or remote calendar
+
+account-hub-address-book-setup-button = Address Book
+    .title = Set up a local or remote address book
+
+account-hub-chat-setup-button = Chat
+    .title = Set up a chat account
+
+account-hub-feed-setup-button = RSS feed
+    .title = Set up an RSS feed account
+
+account-hub-newsgroup-setup-button = Newsgroup
+    .title = Set up a newsgroup account
+
+account-hub-import-setup-button = Import
+    .title = Import a backed up profile
+
+# Note: "Sync" represents the Firefox Sync product so it shouldn't be translated.
+account-hub-sync-button = Sign in to Sync…
+
+## Email page
+
+account-hub-add-email-title = Add Your Account
+
+account-hub-manually-configure-email-title = Set Up Account Configuration
+
+account-hub-email-cancel-button = Cancel
+
+account-hub-email-stop-button = Stop
+
+account-hub-email-back-button = Back
+
+account-hub-email-retest-button = Retest
+
+account-hub-email-finish-button = Finish
+
+account-hub-email-manually-configure-button = Configure Manually
+
+account-hub-email-continue-button = Continue
+
+account-hub-email-set-up-account-button = Set up account
+
+account-hub-email-confirm-button = Confirm
+
+account-hub-email-find-settings-button = Find settings
+
+account-hub-email-connect-button = Connect
+
+account-hub-result-incoming-legend = Incoming
+
+account-hub-result-outgoing-legend = Outgoing
+
+account-hub-all-servers-legend = All servers
+
+account-hub-protocol-label = Protocol
+
+account-hub-result-hostname-label = Hostname
+    .title = Hostname
+
+account-hub-result-socket-type-label = Connection security
+
+account-hub-servers-username-label = Username:
+
+account-hub-result-server-label = Server:
+
+account-hub-result-port-label = Port:
+
+account-hub-result-security-label = Security:
+
+account-hub-result-authentication-type-label = Authentication:
+
+account-hub-result-authentication-none = None
+    .title = None
+
+account-hub-result-authentication-password = Normal Password
+    .title = Normal Password
+
+account-hub-result-authentication-encrypted-password = Encrypted Password
+    .title = Encrypted Password
+
+account-hub-result-authentication-gssapi = Kerberos
+    .title = Kerberos
+
+account-hub-result-authentication-ntlm = NTLM
+    .title = NTLM
+
+account-hub-result-authentication-external = External
+    .title = External
+
+account-hub-result-authentication-oauth2 = OAuth2
+    .title = OAuth2
+
+account-hub-on-port-label = Port
+
+account-hub-auto-description = { -brand-short-name } will attempt to auto-detect fields that are left blank.
+
+account-hub-ssl-label = Connection security
+
+## Incoming/Outgoing authentication method options
+
+account-hub-ssl-autodetect-option =
+    .label = Autodetect
+
+account-hub-ssl-cleartext-password-option =
+    .label = Normal password
+
+account-hub-ssl-encrypted-password-option =
+    .label = Encrypted password
+
+## Incoming/Outgoing connection security options
+
+account-hub-ssl-noencryption-option =
+    .label = None
+
+account-hub-auth-no-authentication-option =
+    .label = No Authentication
+
+account-hub-auth-label = Authentication method
+
+account-hub-select-option =
+    .label = Select an option
+
+## Exchange Type Manual Config Step
+
+account-hub-exchange-type-title = Choose an account type
+
+account-hub-exchange-type-account-type = Account type
+
+account-hub-card-graph-title = Microsoft Graph
+
+account-hub-card-graph-description = Microsoft Graph is a modern connection method for Microsoft 365.
+
+account-hub-card-ews-title = Exchange Web Services
+
+account-hub-card-ews-tag = Legacy
+
+account-hub-card-ews-description = Exchange Web Services (EWS) connects to Microsoft Exchange to sync your mail.
+
+# This is shown after the type description, so "it" is referring to the type (either Microsoft Graph or Exchange Web Services).
+account-hub-card-recommended-description = It’s recommended because it matches your Service URL.
+
+account-hub-exchange-type-username = Username
+
+account-hub-exchange-type-username-hint = Typically your email address or Active Directory UPN.
+
+account-hub-exchange-type-authentication = Authentication Method
+
+# Checkbox that can be unchecked to use a custom OAuth config.
+account-hub-exchange-type-default-oauth = Use default Microsoft 365 Copilot authentication settings
+
+account-hub-exchange-type-oauth-tenant = Tenant ID
+
+account-hub-exchange-type-oauth-app = App ID
+
+## Other Account Hub strings (sadly not sorted into sections)
+
+account-hub-result-username-label = Username
+    .title = Username
+
+account-hub-name-label = Full name
+    .accesskey = n
+
+account-hub-adding-account-title = Adding Account
+
+account-hub-adding-account-subheader = Re-testing account configuration settings
+
+account-hub-lookup-email-configuration-title = Looking up configuration
+
+account-hub-lookup-email-configuration-subheader = Trying common server names…
+
+account-hub-email-account-added-title = Account successfully added
+
+account-hub-find-account-settings-failed = { -brand-short-name } failed to find the settings for your email account.
+
+account-hub-notification-show-more = Show more
+
+account-hub-notification-show-less = Show less
+
+account-hub-email-setup-header = Add your email address
+
+account-hub-email-setup-incoming = Incoming server settings
+
+account-hub-email-setup-outgoing = Outgoing server settings
+
+account-hub-email-exchange-settings = Exchange settings
+
+account-hub-email-connect-settings = Connect your email settings
+
+account-hub-email-protocol-select-header = Choose an email account type
+
+account-hub-email-protocol-select-additional-info = Additional information is required to set up this account.
+
+account-hub-email-enter-password = Enter your email account password
+
+account-hub-email-sync-accounts = Sync your calendars and address books
+
+account-hub-test-configuration = Test
+
+account-hub-add-new-email = Add another email
+
+account-hub-result-imap-description = Keep your folders and emails synced on your server
+
+account-hub-result-pop-description = Keep your folders and emails on your computer
+
+account-hub-result-ews-shortname = Exchange
+
+account-hub-result-ews-description = Use Microsoft Exchange Web Services to sync your folders and emails
+
+account-hub-result-graph-api-shortname = Microsoft Graph API
+
+account-hub-result-graph-api-description = Use the Microsoft Graph API to sync your folders and emails with Microsoft 365
+
+account-hub-result-exchange-description = Sync folders & emails with Exchange or Office 365
+
+account-hub-result-ews-text = Server
+
+# Expanded text used in Account Confirmation page heading
+
+account-hub-result-ews-expanded-text = Exchange Web Services
+
+account-hub-result-graph-expanded-text = Graph API
+
+account-hub-result-recommended-label = Recommended
+
+account-hub-result-addon-label = Requires Add-on
+
+account-hub-edit-configuration = Edit configuration
+
+account-hub-config-success-title = Account settings found automatically.
+
+account-hub-config-success-description-db = Configuration found in Mozilla ISPDB.
+
+account-hub-config-success-description-exchange = Configuration found for a Microsoft Exchange server.
+
+account-hub-config-success-description-guess = Configuration found by trying common server names.
+
+account-hub-config-success-description-disk = Configuration found in { -brand-short-name } installation.
+
+account-hub-config-success-description-isp = Configuration found at email provider.
+
+account-hub-config-success-description-read-more = You can <a data-l10n-name="automated-setup-link">read about how automated email setup works.</a>
+
+account-hub-password-info = Your credentials will only be stored locally on your computer
+
+account-hub-creating-account = Creating account…
+
+account-hub-sync-accounts-found = { -brand-short-name } found some connected services
+
+account-hub-sync-accounts-not-found = { -brand-short-name } was unable to find connected services
+
+account-hub-sync-accounts-failure = { -brand-short-name } was unable to connect the selected services
+
+account-hub-email-added-success = Email account connected successfully
+
+account-hub-config-test-success = { -brand-short-name } found the correct settings and updated them.
+
+account-hub-select-all = Select all
+
+account-hub-deselect-all = Deselect all
+
+# $count (Number) - The number of sync accounts selected.
+account-hub-sync-accounts-selected =
+    { $count ->
+        [one] { $count } selected
+        *[other] { $count } selected
+    }
+
+account-hub-no-address-books = No address books found
+
+account-hub-no-calendars = No calendars found
+
+account-hub-email-added-success-links-title = Explore options for security and personalization:
+
+account-hub-signature-link = Email signature
+
+account-hub-email-error-text = Please enter a valid email address
+
+account-hub-name-error-text = Please enter a name
+
+account-hub-hostname-error-text = Hostname empty or invalid. Only letters, numbers, - and . are allowed
+    .title = Hostname empty or invalid. Only letters, numbers, - and . are allowed
+
+account-hub-port-error-text = Port must be between 1 and 65535
+    .title = Port must be between 1 and 65535
+
+account-hub-username-error-text = Username is required
+    .title = Username is required
+
+account-hub-manual-config-error-summary = Please resolve the following errors:
+
+account-hub-oauth-pending = Waiting for authorization in login popup…
+
+account-hub-addon-install-button = Install
+
+account-hub-addon-error = Add-on installation failed. Please try again or contact the add-on author for assistance.
+
+account-hub-select-security-warning = <span data-l10n-name="error-text">Warning: Insecure mail server detected.</span> This server lacks encryption, exposing your password and data. Contact your administrator to secure the connection or proceed at your own risk. <a data-l10n-name="error-link">See FAQ for more.</a>
+
+account-hub-account-authentication-error = Authentication error.
+
+account-hub-add-address-book = Add an address book
+
+address-book-sync-existing-icon =
+    .alt = Sync an address book from an existing account
+
+address-book-sync-existing = Sync from an existing account
+
+address-book-add-remote-icon2 =
+    .alt = Add a remote address book
+
+address-book-add-remote = Add remote Address Book
+
+address-book-add-remote-carddav-description = Connect to a CardDAV address book
+
+address-book-add-local-icon =
+    .alt = Create a new local address book
+
+address-book-add-local = New local Address Book
+
+address-book-add-local-description = Create a new local address book on your device
+
+address-book-add-ldap-icon2 =
+    .alt = Add an LDAP address book
+
+address-book-add-ldap-button = Add LDAP Address Book
+
+address-book-add-ldap-description = Connect to a remote LDAP address book
+
+# $addressBooks (Number) - The number of address books that can be synced from existing accounts.
+account-hub-address-book-sync-books-data =
+  { $addressBooks ->
+        [one] 1 address book available
+        *[other] { $addressBooks } address books available
+  }
+
+address-book-sync-existing-description = Retrieving existing accounts…
+
+account-hub-select-address-book-account = Select an account with Address books
+
+# $synced (Number) - The number of address books that are synced.
+# $available (Number) - The number of address books that can be synced.
+# $total (Number) - The total number of address books for this account.
+account-hub-account-address-book-count = { $synced } of { $total }
+    .title = { $synced } synced address books, { $available } available
+
+account-hub-add-local-address-book = Create a Local Address Book
+
+account-hub-local-address-book-label = Address Book Name
+
+account-hub-local-error-text = Please enter an address book name
+
+account-hub-sync-address-books = Sync existing address books
+
+account-hub-new-remote-address-book = New remote Address Book
+
+account-hub-username-label = Username
+
+account-hub-username-warning-icon = Username is required
+
+account-hub-address-book-username-error-text = Please enter a username
+
+account-hub-server-label = URL/Hostname
+
+account-hub-server-tip = Thunderbird will try to automatically detect your hostname
+
+account-hub-server-warning-icon = Invalid URL
+
+account-hub-server-error-text = Please enter a valid URL
+
+account-hub-address-book-enter-password = Enter your CardDav account password
+
+account-hub-address-book-name-label = Name
+
+account-hub-address-book-name-error-text = Please enter a name
+
+account-hub-address-book-base-dn = Base DN
+
+account-hub-address-book-bind-dn = Bind DN
+
+account-hub-ldap-form = Connect to an LDAP directory
+
+account-hub-advanced-configuration-button = Advanced configuration
+
+account-hub-ldap-ssl-toggle-label = Use secure connection (SSL)
+
+account-hub-max-results-label = Max results
+
+account-hub-max-results-error-text = Please enter a number greater than 0
+
+account-hub-address-book-scope-label = Scope
+
+account-hub-address-book-scope-level-one-label =
+    .label = One level
+
+account-hub-address-book-scope-subtree-label =
+    .label = Subtree
+
+account-hub-address-book-login-method-label = Login method
+
+account-hub-address-book-login-simple-label =
+    .label = Simple
+
+account-hub-address-book-search-label = Search filter
+
+account-hub-simple-configuration-button = Simple Configuration
+
+address-book-finding-remote-address-books = Searching for address books…
+
+# $url (String) - URL of CardDAV endpoint we don't support.
+address-book-carddav-known-incompatible = { $url } is known to be incompatible with { -brand-short-name }.
+
+address-book-carddav-connection-error = Failed to connect.
+
+address-book-ldap-duplicate-error = LDAP directory name already exists. Please input a different directory name.
+
+address-book-ldap-creation-error = Could not create LDAP Directory.
+
+account-hub-email-setup-ews = Server Settings
+
+account-hub-result-exchange-url-label = Exchange endpoint URL
+
+account-hub-exchange-service-url-label = Enter the service URL
+
+account-hub-email-credentials-confirmation = Account Configuration
+
+account-hub-result-unknown-hostname = Unknown Hostname
+
+account-hub-result-unknown-cert = Unverified Certificate
+
+account-hub-close-button =
+  .title = Close
+
+account-hub-minimize-button =
+  .title = Minimize
+
+account-hub-maximize-button =
+  .title = Maximize Account Hub
+
+account-hub-email-manual-configuration = Manual configuration
+
+account-hub-notification-unknown-host = Setup information found on 3rd party domain
+
+account-hub-ssl-noencryption = None
+
+account-hub-email-skip-button = Skip
+
+account-hub-finding-sync-accounts = Account created. Discovering address books and calendars…
+
+account-hub-privacy-policy = Privacy Policy
+
+account-hub-welcome = Welcome to
+
+account-hub-welcome-brand = { -brand-short-name }
+
+account-hub-welcome-text = Welcome to { -brand-short-name }
+
+account-hub-name-warning-icon =
+    .title = Please enter your name
+
+account-hub-email-label = Email address
+    .accesskey = E
+
+account-hub-email-input =
+    .placeholder = john.doe@example.com
+
+account-hub-email-warning-icon =
+    .title = Invalid email address
+
+account-hub-password-label = Password
+    .accesskey = P
+    .title = Optional, will only be used to validate the username
+
+account-hub-remember-password = Remember password
+    .accesskey = m
+
+account-hub-exchange-label = Your login
+    .accesskey = l
+
+account-hub-installing-addon = Downloading and installing add-on…
+
+account-hub-success-addon = Successfully installed the add-on
+
+account-hub-success-half-manual = The following settings were found by probing the given server:
+
+account-hub-result-security-no-encryption = No Encryption
+    .title = No Encryption
+
+account-hub-result-security-ssl = SSL/TLS
+    .title = SSL/TLS
+
+account-hub-result-security-starttls = STARTTLS
+    .title = STARTTLS
+
+account-hub-credentials-wrong = Authentication failed. Please check the username and password
+
+account-hub-find-settings-failed = { -brand-full-name } failed to find the settings for your email account.
+
+account-hub-exchange-config-unverifiable = Configuration could not be verified. If your username and password are correct, it’s likely that the server administrator has disabled the selected configuration for your account. Try selecting another protocol.
+
+account-hub-advanced-setup-button = Advanced config
+    .accesskey = A
+
+# Variables:
+#  $domain (String): The name of the server where the configuration was found, e.g. rackspace.com.
+account-hub-exchange-dialog-question = { -brand-short-name } found your account setup information on { $domain }. Do you want to proceed and submit your credentials?
+
+account-hub-creation-error-title = Error Creating Account
+
+account-hub-error-server-exists = Incoming server already exists.
+
+account-hub-confirm-advanced-title = Confirm Advanced Configuration
+
+account-hub-confirm-advanced-description = This dialog will be closed and an account with the current settings will be created, even if the configuration is incorrect. Do you want to proceed?
+
+account-hub-addon-install-title = Install
+
+account-hub-encryption-button = End-to-end encryption
+
+account-hub-address-books-button = Address Books
+
+account-hub-calendars-button = Calendars
+
+account-hub-thundermail-button = Sign in with Thundermail
+
+# Used as part of a divider between sign in button and a sign in form.
+account-hub-thundermail-divider-text = or
+
+account-hub-manual-config-imap-title = IMAP Settings
+
+account-hub-manual-config-pop3-title = POP3 Settings
+
+account-hub-manual-config-review-settings-title = Review updated settings
+
+account-hub-manual-config-incoming-legend = Incoming server
+
+account-hub-manual-config-outgoing-legend = Outgoing server
+
+# Label for checkbox that will hide an outgoing username input if it's the same is the incoming
+account-hub-same-username-checkbox = Same username as incoming server
+
+# Variables:
+# $oldValue (String): The value requested before the configuration was tested.
+# $newValue (String): The value found after the configuration was tested.
+account-hub-manual-config-security-changed = Couldn’t find { $oldValue }, but { $newValue } is available.
+
+# Variables:
+# $oldValue (String): The port requested before the configuration was tested.
+# $newValue (String): The port found after the configuration was tested.
+account-hub-manual-config-port-changed = Couldn’t reach Port { $oldValue }, but Port { $newValue } is available.
+
+# Variables:
+# $oldValue (String): The value requested before the configuration was tested.
+# $newValue (String): The value found after the configuration was tested.
+account-hub-manual-config-value-changed = Couldn’t use { $oldValue }, but { $newValue } is available.
+
+account-hub-protocol-imap = Sync across devices
+
+account-hub-protocol-microsoft = Exchange or Microsoft 365
+
+account-hub-protocol-pop3 = Download to device
+
+account-hub-oauth-unsupported-title = Additional configuration is required
+
+# Note: 'Advanced configuration' is the text of the link/button at the bottom of the form (e.g., account-hub-exchange-type-advanced-config)
+# 'Account Settings' is the text of the menu option/tab name accessible outside Account Hub
+account-hub-oauth-unsupported-description = { -brand-short-name } can’t automatically configure OAuth2 for this hostname. Select Advanced configuration to create the account, then complete setup from Account Settings. <a data-l10n-name="oauth-support-link">Get help with OAuth2 setup.</a>
+
+account-hub-username-help-text = Often your full email address
+
+account-hub-port-help-text = If left blank, { -brand-short-name } will attempt to discover the port.

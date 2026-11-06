@@ -1,0 +1,167 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+var { TestUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/TestUtils.sys.mjs"
+);
+
+var { PromiseTestUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
+);
+
+var { localAccountUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/LocalAccountUtils.sys.mjs"
+);
+
+var { EwsServer } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/EwsServer.sys.mjs"
+);
+
+var { RemoteFolder } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/MockServer.sys.mjs"
+);
+
+var { GraphServer } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/GraphServer.sys.mjs"
+);
+
+var { MailServices } = ChromeUtils.importESModule(
+  "resource:///modules/MailServices.sys.mjs"
+);
+
+/**
+ * Sync the messages for the specified folder.
+ *
+ * @param {nsIMsgIncomingServer} incomingServer
+ * @param {nsIMsgFolder} folder
+ */
+async function syncFolder(incomingServer, folder) {
+  const asyncUrlListener = new PromiseTestUtils.PromiseUrlListener();
+  incomingServer.getNewMessages(folder, null, asyncUrlListener);
+  return asyncUrlListener.promise;
+}
+
+/**
+ * Set up an incoming server connected to an EWS test server.
+ *
+ * @returns {[EwsServer, nsIMsgIncomingServer]}
+ */
+function setupBasicEwsTestServer({
+  username = "user",
+  password = "password",
+  version = "Exchange2013",
+}) {
+  // Ensure we have an on-disk profile.
+  do_get_profile();
+
+  // Create a new mock EWS server, and start it.
+  const ewsServer = new EwsServer({ username, password, version });
+  ewsServer.start();
+
+  // Create and configure the EWS incoming server.
+  const incomingServer = localAccountUtils.create_incoming_server(
+    "ews",
+    ewsServer.port,
+    username,
+    password
+  );
+  incomingServer.QueryInterface(Ci.IExchangeIncomingServer);
+  incomingServer.setStringValue(
+    "ews_url",
+    `http://127.0.0.1:${ewsServer.port}/EWS/Exchange.asmx`
+  );
+
+  registerCleanupFunction(async () => {
+    incomingServer.shutdown();
+    incomingServer.QueryInterface(Ci.IExchangeIncomingServer);
+    await TestUtils.waitForCondition(
+      () => !incomingServer.protocolClientRunning,
+      "waiting for the EWS client to shut down"
+    );
+
+    ewsServer.stop();
+    MailServices.protocolClient.shutdownTestClients();
+  });
+
+  return [ewsServer, incomingServer];
+}
+
+/**
+ * Set up an incoming server connected to a Graph test server.
+ *
+ * @param {object} [options]
+ * @param {string} [options.username="user"]
+ * @param {string} [options.password="password"]
+ * @returns {[GraphServer, nsIMsgIncomingServer]}
+ */
+function setupBasicGraphTestServer({
+  username = "user",
+  password = "password",
+} = {}) {
+  // Ensure we have an on-disk profile.
+  do_get_profile();
+
+  // Create a new mock Graph server, and start it.
+  const graphServer = new GraphServer();
+  graphServer.start();
+
+  // Create and configure the Graph incoming server.
+  const incomingServer = localAccountUtils.create_incoming_server(
+    "graph",
+    graphServer.port,
+    username,
+    password
+  );
+  incomingServer.QueryInterface(Ci.IExchangeIncomingServer);
+  incomingServer.setStringValue(
+    "ews_url",
+    `http://127.0.0.1:${graphServer.port}/`
+  );
+
+  registerCleanupFunction(async () => {
+    incomingServer.shutdown();
+    incomingServer.QueryInterface(Ci.IExchangeIncomingServer);
+    await TestUtils.waitForCondition(
+      () => !incomingServer.protocolClientRunning,
+      "waiting for the Graph client to shut down"
+    );
+
+    graphServer.stop();
+  });
+
+  return [graphServer, incomingServer];
+}
+
+/**
+ * Copy or move a folder.
+ *
+ * This function initiates a copy of move of the given `sourceFolder` to the
+ * given `destinationFolder`.  The `isMove` parameters specifies whether this is
+ * a copy or a move operation. Returns a promise that can be awaited to
+ * guarantee the async copy operation has finished.
+ *
+ * @param {nsIMsgFolder} sourceFolder
+ * @param {nsIMsgFolder} destinationFolder
+ * @param {nsIMsgFolder} isMove
+ * @returns {Promise}
+ */
+async function copyFolder(sourceFolder, destinationFolder, isMove) {
+  const copyListener = new PromiseTestUtils.PromiseCopyListener();
+  MailServices.copy.copyFolder(
+    sourceFolder,
+    destinationFolder,
+    isMove,
+    copyListener,
+    null
+  );
+  return copyListener.promise;
+}
+
+async function storePassword(uri, username, password) {
+  const login = Cc["@mozilla.org/login-manager/loginInfo;1"].createInstance(
+    Ci.nsILoginInfo
+  );
+  login.init(uri, null, uri, username, password, "", "");
+  await Services.logins.addLoginAsync(login);
+}

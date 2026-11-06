@@ -1,0 +1,130 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+// This tests our handling of server timeouts during online move of
+// an imap message. The move is done as an offline operation and then
+// played back, to copy what the apps do.
+
+Services.prefs.setIntPref("mailnews.tcptimeout", 2);
+
+/* import-globals-from ../../../test/resources/alertTestUtils.js */
+load("../../../resources/alertTestUtils.js");
+
+var { MessageGenerator } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
+);
+var { PromiseTestUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
+);
+var { MailServices } = ChromeUtils.importESModule(
+  "resource:///modules/MailServices.sys.mjs"
+);
+
+var gTargetFolder;
+var alertResolve;
+var alertPromise = new Promise(resolve => {
+  alertResolve = resolve;
+});
+
+function alertPS(parent, aDialogTitle, aText) {
+  alertResolve(aText);
+}
+
+add_setup(function () {
+  registerAlertTestUtils();
+  setupIMAPPump();
+  Services.prefs.setBoolPref(
+    "mail.server.default.autosync_offline_stores",
+    false
+  );
+  registerCleanupFunction(() => {
+    teardownIMAPPump();
+  });
+});
+
+add_task(async function createTargetFolder() {
+  gTargetFolder =
+    await IMAPPump.incomingServer.rootFolder.createSubfolderAsync(
+      "targetFolder"
+    );
+  Assert.ok(gTargetFolder instanceof Ci.nsIMsgImapMailFolder);
+  const listener = new PromiseTestUtils.PromiseUrlListener();
+  gTargetFolder.updateFolderWithListener(null, listener);
+  await listener.promise;
+});
+
+// Load a message onto the fake server, and make sure it's fetched.
+add_task(async function loadImapMessage() {
+  let messages = [];
+  const gMessageGenerator = new MessageGenerator();
+  messages = messages.concat(gMessageGenerator.makeMessage());
+
+  const msgURI = Services.io.newURI(
+    "data:text/plain;base64," + btoa(messages[0].toMessageString())
+  );
+  const imapInbox = IMAPPump.daemon.getMailbox("INBOX");
+  var gMessage = new ImapMessage(msgURI.spec, imapInbox.uidnext++, []);
+  IMAPPump.mailbox.addMessage(gMessage);
+
+  const promiseUrlListener = new PromiseTestUtils.PromiseUrlListener();
+  IMAPPump.inbox.updateFolderWithListener(null, promiseUrlListener);
+  await promiseUrlListener.promise;
+  Assert.equal(1, IMAPPump.inbox.getTotalMessages(false));
+});
+
+// Cause a timeout while moving the message from "INBOX" to "targetFolder".
+add_task(async function moveMessageWithTimeout() {
+  const msgHdr = mailTestUtils.firstMsgHdr(IMAPPump.inbox);
+  // This should cause the move to be done as an offline imap operation
+  // that's played back immediately.
+  const copyListener = new PromiseTestUtils.PromiseCopyListener();
+  IMAPPump.daemon.copySleep = 5000;
+  MailServices.copy.copyMessages(
+    IMAPPump.inbox,
+    [msgHdr],
+    gTargetFolder,
+    true,
+    copyListener,
+    gDummyMsgWindow,
+    true
+  );
+  await copyListener.promise;
+
+  // Just wait for the alert about timed out connection.
+  const alertText = await alertPromise;
+  Assert.ok(alertText.startsWith("Connection to server localhost timed out."));
+});
+
+add_task(async function updateTargetFolderAndInbox() {
+  const urlListenerTargetFolder = new PromiseTestUtils.PromiseUrlListener();
+  gTargetFolder.updateFolderWithListener(null, urlListenerTargetFolder);
+  await urlListenerTargetFolder.promise;
+  const urlListenerInbox = new PromiseTestUtils.PromiseUrlListener();
+  IMAPPump.inbox.updateFolderWithListener(null, urlListenerInbox);
+  await urlListenerInbox.promise;
+
+  // Make sure neither source nor target folder have offline events.
+  Assert.ok(
+    !IMAPPump.inbox.getFlag(Ci.nsMsgFolderFlags.OfflineEvents),
+    "A timed-out move should clear the source's offline work flag"
+  );
+  Assert.ok(
+    !gTargetFolder.getFlag(Ci.nsMsgFolderFlags.OfflineEvents),
+    "A timed-out move should clear the destination's offline work flag"
+  );
+  Assert.deepEqual(
+    IMAPPump.inbox.msgDatabase.listAllOfflineOpIds(),
+    [],
+    "A timed-out move should not remain queued for replay"
+  );
+
+  // Fake server does the copy, but then times out, so make sure the target
+  // folder has only 1 message, not the multiple ones it would have if we
+  // retried.
+  Assert.equal(
+    gTargetFolder.getTotalMessages(false),
+    1,
+    "The timed-out move should not duplicate the message on retry"
+  );
+});

@@ -1,0 +1,58 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+---
+loader: taskgraph.loader.transform:loader
+
+transforms:
+    - taskgraph.transforms.from_deps
+    - comm_taskgraph.transforms.enterprise:rewrite_shipping_phase
+    - gecko_taskgraph.transforms.name_sanity
+    - gecko_taskgraph.transforms.repackage
+    - comm_taskgraph.transforms.enterprise:maybe_repackage_routes
+    - gecko_taskgraph.transforms.job
+    - gecko_taskgraph.transforms.task
+
+kind-dependencies:
+    - build-signing
+    - toolchain
+    - enterprise-repack
+
+only-for-build-platforms:
+    - linux64-shippable/opt
+    - linux64-enterprise-shippable/opt
+    - linux64-aarch64-enterprise-shippable/opt
+
+only-for-attributes:
+    - nightly
+    - shippable
+
+tasks:
+    repackage-deb:
+        from-deps:
+            group-by: single-with-filters
+        shipping-phase: promote
+        worker-type: b-linux
+        worker:
+            docker-image:
+                in-tree: debian12-repackage
+        mozharness:
+            use-caches: [checkout]
+            comm-checkout: true
+            clone-with: hg
+            config-paths:
+                - comm/testing/mozharness/configs
+            config:
+                by-build-platform:
+                    linux64-enterprise\b.*:
+                        - repackage/base.py
+                        - repackage/base_enterprise.py
+                        - repackage/linux64_signed.py
+                    linux64(?!-enterprise)\b.*:
+                        - repackage/base.py
+                        - repackage/linux64_signed.py
+        treeherder:
+            symbol: Deb(r)
+        package-formats:
+            by-build-platform:
+                linux.*: [deb]

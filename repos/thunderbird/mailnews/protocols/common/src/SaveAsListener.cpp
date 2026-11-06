@@ -1,0 +1,117 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "SaveAsListener.h"
+
+#include "nsIInputStream.h"
+
+NS_IMPL_ISUPPORTS(SaveAsListener, nsIStreamListener, nsIRequestObserver)
+
+NS_IMETHODIMP SaveAsListener::OnStartRequest(nsIRequest* request) {
+  if (mUrlListener) {
+    // If we have a URL listener we must have a URI too (there's an assertion
+    // for this in this class's constructor).
+    mUrlListener->OnStartRunningUrl(mUri);
+  }
+
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+SaveAsListener::OnStopRequest(nsIRequest* request, nsresult aStatus) {
+  if (mOutputStream) {
+    mOutputStream->Flush();
+    mOutputStream->Close();
+  }
+
+  if (mUrlListener) {
+    // If we have a URL listener we must have a URI too (there's an assertion
+    // for this in this class's constructor).
+    mUrlListener->OnStopRunningUrl(mUri, aStatus);
+  }
+
+  return NS_OK;
+}
+
+NS_IMETHODIMP SaveAsListener::OnDataAvailable(nsIRequest* request,
+                                              nsIInputStream* inStream,
+                                              uint64_t srcOffset,
+                                              uint32_t count) {
+  nsresult rv;
+  uint64_t available;
+  rv = inStream->Available(&available);
+  if (!mWrittenData) {
+    mWrittenData = true;
+    // Write into the file in place rather than replacing it, so that a file
+    // created beforehand to reserve the name stays reserved, with its
+    // permissions. The stream truncates any existing content.
+    rv = MsgNewBufferedFileOutputStream(getter_AddRefs(mOutputStream),
+                                        mOutputFile, -1, 0644);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  const char* lineEnding = (mUseCanonicalLineEnding) ? CRLF : MSG_LINEBREAK;
+  uint32_t lineEndingLength = (mUseCanonicalLineEnding) ? 2 : MSG_LINEBREAK_LEN;
+
+  uint32_t readCount, maxReadCount = kDataBufferSize - mLeftOver;
+  uint32_t writeCount;
+  char *start, *end, lastCharInPrevBuf = '\0';
+  uint32_t linebreak_len = 0;
+
+  while (count > 0) {
+    if (count < maxReadCount) maxReadCount = count;
+    rv = inStream->Read(mDataBuffer + mLeftOver, maxReadCount, &readCount);
+    if (NS_FAILED(rv)) return rv;
+
+    mLeftOver += readCount;
+    mDataBuffer[mLeftOver] = '\0';
+
+    start = mDataBuffer;
+    // make sure we don't insert another LF, accidentally, by ignoring
+    // second half of CRLF spanning blocks.
+    if (lastCharInPrevBuf == '\r' && *start == '\n') start++;
+
+    end = PL_strpbrk(start, "\r\n");
+    if (end) linebreak_len = (end[0] == '\r' && end[1] == '\n') ? 2 : 1;
+
+    count -= readCount;
+    maxReadCount = kDataBufferSize - mLeftOver;
+
+    if (!end && count > maxReadCount) {
+      // must be a very very long line; sorry cannot handle it
+      return NS_ERROR_FAILURE;
+    }
+
+    while (start && end) {
+      if (mOutputStream && PL_strncasecmp(start, "X-Mozilla-Status:", 17) &&
+          PL_strncasecmp(start, "X-Mozilla-Status2:", 18) &&
+          PL_strncmp(start, "From - ", 7)) {
+        rv = mOutputStream->Write(start, end - start, &writeCount);
+        nsresult tmp =
+            mOutputStream->Write(lineEnding, lineEndingLength, &writeCount);
+        if (NS_FAILED(tmp)) {
+          rv = tmp;
+        }
+      }
+      start = end + linebreak_len;
+      if (start >= mDataBuffer + mLeftOver) {
+        maxReadCount = kDataBufferSize;
+        mLeftOver = 0;
+        break;
+      }
+      end = PL_strpbrk(start, "\r\n");
+      if (end) linebreak_len = (end[0] == '\r' && end[1] == '\n') ? 2 : 1;
+      if (start && !end) {
+        mLeftOver -= (start - mDataBuffer);
+        memcpy(mDataBuffer, start,
+               mLeftOver + 1);  // including null
+        maxReadCount = kDataBufferSize - mLeftOver;
+      }
+    }
+    if (NS_FAILED(rv)) return rv;
+    if (end) lastCharInPrevBuf = *end;
+  }
+
+  return rv;
+}

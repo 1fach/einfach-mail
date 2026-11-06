@@ -1,0 +1,1039 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+const { AppConstants } = ChromeUtils.importESModule(
+  "resource://gre/modules/AppConstants.sys.mjs"
+);
+const { MailChannel } = ChromeUtils.importESModule(
+  "resource:///modules/MailChannel.sys.mjs"
+);
+
+class TestPlainChannel {
+  QueryInterface = ChromeUtils.generateQI(["nsIChannel"]);
+  contentType = "";
+
+  constructor(uri) {
+    this.URI = Services.io.newURI(uri);
+  }
+}
+
+class TestMailChannel extends MailChannel {
+  QueryInterface = ChromeUtils.generateQI(["nsIChannel", "nsIMailChannel"]);
+  contentType = "";
+
+  /**
+   * @param {string} uri
+   */
+  constructor(uri) {
+    super();
+    this.URI = Services.io.newURI(uri);
+  }
+
+  /**
+   * @param {string[][]} expectedHeaders - An array of key/value pairs.
+   */
+  checkHeaders(expectedHeaders) {
+    const { headerNames, headerValues, mimeHeaders } = this;
+    Assert.equal(
+      headerNames.length,
+      expectedHeaders.length,
+      "number of header names"
+    );
+    Assert.equal(
+      headerValues.length,
+      expectedHeaders.length,
+      "number of header values"
+    );
+    for (let i = 0; i < expectedHeaders.length; i++) {
+      Assert.equal(headerNames[i], expectedHeaders[i][0], `header name ${i}`);
+      Assert.equal(headerValues[i], expectedHeaders[i][1], `header value ${i}`);
+    }
+    for (const [name, value] of expectedHeaders) {
+      if (name != "X-Mozilla-LocalizedDate") {
+        Assert.equal(
+          mimeHeaders.extractHeader(name, true).replaceAll("\t", " "),
+          value,
+          `mimeHeaders value for '${name}'`
+        );
+      }
+    }
+  }
+
+  /**
+   * @param {object[]} expectedAttachments - An array of objects, each
+   *   representing the properties of an attachment.
+   */
+  checkAttachments(expectedAttachments) {
+    const { attachments } = this;
+    Assert.equal(
+      attachments.length,
+      expectedAttachments.length,
+      "number of attachments"
+    );
+    for (let i = 0; i < expectedAttachments.length; i++) {
+      for (const property of attachments[i].enumerator) {
+        Assert.equal(
+          property.value,
+          expectedAttachments[i][property.name],
+          `attachment ${i} property '${property.name}'`
+        );
+        delete expectedAttachments[i][property.name];
+      }
+      Assert.equal(
+        Object.entries(expectedAttachments[i]).length,
+        0,
+        `all attachment ${i} properties checked`
+      );
+    }
+  }
+}
+
+/**
+ * @param {nsIChannel|nsIURI} channelOrURI
+ * @param {string} input
+ * @returns {string}
+ */
+async function convertStream(channelOrURI, input) {
+  let channel = null;
+  try {
+    channel = channelOrURI.QueryInterface(Ci.nsIChannel);
+  } catch {}
+  const converter = Cc[
+    "@mozilla.org/streamconv;1?from=message/rfc822&to=*/*"
+  ].createInstance(Ci.nsIStreamConverter);
+
+  const listener = new PromiseTestUtils.PromiseStreamListener(undefined, true);
+  converter.asyncConvertData(null, null, listener, channelOrURI);
+
+  const { buffer } = new TextEncoder().encode(input);
+  const inputStream = Cc[
+    "@mozilla.org/io/arraybuffer-input-stream;1"
+  ].createInstance(Ci.nsIArrayBufferInputStream);
+  inputStream.setData(buffer, 0, buffer.byteLength);
+  converter.onStartRequest(channel);
+  converter.onDataAvailable(channel, inputStream, 0, buffer.byteLength);
+  converter.onStopRequest(channel, Cr.NS_OK);
+
+  return await listener.promise;
+}
+
+const sampleEmailFile = do_get_file("sampleContent.eml");
+const sampleEmailURI =
+  "mailbox:" + Services.io.newFileURI(sampleEmailFile).spec.slice(5);
+const localizedDate = new Services.intl.DateTimeFormat(undefined, {
+  dateStyle: "short",
+  timeStyle: "short",
+}).format(new Date("2000-02-01T00:00:00+1300"));
+
+/**
+ * Test with a mailbox URL for an email file.
+ */
+add_task(async function testBodyMailboxURL() {
+  await subtestBody(`${sampleEmailURI}?number=1`);
+});
+
+/**
+ * Test with an IMAP URL. This doesn't work because the IMAP account doesn't
+ * exist, so the I/O service will refuse to create the URI.
+ */
+add_task(async function testBodyImapURL() {
+  await subtestBody("imap://somebody@somewhere.tld/fetch%3EUID%3E/INBOX%3E1");
+}).skip();
+
+/**
+ * Test with a file URL, with the query parameters we add.
+ */
+add_task(async function testBodyFileURL1() {
+  await subtestBody(
+    "file:///somewhere/out/there.eml?type=application/x-message-display&number=0"
+  );
+});
+
+/**
+ * Test with a file URL, without the query parameters we add.
+ */
+add_task(async function testBodyFileURL2() {
+  await subtestBody("file:///somewhere/out/there.eml");
+});
+
+/**
+ * Test with some completely unknown URL format.
+ */
+add_task(async function testBodyNewURL() {
+  await subtestBody("odd:///?p=file%3A%2F%2F%2Fsomewhere%2Fout%2Fthere.eml");
+});
+
+/**
+ * Simulates a load of sampleContent.eml from the given URI. The converter
+ * output can vary based on the URI, but should be (almost) exactly the same
+ * for every test that runs this subtest.
+ *
+ * @param {string} uri
+ */
+async function subtestBody(uri) {
+  const channel = new TestMailChannel(uri);
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(channel, input);
+
+  // Test the channel output.
+
+  Assert.equal(
+    channel.contentType,
+    "text/html",
+    "body channel should have the HTML content type"
+  );
+  channel.checkHeaders([
+    ["Content-Type", `multipart/mixed; boundary="--------------CHOPCHOP0"`],
+    ["Subject", "Big Meeting Today"],
+    ["From", `"Andy Anway" <andy@anway.invalid>`],
+    ["To", `"Bob Bell" <bob@bell.invalid>`],
+    ["Message-Id", "<sample.content@made.up.invalid>"],
+    ["Date", "Tue, 01 Feb 2000 00:00:00 +1300"],
+    ["X-Mozilla-LocalizedDate", localizedDate],
+  ]);
+
+  let expectedAttachmentURI;
+  if (uri.startsWith("mailbox:")) {
+    expectedAttachmentURI = "mailbox-message:" + uri.slice(8) + "#1";
+  } else {
+    expectedAttachmentURI = uri;
+  }
+
+  const expectedAttachment1URL = URL.parse(uri);
+  // Delete first to get the params in order.
+  expectedAttachment1URL.searchParams.delete("type");
+  expectedAttachment1URL.searchParams.set("part", "1.2");
+  expectedAttachment1URL.searchParams.set("type", "text/plain");
+  expectedAttachment1URL.searchParams.set("filename", "attachment.txt");
+
+  const expectedAttachment2URL = URL.parse(uri);
+  // Delete first to get the params in order.
+  expectedAttachment2URL.searchParams.delete("type");
+  expectedAttachment2URL.searchParams.set("part", "1.3");
+  expectedAttachment2URL.searchParams.set("type", "image/svg+xml");
+  expectedAttachment2URL.searchParams.set("filename", "attachment.svg");
+
+  channel.checkAttachments([
+    {
+      uri: expectedAttachmentURI,
+      url: expectedAttachment1URL,
+      displayName: "attachment.txt",
+      contentType: "text/plain",
+      "X-Mozilla-PartSize": "51",
+      notDownloaded: false,
+      "X-Mozilla-PartDownloaded": "1",
+    },
+    {
+      uri: expectedAttachmentURI,
+      url: expectedAttachment2URL,
+      displayName: "attachment.svg",
+      contentType: "image/svg+xml",
+      "X-Mozilla-PartSize": "474",
+      notDownloaded: false,
+      "X-Mozilla-PartDownloaded": "1",
+    },
+  ]);
+
+  // Test the HTML output.
+
+  Assert.equal(
+    output.slice(0, 28),
+    "\xEF\xBB\xBF<!DOCTYPE html>\r\n<html>\r\n",
+    "output should begin with UTF-8 BOM and HTML doctype"
+  );
+  Assert.ok(
+    output.includes("<p>This is a page of sample content for tests.</p>"),
+    "output should include the text of the message"
+  );
+  Assert.equal(
+    output.slice(-18),
+    "</body>\r\n</html>\r\n",
+    "output should end with closing HTML tag"
+  );
+
+  // Test the <img> tag in the HTML output.
+
+  const expectedImgURL = URL.parse(uri);
+  expectedImgURL.searchParams.delete("type");
+  expectedImgURL.searchParams.set("part", "1.1.2");
+  expectedImgURL.searchParams.set("type", "image/png");
+  expectedImgURL.searchParams.set("filename", "tb-logo.png");
+
+  const document = new DOMParser().parseFromString(output, "text/html");
+  const img = document.querySelector("img");
+  Assert.equal(
+    img.src,
+    expectedImgURL.toString(),
+    "inline image URL should be rewritten relative to the message URL"
+  );
+
+  // Test a request for the image.
+
+  const imgChannel = new TestPlainChannel(expectedImgURL);
+  const imgOutput = await convertStream(imgChannel, input);
+
+  Assert.equal(
+    imgChannel.contentType,
+    "image/png",
+    "image channel should have the image content type"
+  );
+  Assert.equal(
+    imgOutput.slice(0, 8),
+    "\x89PNG\x0D\x0A\x1A\x0A",
+    "output should start at the start of the PNG image"
+  );
+  Assert.equal(
+    imgOutput.slice(-8),
+    "IEND\xAE\x42\x60\x82",
+    "output should end at the end of the PNG image"
+  );
+
+  // Test a request for the first attachment.
+
+  const attachment1Channel = new TestPlainChannel(expectedAttachment1URL);
+  const attachment1Output = await convertStream(attachment1Channel, input);
+
+  Assert.equal(
+    attachment1Channel.contentType,
+    "text/plain",
+    "attachment channel should have the attachment content type"
+  );
+  Assert.equal(
+    attachment1Output,
+    "I'm a text attachment! I won't be displayed inline\n",
+    "output should contain the attachment"
+  );
+
+  // Test a request for the second attachment.
+
+  const attachment2Channel = new TestPlainChannel(expectedAttachment2URL);
+  const attachment2Output = await convertStream(attachment2Channel, input);
+
+  Assert.equal(
+    attachment2Channel.contentType,
+    "image/svg+xml",
+    "attachment channel should have the attachment content type"
+  );
+  Assert.equal(
+    attachment2Output.slice(0, 5),
+    "<svg ",
+    "output should start at the start of the SVG image"
+  );
+  Assert.equal(
+    attachment2Output.slice(-8),
+    "\n</svg>\n",
+    "output should end at the end of the SVG image"
+  );
+}
+
+/**
+ * Test the inline attachments when enabled.
+ */
+add_task(async function testInlineAttachments() {
+  const uri = `${sampleEmailURI}?number=2`;
+  const channel = new TestMailChannel(uri);
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(channel, input);
+
+  // Test the HTML output.
+
+  Assert.equal(
+    output.slice(0, 28),
+    "\xEF\xBB\xBF<!DOCTYPE html>\r\n<html>\r\n",
+    "output should begin with UTF-8 BOM and HTML doctype"
+  );
+  Assert.equal(
+    output.slice(-18),
+    "</body>\r\n</html>\r\n",
+    "output should end with closing HTML tag"
+  );
+
+  const document = new DOMParser().parseFromString(output, "text/html");
+  const fieldsets = document.querySelectorAll(
+    "fieldset.moz-mime-attachment-header"
+  );
+  Assert.equal(
+    fieldsets.length,
+    2,
+    "there should be fieldsets for the inline attachment and printed list"
+  );
+
+  Assert.ok(!fieldsets[0].classList.contains("moz-print-only"));
+  Assert.equal(fieldsets[0].textContent, "attachment.svg");
+  const inlineContainer = fieldsets[0].nextElementSibling;
+  Assert.equal(inlineContainer.localName, "div");
+  Assert.equal(inlineContainer.className, "moz-attached-image-container");
+  const img = inlineContainer.querySelector("img");
+  Assert.equal(img.className, "moz-attached-image");
+  Assert.equal(
+    img.src,
+    `${sampleEmailURI}?number=2&part=1.3&type=image/svg+xml&filename=attachment.svg`
+  );
+
+  subtestPrintedAttachmentList(fieldsets[1]);
+});
+
+/**
+ * Test the inline attachments when inline text attachments are enabled.
+ */
+add_task(async function testInlineTextAttachments() {
+  Services.prefs.setBoolPref("mail.inline_attachments.text", true);
+
+  const uri = `${sampleEmailURI}?number=3`;
+  const channel = new TestMailChannel(uri);
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(channel, input);
+
+  // Test the HTML output.
+
+  Assert.equal(
+    output.slice(0, 28),
+    "\xEF\xBB\xBF<!DOCTYPE html>\r\n<html>\r\n",
+    "output should begin with UTF-8 BOM and HTML doctype"
+  );
+  Assert.equal(
+    output.slice(-18),
+    "</body>\r\n</html>\r\n",
+    "output should end with closing HTML tag"
+  );
+
+  const document = new DOMParser().parseFromString(output, "text/html");
+  const fieldsets = document.querySelectorAll(
+    "fieldset.moz-mime-attachment-header"
+  );
+  Assert.equal(
+    fieldsets.length,
+    3,
+    "there should be fieldsets for both the inline attachments and printed list"
+  );
+
+  Assert.ok(!fieldsets[0].classList.contains("moz-print-only"));
+  Assert.equal(fieldsets[0].textContent, "attachment.txt");
+  const inlineContainer0 = fieldsets[0].nextElementSibling;
+  Assert.equal(inlineContainer0.localName, "div");
+  Assert.equal(inlineContainer0.className, "moz-text-plain");
+  const pre0 = inlineContainer0.querySelector("pre.moz-quote-pre[wrap]");
+  Assert.equal(
+    pre0.textContent,
+    "I'm a text attachment! I won't be displayed inline\n"
+  );
+
+  Assert.ok(!fieldsets[1].classList.contains("moz-print-only"));
+  Assert.equal(fieldsets[1].textContent, "attachment.svg");
+  const inlineContainer1 = fieldsets[1].nextElementSibling;
+  Assert.equal(inlineContainer1.localName, "div");
+  Assert.equal(inlineContainer1.className, "moz-attached-image-container");
+  const img1 = inlineContainer1.querySelector("img.moz-attached-image");
+  Assert.equal(
+    img1.src,
+    `${sampleEmailURI}?number=3&part=1.3&type=image/svg+xml&filename=attachment.svg`
+  );
+
+  subtestPrintedAttachmentList(fieldsets[2]);
+
+  Services.prefs.clearUserPref("mail.inline_attachments.text");
+});
+
+/**
+ * Test the inline attachments when disabled.
+ */
+add_task(async function testNoInlineAttachments() {
+  Services.prefs.setBoolPref("mail.inline_attachments", false);
+
+  const uri = `${sampleEmailURI}?number=4`;
+  const channel = new TestMailChannel(uri);
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(channel, input);
+
+  // Test the HTML output.
+
+  Assert.equal(
+    output.slice(0, 28),
+    "\xEF\xBB\xBF<!DOCTYPE html>\r\n<html>\r\n",
+    "output should begin with UTF-8 BOM and HTML doctype"
+  );
+  Assert.equal(
+    output.slice(-18),
+    "</body>\r\n</html>\r\n",
+    "output should end with closing HTML tag"
+  );
+
+  const document = new DOMParser().parseFromString(output, "text/html");
+  const fieldsets = document.querySelectorAll(
+    "fieldset.moz-mime-attachment-header"
+  );
+  Assert.equal(
+    fieldsets.length,
+    1,
+    "there should only be a fieldset for the printed list"
+  );
+
+  subtestPrintedAttachmentList(fieldsets[0]);
+
+  Services.prefs.clearUserPref("mail.inline_attachments");
+});
+
+/**
+ * @param {HTMLFieldSetElement} fieldset
+ */
+function subtestPrintedAttachmentList(fieldset) {
+  Assert.ok(fieldset.classList.contains("moz-print-only"));
+  Assert.equal(fieldset.textContent, "Attachments:");
+  const listContainer = fieldset.nextElementSibling;
+  Assert.equal(listContainer.localName, "div");
+  Assert.equal(
+    listContainer.className,
+    "moz-mime-attachment-wrap moz-print-only"
+  );
+  const table = listContainer.querySelector("table");
+  Assert.equal(table.tBodies[0].rows.length, 2);
+  Assert.equal(table.tBodies[0].rows[0].cells[0].textContent, "attachment.txt");
+  Assert.equal(table.tBodies[0].rows[0].cells[1].textContent, "51 byte");
+  Assert.equal(table.tBodies[0].rows[1].cells[0].textContent, "attachment.svg");
+  Assert.equal(table.tBodies[0].rows[1].cells[1].textContent, "474 byte");
+}
+
+/**
+ * Test the case where there aren't any attachments.
+ */
+add_task(async function testNoAttachments() {
+  const uri = `${sampleEmailURI}?number=5`;
+  const channel = new TestMailChannel(uri);
+  const input = `From andy@anway.invalid
+    Subject: Big Meeting Today
+    From: "Andy Anway" <andy@anway.invalid>
+    To: "Bob Bell" <bob@bell.invalid>
+    Message-Id: <sample.content@made.up.invalid>
+    Date: Tue, 01 Feb 2000 00:00:00 +1300
+    Content-Type: text/html; charset=ISO-8859-1; format=flowed
+    Content-Transfer-Encoding: 7bit
+
+    <!DOCTYPE html>
+    <html>
+      <body>
+        <p>I'll be your message today.</p>
+      </body>
+    </html>
+  `.replaceAll(/^ {2,4}/gm, "");
+  const output = await convertStream(channel, input);
+
+  // Test the channel output.
+
+  Assert.equal(
+    channel.contentType,
+    "text/html",
+    "body channel should have the HTML content type"
+  );
+
+  channel.checkHeaders([
+    ["Subject", "Big Meeting Today"],
+    ["From", `"Andy Anway" <andy@anway.invalid>`],
+    ["To", `"Bob Bell" <bob@bell.invalid>`],
+    ["Message-Id", "<sample.content@made.up.invalid>"],
+    ["Date", "Tue, 01 Feb 2000 00:00:00 +1300"],
+    [
+      "X-Mozilla-LocalizedDate",
+      new Services.intl.DateTimeFormat(undefined, {
+        dateStyle: "short",
+        timeStyle: "short",
+      }).format(new Date("2000-02-01T00:00:00+1300")),
+    ],
+    ["Content-Type", "text/html; charset=ISO-8859-1; format=flowed"],
+  ]);
+
+  channel.checkAttachments([]);
+
+  // Test the HTML output.
+
+  Assert.equal(
+    output.slice(0, 28),
+    "\xEF\xBB\xBF<!DOCTYPE html>\r\n<html>\r\n",
+    "output should begin with UTF-8 BOM and HTML doctype"
+  );
+  Assert.equal(
+    output.slice(-18),
+    "</body>\r\n</html>\r\n",
+    "output should end with closing HTML tag"
+  );
+
+  const document = new DOMParser().parseFromString(output, "text/html");
+  const fieldsets = document.querySelectorAll(
+    "fieldset.moz-mime-attachment-header"
+  );
+  Assert.equal(
+    fieldsets.length,
+    0,
+    "there should no fieldsets for attachments"
+  );
+});
+
+/**
+ * Test that conditional CSS is stripped while unconditional CSS is preserved
+ * when mail.html_sanitize.drop_conditional_css is enabled.
+ */
+add_task(async function testConditionalCSSStripped() {
+  const uri = `${sampleEmailURI}?number=6`;
+  const channel = new TestMailChannel(uri);
+  const input = `Content-Type: text/html; charset=UTF-8
+
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <style>#foo { color: blue; } @media (min-width: 300px) { #bar { color: red; } }</style>
+      </head>
+      <body></body>
+    </html>
+  `.replaceAll(/^ {4}/gm, "");
+  const output = await convertStream(channel, input);
+  const doc = new DOMParser().parseFromString(output, "text/html");
+  const sheet = doc.querySelector("style").sheet;
+
+  // 1. Unconditional CSS rule should stay regardless.
+  Assert.equal(
+    sheet.cssRules.length,
+    1,
+    "only unconditional rule should remain"
+  );
+  Assert.equal(
+    sheet.cssRules[0].cssText,
+    "#foo { color: blue; }",
+    "unconditional CSS rule should stay regardless"
+  );
+
+  // 2. Conditional CSS rule (@media) should be stripped.
+  Assert.ok(
+    ![...sheet.cssRules].some(rule => rule.type === CSSRule.MEDIA_RULE),
+    "conditional CSS rule (@media) should be stripped when pref is enabled"
+  );
+});
+
+/**
+ * Test that conditional CSS is preserved along with unconditional CSS
+ * when mail.html_sanitize.drop_conditional_css is disabled.
+ */
+add_task(async function testConditionalCSSPreservedWhenPrefDisabled() {
+  Services.prefs.setBoolPref("mail.html_sanitize.drop_conditional_css", false);
+  registerCleanupFunction(() => {
+    Services.prefs.clearUserPref("mail.html_sanitize.drop_conditional_css");
+  });
+
+  const uri = `${sampleEmailURI}?number=7`;
+  const channel = new TestMailChannel(uri);
+  const input = `Content-Type: text/html; charset=UTF-8
+
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <style>#foo { color: blue; } @media (min-width: 300px) { #bar { color: red; } }</style>
+      </head>
+      <body></body>
+    </html>
+  `.replaceAll(/^ {4}/gm, "");
+  const output = await convertStream(channel, input);
+  const doc = new DOMParser().parseFromString(output, "text/html");
+  const sheet = doc.querySelector("style").sheet;
+
+  // 3. Unconditional CSS rule should stay regardless.
+  Assert.equal(sheet.cssRules.length, 2, "both rules should be preserved");
+  Assert.equal(
+    sheet.cssRules[0].cssText,
+    "#foo { color: blue; }",
+    "unconditional CSS rule should stay regardless when pref is disabled"
+  );
+
+  // 4. Conditional CSS rule (@media) should be preserved.
+  Assert.equal(
+    sheet.cssRules[1].type,
+    CSSRule.MEDIA_RULE,
+    "conditional CSS rule (@media) should be preserved when pref is disabled"
+  );
+  Assert.equal(
+    sheet.cssRules[1].conditionText,
+    "(min-width: 300px)",
+    "media condition should be preserved when pref is disabled"
+  );
+  Assert.equal(
+    sheet.cssRules[1].cssRules[0]?.cssText,
+    "#bar { color: red; }",
+    "nested rule inside conditional block should be preserved when pref is disabled"
+  );
+
+  Services.prefs.clearUserPref("mail.html_sanitize.drop_conditional_css");
+});
+
+/**
+ * Test print-only headers when set to "micro headers".
+ */
+add_task(async function testMicroHeaders() {
+  Services.prefs.setIntPref(
+    "mail.show_headers",
+    Ci.nsMimeHeaderDisplayTypes.MicroHeaders
+  );
+
+  await subtestPrintedHeaders([
+    ["Subject: ", "Big Meeting Today"],
+    ["From: ", `"Andy Anway" <andy@anway.invalid>`],
+    ["Date: ", localizedDate],
+  ]);
+
+  Services.prefs.clearUserPref("mail.show_headers");
+});
+
+/**
+ * Test print-only headers when set to "normal headers".
+ */
+add_task(async function testNormalHeaders() {
+  Services.prefs.setIntPref(
+    "mail.show_headers",
+    Ci.nsMimeHeaderDisplayTypes.NormalHeaders
+  );
+
+  await subtestPrintedHeaders([
+    ["Subject: ", "Big Meeting Today"],
+    ["From: ", `"Andy Anway" <andy@anway.invalid>`],
+    ["Date: ", localizedDate],
+    ["To: ", `"Bob Bell" <bob@bell.invalid>`],
+  ]);
+
+  Services.prefs.clearUserPref("mail.show_headers");
+});
+
+/**
+ * Test print-only headers when set to "all headers".
+ */
+add_task(async function testAllHeaders() {
+  Services.prefs.setIntPref(
+    "mail.show_headers",
+    Ci.nsMimeHeaderDisplayTypes.AllHeaders
+  );
+
+  await subtestPrintedHeaders([
+    ["Subject: ", "Big Meeting Today"],
+    ["From: ", `"Andy Anway" <andy@anway.invalid>`],
+    ["Date: ", localizedDate],
+    ["To: ", `"Bob Bell" <bob@bell.invalid>`],
+    ["Content-Type: ", `multipart/mixed; boundary="--------------CHOPCHOP0"`],
+    ["Message-ID: ", "<sample.content@made.up.invalid>"],
+  ]);
+
+  Services.prefs.clearUserPref("mail.show_headers");
+});
+
+/**
+ * @param {string[][]} expectedHeaders - An array of key/value pairs.
+ */
+async function subtestPrintedHeaders(expectedHeaders) {
+  const uri = `${sampleEmailURI}?number=8`;
+  const channel = new TestMailChannel(uri);
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(channel, input);
+
+  const document = new DOMParser().parseFromString(output, "text/html");
+  const headerDivs = document.querySelectorAll("div.moz-header-display-name");
+  Assert.equal(headerDivs.length, expectedHeaders.length);
+
+  for (let i = 0; i < expectedHeaders.length; i++) {
+    Assert.equal(
+      headerDivs[i].textContent,
+      expectedHeaders[i][0],
+      `header name ${i}`
+    );
+    Assert.equal(
+      headerDivs[i].nextSibling.nodeValue,
+      expectedHeaders[i][1],
+      `header value ${i}`
+    );
+  }
+}
+
+/**
+ * Test using an nsIURI instead of an nsIChannel as the `context` argument.
+ */
+add_task(async function testURIArgument() {
+  const uri = `${sampleEmailURI}?number=9`;
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(Services.io.newURI(uri), input);
+
+  // Test the HTML output.
+
+  Assert.equal(
+    output.slice(0, 28),
+    "\xEF\xBB\xBF<!DOCTYPE html>\r\n<html>\r\n",
+    "output should begin with UTF-8 BOM and HTML doctype"
+  );
+  Assert.equal(
+    output.slice(-18),
+    "</body>\r\n</html>\r\n",
+    "output should end with closing HTML tag"
+  );
+
+  // Test the <img> tag in the HTML output.
+
+  const expectedImgURL = URL.parse(uri);
+  expectedImgURL.searchParams.delete("type");
+  expectedImgURL.searchParams.set("part", "1.1.2");
+  expectedImgURL.searchParams.set("type", "image/png");
+  expectedImgURL.searchParams.set("filename", "tb-logo.png");
+
+  const document = new DOMParser().parseFromString(output, "text/html");
+  const img = document.querySelector("img");
+  Assert.equal(
+    img.src,
+    expectedImgURL.toString(),
+    "inline image URL should be rewritten relative to the message URL"
+  );
+});
+
+const lineEnding = AppConstants.platform == "win" ? "\r\n" : "\n";
+
+/**
+ * Test output by specifying `header=filter`.
+ */
+add_task(async function testFilterOutput() {
+  const uri = `${sampleEmailURI}?number=10&header=filter`;
+  const channel = new TestMailChannel(uri);
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(channel, input);
+
+  Assert.equal(
+    channel.contentType,
+    "text/html",
+    "channel should have the HTML content type"
+  );
+
+  channel.checkHeaders([
+    ["Content-Type", `multipart/mixed; boundary="--------------CHOPCHOP0"`],
+    ["Subject", "Big Meeting Today"],
+    ["From", `"Andy Anway" <andy@anway.invalid>`],
+    ["To", `"Bob Bell" <bob@bell.invalid>`],
+    ["Message-Id", "<sample.content@made.up.invalid>"],
+    ["Date", "Tue, 01 Feb 2000 00:00:00 +1300"],
+    ["X-Mozilla-LocalizedDate", localizedDate],
+  ]);
+
+  const expectedAttachmentURI = "mailbox-message:" + uri.slice(8) + "#10";
+
+  const expectedAttachment1URL = URL.parse(uri);
+  // Delete first to get the params in order.
+  expectedAttachment1URL.searchParams.delete("type");
+  expectedAttachment1URL.searchParams.set("part", "1.2");
+  expectedAttachment1URL.searchParams.set("type", "text/plain");
+  expectedAttachment1URL.searchParams.set("filename", "attachment.txt");
+
+  const expectedAttachment2URL = URL.parse(uri);
+  // Delete first to get the params in order.
+  expectedAttachment2URL.searchParams.delete("type");
+  expectedAttachment2URL.searchParams.set("part", "1.3");
+  expectedAttachment2URL.searchParams.set("type", "image/svg+xml");
+  expectedAttachment2URL.searchParams.set("filename", "attachment.svg");
+
+  channel.checkAttachments([
+    {
+      uri: expectedAttachmentURI,
+      url: expectedAttachment1URL,
+      displayName: "attachment.txt",
+      contentType: "text/plain",
+      "X-Mozilla-PartSize": "51",
+      notDownloaded: false,
+      "X-Mozilla-PartDownloaded": "1",
+    },
+    {
+      uri: expectedAttachmentURI,
+      url: expectedAttachment2URL,
+      displayName: "attachment.svg",
+      contentType: "image/svg+xml",
+      "X-Mozilla-PartSize": "474",
+      notDownloaded: false,
+      "X-Mozilla-PartDownloaded": "1",
+    },
+  ]);
+
+  const start = `<!DOCTYPE html>${lineEnding}<html>${lineEnding}`;
+  Assert.equal(
+    output.slice(0, start.length),
+    start,
+    "output should begin with HTML doctype"
+  );
+  Assert.ok(
+    !output.includes("Big Meeting Today"),
+    "output should not include the subject"
+  );
+  Assert.ok(
+    !output.includes(localizedDate),
+    "output should not include the date"
+  );
+  Assert.ok(
+    output.includes("<p>This is a page of sample content for tests.</p>"),
+    "output should include the text of the message"
+  );
+  // We also get the inline attachment display and print-only attachment list,
+  // after the closing tag. Should we?
+  // const end = `</body>${lineEnding}</html>`;
+  // Assert.equal(
+  //   output.slice(-end.length),
+  //   end,
+  //   "output should end with closing HTML tag"
+  // );
+});
+
+/**
+ * Test plain text output by specifying `header=quotebody`.
+ */
+add_task(async function testQuoteBodyOutput() {
+  const uri = `${sampleEmailURI}?number=11&header=quotebody`;
+  const channel = new TestMailChannel(uri);
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(channel, input);
+
+  Assert.stringMatches(
+    channel.contentType,
+    /^text\/html/,
+    "channel should have the HTML content type"
+  );
+
+  channel.checkHeaders([]);
+  channel.checkAttachments([]);
+
+  const start = `<!DOCTYPE html>${lineEnding}<html><head>${lineEnding}`;
+  Assert.equal(
+    output.slice(0, start.length),
+    start,
+    "output should begin with HTML doctype"
+  );
+  Assert.ok(
+    !output.includes("Big Meeting Today"),
+    "output should not include the subject"
+  );
+  Assert.ok(
+    !output.includes(localizedDate),
+    "output should not include the date"
+  );
+  Assert.ok(
+    output.includes("<p>This is a page of sample content for tests.</p>"),
+    "output should include the text of the message"
+  );
+  Assert.equal(
+    output.slice(-15),
+    "\n</body></html>", // Not \r\n on Windows.
+    "output should end with closing HTML tag"
+  );
+});
+
+/**
+ * Test plain text output by specifying `header=quote`.
+ * This is extremely similar to the quotebody output above, in fact it would
+ * be the same for this message if the URL wasn't different. There are tiny
+ * differences in the code that gets run, but I don't know if there's any
+ * scenario where those differences actually matter.
+ */
+add_task(async function testQuoteOutput() {
+  const uri = `${sampleEmailURI}?number=12&header=quote`;
+  const channel = new TestMailChannel(uri);
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(channel, input);
+
+  Assert.equal(
+    channel.contentType,
+    "text/html",
+    "channel should have the HTML content type"
+  );
+
+  channel.checkHeaders([]);
+  channel.checkAttachments([]);
+
+  const start = `<!DOCTYPE html>${lineEnding}<html><head>${lineEnding}`;
+  Assert.equal(
+    output.slice(0, start.length),
+    start,
+    "output should begin with HTML doctype"
+  );
+  Assert.ok(
+    !output.includes("Big Meeting Today"),
+    "output should not include the subject"
+  );
+  Assert.ok(
+    !output.includes(localizedDate),
+    "output should not include the date"
+  );
+  Assert.ok(
+    output.includes("<p>This is a page of sample content for tests.</p>"),
+    "output should include the text of the message"
+  );
+  Assert.equal(
+    output.slice(-15),
+    "\n</body></html>", // Not \r\n on Windows.
+    "output should end with closing HTML tag"
+  );
+});
+
+/**
+ * Test alternative HTML output by specifying `header=saveas`.
+ * This format emits the headers and attachments to the channel, but that
+ * doesn't make much sense.
+ */
+add_task(async function testSaveAsOutput() {
+  const uri = `${sampleEmailURI}?number=13&header=saveas`;
+  const channel = new TestMailChannel(uri);
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(channel, input);
+
+  Assert.equal(
+    channel.contentType,
+    "text/html",
+    "channel should have the HTML content type"
+  );
+
+  Assert.equal(
+    output.slice(0, 28),
+    "\xEF\xBB\xBF<!DOCTYPE html>\r\n<html>\r\n",
+    "output should begin with UTF-8 BOM and HTML doctype"
+  );
+  Assert.ok(
+    output.includes("\r\n<title>Big Meeting Today</title>\r\n"),
+    "output should include the subject in the title"
+  );
+  Assert.ok(
+    output.includes(`<td><b>Subject: </b>Big Meeting Today</td>`),
+    "output should include the subject"
+  );
+  Assert.ok(
+    output.includes(`<td><b>Date: </b>${localizedDate}</td>`),
+    "output should include the localised date"
+  );
+  Assert.ok(
+    output.includes("<p>This is a page of sample content for tests.</p>"),
+    "output should include the text of the message"
+  );
+  Assert.equal(
+    output.slice(-11),
+    "\r\n</html>\r\n",
+    "output should end with closing HTML tag"
+  );
+});
+
+/**
+ * Test raw output by specifying `header=attach`.
+ */
+add_task(async function testRawOutput() {
+  const uri = `${sampleEmailURI}?number=14&header=attach`;
+  const channel = new TestMailChannel(uri);
+  const input = await IOUtils.readUTF8(sampleEmailFile.path);
+  const output = await convertStream(channel, input);
+
+  // The channel's content-type should probably be "message/rfc822", but it
+  // is "application/x-unknown-content-type".
+
+  channel.checkHeaders([]);
+  channel.checkAttachments([]);
+
+  if (AppConstants.platform == "win") {
+    Assert.equal(
+      output.replaceAll("\r", ""),
+      input,
+      "raw output minus carriage returns should match input"
+    );
+  } else {
+    Assert.equal(output, input, "raw output should match input");
+  }
+});

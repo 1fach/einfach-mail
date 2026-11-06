@@ -1,0 +1,1651 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "nsCMS.h"
+
+#include "CertVerifier.h"
+#include "cms.h"
+#include "CryptoTask.h"
+#include "mozilla/Components.h"
+#include "mozilla/Logging.h"
+#include "mozilla/RefPtr.h"
+#include "mozilla/StaticMutex.h"
+#include "mozpkix/pkixtypes.h"
+#include "mozpkix/Result.h"
+#include "nsDependentSubstring.h"
+#include "nsICryptoHash.h"
+#include "nsISupports.h"
+#include "nsIX509CertDB.h"
+#include "nsNSSCertificate.h"
+#include "nsNSSComponent.h"
+#include "nsServiceManagerUtils.h"
+#include "ScopedNSSTypes.h"
+#include "cert.h"
+#include "pk11pub.h"
+#include "secasn1.h"
+#include "secerr.h"
+#include "sechash.h"
+#include "smime.h"
+
+using namespace mozilla;
+using namespace mozilla::psm;
+using namespace mozilla::pkix;
+
+static mozilla::LazyLogModule gCMSLog("CMS");
+
+NS_IMPL_ISUPPORTS(nsCMSMessage, nsICMSMessage)
+
+nsCMSMessage::nsCMSMessage() { m_cmsMsg = nullptr; }
+nsCMSMessage::nsCMSMessage(NSSCMSMessage* aCMSMsg) { m_cmsMsg = aCMSMsg; }
+
+nsCMSMessage::~nsCMSMessage() {
+  if (m_cmsMsg) {
+    NSS_CMSMessage_Destroy(m_cmsMsg);
+  }
+}
+
+nsresult nsCMSMessage::Init() {
+  return EnsureNSSInitializedChromeOrContent() ? NS_OK : NS_ERROR_NOT_AVAILABLE;
+}
+
+NS_IMETHODIMP nsCMSMessage::VerifySignature(
+    int32_t verifyFlags, nsISMimeVerificationFailure** reason) {
+  const auto result = CommonVerifySignature(verifyFlags, {}, 0);
+  if (result.reason) {
+    auto failureReason =
+        RefPtr(new nsSMimeVerificationFailure{result.reason.value()});
+    failureReason.forget(reason);
+  }
+  return result.rv;
+}
+
+NSSCMSSignerInfo* nsCMSMessage::GetTopLevelSignerInfo() {
+  if (!m_cmsMsg) return nullptr;
+
+  if (!NSS_CMSMessage_IsSigned(m_cmsMsg)) return nullptr;
+
+  NSSCMSContentInfo* cinfo = NSS_CMSMessage_ContentLevel(m_cmsMsg, 0);
+  if (!cinfo) return nullptr;
+
+  NSSCMSSignedData* sigd =
+      (NSSCMSSignedData*)NSS_CMSContentInfo_GetContent(cinfo);
+  if (!sigd) return nullptr;
+
+  PR_ASSERT(NSS_CMSSignedData_SignerInfoCount(sigd) > 0);
+  return NSS_CMSSignedData_GetSignerInfo(sigd, 0);
+}
+
+NS_IMETHODIMP nsCMSMessage::GetSignerEmailAddress(char** aEmail) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSMessage::GetSignerEmailAddress"));
+  NS_ENSURE_ARG(aEmail);
+
+  NSSCMSSignerInfo* si = GetTopLevelSignerInfo();
+  if (!si) return NS_ERROR_FAILURE;
+
+  *aEmail = NSS_CMSSignerInfo_GetSignerEmailAddress(si);
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsCMSMessage::GetSignerCommonName(char** aName) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSMessage::GetSignerCommonName"));
+  NS_ENSURE_ARG(aName);
+
+  NSSCMSSignerInfo* si = GetTopLevelSignerInfo();
+  if (!si) return NS_ERROR_FAILURE;
+
+  *aName = NSS_CMSSignerInfo_GetSignerCommonName(si);
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsCMSMessage::GetContentIsEncrypted(bool* isEncrypted) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSMessage::GetContentIsEncrypted"));
+  NS_ENSURE_ARG(isEncrypted);
+
+  if (!m_cmsMsg) return NS_ERROR_FAILURE;
+
+  *isEncrypted = NSS_CMSMessage_IsEncrypted(m_cmsMsg);
+
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsCMSMessage::GetContentIsSigned(bool* isSigned) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSMessage::GetContentIsSigned"));
+  NS_ENSURE_ARG(isSigned);
+
+  if (!m_cmsMsg) return NS_ERROR_FAILURE;
+
+  *isSigned = NSS_CMSMessage_IsSigned(m_cmsMsg);
+
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsCMSMessage::GetSignerCert(nsIX509Cert** scert) {
+  NSSCMSSignerInfo* si = GetTopLevelSignerInfo();
+  if (!si) return NS_ERROR_FAILURE;
+
+  nsCOMPtr<nsIX509Cert> cert;
+  if (si->cert) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::GetSignerCert got signer cert"));
+
+    nsCOMPtr<nsIX509CertDB> certdb =
+        mozilla::components::NSSCertificateDB::Service();
+    nsTArray<uint8_t> certBytes;
+    certBytes.AppendElements(si->cert->derCert.data, si->cert->derCert.len);
+    nsresult rv = certdb->ConstructX509(certBytes, getter_AddRefs(cert));
+    NS_ENSURE_SUCCESS(rv, rv);
+  } else {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::GetSignerCert no signer cert, do we have a cert "
+             "list? %s",
+             (si->certList ? "yes" : "no")));
+
+    *scert = nullptr;
+  }
+
+  cert.forget(scert);
+
+  return NS_OK;
+}
+
+// Look up a cert by a recipient identifier and return it only if we
+// hold its private key.
+static UniqueCERTCertificate FindOwnRecipientCert(CERTIssuerAndSN* issuerAndSN,
+                                                  SECItem* subjectKeyID) {
+  CERTCertDBHandle* db = CERT_GetDefaultCertDB();
+  UniqueCERTCertificate cert;
+  if (issuerAndSN) {
+    cert.reset(CERT_FindCertByIssuerAndSN(db, issuerAndSN));
+  } else if (subjectKeyID) {
+    cert.reset(CERT_FindCertBySubjectKeyID(db, subjectKeyID));
+  }
+  if (!cert) {
+    return nullptr;
+  }
+  UniqueSECKEYPrivateKey key(PK11_FindKeyByAnyCert(cert.get(), nullptr));
+  if (!key) {
+    return nullptr;
+  }
+  return cert;
+}
+
+NS_IMETHODIMP nsCMSMessage::GetEncryptionCert(nsIX509Cert** ecert) {
+  NS_ENSURE_ARG(ecert);
+  *ecert = nullptr;
+
+  NSSCMSRecipientInfo** recipientInfos = GetEnvelopedRecipientInfos();
+  if (!recipientInfos) {
+    return NS_OK;
+  }
+
+  // Find an encryption cert based on recipient identifiers.
+  UniqueCERTCertificate found;
+  for (int i = 0; recipientInfos[i] && !found; i++) {
+    NSSCMSRecipientInfo* ri = recipientInfos[i];
+    switch (ri->recipientInfoType) {
+      case NSSCMSRecipientInfoID_KeyTrans: {
+        NSSCMSRecipientIdentifier* rid =
+            &ri->ri.keyTransRecipientInfo.recipientIdentifier;
+        found = FindOwnRecipientCert(
+            rid->identifierType == NSSCMSRecipientID_IssuerSN
+                ? rid->id.issuerAndSN
+                : nullptr,
+            rid->identifierType == NSSCMSRecipientID_SubjectKeyID
+                ? rid->id.subjectKeyID
+                : nullptr);
+        break;
+      }
+      case NSSCMSRecipientInfoID_KeyAgree: {
+        NSSCMSRecipientEncryptedKey** reks =
+            ri->ri.keyAgreeRecipientInfo.recipientEncryptedKeys;
+        for (int j = 0; reks && reks[j] && !found; j++) {
+          NSSCMSKeyAgreeRecipientIdentifier* rid =
+              &reks[j]->recipientIdentifier;
+          found = FindOwnRecipientCert(
+              rid->identifierType == NSSCMSKeyAgreeRecipientID_IssuerSN
+                  ? rid->id.issuerAndSN
+                  : nullptr,
+              rid->identifierType == NSSCMSKeyAgreeRecipientID_RKeyID
+                  ? rid->id.recipientKeyIdentifier.subjectKeyIdentifier
+                  : nullptr);
+        }
+        break;
+      }
+      default:
+        // KEK recipients use a pre-shared key and carry no certificate.
+        break;
+    }
+  }
+
+  if (!found) {
+    return NS_OK;
+  }
+
+  nsTArray<uint8_t> certBytes;
+  certBytes.AppendElements(found->derCert.data, found->derCert.len);
+  nsCOMPtr<nsIX509Cert> cert = new nsNSSCertificate(std::move(certBytes));
+  cert.forget(ecert);
+  return NS_OK;
+}
+
+static void AppendMGFFromParams(PLArenaPool* arena, const SECItem& params,
+                                nsACString& aResult) {
+  SECKEYRSAPSSParams pssParams;
+  PORT_Memset(&pssParams, 0, sizeof(pssParams));
+  if (SEC_QuickDERDecodeItem(arena, &pssParams,
+                             SEC_ASN1_GET(SECKEY_RSAPSSParamsTemplate),
+                             &params) != SECSuccess) {
+    return;
+  }
+  if (!pssParams.maskAlg) {
+    return;
+  }
+  if (SECOID_GetAlgorithmTag(pssParams.maskAlg) != SEC_OID_PKCS1_MGF1) {
+    return;
+  }
+  if (!pssParams.maskAlg->parameters.data) {
+    return;
+  }
+  SECAlgorithmID maskHashAlg;
+  PORT_Memset(&maskHashAlg, 0, sizeof(maskHashAlg));
+  if (SEC_QuickDERDecodeItem(arena, &maskHashAlg,
+                             SEC_ASN1_GET(SECOID_AlgorithmIDTemplate),
+                             &pssParams.maskAlg->parameters) != SECSuccess) {
+    return;
+  }
+  SECOidTag maskHashTag = SECOID_GetAlgorithmTag(&maskHashAlg);
+  SECOidData* hashOid = SECOID_FindOIDByTag(maskHashTag);
+  if (hashOid && hashOid->desc) {
+    aResult.AppendLiteral(" (MGF1-");
+    aResult.Append(hashOid->desc);
+    aResult.Append(')');
+  }
+}
+
+NS_IMETHODIMP nsCMSMessage::GetSignatureAlgorithmName(nsACString& aResult) {
+  NSSCMSSignerInfo* si = GetTopLevelSignerInfo();
+  if (!si) {
+    aResult.Truncate();
+    return NS_OK;
+  }
+
+  SECOidTag sigAlgTag = SECOID_GetAlgorithmTag(&si->digestEncAlg);
+  switch (sigAlgTag) {
+    case SEC_OID_PKCS1_RSA_PSS_SIGNATURE: {
+      aResult.AssignLiteral("RSASSA-PSS");
+      if (si->digestEncAlg.parameters.data) {
+        PORTCheapArenaPool tmpArena;
+        PORT_InitCheapArena(&tmpArena, DER_DEFAULT_CHUNKSIZE);
+        AppendMGFFromParams(&tmpArena.arena, si->digestEncAlg.parameters,
+                            aResult);
+        PORT_DestroyCheapArena(&tmpArena);
+      }
+      break;
+    }
+    case SEC_OID_PKCS1_RSA_ENCRYPTION:
+    case SEC_OID_PKCS1_MD2_WITH_RSA_ENCRYPTION:
+    case SEC_OID_PKCS1_MD5_WITH_RSA_ENCRYPTION:
+    case SEC_OID_PKCS1_SHA1_WITH_RSA_ENCRYPTION:
+    case SEC_OID_PKCS1_SHA224_WITH_RSA_ENCRYPTION:
+    case SEC_OID_PKCS1_SHA256_WITH_RSA_ENCRYPTION:
+    case SEC_OID_PKCS1_SHA384_WITH_RSA_ENCRYPTION:
+    case SEC_OID_PKCS1_SHA512_WITH_RSA_ENCRYPTION:
+      aResult.AssignLiteral("RSA");
+      break;
+    case SEC_OID_ANSIX962_ECDSA_SHA1_SIGNATURE:
+    case SEC_OID_ANSIX962_ECDSA_SHA224_SIGNATURE:
+    case SEC_OID_ANSIX962_ECDSA_SHA256_SIGNATURE:
+    case SEC_OID_ANSIX962_ECDSA_SHA384_SIGNATURE:
+    case SEC_OID_ANSIX962_ECDSA_SHA512_SIGNATURE:
+    case SEC_OID_ANSIX962_ECDSA_SIGNATURE_RECOMMENDED_DIGEST:
+    case SEC_OID_ANSIX962_ECDSA_SIGNATURE_SPECIFIED_DIGEST:
+      aResult.AssignLiteral("ECDSA");
+      break;
+    case SEC_OID_ANSIX9_DSA_SIGNATURE_WITH_SHA1_DIGEST:
+    case SEC_OID_NIST_DSA_SIGNATURE_WITH_SHA224_DIGEST:
+    case SEC_OID_NIST_DSA_SIGNATURE_WITH_SHA256_DIGEST:
+      aResult.AssignLiteral("DSA");
+      break;
+    case SEC_OID_ED25519_PUBLIC_KEY:
+      aResult.AssignLiteral("Ed25519");
+      break;
+    default: {
+      SECOidData* oidData = SECOID_FindOIDByTag(sigAlgTag);
+      if (oidData && oidData->desc) {
+        aResult.Assign(oidData->desc);
+      } else {
+        aResult.Truncate();
+      }
+      break;
+    }
+  }
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsCMSMessage::GetDigestAlgorithmName(nsACString& aResult) {
+  NSSCMSSignerInfo* si = GetTopLevelSignerInfo();
+  if (!si) {
+    aResult.Truncate();
+    return NS_OK;
+  }
+
+  SECOidTag digestAlgTag = NSS_CMSSignerInfo_GetDigestAlgTag(si);
+  SECOidData* oidData = SECOID_FindOIDByTag(digestAlgTag);
+  if (oidData && oidData->desc) {
+    aResult.Assign(oidData->desc);
+  } else {
+    aResult.Truncate();
+  }
+  return NS_OK;
+}
+
+NSSCMSContentInfo* nsCMSMessage::GetEncryptionContentInfo() {
+  if (!m_cmsMsg) {
+    return nullptr;
+  }
+  int levels = NSS_CMSMessage_ContentLevelCount(m_cmsMsg);
+  for (int i = 0; i < levels; i++) {
+    NSSCMSContentInfo* cinfo = NSS_CMSMessage_ContentLevel(m_cmsMsg, i);
+    if (!cinfo) {
+      break;
+    }
+    SECOidTag typeTag = NSS_CMSContentInfo_GetContentTypeTag(cinfo);
+    // SEC_OID_PKCS7_ENCRYPTED_DATA is included for content-encryption
+    // lookups; it has no RecipientInfo for key-encryption queries.
+    if (typeTag == SEC_OID_PKCS7_ENVELOPED_DATA ||
+        typeTag == SEC_OID_PKCS7_ENCRYPTED_DATA) {
+      // The inner ContentInfo holds the bulk encryption algorithm and key size.
+      if (i + 1 < levels) {
+        return NSS_CMSMessage_ContentLevel(m_cmsMsg, i + 1);
+      }
+      return nullptr;
+    }
+  }
+  return nullptr;
+}
+
+// Return the recipientInfos of the EnvelopedData layer, or null if the
+// message has no such layer. EncryptedData is not considered because it
+// has no RecipientInfo (it uses pre-shared keys).
+NSSCMSRecipientInfo** nsCMSMessage::GetEnvelopedRecipientInfos() {
+  if (!m_cmsMsg) {
+    return nullptr;
+  }
+  int levels = NSS_CMSMessage_ContentLevelCount(m_cmsMsg);
+  for (int i = 0; i < levels; i++) {
+    NSSCMSContentInfo* cinfo = NSS_CMSMessage_ContentLevel(m_cmsMsg, i);
+    if (!cinfo) {
+      return nullptr;
+    }
+    if (NSS_CMSContentInfo_GetContentTypeTag(cinfo) ==
+        SEC_OID_PKCS7_ENVELOPED_DATA) {
+      void* content = NSS_CMSContentInfo_GetContent(cinfo);
+      // Use information from the outermost enveloped layer.
+      // Don't use data from nested enveloped layers.
+      if (!content) {
+        return nullptr;
+      }
+      return static_cast<NSSCMSEnvelopedData*>(content)->recipientInfos;
+    }
+  }
+  return nullptr;
+}
+
+NS_IMETHODIMP nsCMSMessage::GetContentEncAlgorithmName(nsACString& aResult) {
+  NSSCMSContentInfo* cinfo = GetEncryptionContentInfo();
+  if (!cinfo) {
+    aResult.Truncate();
+    return NS_OK;
+  }
+
+  SECOidTag encAlgTag = NSS_CMSContentInfo_GetContentEncAlgTag(cinfo);
+  switch (encAlgTag) {
+    case SEC_OID_AES_128_CBC:
+    case SEC_OID_AES_192_CBC:
+    case SEC_OID_AES_256_CBC:
+      aResult.AssignLiteral("AES-CBC");
+      break;
+    case SEC_OID_AES_128_GCM:
+    case SEC_OID_AES_192_GCM:
+    case SEC_OID_AES_256_GCM:
+      aResult.AssignLiteral("AES-GCM");
+      break;
+    case SEC_OID_DES_EDE3_CBC:
+      aResult.AssignLiteral("3DES-CBC");
+      break;
+    case SEC_OID_DES_CBC:
+      aResult.AssignLiteral("DES-CBC");
+      break;
+    case SEC_OID_RC2_CBC:
+    case SEC_OID_RC2_40_CBC:
+    case SEC_OID_RC2_64_CBC:
+    case SEC_OID_RC2_128_CBC:
+      aResult.AssignLiteral("RC2-CBC");
+      break;
+    default: {
+      SECOidData* oidData = SECOID_FindOIDByTag(encAlgTag);
+      if (oidData && oidData->desc) {
+        aResult.Assign(oidData->desc);
+      } else {
+        aResult.Truncate();
+      }
+      break;
+    }
+  }
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsCMSMessage::GetContentEncKeySizeBits(int32_t* aKeySize) {
+  NS_ENSURE_ARG(aKeySize);
+  *aKeySize = 0;
+
+  NSSCMSContentInfo* cinfo = GetEncryptionContentInfo();
+  if (!cinfo) {
+    return NS_OK;
+  }
+
+  int bulkKeySize = NSS_CMSContentInfo_GetBulkKeySize(cinfo);
+  MOZ_ASSERT(bulkKeySize >= 0);
+  *aKeySize = static_cast<int32_t>(bulkKeySize);
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsCMSMessage::GetKeyEncAlgorithmName(nsACString& aResult) {
+  NSSCMSRecipientInfo** recipientInfos = GetEnvelopedRecipientInfos();
+  if (!recipientInfos || !recipientInfos[0]) {
+    aResult.Truncate();
+    return NS_OK;
+  }
+
+  // Only the first recipient's key encryption algorithm is reported.
+  NSSCMSRecipientInfo* ri = recipientInfos[0];
+  SECOidTag keyEncAlgTag = SEC_OID_UNKNOWN;
+  switch (ri->recipientInfoType) {
+    case NSSCMSRecipientInfoID_KeyTrans:
+      keyEncAlgTag =
+          SECOID_GetAlgorithmTag(&ri->ri.keyTransRecipientInfo.keyEncAlg);
+      break;
+    case NSSCMSRecipientInfoID_KeyAgree:
+      keyEncAlgTag =
+          SECOID_GetAlgorithmTag(&ri->ri.keyAgreeRecipientInfo.keyEncAlg);
+      break;
+    case NSSCMSRecipientInfoID_KEK:
+      keyEncAlgTag = SECOID_GetAlgorithmTag(&ri->ri.kekRecipientInfo.keyEncAlg);
+      break;
+    default:
+      break;
+  }
+  switch (keyEncAlgTag) {
+    case SEC_OID_PKCS1_RSA_ENCRYPTION:
+      aResult.AssignLiteral("RSAES-PKCS#1-v1.5");
+      break;
+    case SEC_OID_PKCS1_RSA_OAEP_ENCRYPTION:
+      aResult.AssignLiteral("RSAES-OAEP");
+      break;
+    case SEC_OID_DHSINGLEPASS_STDDH_SHA1KDF_SCHEME:
+    case SEC_OID_DHSINGLEPASS_COFACTORDH_SHA1KDF_SCHEME:
+      aResult.AssignLiteral("ECDH (SHA-1 KDF)");
+      break;
+    case SEC_OID_DHSINGLEPASS_STDDH_SHA224KDF_SCHEME:
+    case SEC_OID_DHSINGLEPASS_COFACTORDH_SHA224KDF_SCHEME:
+      aResult.AssignLiteral("ECDH (SHA-224 KDF)");
+      break;
+    case SEC_OID_DHSINGLEPASS_STDDH_SHA256KDF_SCHEME:
+    case SEC_OID_DHSINGLEPASS_COFACTORDH_SHA256KDF_SCHEME:
+      aResult.AssignLiteral("ECDH (SHA-256 KDF)");
+      break;
+    case SEC_OID_DHSINGLEPASS_STDDH_SHA384KDF_SCHEME:
+    case SEC_OID_DHSINGLEPASS_COFACTORDH_SHA384KDF_SCHEME:
+      aResult.AssignLiteral("ECDH (SHA-384 KDF)");
+      break;
+    case SEC_OID_DHSINGLEPASS_STDDH_SHA512KDF_SCHEME:
+    case SEC_OID_DHSINGLEPASS_COFACTORDH_SHA512KDF_SCHEME:
+      aResult.AssignLiteral("ECDH (SHA-512 KDF)");
+      break;
+    default: {
+      SECOidData* oidData = SECOID_FindOIDByTag(keyEncAlgTag);
+      if (oidData && oidData->desc) {
+        aResult.Assign(oidData->desc);
+      } else {
+        aResult.Truncate();
+      }
+      break;
+    }
+  }
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsCMSMessage::GetSigningTime(PRTime* aTime) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSMessage::GetSigningTime"));
+  NS_ENSURE_ARG(aTime);
+
+  NSSCMSSignerInfo* si = GetTopLevelSignerInfo();
+  if (!si) {
+    return NS_ERROR_FAILURE;
+  }
+
+  SECStatus getSigningTimeResult = NSS_CMSSignerInfo_GetSigningTime(si, aTime);
+  MOZ_LOG(gCMSLog, LogLevel::Debug,
+          ("nsCMSMessage::GetSigningTime result: %s",
+           (getSigningTimeResult ? "ok" : "fail")));
+
+  return getSigningTimeResult == SECSuccess ? NS_OK : NS_ERROR_FAILURE;
+}
+
+NS_IMETHODIMP
+nsCMSMessage::VerifyDetachedSignature(int32_t verifyFlags,
+                                      const nsTArray<uint8_t>& aDigestData,
+                                      int16_t aDigestType,
+                                      nsISMimeVerificationFailure** aReason) {
+  if (aDigestData.IsEmpty()) return NS_ERROR_FAILURE;
+
+  const auto result =
+      CommonVerifySignature(verifyFlags, aDigestData, aDigestType);
+  if (result.reason) {
+    auto failureReason =
+        RefPtr(new nsSMimeVerificationFailure{result.reason.value()});
+    failureReason.forget(aReason);
+  }
+  return result.rv;
+}
+
+// This is an exact copy of NSS_CMSArray_Count from NSS' cmsarray.c,
+// temporarily necessary, see below for for justification.
+static int myNSS_CMSArray_Count(void** array) {
+  int n = 0;
+
+  if (array == NULL) return 0;
+
+  while (*array++ != NULL) n++;
+
+  return n;
+}
+
+// This is an exact copy of NSS_CMSArray_Add from NSS' cmsarray.c,
+// temporarily necessary, see below for for justification.
+static SECStatus myNSS_CMSArray_Add(PLArenaPool* poolp, void*** array,
+                                    void* obj) {
+  void** p;
+  int n;
+  void** dest;
+
+  PORT_Assert(array != NULL);
+  if (array == NULL) return SECFailure;
+
+  if (*array == NULL) {
+    dest = (void**)PORT_ArenaAlloc(poolp, 2 * sizeof(void*));
+    n = 0;
+  } else {
+    n = 0;
+    p = *array;
+    while (*p++) n++;
+    dest = (void**)PORT_ArenaGrow(poolp, *array, (n + 1) * sizeof(void*),
+                                  (n + 2) * sizeof(void*));
+  }
+
+  if (dest == NULL) return SECFailure;
+
+  dest[n] = obj;
+  dest[n + 1] = NULL;
+  *array = dest;
+  return SECSuccess;
+}
+
+// This is an exact copy of NSS_CMSArray_Add from NSS' cmsarray.c,
+// temporarily necessary, see below for for justification.
+static SECStatus myNSS_CMSSignedData_AddTempCertificate(NSSCMSSignedData* sigd,
+                                                        CERTCertificate* cert) {
+  CERTCertificate* c;
+  SECStatus rv;
+
+  if (!sigd || !cert) {
+    PORT_SetError(SEC_ERROR_INVALID_ARGS);
+    return SECFailure;
+  }
+
+  c = CERT_DupCertificate(cert);
+  rv = myNSS_CMSArray_Add(sigd->cmsg->poolp, (void***)&(sigd->tempCerts),
+                          (void*)c);
+  return rv;
+}
+
+struct SecVerificationResult {
+  SECStatus result;
+  mozilla::Maybe<mozilla::pkix::Result> reason;
+
+  static SecVerificationResult SecStatusOnly(SECStatus rv) {
+    return SecVerificationResult{rv, mozilla::Nothing()};
+  }
+};
+
+typedef SecVerificationResult (*extraVerificationOnCertFn)(
+    CERTCertificate* cert, SECCertUsage certusage);
+
+static SecVerificationResult myExtraVerificationOnCert(CERTCertificate* cert,
+                                                       SECCertUsage certusage) {
+  RefPtr<SharedCertVerifier> certVerifier;
+  certVerifier = GetDefaultCertVerifier();
+  if (!certVerifier) {
+    return {SECFailure, mozilla::Nothing()};
+  }
+
+  mozilla::psm::VerifyUsage usageForPkix;
+
+  switch (certusage) {
+    case certUsageEmailSigner:
+      usageForPkix = mozilla::psm::VerifyUsage::EmailSigner;
+      break;
+    case certUsageEmailRecipient:
+      usageForPkix = mozilla::psm::VerifyUsage::EmailRecipient;
+      break;
+    default:
+      return {SECFailure, mozilla::Nothing()};
+  }
+
+  nsTArray<uint8_t> certBytes(cert->derCert.data, cert->derCert.len);
+  nsTArray<nsTArray<uint8_t>> builtChain;
+  // This code is used when verifying incoming certificates, including
+  // a signature certificate. Performing OCSP is necessary.
+  // Allowing OCSP in blocking mode should be fine, because all our
+  // callers run this code on a separate thread, using
+  // SMimeVerificationTask/CryptoTask.
+  mozilla::pkix::Result result = certVerifier->VerifyCert(
+      certBytes, usageForPkix, Now(), nullptr /*XXX pinarg*/,
+      nullptr /*hostname*/, builtChain);
+  if (result != mozilla::pkix::Success) {
+    return {SECFailure, mozilla::Some(result)};
+  }
+
+  return {SECSuccess, mozilla::Nothing()};
+}
+
+static void fillSignerInfoCerts(NSSCMSSignedData* sigd,
+                                CERTCertDBHandle* certdb) {
+  if (sigd->signerInfos != nullptr) {
+    /* fill in all signerinfo's certs */
+    for (int i = 0; sigd->signerInfos[i] != nullptr; i++)
+      (void)NSS_CMSSignerInfo_GetSigningCertificate(sigd->signerInfos[i],
+                                                    certdb);
+  }
+}
+
+// This is a temporary copy of NSS_CMSSignedData_ImportCerts, which
+// performs additional verifications prior to import.
+// The copy is almost identical to the original.
+//
+// The ONLY DIFFERENCE is the addition of parameter extraVerifyFn,
+// and the call to it - plus a non-null check.
+//
+// NSS should add this or a similar API in the future,
+// and then these temporary functions should be removed, including
+// the ones above. Request is tracked in bugzilla 1738592.
+static SecVerificationResult myNSS_CMSSignedData_ImportCerts(
+    NSSCMSSignedData* sigd, CERTCertDBHandle* certdb, SECCertUsage certusage,
+    PRBool keepcerts, extraVerificationOnCertFn extraVerifyFn) {
+  int certcount;
+  CERTCertificate** certArray = NULL;
+  CERTCertList* certList = NULL;
+  CERTCertListNode* node;
+  SECStatus rv;
+  SECItem** rawArray;
+  int i;
+  PRTime now;
+
+  const auto freeResourcesOnExit =
+      mozilla::MakeScopeExit([&certArray, &certcount, &certList]() {
+        /* now free everything */
+        if (certArray) {
+          CERT_DestroyCertArray(certArray, certcount);
+        }
+        if (certList) {
+          CERT_DestroyCertList(certList);
+        }
+      });
+
+  if (!sigd) {
+    PORT_SetError(SEC_ERROR_INVALID_ARGS);
+    return SecVerificationResult::SecStatusOnly(SECFailure);
+  }
+
+  certcount = myNSS_CMSArray_Count((void**)sigd->rawCerts);
+
+  /* get the certs in the temp DB */
+  rv = CERT_ImportCerts(certdb, certusage, certcount, sigd->rawCerts,
+                        &certArray, PR_FALSE, PR_FALSE, NULL);
+  if (rv != SECSuccess) {
+    return SecVerificationResult::SecStatusOnly(rv);
+  }
+
+  /* save the certs so they don't get destroyed */
+  for (i = 0; i < certcount; i++) {
+    CERTCertificate* cert = certArray[i];
+    if (cert) myNSS_CMSSignedData_AddTempCertificate(sigd, cert);
+  }
+
+  if (!keepcerts) {
+    fillSignerInfoCerts(sigd, certdb);
+    return SecVerificationResult::SecStatusOnly(rv);
+  }
+
+  /* build a CertList for filtering */
+  certList = CERT_NewCertList();
+  if (certList == NULL) {
+    rv = SECFailure;
+    return SecVerificationResult::SecStatusOnly(rv);
+  }
+  for (i = 0; i < certcount; i++) {
+    CERTCertificate* cert = certArray[i];
+    if (cert) cert = CERT_DupCertificate(cert);
+    if (cert) CERT_AddCertToListTail(certList, cert);
+  }
+
+  /* filter out the certs we don't want */
+  rv = CERT_FilterCertListByUsage(certList, certusage, PR_FALSE);
+  if (rv != SECSuccess) {
+    return SecVerificationResult::SecStatusOnly(rv);
+  }
+
+  /* go down the remaining list of certs and verify that they have
+   * valid chains, then import them.
+   */
+  now = PR_Now();
+  for (node = CERT_LIST_HEAD(certList); !CERT_LIST_END(node, certList);
+       node = CERT_LIST_NEXT(node)) {
+    CERTCertificateList* certChain;
+
+    if (!node->cert) {
+      continue;
+    }
+
+    if (extraVerifyFn) {
+      const auto extraResult = (*extraVerifyFn)(node->cert, certusage);
+      if (extraResult.result != SECSuccess) {
+        continue;
+      }
+    }
+
+    if (CERT_VerifyCert(certdb, node->cert, PR_TRUE, certusage, now, NULL,
+                        NULL) != SECSuccess) {
+      continue;
+    }
+
+    certChain = CERT_CertChainFromCert(node->cert, certusage, PR_FALSE);
+    if (!certChain) {
+      continue;
+    }
+
+    /*
+     * CertChain returns an array of SECItems, import expects an array of
+     * SECItem pointers. Create the SECItem Pointers from the array of
+     * SECItems.
+     */
+    rawArray = (SECItem**)PORT_Alloc(certChain->len * sizeof(SECItem*));
+    if (!rawArray) {
+      CERT_DestroyCertificateList(certChain);
+      continue;
+    }
+    for (i = 0; i < certChain->len; i++) {
+      rawArray[i] = &certChain->certs[i];
+    }
+    (void)CERT_ImportCerts(certdb, certusage, certChain->len, rawArray, NULL,
+                           keepcerts, PR_FALSE, NULL);
+    PORT_Free(rawArray);
+    CERT_DestroyCertificateList(certChain);
+  }
+
+  rv = SECSuccess;
+
+  /* XXX CRL handling */
+
+  fillSignerInfoCerts(sigd, certdb);
+
+  return SecVerificationResult::SecStatusOnly(rv);
+}
+
+nsCMSMessage::SignatureVerificationResult nsCMSMessage::CommonVerifySignature(
+    int32_t verifyFlags, const nsTArray<uint8_t>& aDigestData,
+    int16_t aDigestType) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug,
+          ("nsCMSMessage::CommonVerifySignature, content level count %d",
+           NSS_CMSMessage_ContentLevelCount(m_cmsMsg)));
+  NSSCMSContentInfo* cinfo = nullptr;
+  NSSCMSSignedData* sigd = nullptr;
+  NSSCMSSignerInfo* si;
+  int32_t nsigners;
+  nsresult rv = NS_ERROR_FAILURE;
+  SECOidTag sigAlgTag;
+
+  if (!NSS_CMSMessage_IsSigned(m_cmsMsg)) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CommonVerifySignature - not signed"));
+    return {NS_ERROR_CMS_VERIFY_NOT_SIGNED, {}};
+  }
+
+  cinfo = NSS_CMSMessage_ContentLevel(m_cmsMsg, 0);
+  if (cinfo) {
+    switch (NSS_CMSContentInfo_GetContentTypeTag(cinfo)) {
+      case SEC_OID_PKCS7_SIGNED_DATA:
+        sigd = reinterpret_cast<NSSCMSSignedData*>(
+            NSS_CMSContentInfo_GetContent(cinfo));
+        break;
+
+      case SEC_OID_PKCS7_ENVELOPED_DATA:
+      case SEC_OID_PKCS7_ENCRYPTED_DATA:
+      case SEC_OID_PKCS7_DIGESTED_DATA:
+      default: {
+        MOZ_LOG(gCMSLog, LogLevel::Debug,
+                ("nsCMSMessage::CommonVerifySignature - unexpected "
+                 "ContentTypeTag"));
+        rv = NS_ERROR_CMS_VERIFY_NO_CONTENT_INFO;
+        return {rv, {}};
+      }
+    }
+  }
+
+  if (!sigd) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CommonVerifySignature - no content info"));
+    rv = NS_ERROR_CMS_VERIFY_NO_CONTENT_INFO;
+    return {rv, {}};
+  }
+
+  if (!aDigestData.IsEmpty()) {
+    SECOidTag oidTag;
+    SECItem digest = {siBuffer, NULL, 0};
+    // NSS_CMSSignedData_SetDigestValue() takes a copy and won't mutate our
+    // data, so we're OK to cast away the const here.
+    digest.data = const_cast<uint8_t*>(aDigestData.Elements());
+    digest.len = aDigestData.Length();
+
+    if (NSS_CMSSignedData_HasDigests(sigd)) {
+      SECAlgorithmID** existingAlgs = NSS_CMSSignedData_GetDigestAlgs(sigd);
+      if (existingAlgs) {
+        while (*existingAlgs) {
+          SECAlgorithmID* alg = *existingAlgs;
+          SECOidTag algOIDTag = SECOID_FindOIDTag(&alg->algorithm);
+          NSS_CMSSignedData_SetDigestValue(sigd, algOIDTag, NULL);
+          ++existingAlgs;
+        }
+      }
+    }
+
+    oidTag =
+        HASH_GetHashOidTagByHashType(static_cast<HASH_HashType>(aDigestType));
+    if (oidTag == SEC_OID_UNKNOWN) {
+      rv = NS_ERROR_CMS_VERIFY_BAD_DIGEST;
+      return {rv, {}};
+    }
+
+    if (NSS_CMSSignedData_SetDigestValue(sigd, oidTag, &digest)) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CommonVerifySignature - bad digest"));
+      rv = NS_ERROR_CMS_VERIFY_BAD_DIGEST;
+      return {rv, {}};
+    }
+  }
+
+  // Import certs. Note that import failure is not a signature verification
+  // failure. //
+  if (myNSS_CMSSignedData_ImportCerts(sigd, CERT_GetDefaultCertDB(),
+                                      certUsageEmailRecipient, true,
+                                      myExtraVerificationOnCert)
+          .result != SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CommonVerifySignature - can not import certs"));
+  }
+
+  nsigners = NSS_CMSSignedData_SignerInfoCount(sigd);
+  PR_ASSERT(nsigners > 0);
+  if (nsigners <= 0) {
+    return {NS_ERROR_UNEXPECTED, {}};
+  }
+  si = NSS_CMSSignedData_GetSignerInfo(sigd, 0);
+
+  if (!si) {
+    return {NS_ERROR_UNEXPECTED, {}};
+  }
+
+  if (!si->cert) {
+    return {NS_ERROR_UNEXPECTED, {}};
+  }
+
+  // See bug 324474. We want to make sure the signing cert is
+  // still valid at the current time.
+
+  if (const auto extraVerificationResult =
+          myExtraVerificationOnCert(si->cert, certUsageEmailSigner);
+      extraVerificationResult.result != SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CommonVerifySignature - signing cert not trusted "
+             "now"));
+    return {NS_ERROR_CMS_VERIFY_UNTRUSTED, extraVerificationResult.reason};
+  }
+
+  sigAlgTag = NSS_CMSSignerInfo_GetDigestAlgTag(si);
+  switch (sigAlgTag) {
+    case SEC_OID_SHA256:
+    case SEC_OID_SHA384:
+    case SEC_OID_SHA512:
+      break;
+
+    case SEC_OID_SHA1:
+      if (verifyFlags & nsICMSVerifyFlags::VERIFY_ALLOW_WEAK_SHA1) {
+        break;
+      }
+      // else fall through to failure
+#if defined(__clang__) || defined(__GNUC__)
+      [[fallthrough]];
+#endif
+    default:
+      MOZ_LOG(
+          gCMSLog, LogLevel::Debug,
+          ("nsCMSMessage::CommonVerifySignature - unsupported digest algo"));
+      rv = NS_ERROR_CMS_VERIFY_UNSUPPORTED_ALGO;
+      return {rv, {}};
+  };
+
+  // We verify the first signer info,  only //
+  // XXX: NSS_CMSSignedData_VerifySignerInfo calls CERT_VerifyCert, which
+  // requires NSS's certificate verification configuration to be done in
+  // order to work well (e.g. honoring OCSP preferences and proxy settings
+  // for OCSP requests), but Gecko stopped doing that configuration. Something
+  // similar to what was done for Gecko bug 1028643 needs to be done here too.
+  if (NSS_CMSSignedData_VerifySignerInfo(sigd, 0, CERT_GetDefaultCertDB(),
+                                         certUsageEmailSigner) != SECSuccess) {
+    MOZ_LOG(
+        gCMSLog, LogLevel::Debug,
+        ("nsCMSMessage::CommonVerifySignature - unable to verify signature"));
+
+    if (NSSCMSVS_SigningCertNotFound == si->verificationStatus) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CommonVerifySignature - signing cert not found"));
+      rv = NS_ERROR_CMS_VERIFY_NOCERT;
+    } else if (NSSCMSVS_SigningCertNotTrusted == si->verificationStatus) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CommonVerifySignature - signing cert not trusted "
+               "at signing time"));
+      rv = NS_ERROR_CMS_VERIFY_UNTRUSTED;
+    } else if (NSSCMSVS_Unverified == si->verificationStatus) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CommonVerifySignature - can not verify"));
+      rv = NS_ERROR_CMS_VERIFY_ERROR_UNVERIFIED;
+    } else if (NSSCMSVS_ProcessingError == si->verificationStatus) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CommonVerifySignature - processing error"));
+      rv = NS_ERROR_CMS_VERIFY_ERROR_PROCESSING;
+    } else if (NSSCMSVS_BadSignature == si->verificationStatus) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CommonVerifySignature - bad signature"));
+      rv = NS_ERROR_CMS_VERIFY_BAD_SIGNATURE;
+    } else if (NSSCMSVS_DigestMismatch == si->verificationStatus) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CommonVerifySignature - digest mismatch"));
+      rv = NS_ERROR_CMS_VERIFY_DIGEST_MISMATCH;
+    } else if (NSSCMSVS_SignatureAlgorithmUnknown == si->verificationStatus) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CommonVerifySignature - algo unknown"));
+      rv = NS_ERROR_CMS_VERIFY_UNKNOWN_ALGO;
+    } else if (NSSCMSVS_SignatureAlgorithmUnsupported ==
+               si->verificationStatus) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CommonVerifySignature - algo not supported"));
+      rv = NS_ERROR_CMS_VERIFY_UNSUPPORTED_ALGO;
+    } else if (NSSCMSVS_MalformedSignature == si->verificationStatus) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CommonVerifySignature - malformed signature"));
+      rv = NS_ERROR_CMS_VERIFY_MALFORMED_SIGNATURE;
+    }
+
+    return {rv, {}};
+  }
+
+  // Save the profile. Note that save import failure is not a signature
+  // verification failure. //
+  if (NSS_SMIMESignerInfo_SaveSMIMEProfile(si) != SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CommonVerifySignature - unable to save smime "
+             "profile"));
+  }
+
+  rv = NS_OK;
+  return {rv, {}};
+}
+
+NS_IMETHODIMP nsCMSMessage::AsyncVerifySignature(
+    int32_t verifyFlags, nsISMimeVerificationListener* aListener) {
+  return CommonAsyncVerifySignature(verifyFlags, aListener, {}, 0);
+}
+
+NS_IMETHODIMP nsCMSMessage::AsyncVerifyDetachedSignature(
+    int32_t verifyFlags, nsISMimeVerificationListener* aListener,
+    const nsTArray<uint8_t>& aDigestData, int16_t aDigestType) {
+  if (aDigestData.IsEmpty()) return NS_ERROR_FAILURE;
+
+  return CommonAsyncVerifySignature(verifyFlags, aListener, aDigestData,
+                                    aDigestType);
+}
+
+class SMimeVerificationTask final : public CryptoTask {
+ public:
+  SMimeVerificationTask(nsICMSMessage* aMessage, int32_t verifyFlags,
+                        nsISMimeVerificationListener* aListener,
+                        const nsTArray<uint8_t>& aDigestData,
+                        int16_t aDigestType)
+      : mMessage(aMessage),
+        mListener(aListener),
+        mDigestData(aDigestData.Clone()),
+        mDigestType(aDigestType),
+        mVerifyFlags(verifyFlags) {
+    MOZ_ASSERT(NS_IsMainThread());
+  }
+
+ private:
+  virtual nsresult CalculateResult() override {
+    MOZ_ASSERT(!NS_IsMainThread());
+
+    // Because the S/MIME code and related certificate processing isn't
+    // sufficiently threadsafe (see bug 1529003), we want this code to
+    // never run in parallel (see bug 1386601).
+    mozilla::StaticMutexAutoLock lock(sMutex);
+    nsresult rv;
+    if (mDigestData.IsEmpty()) {
+      rv = mMessage->VerifySignature(mVerifyFlags, getter_AddRefs(mReason));
+    } else {
+      rv = mMessage->VerifyDetachedSignature(
+          mVerifyFlags, mDigestData, mDigestType, getter_AddRefs(mReason));
+    }
+
+    return rv;
+  }
+  virtual void CallCallback(nsresult rv) override {
+    MOZ_ASSERT(NS_IsMainThread());
+    mListener->Notify(mMessage, rv, mReason);
+  }
+
+  nsCOMPtr<nsICMSMessage> mMessage;
+  nsCOMPtr<nsISMimeVerificationListener> mListener;
+  nsTArray<uint8_t> mDigestData;
+  int16_t mDigestType;
+  int32_t mVerifyFlags;
+  nsCOMPtr<nsISMimeVerificationFailure> mReason;
+
+  static mozilla::StaticMutex sMutex;
+};
+
+mozilla::StaticMutex SMimeVerificationTask::sMutex;
+
+nsresult nsCMSMessage::CommonAsyncVerifySignature(
+    int32_t verifyFlags, nsISMimeVerificationListener* aListener,
+    const nsTArray<uint8_t>& aDigestData, int16_t aDigestType) {
+  RefPtr<CryptoTask> task = new SMimeVerificationTask(
+      this, verifyFlags, aListener, aDigestData, aDigestType);
+  return task->Dispatch();
+}
+
+class nsZeroTerminatedCertArray {
+ public:
+  nsZeroTerminatedCertArray() : mCerts(nullptr), mPoolp(nullptr), mSize(0) {}
+
+  ~nsZeroTerminatedCertArray() {
+    if (mCerts) {
+      for (uint32_t i = 0; i < mSize; i++) {
+        if (mCerts[i]) {
+          CERT_DestroyCertificate(mCerts[i]);
+        }
+      }
+    }
+
+    if (mPoolp) PORT_FreeArena(mPoolp, false);
+  }
+
+  bool allocate(uint32_t count) {
+    // only allow allocation once
+    if (mPoolp) return false;
+
+    mSize = count;
+
+    if (!mSize) return false;
+
+    mPoolp = PORT_NewArena(1024);
+    if (!mPoolp) return false;
+
+    mCerts = (CERTCertificate**)PORT_ArenaZAlloc(
+        mPoolp, (count + 1) * sizeof(CERTCertificate*));
+
+    if (!mCerts) return false;
+
+    // null array, including zero termination
+    for (uint32_t i = 0; i < count + 1; i++) {
+      mCerts[i] = nullptr;
+    }
+
+    return true;
+  }
+
+  void set(uint32_t i, CERTCertificate* c) {
+    if (i >= mSize) return;
+
+    if (mCerts[i]) {
+      CERT_DestroyCertificate(mCerts[i]);
+    }
+
+    mCerts[i] = CERT_DupCertificate(c);
+  }
+
+  CERTCertificate* get(uint32_t i) {
+    if (i >= mSize) return nullptr;
+
+    return CERT_DupCertificate(mCerts[i]);
+  }
+
+  CERTCertificate** getRawArray() { return mCerts; }
+
+ private:
+  CERTCertificate** mCerts;
+  PLArenaPool* mPoolp;
+  uint32_t mSize;
+};
+
+NS_IMETHODIMP nsCMSMessage::CreateEncrypted(
+    const nsTArray<RefPtr<nsIX509Cert>>& aRecipientCerts) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSMessage::CreateEncrypted"));
+  NSSCMSContentInfo* cinfo;
+  NSSCMSEnvelopedData* envd;
+  NSSCMSRecipientInfo* recipientInfo;
+  nsZeroTerminatedCertArray recipientCerts;
+  SECOidTag bulkAlgTag;
+  int keySize;
+  uint32_t i;
+  nsresult rv = NS_ERROR_FAILURE;
+
+  // Check the recipient certificates //
+  uint32_t recipientCertCount = aRecipientCerts.Length();
+  PR_ASSERT(recipientCertCount > 0);
+
+  if (!recipientCerts.allocate(recipientCertCount)) {
+    goto loser;
+  }
+
+  for (i = 0; i < recipientCertCount; i++) {
+    nsIX509Cert* x509cert = aRecipientCerts[i];
+
+    if (!x509cert) return NS_ERROR_FAILURE;
+
+    UniqueCERTCertificate c(x509cert->GetCert());
+    recipientCerts.set(i, c.get());
+  }
+
+  // Find a bulk key algorithm //
+  if (NSS_SMIMEUtil_FindBulkAlgForRecipients(
+          recipientCerts.getRawArray(), &bulkAlgTag, &keySize) != SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateEncrypted - can't find bulk alg for "
+             "recipients"));
+    rv = NS_ERROR_CMS_ENCRYPT_NO_BULK_ALG;
+    goto loser;
+  }
+
+  m_cmsMsg = NSS_CMSMessage_Create(nullptr);
+  if (!m_cmsMsg) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateEncrypted - can't create new cms message"));
+    rv = NS_ERROR_OUT_OF_MEMORY;
+    goto loser;
+  }
+
+  if ((envd = NSS_CMSEnvelopedData_Create(m_cmsMsg, bulkAlgTag, keySize)) ==
+      nullptr) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateEncrypted - can't create enveloped data"));
+    goto loser;
+  }
+
+  cinfo = NSS_CMSMessage_GetContentInfo(m_cmsMsg);
+  if (NSS_CMSContentInfo_SetContent_EnvelopedData(m_cmsMsg, cinfo, envd) !=
+      SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateEncrypted - can't create content enveloped "
+             "data"));
+    goto loser;
+  }
+
+  cinfo = NSS_CMSEnvelopedData_GetContentInfo(envd);
+  if (NSS_CMSContentInfo_SetContent_Data(m_cmsMsg, cinfo, nullptr, false) !=
+      SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateEncrypted - can't set content data"));
+    goto loser;
+  }
+
+  // Create and attach recipient information //
+  for (i = 0; i < recipientCertCount; i++) {
+    UniqueCERTCertificate rc(recipientCerts.get(i));
+    if ((recipientInfo = NSS_CMSRecipientInfo_Create(m_cmsMsg, rc.get())) ==
+        nullptr) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CreateEncrypted - can't create recipient info"));
+      goto loser;
+    }
+    if (NSS_CMSEnvelopedData_AddRecipient(envd, recipientInfo) != SECSuccess) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CreateEncrypted - can't add recipient info"));
+      goto loser;
+    }
+  }
+
+  return NS_OK;
+loser:
+  if (m_cmsMsg) {
+    NSS_CMSMessage_Destroy(m_cmsMsg);
+    m_cmsMsg = nullptr;
+  }
+
+  return rv;
+}
+
+bool nsCMSMessage::IsAllowedHash(const int16_t aCryptoHashInt) {
+  switch (aCryptoHashInt) {
+    case nsICryptoHash::SHA1:
+    case nsICryptoHash::SHA256:
+    case nsICryptoHash::SHA384:
+    case nsICryptoHash::SHA512:
+      return true;
+    default:
+      return false;
+  }
+}
+
+NS_IMETHODIMP
+nsCMSMessage::CreateSigned(nsIX509Cert* aSigningCert, nsIX509Cert* aEncryptCert,
+                           const nsTArray<uint8_t>& aDigestData,
+                           int16_t aDigestType) {
+  NS_ENSURE_ARG(aSigningCert);
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSMessage::CreateSigned"));
+  NSSCMSContentInfo* cinfo;
+  NSSCMSSignedData* sigd;
+  NSSCMSSignerInfo* signerinfo;
+  UniqueCERTCertificate scert(aSigningCert->GetCert());
+  UniqueCERTCertificate ecert;
+  nsresult rv = NS_ERROR_FAILURE;
+
+  if (!scert) {
+    return NS_ERROR_FAILURE;
+  }
+
+  if (aEncryptCert) {
+    ecert = UniqueCERTCertificate(aEncryptCert->GetCert());
+  }
+
+  if (!IsAllowedHash(aDigestType)) {
+    return NS_ERROR_INVALID_ARG;
+  }
+
+  SECOidTag digestType =
+      HASH_GetHashOidTagByHashType(static_cast<HASH_HashType>(aDigestType));
+  if (digestType == SEC_OID_UNKNOWN) {
+    return NS_ERROR_INVALID_ARG;
+  }
+
+  /*
+   * create the message object
+   */
+  m_cmsMsg =
+      NSS_CMSMessage_Create(nullptr); /* create a message on its own pool */
+  if (!m_cmsMsg) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateSigned - can't create new message"));
+    rv = NS_ERROR_OUT_OF_MEMORY;
+    goto loser;
+  }
+
+  /*
+   * build chain of objects: message->signedData->data
+   */
+  if ((sigd = NSS_CMSSignedData_Create(m_cmsMsg)) == nullptr) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateSigned - can't create signed data"));
+    goto loser;
+  }
+  cinfo = NSS_CMSMessage_GetContentInfo(m_cmsMsg);
+  if (NSS_CMSContentInfo_SetContent_SignedData(m_cmsMsg, cinfo, sigd) !=
+      SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateSigned - can't set content signed data"));
+    goto loser;
+  }
+
+  cinfo = NSS_CMSSignedData_GetContentInfo(sigd);
+
+  /* we're always passing data in and detaching optionally */
+  if (NSS_CMSContentInfo_SetContent_Data(m_cmsMsg, cinfo, nullptr, true) !=
+      SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateSigned - can't set content data"));
+    goto loser;
+  }
+
+  /*
+   * create & attach signer information
+   */
+  signerinfo = NSS_CMSSignerInfo_Create(m_cmsMsg, scert.get(), digestType);
+  if (!signerinfo) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateSigned - can't create signer info"));
+    goto loser;
+  }
+
+  /* we want the cert chain included for this one */
+  if (NSS_CMSSignerInfo_IncludeCerts(signerinfo, NSSCMSCM_CertChain,
+                                     certUsageEmailSigner) != SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateSigned - can't include signer cert chain"));
+    goto loser;
+  }
+
+  if (NSS_CMSSignerInfo_AddSigningTime(signerinfo, PR_Now()) != SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateSigned - can't add signing time"));
+    goto loser;
+  }
+
+  if (NSS_CMSSignerInfo_AddSMIMECaps(signerinfo) != SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateSigned - can't add smime caps"));
+    goto loser;
+  }
+
+  if (ecert) {
+    if (NSS_CMSSignerInfo_AddSMIMEEncKeyPrefs(
+            signerinfo, ecert.get(), CERT_GetDefaultCertDB()) != SECSuccess) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CreateSigned - can't add smime enc key prefs"));
+      goto loser;
+    }
+
+    if (NSS_CMSSignerInfo_AddMSSMIMEEncKeyPrefs(
+            signerinfo, ecert.get(), CERT_GetDefaultCertDB()) != SECSuccess) {
+      MOZ_LOG(
+          gCMSLog, LogLevel::Debug,
+          ("nsCMSMessage::CreateSigned - can't add MS smime enc key prefs"));
+      goto loser;
+    }
+
+    // If signing and encryption cert are identical, don't add it twice.
+    bool addEncryptionCert =
+        (ecert && (!scert || !CERT_CompareCerts(ecert.get(), scert.get())));
+
+    if (addEncryptionCert &&
+        NSS_CMSSignedData_AddCertificate(sigd, ecert.get()) != SECSuccess) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CreateSigned - can't add own encryption "
+               "certificate"));
+      goto loser;
+    }
+  }
+
+  if (NSS_CMSSignedData_AddSignerInfo(sigd, signerinfo) != SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSMessage::CreateSigned - can't add signer info"));
+    goto loser;
+  }
+
+  // Finally, add the pre-computed digest if passed in
+  if (!aDigestData.IsEmpty()) {
+    SECItem digest;
+
+    // NSS_CMSSignedData_SetDigestValue() takes a copy and won't mutate our
+    // data, so we're OK to cast away the const here.
+    digest.data = const_cast<uint8_t*>(aDigestData.Elements());
+    digest.len = aDigestData.Length();
+    if (NSS_CMSSignedData_SetDigestValue(sigd, digestType, &digest) !=
+        SECSuccess) {
+      MOZ_LOG(gCMSLog, LogLevel::Debug,
+              ("nsCMSMessage::CreateSigned - can't set digest value"));
+      goto loser;
+    }
+  }
+
+  return NS_OK;
+loser:
+  if (m_cmsMsg) {
+    NSS_CMSMessage_Destroy(m_cmsMsg);
+    m_cmsMsg = nullptr;
+  }
+  return rv;
+}
+
+NS_IMPL_ISUPPORTS(nsCMSDecoder, nsICMSDecoder)
+NS_IMPL_ISUPPORTS(nsCMSDecoderJS, nsICMSDecoderJS)
+
+nsCMSDecoder::nsCMSDecoder()
+    : m_dcx(nullptr),
+      mCallback(nullptr),
+      mCallbackArg(nullptr),
+      mUpdating(false),
+      mAborted(false),
+      mFinished(false) {}
+nsCMSDecoderJS::nsCMSDecoderJS() : m_dcx(nullptr) {}
+
+nsCMSDecoder::~nsCMSDecoder() {
+  if (m_dcx) {
+    NSS_CMSDecoder_Cancel(m_dcx);
+    m_dcx = nullptr;
+  }
+}
+
+nsCMSDecoderJS::~nsCMSDecoderJS() {
+  if (m_dcx) {
+    NSS_CMSDecoder_Cancel(m_dcx);
+    m_dcx = nullptr;
+  }
+}
+
+nsresult nsCMSDecoder::Init() {
+  return EnsureNSSInitializedChromeOrContent() ? NS_OK : NS_ERROR_NOT_AVAILABLE;
+}
+
+nsresult nsCMSDecoderJS::Init() {
+  return EnsureNSSInitializedChromeOrContent() ? NS_OK : NS_ERROR_NOT_AVAILABLE;
+}
+
+/* void start (in NSSCMSContentCallback cb, in voidPtr arg); */
+NS_IMETHODIMP nsCMSDecoder::Start(NSSCMSContentCallback cb, void* arg) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSDecoder::Start"));
+  m_ctx = nullptr;
+  mCallback = cb;
+  mCallbackArg = arg;
+  mAborted = false;
+
+  m_dcx = NSS_CMSDecoder_Start(0, nsCMSDecoder::ContentCallback, this, 0, m_ctx,
+                               0, 0);
+  if (!m_dcx) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSDecoder::Start - can't start decoder"));
+    return NS_ERROR_FAILURE;
+  }
+  return NS_OK;
+}
+
+void nsCMSDecoder::ContentCallback(void* aArg, const char* aBuf,
+                                   unsigned long aLen) {
+  nsCMSDecoder* self = static_cast<nsCMSDecoder*>(aArg);
+  if (self->mCallback) {
+    self->mCallback(self->mCallbackArg, aBuf, aLen);
+  }
+}
+
+/* void update (in string bug, in long len); */
+NS_IMETHODIMP nsCMSDecoder::Update(const char* buf, int32_t len) {
+  MOZ_ASSERT(!mUpdating, "Update should not be called re-entrantly");
+  if (!m_dcx || mUpdating) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+
+  // Hold an additional reference to (this), to ensure the reference count
+  // cannot drop to zero during the call to NSS_CMSDecoder_Update(),
+  // which prevents destruction of (this) as long as the current scope is alive.
+  RefPtr<nsCMSDecoder> kungFuDeathGrip(this);
+  mUpdating = true;
+  NSS_CMSDecoder_Update(m_dcx, (char*)buf, len);
+  mUpdating = false;
+
+  if (mAborted) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSDecoder::Update - finished while updating, cancelling"));
+    NSS_CMSDecoder_Cancel(m_dcx);
+    m_dcx = nullptr;
+    return NS_ERROR_ABORT;
+  }
+  return NS_OK;
+}
+
+/* void finish (); */
+NS_IMETHODIMP nsCMSDecoder::Finish(nsICMSMessage** aCMSMsg) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSDecoder::Finish"));
+  MOZ_ASSERT(!mFinished, "Finish should only be called once");
+  mFinished = true;
+  if (!m_dcx) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+  if (mUpdating) {
+    // NSS is still using m_dcx further up the stack. Stop delivering content
+    // to the consumer, which may be gone once we return, and let Update()
+    // cancel the decoder when it unwinds.
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSDecoder::Finish - called during Update, deferring"));
+    mCallback = nullptr;
+    mCallbackArg = nullptr;
+    mAborted = true;
+    return NS_ERROR_ABORT;
+  }
+  NSSCMSMessage* cmsMsg;
+  cmsMsg = NSS_CMSDecoder_Finish(m_dcx);
+  m_dcx = nullptr;
+  if (cmsMsg) {
+    nsCMSMessage* obj = new nsCMSMessage(cmsMsg);
+    // The NSS object cmsMsg still carries a reference to the context
+    // we gave it on construction.
+    // Make sure the context will live long enough.
+    obj->referenceContext(m_ctx);
+    NS_ADDREF(*aCMSMsg = obj);
+  }
+  return NS_OK;
+}
+
+void nsCMSDecoderJS::content_callback(void* arg, const char* input,
+                                      unsigned long length) {
+  nsCMSDecoderJS* self = reinterpret_cast<nsCMSDecoderJS*>(arg);
+  self->mDecryptedData.AppendElements(input, length);
+}
+
+NS_IMETHODIMP nsCMSDecoderJS::Decrypt(const nsTArray<uint8_t>& aInput,
+                                      nsTArray<uint8_t>& _retval) {
+  if (aInput.IsEmpty()) {
+    return NS_ERROR_FAILURE;
+  }
+
+  m_ctx = nullptr;
+
+  m_dcx = NSS_CMSDecoder_Start(0, nsCMSDecoderJS::content_callback, this, 0,
+                               m_ctx, 0, 0);
+  if (!m_dcx) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSDecoderJS::Start - can't start decoder"));
+    return NS_ERROR_FAILURE;
+  }
+
+  NSS_CMSDecoder_Update(m_dcx, (char*)aInput.Elements(), aInput.Length());
+
+  NSSCMSMessage* cmsMsg;
+  cmsMsg = NSS_CMSDecoder_Finish(m_dcx);
+  m_dcx = nullptr;
+  if (cmsMsg) {
+    nsCMSMessage* obj = new nsCMSMessage(cmsMsg);
+    // The NSS object cmsMsg still carries a reference to the context
+    // we gave it on construction.
+    // Make sure the context will live long enough.
+    obj->referenceContext(m_ctx);
+    mCMSMessage = obj;
+  }
+
+  _retval = mDecryptedData.Clone();
+  return NS_OK;
+}
+
+NS_IMPL_ISUPPORTS(nsCMSEncoder, nsICMSEncoder)
+
+nsCMSEncoder::nsCMSEncoder() : m_ecx(nullptr) {}
+
+nsCMSEncoder::~nsCMSEncoder() {
+  if (m_ecx) NSS_CMSEncoder_Cancel(m_ecx);
+}
+
+nsresult nsCMSEncoder::Init() {
+  return EnsureNSSInitializedChromeOrContent() ? NS_OK : NS_ERROR_NOT_AVAILABLE;
+}
+
+/* void start (); */
+NS_IMETHODIMP nsCMSEncoder::Start(nsICMSMessage* aMsg, NSSCMSContentCallback cb,
+                                  void* arg) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSEncoder::Start"));
+  nsCMSMessage* cmsMsg = static_cast<nsCMSMessage*>(aMsg);
+  m_ctx = nullptr;
+
+  m_ecx = NSS_CMSEncoder_Start(cmsMsg->getCMS(), cb, arg, 0, 0, 0, m_ctx, 0, 0,
+                               0, 0);
+  if (!m_ecx) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSEncoder::Start - can't start encoder"));
+    return NS_ERROR_FAILURE;
+  }
+  return NS_OK;
+}
+
+/* void update (in string aBuf, in long aLen); */
+NS_IMETHODIMP nsCMSEncoder::Update(const char* aBuf, int32_t aLen) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSEncoder::Update"));
+  if (!m_ecx || NSS_CMSEncoder_Update(m_ecx, aBuf, aLen) != SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSEncoder::Update - can't update encoder"));
+    return NS_ERROR_FAILURE;
+  }
+  return NS_OK;
+}
+
+/* void finish (); */
+NS_IMETHODIMP nsCMSEncoder::Finish() {
+  nsresult rv = NS_OK;
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSEncoder::Finish"));
+  if (!m_ecx || NSS_CMSEncoder_Finish(m_ecx) != SECSuccess) {
+    MOZ_LOG(gCMSLog, LogLevel::Debug,
+            ("nsCMSEncoder::Finish - can't finish encoder"));
+    rv = NS_ERROR_FAILURE;
+  }
+  m_ecx = nullptr;
+  return rv;
+}
+
+/* void encode (in nsICMSMessage aMsg); */
+NS_IMETHODIMP nsCMSEncoder::Encode(nsICMSMessage* aMsg) {
+  MOZ_LOG(gCMSLog, LogLevel::Debug, ("nsCMSEncoder::Encode"));
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMPL_ISUPPORTS(nsSMimeVerificationFailure, nsISMimeVerificationFailure)
+
+nsSMimeVerificationFailure::nsSMimeVerificationFailure(
+    mozilla::pkix::Result result)
+    : mResult(std::move(result)) {}
+
+nsSMimeVerificationFailure::~nsSMimeVerificationFailure() = default;
+
+NS_IMETHODIMP nsSMimeVerificationFailure::GetEnumValue(int32_t* value) {
+  *value = static_cast<int32_t>(mResult);
+  return NS_OK;
+}
+
+NS_IMETHODIMP nsSMimeVerificationFailure::GetEnumString(nsACString& value) {
+  value.Assign(MapResultToName(mResult));
+  return NS_OK;
+}

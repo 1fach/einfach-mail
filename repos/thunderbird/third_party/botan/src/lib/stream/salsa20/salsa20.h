@@ -1,0 +1,77 @@
+/*
+* Salsa20 / XSalsa20
+* (C) 1999-2010 Jack Lloyd
+*
+* Botan is released under the Simplified BSD License (see license.txt)
+*/
+
+#ifndef BOTAN_SALSA20_H_
+#define BOTAN_SALSA20_H_
+
+#include <botan/stream_cipher.h>
+
+namespace Botan {
+
+/**
+* DJB's Salsa20 (and XSalsa20)
+*/
+class Salsa20 final : public StreamCipher {
+   public:
+      std::string provider() const override;
+      bool valid_iv_length(size_t iv_len) const override;
+      size_t default_iv_length() const override;
+      Key_Length_Specification key_spec() const override;
+      void clear() override;
+      std::string name() const override;
+      std::unique_ptr<StreamCipher> new_object() const override;
+      bool has_keying_material() const override;
+      void seek(uint64_t offset) override;
+
+      bool supports_seek() const override { return true; }
+
+      // Salsa uses a 64-bit counter which we consider sufficient
+      std::optional<uint64_t> remaining_keystream_bytes() const override { return {}; }
+
+      size_t buffer_size() const override;
+
+      // For internal use only
+      static void salsa_core(uint8_t output[64], const uint32_t input[16], size_t rounds);
+
+      // For internal use only
+      static void hsalsa20(uint32_t output[8], const uint32_t input[16]);
+
+   protected:
+      void cipher_bytes(const uint8_t in[], uint8_t out[], size_t length) override;
+      void generate_keystream(uint8_t out[], size_t len) override;
+      void set_iv_bytes(const uint8_t iv[], size_t iv_len) override;
+
+   private:
+      void key_schedule(std::span<const uint8_t> key) override;
+
+      void initialize_state();
+
+      static size_t parallelism();
+
+      static void salsa20(uint8_t output[], size_t output_blocks, uint32_t state[16], size_t rounds);
+
+#if defined(BOTAN_HAS_SALSA20_SIMD32)
+      static void salsa20_simd32_x4(uint8_t output[64 * 4], uint32_t state[16], size_t rounds);
+#endif
+
+#if defined(BOTAN_HAS_SALSA20_AVX2)
+      static void salsa20_avx2_x8(uint8_t output[64 * 8], uint32_t state[16], size_t rounds);
+#endif
+
+#if defined(BOTAN_HAS_SALSA20_AVX512)
+      static void salsa20_avx512_x16(uint8_t output[64 * 16], uint32_t state[16], size_t rounds);
+#endif
+
+      secure_vector<uint32_t> m_key;
+      secure_vector<uint32_t> m_state;
+      secure_vector<uint8_t> m_buffer;
+      size_t m_position = 0;
+};
+
+}  // namespace Botan
+
+#endif

@@ -1,0 +1,486 @@
+/*
+* DER Encoder
+* (C) 1999-2007,2018 Jack Lloyd
+*
+* Botan is released under the Simplified BSD License (see license.txt)
+*/
+
+#include <botan/der_enc.h>
+
+#include <botan/asn1_obj.h>
+#include <botan/bigint.h>
+#include <botan/internal/asn1_utils.h>
+#include <botan/internal/bit_ops.h>
+#include <botan/internal/fmt.h>
+#include <botan/internal/loadstor.h>
+#include <botan/internal/mem_utils.h>
+#include <algorithm>
+
+namespace Botan {
+
+namespace {
+
+/*
+* DER encode an ASN.1 type tag
+*/
+void encode_tag(std::vector<uint8_t>& encoded_tag, ASN1_Type type_tag_e, ASN1_Class class_tag_e) {
+   const uint32_t type_tag = static_cast<uint32_t>(type_tag_e);
+   const uint32_t class_tag = static_cast<uint32_t>(class_tag_e);
+
+   if((class_tag | 0xE0) != 0xE0) {
+      throw Encoding_Error(fmt("DER_Encoder: Invalid class tag {}", std::to_string(class_tag)));
+   }
+
+   if(type_tag <= 30) {
+      encoded_tag.push_back(static_cast<uint8_t>(type_tag | class_tag));
+   } else {
+      size_t blocks = high_bit(static_cast<uint32_t>(type_tag)) + 6;
+      blocks = (blocks - (blocks % 7)) / 7;
+
+      BOTAN_ASSERT_NOMSG(blocks > 0);
+
+      encoded_tag.push_back(static_cast<uint8_t>(class_tag | 0x1F));
+      for(size_t i = 0; i != blocks - 1; ++i) {
+         encoded_tag.push_back(0x80 | ((type_tag >> 7 * (blocks - i - 1)) & 0x7F));
+      }
+      encoded_tag.push_back(type_tag & 0x7F);
+   }
+}
+
+/*
+* DER encode an ASN.1 length field
+*/
+void encode_length(std::vector<uint8_t>& encoded_length, size_t length) {
+   if(length <= 127) {
+      encoded_length.push_back(static_cast<uint8_t>(length));
+   } else {
+      const size_t bytes_needed = significant_bytes(length);
+
+      encoded_length.push_back(static_cast<uint8_t>(0x80 | bytes_needed));
+
+      for(size_t i = sizeof(length) - bytes_needed; i < sizeof(length); ++i) {
+         encoded_length.push_back(get_byte_var(i, length));
+      }
+   }
+}
+
+}  // namespace
+
+namespace ASN1 {
+
+std::vector<uint8_t> der_sequence_header(size_t contents_len) {
+   std::vector<uint8_t> header;
+   header.reserve(2 + sizeof(contents_len));
+   encode_tag(header, ASN1_Type::Sequence, ASN1_Class::Constructed);
+   encode_length(header, contents_len);
+   return header;
+}
+
+}  // namespace ASN1
+
+DER_Encoder::DER_Encoder(secure_vector<uint8_t>& vec) {
+   m_append_output = [&vec](const uint8_t b[], size_t l) {
+      if(l > 0) {
+         vec.insert(vec.end(), b, b + l);
+      }
+   };
+}
+
+DER_Encoder::DER_Encoder(std::vector<uint8_t>& vec) {
+   m_append_output = [&vec](const uint8_t b[], size_t l) {
+      if(l > 0) {
+         vec.insert(vec.end(), b, b + l);
+      }
+   };
+}
+
+/*
+* Push the encoded SEQUENCE/SET to the encoder stream
+*/
+void DER_Encoder::DER_Sequence::push_contents(DER_Encoder& der) {
+   const auto real_class_tag = m_class_tag | ASN1_Class::Constructed;
+
+   if(m_sort_contents) {
+      std::sort(m_set_contents.begin(), m_set_contents.end());
+      for(const auto& set_elem : m_set_contents) {
+         m_contents += set_elem;
+      }
+      m_set_contents.clear();
+   }
+
+   der.add_object(m_type_tag, real_class_tag, m_contents.data(), m_contents.size());
+   m_contents.clear();
+}
+
+/*
+* Add an encoded value to the SEQUENCE/SET
+*/
+void DER_Encoder::DER_Sequence::add_bytes(const uint8_t data[], size_t length) {
+   if(m_sort_contents) {
+      if(length > 0) {
+         m_set_contents.emplace_back(data, data + length);
+      } else {
+         m_set_contents.emplace_back();
+      }
+   } else {
+      m_contents += std::make_pair(data, length);
+   }
+}
+
+void DER_Encoder::DER_Sequence::add_bytes(const uint8_t hdr[], size_t hdr_len, const uint8_t val[], size_t val_len) {
+   if(m_sort_contents) {
+      secure_vector<uint8_t> m;
+      m.reserve(hdr_len + val_len);
+      m += std::make_pair(hdr, hdr_len);
+      m += std::make_pair(val, val_len);
+      m_set_contents.push_back(std::move(m));
+   } else {
+      m_contents += std::make_pair(hdr, hdr_len);
+      m_contents += std::make_pair(val, val_len);
+   }
+}
+
+/*
+* Return the type and class taggings
+*/
+uint32_t DER_Encoder::DER_Sequence::tag_of() const {
+   return m_type_tag | m_class_tag;
+}
+
+/*
+* DER_Sequence Constructor
+*/
+DER_Encoder::DER_Sequence::DER_Sequence(ASN1_Type type_tag, ASN1_Class class_tag, bool sort_contents) :
+      m_type_tag(type_tag),
+      m_class_tag(class_tag),
+      m_sort_contents(sort_contents || (type_tag == ASN1_Type::Set && class_tag == ASN1_Class::Universal)) {}
+
+/*
+* Return the encoded contents
+*/
+secure_vector<uint8_t> DER_Encoder::get_contents() {
+   if(!m_subsequences.empty()) {
+      throw Invalid_State("DER_Encoder: Sequence hasn't been marked done");
+   }
+
+   if(m_append_output) {
+      throw Invalid_State("DER_Encoder Cannot get contents when using output vector");
+   }
+
+   secure_vector<uint8_t> output;
+   std::swap(output, m_default_outbuf);
+   return output;
+}
+
+std::vector<uint8_t> DER_Encoder::get_contents_unlocked() {
+   if(!m_subsequences.empty()) {
+      throw Invalid_State("DER_Encoder: Sequence hasn't been marked done");
+   }
+
+   if(m_append_output) {
+      throw Invalid_State("DER_Encoder Cannot get contents when using output vector");
+   }
+
+   std::vector<uint8_t> output(m_default_outbuf.begin(), m_default_outbuf.end());
+   m_default_outbuf.clear();
+   return output;
+}
+
+/*
+* Start a new ASN.1 SEQUENCE/SET/EXPLICIT
+*/
+DER_Encoder& DER_Encoder::start_cons(ASN1_Type type_tag, ASN1_Class class_tag) {
+   return start_cons(type_tag, class_tag, false);
+}
+
+DER_Encoder& DER_Encoder::start_set(ASN1_Type type_tag, ASN1_Class class_tag) {
+   return start_cons(type_tag, class_tag, true);
+}
+
+DER_Encoder& DER_Encoder::start_cons(ASN1_Type type_tag, ASN1_Class class_tag, bool sort_contents) {
+   m_subsequences.push_back(DER_Sequence(type_tag, class_tag, sort_contents));
+   return (*this);
+}
+
+/*
+* Finish the current ASN.1 SEQUENCE/SET/EXPLICIT
+*/
+DER_Encoder& DER_Encoder::end_cons() {
+   if(m_subsequences.empty()) {
+      throw Invalid_State("DER_Encoder::end_cons: No such sequence");
+   }
+
+   DER_Sequence last_seq = std::move(m_subsequences[m_subsequences.size() - 1]);
+   m_subsequences.pop_back();
+   last_seq.push_contents(*this);
+
+   return (*this);
+}
+
+/*
+* Start a new ASN.1 EXPLICIT encoding
+*/
+DER_Encoder& DER_Encoder::start_explicit(uint16_t type_no) {
+   return start_cons(static_cast<ASN1_Type>(type_no), ASN1_Class::ContextSpecific);
+}
+
+/*
+* Finish the current ASN.1 EXPLICIT encoding
+*/
+DER_Encoder& DER_Encoder::end_explicit() {
+   return end_cons();
+}
+
+/*
+* Write raw bytes into the stream
+*/
+DER_Encoder& DER_Encoder::raw_bytes(const uint8_t bytes[], size_t length) {
+   if(!m_subsequences.empty()) {
+      m_subsequences[m_subsequences.size() - 1].add_bytes(bytes, length);
+   } else if(m_append_output) {
+      m_append_output(bytes, length);
+   } else {
+      m_default_outbuf += std::make_pair(bytes, length);
+   }
+
+   return (*this);
+}
+
+DER_Encoder& DER_Encoder::add_object_tlv(ASN1_Type type_tag, ASN1_Class class_tag, std::vector<uint8_t> tlv) {
+   // `tlv` was just produced by us via DER_Encoder, so it's a single
+   // well-formed TLV. Skip over the tag and length bytes (without
+   // reinterpreting them) to find the body offset.
+   BOTAN_ASSERT_NOMSG(!tlv.empty());
+   class_tag =
+      static_cast<ASN1_Class>(static_cast<uint32_t>(class_tag) & ~static_cast<uint32_t>(ASN1_Class::Constructed));
+   if((tlv[0] & static_cast<uint8_t>(ASN1_Class::Constructed)) != 0) {
+      class_tag = class_tag | ASN1_Class::Constructed;
+   }
+
+   size_t off = 1;
+   // Multi-byte tag form (X.690 8.1.2.4): low 5 bits set to 0x1F, then
+   // continuation bytes whose MSB is 1 except the last.
+   if((tlv[0] & 0x1F) == 0x1F) {
+      while(off < tlv.size() && (tlv[off] & 0x80) != 0) {
+         ++off;
+      }
+      BOTAN_ASSERT_NOMSG(off < tlv.size());
+      ++off;
+   }
+   // Length: short form is one byte; long form (MSB set) names the
+   // number of length-of-length bytes that follow.
+   BOTAN_ASSERT_NOMSG(off < tlv.size());
+   const uint8_t len_byte = tlv[off++];
+   if((len_byte & 0x80) != 0) {
+      off += (len_byte & 0x7F);
+   }
+   BOTAN_ASSERT_NOMSG(off <= tlv.size());
+
+   return add_object(type_tag, class_tag, std::span<const uint8_t>(tlv).subspan(off));
+}
+
+/*
+* Write the encoding of the byte(s)
+*/
+DER_Encoder& DER_Encoder::add_object(ASN1_Type type_tag, ASN1_Class class_tag, const uint8_t rep[], size_t length) {
+   std::vector<uint8_t> hdr;
+   encode_tag(hdr, type_tag, class_tag);
+   encode_length(hdr, length);
+
+   if(!m_subsequences.empty()) {
+      m_subsequences[m_subsequences.size() - 1].add_bytes(hdr.data(), hdr.size(), rep, length);
+   } else if(m_append_output) {
+      m_append_output(hdr.data(), hdr.size());
+      m_append_output(rep, length);
+   } else {
+      m_default_outbuf += hdr;
+      m_default_outbuf += std::make_pair(rep, length);
+   }
+
+   return (*this);
+}
+
+/*
+* Encode a NULL object
+*/
+DER_Encoder& DER_Encoder::encode_null() {
+   return add_object(ASN1_Type::Null, ASN1_Class::Universal, nullptr, 0);
+}
+
+/*
+* DER encode a BOOLEAN
+*/
+DER_Encoder& DER_Encoder::encode(bool is_true) {
+   return encode(is_true, ASN1_Type::Boolean, ASN1_Class::Universal);
+}
+
+/*
+* DER encode a small INTEGER
+*/
+DER_Encoder& DER_Encoder::encode(size_t n) {
+   return encode(BigInt::from_u64(n), ASN1_Type::Integer, ASN1_Class::Universal);
+}
+
+/*
+* DER encode a small INTEGER
+*/
+DER_Encoder& DER_Encoder::encode(const BigInt& n) {
+   return encode(n, ASN1_Type::Integer, ASN1_Class::Universal);
+}
+
+/*
+* Encode this object
+*/
+DER_Encoder& DER_Encoder::encode(std::span<const uint8_t> bytes, ASN1_Type real_type) {
+   return encode(bytes, real_type, real_type, ASN1_Class::Universal);
+}
+
+/*
+* DER encode a BOOLEAN
+*/
+DER_Encoder& DER_Encoder::encode(bool is_true, ASN1_Type type_tag, ASN1_Class class_tag) {
+   const uint8_t val = is_true ? 0xFF : 0x00;
+   return add_object(type_tag, class_tag, &val, 1);
+}
+
+/*
+* DER encode a small INTEGER
+*/
+DER_Encoder& DER_Encoder::encode(size_t n, ASN1_Type type_tag, ASN1_Class class_tag) {
+   return encode(BigInt::from_u64(n), type_tag, class_tag);
+}
+
+/*
+* DER encode an INTEGER
+*/
+std::vector<uint8_t> ASN1::integer_contents(const BigInt& n) {
+   if(n == 0) {
+      return {0x00};
+   }
+
+   // Serialize magnitude with one extra leading byte
+   auto contents = n.serialize(n.bytes() + 1);
+
+   if(n.signum() < 0) {
+      // Two's complement: bitwise NOT then increment
+      for(auto& byte : contents) {
+         byte = ~byte;
+      }
+      for(size_t i = contents.size(); i > 0; --i) {
+         if(++contents[i - 1] != 0) {
+            break;
+         }
+      }
+   }
+
+   /*
+   * DER requires the leading byte be emitted only if it required
+   */
+   BOTAN_ASSERT_NOMSG(contents.size() >= 2);
+   const bool leading_byte_redundant =
+      (contents[0] == 0x00 && (contents[1] & 0x80) == 0) || (contents[0] == 0xFF && (contents[1] & 0x80) != 0);
+
+   if(leading_byte_redundant) {
+      contents.erase(contents.begin());
+   }
+   return contents;
+}
+
+DER_Encoder& DER_Encoder::encode(const BigInt& n, ASN1_Type type_tag, ASN1_Class class_tag) {
+   return add_object(type_tag, class_tag, ASN1::integer_contents(n));
+}
+
+/*
+* DER encode an OCTET STRING or BIT STRING
+*/
+DER_Encoder& DER_Encoder::encode(std::span<const uint8_t> bytes,
+                                 ASN1_Type real_type,
+                                 ASN1_Type type_tag,
+                                 ASN1_Class class_tag) {
+   if(real_type != ASN1_Type::OctetString && real_type != ASN1_Type::BitString) {
+      throw Invalid_Argument("DER_Encoder: Invalid tag for byte/bit string");
+   }
+
+   if(real_type == ASN1_Type::BitString) {
+      return encode_bitstring(bytes, 0, type_tag, class_tag);
+   } else {
+      return add_object(type_tag, class_tag, bytes);
+   }
+}
+
+DER_Encoder& DER_Encoder::encode_bitstring(std::span<const uint8_t> bits,
+                                           size_t unused_bits,
+                                           ASN1_Type type_tag,
+                                           ASN1_Class class_tag) {
+   if(unused_bits >= 8) {
+      throw Invalid_Argument("DER_Encoder: Invalid unused bit count for BIT STRING");
+   }
+
+   if(bits.empty() && unused_bits != 0) {
+      throw Invalid_Argument("DER_Encoder: Empty BIT STRING cannot have unused bits");
+   }
+
+   if(unused_bits > 0 && (bits.back() & ((1U << unused_bits) - 1)) != 0) {
+      throw Invalid_Argument("DER_Encoder: BIT STRING unused bits must be zero");
+   }
+
+   secure_vector<uint8_t> encoded;
+   encoded.reserve(1 + bits.size());
+   encoded.push_back(static_cast<uint8_t>(unused_bits));
+   encoded.insert(encoded.end(), bits.begin(), bits.end());
+   return add_object(type_tag, class_tag, encoded);
+}
+
+DER_Encoder& DER_Encoder::encode_bitstring(const ASN1_BitString& bits, ASN1_Type type_tag, ASN1_Class class_tag) {
+   return encode_bitstring(bits.bytes(), bits.unused_bits(), type_tag, class_tag);
+}
+
+DER_Encoder& DER_Encoder::encode_named_bitstring(uint64_t bits,
+                                                 size_t width,
+                                                 ASN1_Type type_tag,
+                                                 ASN1_Class class_tag) {
+   if(width > 64) {
+      throw Invalid_Argument("DER_Encoder: Named BIT STRING width is too large");
+   }
+
+   if(width < 64 && (bits >> width) != 0) {
+      throw Invalid_Argument("DER_Encoder: Named BIT STRING has bits outside range");
+   }
+
+   if(bits == 0) {
+      return encode_bitstring({}, 0, type_tag, class_tag);
+   }
+
+   const size_t bit_length = width - ctz(bits);
+   const size_t byte_length = (bit_length + 7) / 8;
+   std::vector<uint8_t> encoded(byte_length);
+
+   for(size_t bit = 0; bit != bit_length; ++bit) {
+      if((bits & (uint64_t(1) << (width - 1 - bit))) != 0) {
+         encoded[bit / 8] |= static_cast<uint8_t>(0x80 >> (bit % 8));
+      }
+   }
+
+   return encode_bitstring(encoded, byte_length * 8 - bit_length, type_tag, class_tag);
+}
+
+DER_Encoder& DER_Encoder::encode(const ASN1_Object& obj) {
+   obj.encode_into(*this);
+   return (*this);
+}
+
+/*
+* Write the encoding of the byte(s)
+*/
+DER_Encoder& DER_Encoder::add_object(ASN1_Type type_tag, ASN1_Class class_tag, std::string_view rep_str) {
+   return add_object(type_tag, class_tag, as_span_of_bytes(rep_str));
+}
+
+/*
+* Write the encoding of the byte
+*/
+DER_Encoder& DER_Encoder::add_object(ASN1_Type type_tag, ASN1_Class class_tag, uint8_t rep) {
+   return add_object(type_tag, class_tag, std::span<const uint8_t>{&rep, 1});
+}
+
+}  // namespace Botan

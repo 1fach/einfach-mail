@@ -1,0 +1,125 @@
+<?xml version="1.0"?>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/.
+   -->
+
+<!DOCTYPE html>
+<html id="virtualFolderProperties" xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      lightweightthemes="true"
+      windowtype="mailnews:virtualFolderProperties"
+      style="min-width: 60em; min-height: 30em;"
+      scrolling="false">
+<head>
+  <title data-l10n-id="virtual-folder-properties-title"></title>
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src chrome:; script-src chrome: 'unsafe-inline' moz-src:; style-src chrome: 'unsafe-inline'"
+  />
+  <link rel="stylesheet" href="chrome://messenger/skin/searchDialog.css" />
+  <link rel="stylesheet" href="chrome://messenger/skin/folderMenus.css" />
+  <link rel="stylesheet" href="chrome://messenger/skin/input-fields.css" />
+  <link
+    rel="stylesheet"
+    href="chrome://messenger/skin/shared/grid-layout.css"
+  />
+  <link rel="stylesheet" href="chrome://messenger/skin/themeableDialog.css" />
+  <link rel="stylesheet" href="chrome://messenger/skin/contextMenu.css" />
+  <link rel="stylesheet" href="chrome://messenger/skin/colors.css" />
+  <link rel="stylesheet" href="chrome://messenger/skin/folderColors.css" />
+
+  <link rel="localization" href="branding/brand.ftl" />
+  <link rel="localization" href="messenger/searchWidgets.ftl" />
+  <link rel="localization" href="messenger/virtualFolderProperties.ftl" />
+  <link rel="localization" href="messenger/folderprops.ftl" />
+
+  <script defer="defer" src="chrome://messenger/content/globalOverlay.js"></script>
+  <script defer="defer" src="chrome://global/content/editMenuOverlay.js"></script>
+  <script defer="defer" src="chrome://messenger/content/searchWidgets.js"></script>
+  <script defer="defer" src="chrome://messenger/content/mailCommands.js"></script>
+  <script defer="defer" src="chrome://messenger/content/searchTerm.js"></script>
+  <script defer="defer" src="chrome://messenger/content/dateFormat.js"></script>
+  <script defer="defer" src="chrome://messenger/content/dialogShadowDom.js"></script>
+  <script defer="defer" src="chrome://messenger/content/virtualFolderProperties.js"></script>
+</head>
+<html:body xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+<dialog id="virtualFolderPropertiesDialog"
+        buttons="accept,cancel"
+        style="min-width: 60em; min-height: 30em;">
+
+  <html:div class="grid-two-column-fr grid-items-center">
+    <label
+      id="nameLabel"
+      data-l10n-id="virtual-folder-name"
+      control="name"
+    />
+    <hbox class="input-container">
+      <html:input id="name"
+                  hidden="hidden"
+                  class="input-inline"
+                  aria-labelledby="nameLabel"
+                  oninput="doEnabling();"/>
+      <html:input id="existingName"
+                  readonly="readonly"
+                  hidden="hidden"
+                  class="input-inline"
+                  tabindex="0"/>
+      <hbox id="iconColorContainer" align="center" collapsed="collapsed">
+        <label
+          id="colorLabel"
+          data-l10n-id="folder-props-color"
+          control="color"
+        />
+        <html:input id="color"
+                    type="color"
+                    value=""
+                    class="input-inline-color"
+                    aria-labelledby="colorLabel"/>
+        <button
+          id="resetColor"
+          class="toolbarbutton-1 btn-flat btn-reset"
+          data-l10n-id="folder-props-reset-color"
+        />
+      </hbox>
+    </hbox>
+    <label
+      class="chooseFolderLocation"
+      data-l10n-id="virtual-folder-description"
+      control="msgNewFolderPicker"
+    />
+    <menulist id="msgNewFolderPicker" class="folderMenuItem chooseFolderLocation"
+              align="center" displayformat="verbose">
+      <menupopup is="folder-menupopup" id="msgNewFolderPopup" class="menulist-menupopup"
+                 mode="newFolder" showFileHereLabel="true" oncommand="onFolderPick(event);"/>
+    </menulist>
+    <label data-l10n-id="virtual-folder-folder-selection-caption"/>
+    <hbox align="center">
+      <label id="chosenFoldersCount"/>
+      <spacer flex="1"/>
+      <button
+        id="folderListPicker"
+        data-l10n-id="virtual-folder-choose-folders-button"
+        oncommand="chooseFoldersToSearch();"
+      />
+    </hbox>
+  </html:div>
+
+  <checkbox
+    id="searchOnline"
+    data-l10n-id="virtual-folder-search-online"
+  />
+
+  <separator class="thin"/>
+
+  <vbox id="virtualFolderSearchTerms">
+    <label data-l10n-id="virtual-folder-search-term-caption"/>
+    <hbox id="virtualFolderSearchTermListBoxWrapper">
+      <vbox id="virtualFolderSearchTermListBox">
+#include ../../search/content/searchTerm.inc.xhtml
+    </hbox>
+  </vbox>
+</dialog>
+</html:body>
+</html>

@@ -1,0 +1,95 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/* import-globals-from ../head.js */
+
+var { GraphServer } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/GraphServer.sys.mjs"
+);
+var { PromiseTestUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
+);
+var { localAccountUtils } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/LocalAccountUtils.sys.mjs"
+);
+var { RemoteFolder } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/MockServer.sys.mjs"
+);
+var { TestUtils } = ChromeUtils.importESModule("resource://testing-common/TestUtils.sys.mjs");
+
+/**
+ * Set up an incoming server connected to a Graph test server.
+ *
+ * @returns {[GraphServer, nsIMsgIncomingServer]}
+ */
+function setupBasicGraphTestServer() {
+  // Ensure we have an on-disk profile.
+  do_get_profile();
+
+  // Create a new mock Graph server, and start it.
+  const graphServer = new GraphServer();
+  graphServer.start();
+
+  // Create and configure the Graph incoming server.
+  const incomingServer = localAccountUtils.create_incoming_server(
+    "graph",
+    graphServer.port,
+    "user",
+    "password"
+  );
+  incomingServer.QueryInterface(Ci.IExchangeIncomingServer);
+  incomingServer.setStringValue("ews_url", `http://127.0.0.1:${graphServer.port}/`);
+
+  // Make sure the server has a protocol client associated with it.
+  incomingServer.getProtocolClient();
+
+  registerCleanupFunction(async () => {
+    incomingServer.shutdown();
+    incomingServer.QueryInterface(Ci.IExchangeIncomingServer);
+    await TestUtils.waitForCondition(
+      () => !incomingServer.protocolClientRunning,
+      "waiting for the Graph client to shut down"
+    );
+
+    graphServer.stop();
+  });
+
+  return [graphServer, incomingServer];
+}
+
+/**
+ * A wrapper for ../head.js's `createCalendar` with graph-specific overrides.
+ *
+ * @param {nsIMsgIncomingServer} incomingServer
+ * @param {boolean} useCache
+ * @param {nsIRUI | null} uri
+ * @returns {calICalendar}
+ */
+function createGraphCalendar(incomingServer, useCache, uri = null) {
+  if (!uri) {
+    uri = Services.io.newURI(incomingServer.getStringValue("ews_url"));
+  }
+  const calendar = cal.manager.createCalendar("graph", uri);
+
+  calendar.id = "AAMkAGI2TGuLAAA=";
+  calendar.setProperty("username", "user");
+  calendar.setProperty("location", uri.prePath);
+  calendar.setProperty("cache.enabled", useCache);
+  calendar.setProperty("refreshInterval", "0");
+
+  cal.manager.registerCalendar(calendar);
+
+  const registered = cal.manager.getCalendarById(calendar.id);
+  calendarObserver._expectedCalendar = registered;
+  return registered;
+}
+
+/**
+ * @param {calICalendar} calendar
+ * @returns {GraphCalendar}
+ */
+function getGraphCalendar(calendar) {
+  const wrapped = calendar.wrappedJSObject;
+  return wrapped.mUncachedCalendar?.wrappedJSObject ?? wrapped;
+}

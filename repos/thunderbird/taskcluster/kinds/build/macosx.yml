@@ -1,0 +1,668 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+---
+task-defaults:
+    run-on-repo-type: [hg]
+    index:
+        product: thunderbird
+    worker-type: b-linux-docker-amd
+    worker:
+        artifacts:
+            - name: public/build/security/browser.xml
+              path: checkouts/gecko/comm/build/macosx/hardenedruntime/v2/{entitlement_directory}/browser.xml
+              type: file
+            - name: public/build/security/media-plugin-helper.xml
+              path: checkouts/gecko/comm/build/macosx/hardenedruntime/v2/{entitlement_directory}/media-plugin-helper.xml
+              type: file
+            - name: public/build/security/plugin-container.xml
+              path: checkouts/gecko/comm/build/macosx/hardenedruntime/v2/{entitlement_directory}/plugin-container.xml
+              type: file
+            - name: public/build/security/security-module-helper.xml
+              path: checkouts/gecko/comm/build/macosx/hardenedruntime/v2/{entitlement_directory}/security-module-helper.xml
+              type: file
+    run:
+        using: mozharness
+        comm-checkout: true
+        clone-with: hg
+        actions: [build]
+        config-paths:
+            - comm/testing/mozharness/configs
+        script: "mozharness/scripts/fx_desktop_build.py"
+    optimization:
+        never: null
+    fetches:
+        toolchain:
+            - linux64-cbindgen
+            - linux64-cctools-port
+            - linux64-clang
+            - linux64-dump_syms
+            - linux64-hfsplus
+            - linux64-libdmg
+            - linux64-nasm
+            - linux64-node
+            - linux64-rust-macos
+            - linux64-rust-size
+            - sysroot-wasm32-wasi
+            - sysroot-x86_64-linux-gnu
+
+macosx64/debug:
+    description: "MacOS X x64 Cross-compile"
+    index:
+        job-name: macosx64-debug
+    attributes:
+        enable-build-signing: true
+        enable-full-crashsymbols: true
+    treeherder:
+        platform: osx-cross/debug
+        symbol: B
+        tier: 1
+    worker:
+        max-run-time: 7200
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+    mozconfig:
+        variant: debug
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+        custom-build-variant-cfg: cross-debug
+    use-sccache: true
+    fetches:
+        toolchain:
+            - linux64-sccache
+            - macosx64-x64-libotr
+            - macosx64-sdk
+
+macosx64-enterprise/debug:
+    description: "MacOS X x64 Enterprise Cross-compile"
+    index:
+        job-name: macosx64-enterprise-debug
+    attributes:
+        enable-build-signing: true
+        enable-full-crashsymbols: true
+        code-review: true
+    treeherder:
+        platform: osx-cross-enterprise-thunderbird/debug
+        symbol: Bent
+        tier: 1
+    worker-type: b-linux-docker-xlarge-amd
+    worker:
+        max-run-time: 7200
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+    mozconfig:
+        variant: enterprise-debug
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+        custom-build-variant-cfg: cross-debug
+    run-on-projects: ["enterprise-thunderbird"]
+    run-on-repo-type: ["git"]
+    use-sccache: true
+    fetches:
+        toolchain:
+            - linux64-sccache
+            - macosx64-x64-libotr
+            - macosx64-sdk
+
+macosx64/opt:
+    description: "MacOS X x64 Cross-compile"
+    index:
+        job-name: macosx64-opt
+    attributes:
+        enable-build-signing: true
+        enable-full-crashsymbols: true
+    treeherder:
+        platform: osx-cross/opt
+        symbol: B
+        tier: 1
+    worker:
+        max-run-time: 7200
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+    use-sccache: true
+    fetches:
+        toolchain:
+            - linux64-sccache
+            - macosx64-x64-libotr
+            - macosx64-sdk
+            - terser
+
+macosx64-enterprise/opt:
+    description: "MacOS X x64 Enterprise Cross-compile"
+    index:
+        job-name: macosx64-enterprise-opt
+    attributes:
+        enable-build-signing: true
+        enable-full-crashsymbols: true
+        code-review: true
+    treeherder:
+        platform: osx-cross-enterprise-thunderbird/opt
+        symbol: Bent
+        tier: 1
+    worker-type: b-linux-docker-xlarge-amd
+    worker:
+        max-run-time: 7200
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+    mozconfig:
+        variant: enterprise
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+    run-on-projects: ["enterprise-thunderbird"]
+    run-on-repo-type: ["git"]
+    use-sccache: true
+    fetches:
+        toolchain:
+            - linux64-sccache
+            - macosx64-x64-libotr
+            - macosx64-sdk
+            - terser
+
+macosx64-x64-shippable/opt:
+    description: "MacOS X x64 Cross-compile"
+    attributes:
+        enable-full-crashsymbols: true
+        skip-verify-test-packaging: true
+    shipping-phase: build
+    shipping-product: thunderbird
+    index:
+        product: thunderbird
+        job-name: macosx64-x64-opt
+        type: shippable
+    treeherder:
+        platform: osx-shippable/opt
+        symbol: B
+        tier: 1
+    run-on-projects: ['release']
+    worker:
+        max-run-time: 7200
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+            MOZ_GENERATE_SBOM: "1"
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+            - taskcluster_nightly.py
+    fetches:
+        toolchain:
+            - macosx64-x64-libotr
+            - macosx64-sdk
+            - terser
+
+macosx64-x64-enterprise-shippable/opt:
+    description: "MacOS X x64 Enterprise Cross-compile"
+    attributes:
+        enable-full-crashsymbols: true
+        skip-verify-test-packaging: true
+        code-review: true
+    shipping-phase: build
+    shipping-product: thunderbird-enterprise
+    index:
+        product: thunderbird
+        job-name: macosx64-x64-enterprise-opt
+        type: shippable
+    treeherder:
+        platform: osx-shippable-enterprise-thunderbird/opt
+        symbol: Bent
+        tier: 1
+    worker-type: b-linux-docker-xlarge-amd
+    worker:
+        max-run-time: 7200
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+            MOZ_GENERATE_SBOM: "1"
+    mozconfig:
+        variant: enterprise
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+            - taskcluster_nightly.py
+    run-on-projects: ["enterprise-thunderbird"]
+    run-on-repo-type: ["git"]
+    fetches:
+        toolchain:
+            - macosx64-x64-libotr
+            - macosx64-sdk
+            - terser
+
+macosx64-aarch64/debug:
+    description: "MacOS X Aarch64 Cross-compile"
+    index:
+        job-name: macosx64-aarch64-debug
+    attributes:
+        enable-build-signing: true
+        enable-full-crashsymbols: true
+    treeherder:
+        platform: osx-cross-aarch64/debug
+        symbol: B
+        tier: 1
+    worker:
+        max-run-time: 5400
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+            PERFHERDER_EXTRA_OPTIONS: aarch64
+    mozconfig:
+        variant: debug
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+        custom-build-variant-cfg: cross-debug
+    use-sccache: true
+    fetches:
+        toolchain:
+            - linux64-sccache
+            - macosx64-aarch64-libotr
+            - macosx64-sdk
+
+macosx64-aarch64-enterprise/debug:
+    description: "MacOS X Aarch64 Enterprise Cross-compile"
+    index:
+        job-name: macosx64-aarch64-enterprise-debug
+    attributes:
+        enable-full-crashsymbols: true
+        code-review: true
+    treeherder:
+        platform: osx-cross-aarch64-enterprise-thunderbird/debug
+        symbol: Bent
+        tier: 1
+    worker-type: b-linux-docker-xlarge-amd
+    worker:
+        max-run-time: 5400
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+            PERFHERDER_EXTRA_OPTIONS: aarch64
+    mozconfig:
+        variant: enterprise-debug
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+        custom-build-variant-cfg: cross-debug
+    run-on-projects: ["enterprise-thunderbird"]
+    run-on-repo-type: ["git"]
+    use-sccache: true
+    fetches:
+        toolchain:
+            - linux64-sccache
+            - macosx64-aarch64-libotr
+            - macosx64-sdk
+
+macosx64-aarch64/opt:
+    description: "MacOS X Aarch64 Cross-compile"
+    index:
+        job-name: macosx64-aarch64-opt
+    attributes:
+        enable-build-signing: true
+        enable-full-crashsymbols: true
+    treeherder:
+        platform: osx-cross-aarch64/opt
+        symbol: B
+        tier: 1
+    worker:
+        max-run-time: 7200
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+            PERFHERDER_EXTRA_OPTIONS: aarch64
+    mozconfig:
+        variant:
+            by-release-type:
+                beta: opt-release
+                release.*: opt-release
+                esr.*: opt-release
+                default: opt
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+    use-sccache: true
+    fetches:
+        toolchain:
+            - linux64-sccache
+            - macosx64-aarch64-libotr
+            - macosx64-sdk
+            - terser
+
+macosx64-aarch64-enterprise/opt:
+    description: "MacOS X Aarch64 Enterprise Cross-compile"
+    index:
+        job-name: macosx64-aarch64-enterprise-opt
+    attributes:
+        enable-full-crashsymbols: true
+        code-review: true
+    treeherder:
+        platform: osx-cross-aarch64-enterprise-thunderbird/opt
+        symbol: Bent
+        tier: 1
+    worker-type: b-linux-docker-xlarge-amd
+    worker:
+        max-run-time: 7200
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+            PERFHERDER_EXTRA_OPTIONS: aarch64
+    mozconfig:
+        variant: enterprise-opt
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+    run-on-projects: ["enterprise-thunderbird"]
+    run-on-repo-type: ["git"]
+    use-sccache: true
+    fetches:
+        toolchain:
+            - linux64-sccache
+            - macosx64-aarch64-libotr
+            - macosx64-sdk
+            - terser
+
+macosx64-aarch64-shippable/opt:
+    description: "MacOS X aarch64 Cross-compile"
+    attributes:
+        enable-full-crashsymbols: true
+        skip-verify-test-packaging: true
+    shipping-phase: build
+    shipping-product: thunderbird
+    index:
+        product: thunderbird
+        job-name: macosx64-aarch64-opt
+        type: shippable
+    treeherder:
+        platform: osx-aarch64-shippable/opt
+        symbol: B
+        tier: 1
+    run-on-projects: ['release']
+    worker:
+        max-run-time: 7200
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+            PERFHERDER_EXTRA_OPTIONS: aarch64
+            MOZ_GENERATE_SBOM: "1"
+    mozconfig:
+        platform: macosx64-aarch64
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+            - taskcluster_nightly.py
+        script: "mozharness/scripts/fx_desktop_build.py"
+    fetches:
+        toolchain:
+            - macosx64-aarch64-libotr
+            - macosx64-sdk
+            - terser
+
+macosx64-aarch64-enterprise-shippable/opt:
+    description: "MacOS X aarch64 Enterprise Cross-compile"
+    attributes:
+        enable-full-crashsymbols: true
+        skip-verify-test-packaging: true
+        code-review: true
+    shipping-phase: build
+    shipping-product: thunderbird-enterprise
+    index:
+        product: thunderbird
+        job-name: macosx64-aarch64-enterprise-opt
+        type: shippable
+    treeherder:
+        platform: osx-aarch64-shippable-enterprise-thunderbird/opt
+        symbol: Bent
+        tier: 1
+    worker-type: b-linux-docker-xlarge-amd
+    worker:
+        max-run-time: 7200
+        env:
+            MOZ_AUTOMATION_PACKAGE_TESTS: "1"
+            PERFHERDER_EXTRA_OPTIONS: aarch64
+            MOZ_GENERATE_SBOM: "1"
+    mozconfig:
+        variant: enterprise
+        platform: macosx64-aarch64
+    run:
+        config:
+            - builds/taskcluster_base_thunderbird.py
+            - builds/releng_base_mac_64_cross_builds.py
+            - taskcluster_nightly.py
+        script: "mozharness/scripts/fx_desktop_build.py"
+    run-on-projects: ["enterprise-thunderbird"]
+    run-on-repo-type: ["git"]
+    fetches:
+        toolchain:
+            - macosx64-aarch64-libotr
+            - macosx64-sdk
+            - terser
+
+macosx64-shippable/opt:
+    description: "MacOS Universal"
+    attributes:
+        shippable: true
+        enable-build-signing: true
+        skip-upload-crashsymbols: true
+        skip-verify-test-packaging: true
+    shipping-phase: build
+    shipping-product: thunderbird
+    index:
+        product: thunderbird
+        job-name: macosx64-opt
+        type: shippable
+    treeherder:
+        platform: osx-shippable/opt
+        symbol: U
+        tier: 1
+    run-on-projects: ['release']
+    worker:
+        max-run-time: 1800
+        # No MOZ_GENERATE_SBOM, it's already provided by platform-specific
+        # builds
+    mozconfig: null
+    run:
+        job-script: taskcluster/scripts/misc/unify.sh
+        config:
+            - builds/taskcluster_base_thunderbird.py
+    dependencies:
+        macosx64-x64-shippable-opt: build-macosx64-x64-shippable/opt
+        macosx64-aarch64-shippable-opt: build-macosx64-aarch64-shippable/opt
+    fetches:
+        macosx64-x64-shippable-opt:
+            - artifact: target.dmg
+              extract: false
+              dest: x64
+            - artifact: buildhub.json
+              extract: false
+              dest: ../artifacts
+            - artifact: host/bin/mar
+              extract: false
+              dest: ../artifacts/host/bin
+            - artifact: host/bin/mbsdiff
+              extract: false
+              dest: ../artifacts/host/bin
+            - artifact: target.txt
+              extract: false
+              dest: ../artifacts
+            - artifact: target_info.txt
+              extract: false
+              dest: ../artifacts
+            - artifact: target.json
+              extract: false
+              dest: ../artifacts
+            - artifact: target.mozinfo.json
+              extract: false
+              dest: ../artifacts
+            - artifact: target.test_packages.json
+              extract: false
+              dest: ../artifacts
+            - artifact: target.update_framework_artifacts.zip
+              extract: false
+              dest: ../artifacts
+            - artifact: target.xpt_artifacts.zip
+              extract: false
+              dest: ../artifacts
+            - artifact: target.common.tests.tar.zst
+              dest: x64/common
+            - artifact: target.gtest.tests.tar.zst
+              dest: x64/gtest
+            - artifact: target.mochitest.tests.tar.zst
+              dest: x64/mochitest
+            - artifact: target.condprof.tests.tar.zst
+              dest: x64/confprof
+            - artifact: target.xpcshell.tests.tar.zst
+              dest: x64/xpcshell
+            - artifact: target.crashreporter-symbols.zip
+              dest: x64/crashreporter-symbols
+            - artifact: target.jsshell.zip
+              dest: x64/jsshell
+            - artifact: target.generated-files.tar.gz
+              extract: false
+              dest: ../artifacts
+            - artifact: target.langpack.xpi
+              extract: false
+              dest: ../artifacts
+            - artifact: mozharness.zip
+              extract: false
+              dest: ../artifacts
+            - artifact: target.trainhop.tests.tar.zst
+              extract: false
+              dest: ../artifacts
+        macosx64-aarch64-shippable-opt:
+            - artifact: target.dmg
+              extract: false
+              dest: aarch64
+            - artifact: target.common.tests.tar.zst
+              dest: aarch64/common
+            - artifact: target.gtest.tests.tar.zst
+              dest: aarch64/gtest
+            - artifact: target.mochitest.tests.tar.zst
+              dest: aarch64/mochitest
+            - artifact: target.condprof.tests.tar.zst
+              dest: aarch64/confprof
+            - artifact: target.xpcshell.tests.tar.zst
+              dest: aarch64/xpcshell
+            - artifact: target.crashreporter-symbols.zip
+              dest: aarch64/crashreporter-symbols
+            - artifact: target.jsshell.zip
+              dest: aarch64/jsshell
+
+
+macosx64-enterprise-shippable/opt:
+    description: "MacOS Universal Enterprise"
+    attributes:
+        shippable: true
+        enable-build-signing: true
+        skip-upload-crashsymbols: true
+        skip-verify-test-packaging: true
+        code-review: true
+    shipping-phase: build
+    shipping-product: thunderbird-enterprise
+    index:
+        product: thunderbird
+        job-name: macosx64-enterprise-opt
+        type: shippable
+    treeherder:
+        platform: osx-shippable-enterprise-thunderbird/opt
+        symbol: Uent
+        tier: 1
+    run-on-projects: ["enterprise-thunderbird"]
+    run-on-repo-type: ["git"]
+    worker:
+        max-run-time: 1800
+        # No MOZ_GENERATE_SBOM, it's already provided by platform-specific
+        # builds
+    mozconfig: null
+    run:
+        job-script: taskcluster/scripts/misc/unify.sh
+        config:
+            - builds/taskcluster_base_thunderbird.py
+    dependencies:
+        macosx64-x64-enterprise-shippable-opt: build-macosx64-x64-enterprise-shippable/opt
+        macosx64-aarch64-enterprise-shippable-opt: build-macosx64-aarch64-enterprise-shippable/opt
+    fetches:
+        macosx64-x64-enterprise-shippable-opt:
+            - artifact: target.dmg
+              extract: false
+              dest: x64
+            - artifact: buildhub.json
+              extract: false
+              dest: ../artifacts
+            - artifact: host/bin/mar
+              extract: false
+              dest: ../artifacts/host/bin
+            - artifact: host/bin/mbsdiff
+              extract: false
+              dest: ../artifacts/host/bin
+            - artifact: target.txt
+              extract: false
+              dest: ../artifacts
+            - artifact: target_info.txt
+              extract: false
+              dest: ../artifacts
+            - artifact: target.json
+              extract: false
+              dest: ../artifacts
+            - artifact: target.mozinfo.json
+              extract: false
+              dest: ../artifacts
+            - artifact: target.test_packages.json
+              extract: false
+              dest: ../artifacts
+            - artifact: target.update_framework_artifacts.zip
+              extract: false
+              dest: ../artifacts
+            - artifact: target.xpt_artifacts.zip
+              extract: false
+              dest: ../artifacts
+            - artifact: target.common.tests.tar.zst
+              dest: x64/common
+            - artifact: target.gtest.tests.tar.zst
+              dest: x64/gtest
+            - artifact: target.mochitest.tests.tar.zst
+              dest: x64/mochitest
+            - artifact: target.condprof.tests.tar.zst
+              dest: x64/confprof
+            - artifact: target.xpcshell.tests.tar.zst
+              dest: x64/xpcshell
+            - artifact: target.crashreporter-symbols.zip
+              dest: x64/crashreporter-symbols
+            - artifact: target.jsshell.zip
+              dest: x64/jsshell
+            - artifact: target.generated-files.tar.gz
+              extract: false
+              dest: ../artifacts
+            - artifact: target.langpack.xpi
+              extract: false
+              dest: ../artifacts
+            - artifact: mozharness.zip
+              extract: false
+              dest: ../artifacts
+            - artifact: target.trainhop.tests.tar.zst
+              extract: false
+              dest: ../artifacts
+        macosx64-aarch64-enterprise-shippable-opt:
+            - artifact: target.dmg
+              extract: false
+              dest: aarch64
+            - artifact: target.common.tests.tar.zst
+              dest: aarch64/common
+            - artifact: target.gtest.tests.tar.zst
+              dest: aarch64/gtest
+            - artifact: target.mochitest.tests.tar.zst
+              dest: aarch64/mochitest
+            - artifact: target.condprof.tests.tar.zst
+              dest: aarch64/confprof
+            - artifact: target.xpcshell.tests.tar.zst
+              dest: aarch64/xpcshell
+            - artifact: target.crashreporter-symbols.zip
+              dest: aarch64/crashreporter-symbols
+            - artifact: target.jsshell.zip
+              dest: aarch64/jsshell

@@ -1,0 +1,148 @@
+/*
+* TLS Signature Scheme
+* (C) 2022 Jack Lloyd
+*     2022 Hannes Rantzsch, René Meusel - neXenio GmbH
+*
+* Botan is released under the Simplified BSD License (see license.txt)
+*/
+
+#ifndef BOTAN_TLS_SIGNATURE_SCHEME_H_
+#define BOTAN_TLS_SIGNATURE_SCHEME_H_
+
+#include <botan/asn1_obj.h>
+#include <botan/types.h>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace Botan {
+
+enum class Signature_Format : uint8_t;
+class Private_Key;
+
+}  // namespace Botan
+
+namespace Botan::TLS {
+
+class Protocol_Version;
+
+class BOTAN_PUBLIC_API(3, 0) Signature_Scheme final {
+   public:
+      /**
+      * Matches with wire encoding
+      *
+      * Note that this is intentionally left as a bare enum. It emulates the Botan 2
+      * API where `Signature_Scheme` was an enum class with associated free-standing
+      * functions. Leaving it as a bare enum resembles the legacy user-facing API.
+      */
+      enum Code : uint16_t /* NOLINT(*-use-enum-class) */ {
+         NONE = 0x0000,
+
+         RSA_PKCS1_SHA1 = 0x0201,  // not implemented
+         RSA_PKCS1_SHA256 = 0x0401,
+         RSA_PKCS1_SHA384 = 0x0501,
+         RSA_PKCS1_SHA512 = 0x0601,
+
+         // RFC 9846 4.3.3
+         //    ECDSA algorithms:  Indicates a signature algorithm using ECDSA,
+         //    the corresponding curve as defined in NIST SP 800-186.
+         //
+         // In TLS 1.3 these code points specifically refer to the NIST curves
+         // P-256, P-384, and P-521. In contrast TLS 1.2 uses these code points
+         // for ECDSA on any curve paired with the specified hash function.
+         ECDSA_SECP256R1_TLS13_SHA256 = 0x0403,
+         ECDSA_SECP384R1_TLS13_SHA384 = 0x0503,
+         ECDSA_SECP521R1_TLS13_SHA512 = 0x0603,
+
+         // RFC 5246 7.4.1.4.1
+         //   The client uses the "signature_algorithms" extension to indicate
+         //   to the server which signature/hash algorithm pairs may be used in
+         //   digital signatures.
+         //
+         // In TLS 1.2 the signature_algorithms extension contains pairs of hash
+         // and signature algorithms. For ECDSA these code points are not bound
+         // to a specific curve in contrast to TLS 1.3, where these code points
+         // imply the usage of NIST's P-256, P-384, and P-521 curves.
+         ECDSA_SHA1 = 0x0203,  // not implemented
+         ECDSA_SHA256 = ECDSA_SECP256R1_TLS13_SHA256,
+         ECDSA_SHA384 = ECDSA_SECP384R1_TLS13_SHA384,
+         ECDSA_SHA512 = ECDSA_SECP521R1_TLS13_SHA512,
+
+         RSA_PSS_SHA256 = 0x0804,
+         RSA_PSS_SHA384 = 0x0805,
+         RSA_PSS_SHA512 = 0x0806,
+
+         // RFC 8734
+         ECDSA_BRAINPOOL256R1_TLS13_SHA256 = 0x081A,
+         ECDSA_BRAINPOOL384R1_TLS13_SHA384 = 0x081B,
+         ECDSA_BRAINPOOL512R1_TLS13_SHA512 = 0x081C,
+
+         EDDSA_25519 = 0x0807,
+         EDDSA_448 = 0x0808,
+      };
+
+   public:
+      /**
+      * @return all available signature schemes
+      */
+      static const std::vector<Signature_Scheme>& all_available_schemes();
+
+      /**
+      * @return the signature scheme corresponding to the given string
+      */
+      static Signature_Scheme from_string(std::string_view str);
+
+      /**
+      * Construct an uninitialized / invalid scheme
+      */
+      Signature_Scheme();
+
+      /* NOLINT(*-explicit-conversions) */ Signature_Scheme(uint16_t wire_code);
+
+      /* NOLINT(*-explicit-conversions) */ Signature_Scheme(Signature_Scheme::Code wire_code);
+
+      Signature_Scheme::Code wire_code() const noexcept { return m_code; }
+
+      /**
+      * @return true if support for this scheme is implemented in this Botan build
+      */
+      bool is_available() const noexcept;
+
+      /**
+      * @return true if the wire_code is set to any value other than `NONE`
+      */
+      bool is_set() const noexcept;
+
+      std::string to_string() const;
+      std::string hash_function_name() const;
+      std::string padding_string() const;
+      std::string algorithm_name() const;
+      AlgorithmIdentifier key_algorithm_identifier() const;
+      AlgorithmIdentifier algorithm_identifier() const;
+      std::optional<Signature_Format> format() const noexcept;
+
+      bool is_compatible_with(const Protocol_Version& protocol_version) const noexcept;
+
+      /**
+      * Checks that @p private_key is suitable for use with this signature
+      * scheme, enforcing the curve-hash binding required by TLS 1.3 (e.g.
+      * ECDSA_SHA256 only with P-256 keys). This must not be used for TLS
+      * 1.2 scheme selection, where signature schemes are (hash, algorithm)
+      * pairs with no curve binding -- any hash may be used with any ECDSA
+      * curve per RFC 5246.
+      */
+      bool is_suitable_for(const Private_Key& private_key) const;
+
+      bool operator==(const Signature_Scheme& rhs) const { return m_code == rhs.m_code; }
+
+      bool operator!=(const Signature_Scheme& rhs) const { return !(*this == rhs); }
+
+   private:
+      Signature_Scheme::Code m_code;
+};
+
+std::vector<AlgorithmIdentifier> to_algorithm_identifiers(const std::vector<Signature_Scheme>& schemes);
+
+}  // namespace Botan::TLS
+
+#endif  // BOTAN_TLS_SIGNATURE_SCHEME_H_

@@ -1,0 +1,59 @@
+android_perftest_backstop: true
+app_version: '153.0'
+backstop: true
+base_ref: ''
+base_repository: https://hg.mozilla.org/mozilla-unified
+base_rev: ''
+build_date: 1784538307
+build_number: 1
+comm_base_ref: default
+comm_base_repository: https://hg.mozilla.org/comm-unified
+comm_base_rev: 65d143bac3a36bee8f818503182fc3acef10e782
+comm_head_ref: 05390d4bdeef01bb15cec2fdf984ddbd199d6196
+comm_head_repository: https://hg.mozilla.org/releases/comm-release
+comm_head_rev: 05390d4bdeef01bb15cec2fdf984ddbd199d6196
+comm_src_path: comm/
+do_not_optimize: []
+dontbuild: false
+enable_always_target:
+  - docker-image
+existing_tasks: {}
+files_changed:
+  - comm/mail/locales/l10n-changesets.json
+filters:
+  - target_tasks_method
+head_git_rev: f1b6c0f86b96b7e0688c26f65803576f27cdaf88
+head_ref: FIREFOX_153_0_BUILD1
+head_repository: https://hg.mozilla.org/releases/mozilla-release
+head_rev: 3810496e857367d04cf4fa0c705df6995a48b860
+head_tag: ''
+hg_branch: default
+level: '3'
+message: ''
+moz_build_date: '20260720090507'
+next_version: null
+optimize_strategies: null
+optimize_target_tasks: true
+owner: user@example.com
+phabricator_diff: null
+project: comm-release
+pushdate: 1784538307
+pushlog_id: '718'
+release_enable_emefree: false
+release_enable_partner_attribution: false
+release_enable_partner_repack: false
+release_eta: ''
+release_history: {}
+release_partner_build_number: 1
+release_partner_config: {}
+release_partners: []
+release_product: null
+release_type: release
+repository_type: hg
+target_tasks_method: mozilla_release_tasks
+tasks_for: hg-push
+test_manifest_loader: default
+try_mode: null
+try_options: null
+try_task_config: {}
+version: '153.0'

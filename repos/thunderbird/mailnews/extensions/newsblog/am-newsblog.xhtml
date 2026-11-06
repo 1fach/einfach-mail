@@ -1,0 +1,264 @@
+<?xml version="1.0"?>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+
+<!DOCTYPE html SYSTEM "chrome://messenger-newsblog/locale/feed-subscriptions.dtd">
+
+<html
+  xmlns="http://www.w3.org/1999/xhtml"
+  xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+>
+  <head>
+    <title data-l10n-id="account-settings-document-title"></title>
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src chrome:; script-src chrome: 'unsafe-inline' moz-src:; style-src chrome: 'unsafe-inline'"
+    />
+    <link rel="localization" href="messenger/accountSettings.ftl" />
+    <link rel="stylesheet" href="chrome://messenger/skin/icons.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/colors.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/variables.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/input-fields.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/accountManage.css" />
+    <link
+      rel="stylesheet"
+      href="chrome://messenger-newsblog/skin/feed-subscriptions.css"
+    />
+    <script
+      defer="defer"
+      src="chrome://messenger/content/globalOverlay.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://global/content/editMenuOverlay.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://messenger/content/AccountManager.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://messenger-newsblog/content/am-newsblog.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://messenger-newsblog/content/newsblogOverlay.js"
+    ></script>
+    <script defer="defer" src="chrome://messenger/content/amUtils.js"></script>
+    <script defer="defer" src="chrome://messenger/content/am-prefs.js"></script>
+    <script>
+      // FIXME: move to script file.
+      window.addEventListener("load", event => {
+        parent.onPanelLoaded("am-newsblog.xhtml");
+      });
+    </script>
+  </head>
+  <html:body
+    xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  >
+    <vbox id="containerBox" flex="1">
+      <hbox id="am-newsblog-title" class="dialogheader">
+        <label
+          class="dialogheader-title"
+          data-l10n-id="account-settings-title"
+        />
+        <spacer flex="1" />
+        <button
+          id="deleteAccount"
+          data-l10n-id="delete-account-button"
+          oncommand="top.onRemoveAccount(event)"
+        />
+      </hbox>
+
+      <description
+        class="secDesc"
+        data-l10n-id="account-settings-special-account-description"
+      />
+
+      <html:div class="input-container" xmlns="http://www.w3.org/1999/xhtml">
+        <div class="input-container-column flex-grow">
+          <xul:label
+            id="server.prettyNameLabel"
+            data-l10n-id="account-settings-account-name"
+            control="server.prettyName"
+          />
+          <input
+            id="server.prettyName"
+            type="text"
+            wsm_persist="true"
+            class="input-inline"
+            aria-labelledby="server.prettyNameLabel"
+            onblur="serverPrettyNameOnBlur(event)"
+            prefstring="mail.server.%serverkey%.name"
+          />
+        </div>
+        <div class="input-container-column flex-no-grow">
+          <label
+            id="server.color.label"
+            for="serverColor"
+            data-l10n-id="account-settings-color-label"
+          />
+          <div class="input-container">
+            <input id="serverColor" type="color" class="input-inline" />
+            <button
+              id="resetColor"
+              type="button"
+              data-l10n-id="account-settings-reset-color-button"
+              class="button button-flat icon-button icon-only"
+            />
+          </div>
+        </div>
+      </html:div>
+
+      <separator class="thin" />
+
+      <html:div>
+        <html:fieldset>
+          <html:legend data-l10n-id="account-settings-rss-server-settings" />
+          <checkbox
+            id="doBiff"
+            data-l10n-id="account-settings-rss-enable-updates"
+            oncommand="setPrefs(this)"
+          />
+        </html:fieldset>
+      </html:div>
+
+      <separator class="thin" />
+
+      <html:div>
+        <html:fieldset>
+          <html:legend data-l10n-id="account-settings-rss-new-feed-defaults" />
+
+          <hbox align="center">
+            <checkbox
+              id="updateEnabled"
+              data-l10n-id="account-settings-check-new-messages-every"
+              oncommand="setPrefs(this)"
+            />
+            <html:input
+              id="updateValue"
+              type="number"
+              class="size3"
+              min="1"
+              aria-labelledby="updateEnabled updateValue biffMinutes biffDays"
+              onchange="setPrefs(this)"
+            />
+            <radiogroup
+              id="biffUnits"
+              orient="horizontal"
+              oncommand="setPrefs(this)"
+            >
+              <radio
+                id="biffMinutes"
+                value="min"
+                label="&biffMinutes.label;"
+                accesskey="&biffMinutes.accesskey;"
+              />
+              <radio
+                id="biffDays"
+                value="d"
+                label="&biffDays.label;"
+                accesskey="&biffDays.accesskey;"
+              />
+            </radiogroup>
+          </hbox>
+
+          <checkbox
+            id="server.quickMode"
+            wsm_persist="true"
+            genericattr="true"
+            label="&quickMode.label;"
+            accesskey="&quickMode.accesskey;"
+            preftype="bool"
+            prefattribute="value"
+            prefstring="mail.server.%serverkey%.quickMode"
+          />
+
+          <checkbox
+            id="autotagEnable"
+            accesskey="&autotagEnable.accesskey;"
+            label="&autotagEnable.label;"
+            oncommand="setPrefs(this)"
+          />
+          <hbox class="input-container">
+            <checkbox
+              id="autotagUsePrefix"
+              class="indent"
+              accesskey="&autotagUsePrefix.accesskey;"
+              label="&autotagUsePrefix.label;"
+              oncommand="setPrefs(this)"
+            />
+            <html:input
+              id="autotagPrefix"
+              type="text"
+              class="input-inline"
+              aria-labelledby="autotagUsePrefix"
+              placeholder="&autoTagPrefix.placeholder;"
+              onchange="setPrefs(this)"
+            />
+          </hbox>
+        </html:fieldset>
+      </html:div>
+
+      <separator class="thin" />
+
+      <hbox pack="end">
+        <button
+          id="manageFeedSubscriptions"
+          data-l10n-id="account-settings-rss-manage-subscriptions"
+          oncommand="
+            SubscribeCommands.MsgSubscribe(gAccount.incomingServer.rootFolder)
+          "
+        />
+      </hbox>
+
+      <separator class="thin" />
+
+      <html:div>
+        <html:fieldset>
+          <html:legend data-l10n-id="account-settings-message-storage" />
+
+          <checkbox
+            id="server.emptyTrashOnExit"
+            wsm_persist="true"
+            data-l10n-id="account-settings-empty-trash-on-exit"
+            prefattribute="value"
+            prefstring="mail.server.%serverkey%.empty_trash_on_exit"
+          />
+
+          <separator class="thin" />
+
+          <vbox>
+            <hbox align="center">
+              <label
+                id="server.localPathLabel"
+                data-l10n-id="account-settings-local-directory"
+                control="server.localPath"
+              />
+              <hbox class="input-container" flex="1">
+                <html:input
+                  id="server.localPath"
+                  type="text"
+                  readonly="readonly"
+                  class="uri-element input-inline"
+                  aria-labelledby="server.localPathLabel"
+                  wsm_persist="true"
+                  datatype="nsIFile"
+                  prefstring="mail.server.%serverkey%.directory"
+                />
+              </hbox>
+              <button
+                id="browseForLocalFolder"
+                data-l10n-id="account-settings-browse-local-directory"
+                data-l10n-attrs="filepickertitle"
+                oncommand="BrowseForLocalFolders()"
+              />
+            </hbox>
+          </vbox>
+        </html:fieldset>
+      </html:div>
+    </vbox>
+  </html:body>
+</html>
