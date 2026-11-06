@@ -1007,7 +1007,10 @@ where
             .lock()
             .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
         if !recovery.synchronized_views.contains(view)
-            || recovery.sync_required_views.contains(view)
+            || recovery
+                .sync_required_views
+                .iter()
+                .any(|required_view| required_view.account_id() == view.account_id())
         {
             Err(CalendarWorkflowError::CalendarWriteSyncRequired)
         } else {

@@ -1603,6 +1603,11 @@ fn uncertain_event_deletion_requires_sync_for_each_previously_synced_account_vie
                 .expect("reconciled source view is readable")
                 .calendar_write_sync_required()
         );
+        assert_eq!(
+            workflow.delete_event(&source_editable).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired),
+            "one view's recovery sync must not unlock writes while another account view remains stale"
+        );
         assert!(
             workflow
                 .load_cached_view(&overlapping_view)
