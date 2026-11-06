@@ -38,8 +38,9 @@ CI runs the build, dependency, and test gates in [its Linux workflow](.github/wo
 - `crates/domain/` contains provider-independent account, folder, message, calendar occurrence, and sync values.
 - `crates/application/` contains account, mail, and calendar workflows; cache/provider ports; cancellation ordering; and the application-owned email sanitizer.
 - `crates/providers/microsoft-graph/` contains Linux OAuth, Graph profile, mail and calendar reads, explicit plain-text sends and replies, response mapping, and Secret Service refresh-token storage.
+  Its tests exercise the production Graph adapter with synthetic HTTP fixtures; live Graph behavior remains unverified.
 - `crates/persistence/` owns the Linux XDG cache, SQLCipher schema and migrations, and atomic mail and calendar page commits.
-- `tools/authentication-proof/`, `tools/storage-proof/`, `tools/graph-transport-proof/`, and `tools/email-html-proof/` contain synthetic test-only integration proofs; they expose no application API.
+- `tools/authentication-proof/`, `tools/storage-proof/`, and `tools/email-html-proof/` contain synthetic test-only integration proofs; they expose no application API.
 - `docs/product/` contains product scope.
 - `docs/architecture/` describes module ownership and data flow.
 - `docs/decisions/` contains accepted and proposed architecture decisions plus the ADR template.

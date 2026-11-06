@@ -1750,23 +1750,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "einfach-mail-graph-transport-proof"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "einfach-mail-domain",
- "gpui-pre",
- "httpdate",
- "httpmock",
- "reqwest",
- "serde",
- "serde_json",
- "smol",
- "time",
- "tokio",
-]
-
-[[package]]
 name = "einfach-mail-microsoft-graph"
 version = "0.1.0"
 dependencies = [
