@@ -1,14 +1,16 @@
 //! Account-scoped SQLCipher cache operations.
 
 use std::{
-    collections::{HashMap, HashSet},
-    fs::File,
+    collections::HashSet,
     future::Future,
-    sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(test)]
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 use async_sqlite::{
@@ -18,13 +20,24 @@ use async_sqlite::{
         params,
     },
 };
-use einfach_mail_application::{MailCache, MailCacheError, MailCacheFactory, MailSyncState};
+use einfach_mail_application::{
+    AccountCacheFactory, CalendarCache, CalendarCacheError, CalendarSyncState, MailCache,
+    MailCacheError, MailSyncState,
+};
 use einfach_mail_domain::{
-    AccountId, FolderId, FolderReference, MailFolder, MailMessage, Mailbox, MessageBody,
-    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
-    MessageId, MessageMetadata, MessageOrigin, ReadState,
+    AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
+    CalendarEventCreation, CalendarEventCreationId, CalendarEventDraft, CalendarEventUpdate,
+    CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
+    CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange, CalendarViewReference,
+    EditableCalendarEvent, FolderId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage,
+    MailRecipient, MailReplySource, MailSendOperationId, MailSendTarget, MailSubject, Mailbox,
+    MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+    MessageDeltaProgress, MessageId, MessageMetadata, MessageOrigin, PendingCalendarEventCreation,
+    PendingMailSend, ReadState,
 };
 use thiserror::Error;
+use time::{Date, OffsetDateTime, PrimitiveDateTime};
+use uuid::Uuid;
 
 use crate::{schema, security};
 
@@ -40,6 +53,14 @@ pub(super) enum CacheFailure {
     MessageNotCached,
     #[error("the folder synchronization checkpoint changed")]
     SyncStateChanged,
+    #[error("an unresolved send marker already exists")]
+    SendAlreadyPending,
+    #[error("the pending send belongs to another operation")]
+    PendingSendMismatch,
+    #[error("the pending send marker does not exist")]
+    PendingSendNotFound,
+    #[error("another calendar event creation is already pending")]
+    CreationAlreadyPending,
 }
 
 impl From<async_sqlite::Error> for CacheFailure {
@@ -61,121 +82,171 @@ impl CacheFailure {
             Self::InvalidData => MailCacheError::InvalidData,
             Self::MessageNotCached => MailCacheError::MessageNotCached,
             Self::SyncStateChanged => MailCacheError::SyncStateChanged,
+            Self::SendAlreadyPending => MailCacheError::SendAlreadyPending,
+            Self::PendingSendMismatch => MailCacheError::PendingSendMismatch,
+            Self::PendingSendNotFound => MailCacheError::PendingSendNotFound,
+            Self::CreationAlreadyPending => MailCacheError::InvalidData,
+        }
+    }
+
+    fn calendar_public(self) -> CalendarCacheError {
+        match self {
+            Self::Unavailable => CalendarCacheError::Unavailable,
+            Self::InvalidData | Self::MessageNotCached => CalendarCacheError::InvalidData,
+            Self::SyncStateChanged => CalendarCacheError::Unavailable,
+            Self::SendAlreadyPending => CalendarCacheError::PendingMailSend,
+            Self::PendingSendMismatch | Self::PendingSendNotFound => {
+                CalendarCacheError::InvalidData
+            }
+            Self::CreationAlreadyPending => CalendarCacheError::CreationAlreadyPending,
         }
     }
 }
 
-/// One account's shared encrypted SQLCipher database and operating-system key reference.
-#[derive(Clone)]
-pub struct SqliteMailCache {
-    inner: Arc<SqliteMailCacheInner>,
+#[derive(Clone, Copy)]
+struct CalendarScope {
+    start_seconds: i64,
+    start_nanoseconds: i64,
+    end_seconds: i64,
+    end_nanoseconds: i64,
+    local_start_julian_day: i32,
+    local_end_julian_day: i32,
 }
 
-struct SqliteMailCacheInner {
+#[derive(Clone, Copy)]
+struct CalendarEventScope<'a> {
+    view: &'a CalendarViewReference,
+    range: CalendarScope,
+}
+
+impl<'a> CalendarEventScope<'a> {
+    fn account_id(self) -> &'a str {
+        self.view.account_id().as_str()
+    }
+}
+
+struct CalendarPageCommit {
+    view: CalendarViewReference,
+    scope: CalendarScope,
+    changes: Vec<CalendarDeltaChange>,
+    progress: CalendarDeltaProgress,
+    completed_at: (i64, i64),
+}
+
+struct CalendarProgressCommit {
+    account_id: String,
+    scope: CalendarScope,
+    progress: CalendarDeltaProgress,
+    completed_at: (i64, i64),
+}
+
+struct CalendarEventTimeColumns {
+    is_all_day: i64,
+    start_seconds: Option<i64>,
+    start_nanoseconds: Option<i64>,
+    end_seconds: Option<i64>,
+    end_nanoseconds: Option<i64>,
+    start_day: Option<i32>,
+    end_day: Option<i32>,
+}
+
+impl CalendarEventTimeColumns {
+    fn from_time(time: &CalendarOccurrenceTime) -> Self {
+        match time {
+            CalendarOccurrenceTime::Timed { start, end } => Self::from_instants(*start, *end),
+            CalendarOccurrenceTime::AllDay {
+                start,
+                end_exclusive,
+            } => Self::from_dates(*start, *end_exclusive),
+        }
+    }
+
+    fn from_instants(start: OffsetDateTime, end: OffsetDateTime) -> Self {
+        let (start_seconds, start_nanoseconds) = offset_datetime_parts(start);
+        let (end_seconds, end_nanoseconds) = offset_datetime_parts(end);
+        Self {
+            is_all_day: 0,
+            start_seconds: Some(start_seconds),
+            start_nanoseconds: Some(start_nanoseconds),
+            end_seconds: Some(end_seconds),
+            end_nanoseconds: Some(end_nanoseconds),
+            start_day: None,
+            end_day: None,
+        }
+    }
+
+    fn from_dates(start: Date, end_exclusive: Date) -> Self {
+        Self {
+            is_all_day: 1,
+            start_seconds: None,
+            start_nanoseconds: None,
+            end_seconds: None,
+            end_nanoseconds: None,
+            start_day: Some(start.to_julian_day()),
+            end_day: Some(end_exclusive.to_julian_day()),
+        }
+    }
+}
+
+impl CalendarScope {
+    fn from_view(view: &CalendarViewReference) -> Self {
+        let range = view.range();
+        Self {
+            start_seconds: range.start().unix_timestamp(),
+            start_nanoseconds: i64::from(range.start().nanosecond()),
+            end_seconds: range.end().unix_timestamp(),
+            end_nanoseconds: i64::from(range.end().nanosecond()),
+            local_start_julian_day: range.start_date().to_julian_day(),
+            local_end_julian_day: range.end_date_exclusive().to_julian_day(),
+        }
+    }
+
+    fn view_range(self) -> CacheResult<CalendarViewRange> {
+        let start = offset_datetime_from_parts(self.start_seconds, self.start_nanoseconds)?;
+        let end = offset_datetime_from_parts(self.end_seconds, self.end_nanoseconds)?;
+        let start_date = Date::from_julian_day(self.local_start_julian_day)
+            .map_err(|_| CacheFailure::InvalidData)?;
+        let end_date = Date::from_julian_day(self.local_end_julian_day)
+            .map_err(|_| CacheFailure::InvalidData)?;
+        CalendarViewRange::new(start, end, start_date, end_date)
+            .map_err(|_| CacheFailure::InvalidData)
+    }
+}
+
+/// One account's encrypted SQLCipher database and operating-system key reference.
+#[derive(Clone)]
+pub struct SqliteMailCache {
     account_id: AccountId,
     client: Client,
     database_path: std::path::PathBuf,
-    credential_account: Option<String>,
-    lock_file: Mutex<Option<File>>,
-    client_closed: AtomicBool,
-    removed: AtomicBool,
-    removal_in_progress: AtomicBool,
-}
-
-/// Shares one live SQLCipher cache handle per account across opened sessions.
-#[derive(Clone, Default)]
-pub struct SqliteMailCacheFactory {
-    open_caches: Arc<Mutex<HashMap<AccountId, Weak<SqliteMailCacheInner>>>>,
-}
-
-impl std::fmt::Debug for SqliteMailCache {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SqliteMailCache(<redacted>)")
-    }
-}
-
-impl std::fmt::Debug for SqliteMailCacheFactory {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("SqliteMailCacheFactory")
-    }
-}
-
-impl SqliteMailCacheFactory {
-    fn cached_inner(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<Option<Arc<SqliteMailCacheInner>>, MailCacheError> {
-        let mut open_caches = self
-            .open_caches
-            .lock()
-            .map_err(|_| MailCacheError::Unavailable)?;
-        let Some(inner) = open_caches.get(account_id).and_then(Weak::upgrade) else {
-            open_caches.remove(account_id);
-            return Ok(None);
-        };
-        if inner.removed.load(Ordering::Acquire) {
-            open_caches.remove(account_id);
-            return Ok(None);
-        }
-        Ok(Some(inner))
-    }
-
-    async fn open_with<F>(
-        &self,
-        account_id: AccountId,
-        open_database: F,
-    ) -> Result<SqliteMailCache, MailCacheError>
-    where
-        F: Future<Output = Result<security::OpenDatabase, MailCacheError>>,
-    {
-        if let Some(inner) = self.cached_inner(&account_id)? {
-            if inner.client_closed.load(Ordering::Acquire)
-                || inner.removal_in_progress.load(Ordering::Acquire)
-            {
-                return Err(MailCacheError::OperationInProgress);
-            }
-            return Ok(SqliteMailCache { inner });
-        }
-
-        let opened = open_database.await?;
-        let cache = SqliteMailCache::from_open_database(account_id.clone(), opened);
-        self.open_caches
-            .lock()
-            .map_err(|_| MailCacheError::Unavailable)?
-            .insert(account_id, Arc::downgrade(&cache.inner));
-        Ok(cache)
-    }
-
+    database_identity: security::DatabaseIdentity,
+    credential_account: String,
+    lifecycle_lock_path: std::path::PathBuf,
+    account_lock: Arc<std::fs::File>,
     #[cfg(test)]
-    pub(super) async fn open_with_test_key_for_account(
-        &self,
-        database_path: std::path::PathBuf,
-        account_id: AccountId,
-        key_byte: u8,
-    ) -> Result<SqliteMailCache, MailCacheError> {
-        self.open_with(account_id, async move {
-            security::open_test_database(&database_path, key_byte).await
-        })
-        .await
-    }
+    fail_next_pending_send_clear: Arc<AtomicBool>,
+    #[cfg(test)]
+    removal_gate: Arc<Mutex<Option<TestOperationGate>>>,
+    #[cfg(test)]
+    pending_send_read_gate: Arc<Mutex<Option<TestOperationGate>>>,
 }
 
-impl MailCacheFactory for SqliteMailCacheFactory {
+#[cfg(test)]
+type TestOperationGate = (smol::channel::Sender<()>, smol::channel::Receiver<()>);
+
+/// Opens and removes account-scoped [`SqliteMailCache`] values.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SqliteMailCacheFactory;
+
+impl AccountCacheFactory for SqliteMailCacheFactory {
     type Cache = SqliteMailCache;
 
     async fn open_for_account(&self, account_id: AccountId) -> Result<Self::Cache, MailCacheError> {
-        let account_for_open = account_id.clone();
-        self.open_with(account_id, async move {
-            security::open_database(&account_for_open).await
-        })
-        .await
+        SqliteMailCache::open_for_account(account_id).await
     }
 
     async fn remove_for_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
-        match self.cached_inner(account_id)? {
-            Some(inner) => SqliteMailCache { inner }.remove_account(account_id).await,
-            None => SqliteMailCache::remove_for_account(account_id),
-        }
+        SqliteMailCache::remove_for_account(account_id).await
     }
 }
 
@@ -187,36 +258,38 @@ impl SqliteMailCache {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when paths, Secret Service, SQLCipher, or migrations fail, or
-    /// [`MailCacheError::OperationInProgress`] when another cache handle owns the account lock.
+    /// Returns a cache error when paths, Secret Service, SQLCipher, or migrations fail.
     pub async fn open_for_account(account_id: AccountId) -> Result<Self, MailCacheError> {
         let opened = security::open_database(&account_id).await?;
-        Ok(Self::from_open_database(account_id, opened))
-    }
-
-    fn from_open_database(account_id: AccountId, opened: security::OpenDatabase) -> Self {
-        Self {
-            inner: Arc::new(SqliteMailCacheInner {
-                account_id,
-                client: opened.client,
-                database_path: opened.database_path,
-                credential_account: opened.credential_account,
-                lock_file: Mutex::new(Some(opened.lock_file)),
-                client_closed: AtomicBool::new(false),
-                removed: AtomicBool::new(false),
-                removal_in_progress: AtomicBool::new(false),
-            }),
-        }
+        Ok(Self {
+            account_id,
+            client: opened.client,
+            database_path: opened.database_path,
+            database_identity: opened.database_identity,
+            credential_account: opened.credential_account,
+            lifecycle_lock_path: opened.lifecycle_lock_path,
+            account_lock: opened.account_lock,
+            #[cfg(test)]
+            fail_next_pending_send_clear: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            removal_gate: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            pending_send_read_gate: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// Removes an account's cache files and key when no cache handle is open.
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the cache path or credential service cannot be updated, or
-    /// [`MailCacheError::OperationInProgress`] when another cache handle owns the account lock.
-    pub fn remove_for_account(account_id: &AccountId) -> Result<(), MailCacheError> {
-        security::remove_account_without_open_client(account_id)
+    /// Returns a cache error when the cache path or credential service cannot be updated.
+    pub async fn remove_for_account(account_id: &AccountId) -> Result<(), MailCacheError> {
+        if security::account_database_exists(account_id)? {
+            let cache = Self::open_for_account(account_id.clone()).await?;
+            <Self as MailCache>::remove_account(&cache, account_id).await
+        } else {
+            security::remove_account_without_open_client(account_id)
+        }
     }
 
     #[cfg(test)]
@@ -228,80 +301,180 @@ impl SqliteMailCache {
         let opened = security::open_test_database(&database_path, key_byte)
             .await
             .expect("synthetic encrypted cache opens");
-        Self::from_open_database(account_id, opened)
+        Self {
+            account_id,
+            client: opened.client,
+            database_path: opened.database_path,
+            database_identity: opened.database_identity,
+            credential_account: opened.credential_account,
+            lifecycle_lock_path: opened.lifecycle_lock_path,
+            account_lock: opened.account_lock,
+            fail_next_pending_send_clear: Arc::new(AtomicBool::new(false)),
+            removal_gate: Arc::new(Mutex::new(None)),
+            pending_send_read_gate: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn hold_removal_after_marker_check_for_tests(
+        &self,
+    ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+        let (checked_tx, checked_rx) = smol::channel::bounded(1);
+        let (release_tx, release_rx) = smol::channel::bounded(1);
+        *self
+            .removal_gate
+            .lock()
+            .expect("synthetic account-removal gate mutex is healthy") =
+            Some((checked_tx, release_rx));
+        (checked_rx, release_tx)
+    }
+
+    #[cfg(test)]
+    pub(super) fn hold_pending_send_read_for_tests(
+        &self,
+    ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+        let (started_tx, started_rx) = smol::channel::bounded(1);
+        let (release_tx, release_rx) = smol::channel::bounded(1);
+        *self
+            .pending_send_read_gate
+            .lock()
+            .expect("synthetic pending-send read gate mutex is healthy") =
+            Some((started_tx, release_rx));
+        (started_rx, release_tx)
+    }
+
+    #[cfg(test)]
+    pub(super) fn fail_next_pending_send_clear(&self) {
+        self.fail_next_pending_send_clear
+            .store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]
     pub(super) async fn close_for_tests(&self) {
-        self.inner
-            .client
+        self.client
             .close()
             .await
-            .expect("synthetic cache connection closes");
-        self.inner.client_closed.store(true, Ordering::Release);
-        self.release_lock_file()
-            .expect("synthetic cache lock releases");
+            .expect("synthetic encrypted cache connection closes");
     }
 
     #[cfg(test)]
-    fn release_lock_file(&self) -> Result<(), MailCacheError> {
-        self.inner
-            .lock_file
-            .lock()
-            .map_err(|_| MailCacheError::Unavailable)?
-            .take();
+    pub(super) async fn execute_batch_for_tests(&self, sql: &str) -> Result<(), MailCacheError> {
+        let sql = sql.to_owned();
+        self.client
+            .conn_mut_and_then(move |connection| {
+                connection.execute_batch(&sql)?;
+                Ok(())
+            })
+            .await
+            .map_err(CacheFailure::public)?;
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) async fn set_message_move_failure_for_tests(&self, enabled: bool) {
+        let statement = if enabled {
+            "CREATE TRIGGER fail_message_move BEFORE DELETE ON mail_messages BEGIN SELECT RAISE(ABORT, 'synthetic move failure'); END;"
+        } else {
+            "DROP TRIGGER IF EXISTS fail_message_move;"
+        };
+        self.client
+            .conn_and_then(|connection| -> Result<(), async_sqlite::Error> {
+                connection.execute_batch(statement)?;
+                Ok(())
+            })
+            .await
+            .expect("synthetic message move trigger can be updated");
+    }
+
     fn check_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
-        if &self.inner.account_id == account_id {
+        if &self.account_id == account_id {
             Ok(())
         } else {
             Err(MailCacheError::AccountMismatch)
         }
     }
 
+    async fn has_unresolved_event_creation(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<bool, MailCacheError> {
+        self.check_account(account_id)?;
+        let account_id = account_id.as_str().to_owned();
+        self.client
+            .conn_and_then(move |connection| -> CacheResult<bool> {
+                connection
+                    .query_row(
+                        "SELECT EXISTS (
+                            SELECT 1 FROM calendar_pending_event_creation
+                            WHERE account_id = ?1 AND resolution = 'unresolved'
+                        )",
+                        [account_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(CacheFailure::from)
+            })
+            .await
+            .map_err(CacheFailure::public)
+    }
+
+    async fn remove_account_under_lock(
+        &self,
+        account_id: &AccountId,
+        removal_lock: security::AccountRemovalLock,
+    ) -> Result<(), MailCacheError> {
+        match self.remove_account_contents(account_id).await {
+            Ok(()) => {
+                removal_lock.retain_exclusive();
+                Ok(())
+            }
+            Err(error) => {
+                removal_lock.restore_shared()?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn remove_account_contents(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
+        if !self.database_identity.matches_path(&self.database_path)? {
+            return Err(MailCacheError::Unavailable);
+        }
+        if self.load_pending_send(account_id).await?.is_some() {
+            return Err(MailCacheError::SendAlreadyPending);
+        }
+        if self.has_unresolved_event_creation(account_id).await? {
+            return Err(MailCacheError::CalendarEventCreationUnresolved);
+        }
+        #[cfg(test)]
+        self.wait_for_removal_test_gate().await;
+        security::delete_database_files(&self.client, &self.database_path).await?;
+        security::remove_credential(&self.credential_account)
+    }
+
+    #[cfg(test)]
+    async fn wait_for_removal_test_gate(&self) {
+        let gate = self
+            .removal_gate
+            .lock()
+            .expect("synthetic account-removal gate mutex is healthy")
+            .take();
+        if let Some((checked, release)) = gate {
+            let _ = checked.send(()).await;
+            let _ = release.recv().await;
+        }
+    }
+
     fn check_folder(&self, folder: &FolderReference) -> Result<(), MailCacheError> {
         self.check_account(folder.account_id())
     }
-}
 
-impl SqliteMailCacheInner {
-    async fn remove(&self) -> Result<(), MailCacheError> {
-        if self.removed.load(Ordering::Acquire) {
-            return Ok(());
+    fn check_calendar_view(
+        &self,
+        view: &CalendarViewReference,
+    ) -> Result<CalendarScope, CalendarCacheError> {
+        if &self.account_id != view.account_id() {
+            return Err(CalendarCacheError::AccountMismatch);
         }
-        if self
-            .removal_in_progress
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(MailCacheError::OperationInProgress);
-        }
-
-        let result = self.finish_removal().await;
-        self.removal_in_progress.store(false, Ordering::Release);
-        result
-    }
-
-    async fn finish_removal(&self) -> Result<(), MailCacheError> {
-        if !self.client_closed.load(Ordering::Acquire) {
-            self.client
-                .close()
-                .await
-                .map_err(|_| MailCacheError::Unavailable)?;
-            self.client_closed.store(true, Ordering::Release);
-        }
-        security::remove_database_files(&self.database_path)?;
-        if let Some(credential_account) = &self.credential_account {
-            security::remove_credential(credential_account)?;
-        }
-        self.lock_file
-            .lock()
-            .map_err(|_| MailCacheError::Unavailable)?
-            .take();
-        self.removed.store(true, Ordering::Release);
-        Ok(())
+        Ok(CalendarScope::from_view(view))
     }
 }
 
@@ -315,7 +488,7 @@ impl MailCache for SqliteMailCache {
             .check_account(account_id)
             .and_then(|()| validate_folder_snapshot(account_id, &folders));
         let account_id = account_id.as_str().to_owned();
-        let client = self.inner.client.clone();
+        let client = self.client.clone();
         async move {
             validation?;
             client
@@ -339,7 +512,7 @@ impl MailCache for SqliteMailCache {
             .check_folder(folder)
             .and_then(|()| timestamp_parts(initial_cutoff));
         let folder = folder.clone();
-        let client = self.inner.client.clone();
+        let client = self.client.clone();
         async move {
             let (cutoff_seconds, cutoff_nanoseconds) = validation?;
             client
@@ -379,7 +552,7 @@ impl MailCache for SqliteMailCache {
             .check_account(account_id)
             .and_then(|()| timestamp_parts(initial_cutoff));
         let account_id = account_id.as_str().to_owned();
-        let client = self.inner.client.clone();
+        let client = self.client.clone();
         async move {
             let (cutoff_seconds, cutoff_nanoseconds) = validation?;
             client
@@ -418,7 +591,7 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<Option<MailSyncState>, MailCacheError>> + Send + '_ {
         let validation = self.check_folder(folder);
         let folder = folder.clone();
-        let client = self.inner.client.clone();
+        let client = self.client.clone();
         async move {
             validation?;
             client
@@ -440,7 +613,7 @@ impl MailCache for SqliteMailCache {
             .and_then(|()| timestamp_parts(completed_at));
         let folder = folder.clone();
         let expected_state = expected_state.clone();
-        let client = self.inner.client.clone();
+        let client = self.client.clone();
         async move {
             let completed_at = validation?;
             let (changes, progress) = page.into_parts();
@@ -496,7 +669,7 @@ impl MailCache for SqliteMailCache {
         let folder = folder.clone();
         let expected_state = expected_state.clone();
         let reset_link = reset_link.as_str().to_owned();
-        let client = self.inner.client.clone();
+        let client = self.client.clone();
         async move {
             validation?;
             client
@@ -514,7 +687,7 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<Vec<MailFolder>, MailCacheError>> + Send + '_ {
         let validation = self.check_account(account_id);
         let account_id = account_id.as_str().to_owned();
-        let client = self.inner.client.clone();
+        let client = self.client.clone();
         async move {
             validation?;
             client
@@ -530,7 +703,7 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<Vec<MailMessage>, MailCacheError>> + Send + '_ {
         let validation = self.check_folder(folder);
         let folder = folder.clone();
-        let client = self.inner.client.clone();
+        let client = self.client.clone();
         async move {
             validation?;
             client
@@ -550,12 +723,244 @@ impl MailCache for SqliteMailCache {
         let validation = self.check_folder(folder);
         let folder = folder.clone();
         let message_id = message_id.clone();
-        let client = self.inner.client.clone();
+        let client = self.client.clone();
         async move {
             validation?;
             client
                 .conn_and_then(move |connection| {
                     read_cached_message(connection, &folder, &message_id)
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> impl Future<Output = Result<Option<ReadState>, MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let message_id = message_id.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_and_then(move |connection| {
+                    let is_read = connection
+                        .query_row(
+                            "SELECT is_read FROM mail_messages
+                             WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+                            params![
+                                folder.account_id().as_str(),
+                                folder.folder_id().as_str(),
+                                message_id.as_str()
+                            ],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .optional()?;
+                    Ok(is_read.map(read_state_from_bool))
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn set_message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        read_state: ReadState,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let message_id = message_id.clone();
+        let is_read = read_state == ReadState::Read;
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    let changed = transaction.execute(
+                        "UPDATE mail_messages SET is_read = ?4
+                         WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+                        params![
+                            folder.account_id().as_str(),
+                            folder.folder_id().as_str(),
+                            message_id.as_str(),
+                            is_read
+                        ],
+                    )?;
+                    if changed == 0 {
+                        return Err(CacheFailure::MessageNotCached);
+                    }
+                    transaction.execute(
+                        "DELETE FROM mail_folder_write_sync_requirement
+                         WHERE account_id = ?1 AND folder_id = ?2",
+                        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                    )?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn folder_write_sync_required(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<bool, MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_and_then(move |connection| {
+                    if !folder_exists(connection, &folder)? {
+                        return Err(CacheFailure::InvalidData);
+                    }
+                    let required = connection.query_row(
+                        "SELECT EXISTS (
+                            SELECT 1 FROM mail_folder_write_sync_requirement
+                            WHERE account_id = ?1 AND folder_id = ?2
+                        )",
+                        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                        |row| row.get(0),
+                    )?;
+                    Ok(required)
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn require_folder_write_sync(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    if !folder_exists(&transaction, &folder)? {
+                        return Err(CacheFailure::InvalidData);
+                    }
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO mail_folder_write_sync_requirement (
+                            account_id, folder_id
+                        ) VALUES (?1, ?2)",
+                        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                    )?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn clear_folder_write_sync_requirement(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    connection.execute(
+                        "DELETE FROM mail_folder_write_sync_requirement
+                         WHERE account_id = ?1 AND folder_id = ?2",
+                        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn set_message_follow_up_flag_status(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        status: FollowUpFlagStatus,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_folder(folder);
+        let folder = folder.clone();
+        let message_id = message_id.clone();
+        let flag_status = follow_up_flag_status_name(status);
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    let changed = transaction.execute(
+                        "UPDATE mail_messages SET flag_status = ?4
+                         WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+                        params![
+                            folder.account_id().as_str(),
+                            folder.folder_id().as_str(),
+                            message_id.as_str(),
+                            flag_status
+                        ],
+                    )?;
+                    if changed == 0 {
+                        return Err(CacheFailure::MessageNotCached);
+                    }
+                    transaction.execute(
+                        "DELETE FROM mail_folder_write_sync_requirement
+                         WHERE account_id = ?1 AND folder_id = ?2",
+                        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+                    )?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn move_message(
+        &self,
+        source_folder: &FolderReference,
+        destination_folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self
+            .check_folder(source_folder)
+            .and_then(|()| self.check_folder(destination_folder));
+        let source_folder = source_folder.clone();
+        let destination_folder = destination_folder.clone();
+        let message_id = message_id.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            if source_folder == destination_folder {
+                return Err(MailCacheError::InvalidData);
+            }
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    move_cached_message(
+                        &transaction,
+                        &source_folder,
+                        &destination_folder,
+                        &message_id,
+                    )?;
+                    transaction.commit()?;
+                    Ok(())
                 })
                 .await
                 .map_err(CacheFailure::public)
@@ -573,7 +978,7 @@ impl MailCache for SqliteMailCache {
         let message_id = message_id.clone();
         let body_type = body_type_name(body.content_type());
         let content = body.content().to_owned();
-        let client = self.inner.client.clone();
+        let client = self.client.clone();
         async move {
             validation?;
             client
@@ -600,17 +1005,1317 @@ impl MailCache for SqliteMailCache {
         }
     }
 
+    fn load_pending_send(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<Option<PendingMailSend>, MailCacheError>> + Send + '_ {
+        let validation = self.check_account(account_id);
+        let account_id = account_id.as_str().to_owned();
+        let client = self.client.clone();
+        #[cfg(test)]
+        let pending_send_read_gate = Arc::clone(&self.pending_send_read_gate);
+        async move {
+            validation?;
+            #[cfg(test)]
+            let gate = pending_send_read_gate
+                .lock()
+                .expect("synthetic pending-send read gate mutex is healthy")
+                .take();
+            #[cfg(test)]
+            if let Some((started, release)) = gate {
+                let _ = started.send(()).await;
+                let _ = release.recv().await;
+            }
+            client
+                .conn_and_then(move |connection| read_pending_send(connection, &account_id))
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn stage_pending_send(
+        &self,
+        pending: &PendingMailSend,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self
+            .check_account(pending.account_id())
+            .and_then(|()| timestamp_parts(pending.created_at()));
+        let pending = pending.clone();
+        let client = self.client.clone();
+        let database_path = self.database_path.clone();
+        let database_identity = self.database_identity;
+        async move {
+            let (created_seconds, created_nanoseconds) = validation?;
+            let account_id = pending.account_id().as_str().to_owned();
+            let operation_id = pending.operation_id().as_uuid().to_string();
+            let (target_kind, recipient, subject, source_folder_id, source_message_id) =
+                match pending.target() {
+                    MailSendTarget::NewMessage { recipient, subject } => (
+                        "new_message",
+                        Some(recipient.as_str().to_owned()),
+                        Some(subject.as_str().to_owned()),
+                        None,
+                        None,
+                    ),
+                    MailSendTarget::Reply { source, subject } => (
+                        "reply",
+                        None,
+                        subject.as_ref().map(|subject| subject.to_string()),
+                        Some(source.folder().folder_id().as_str().to_owned()),
+                        Some(source.message_id().as_str().to_owned()),
+                    ),
+                };
+            if !database_identity.matches_path(&database_path)? {
+                return Err(MailCacheError::Unavailable);
+            }
+            client
+                .conn_mut_and_then(move |connection| {
+                    let changed = connection.execute(
+                        "INSERT OR IGNORE INTO mail_pending_send (
+                            account_id, operation_id, target_kind, recipient, subject,
+                            source_folder_id, source_message_id,
+                            created_seconds, created_nanoseconds
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            account_id,
+                            operation_id,
+                            target_kind,
+                            recipient,
+                            subject,
+                            source_folder_id,
+                            source_message_id,
+                            created_seconds,
+                            created_nanoseconds
+                        ],
+                    )?;
+                    if changed == 0 {
+                        return Err(CacheFailure::SendAlreadyPending);
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
+    fn clear_pending_send(
+        &self,
+        account_id: &AccountId,
+        operation_id: MailSendOperationId,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_account(account_id);
+        let account_id = account_id.as_str().to_owned();
+        let operation_id = operation_id.as_uuid().to_string();
+        let client = self.client.clone();
+        #[cfg(test)]
+        let fail_next_pending_send_clear = Arc::clone(&self.fail_next_pending_send_clear);
+        async move {
+            validation?;
+            #[cfg(test)]
+            if fail_next_pending_send_clear.swap(false, Ordering::Relaxed) {
+                return Err(MailCacheError::Unavailable);
+            }
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    let existing = transaction
+                        .query_row(
+                            "SELECT operation_id FROM mail_pending_send WHERE account_id = ?1",
+                            [account_id.as_str()],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?;
+                    match existing.as_deref() {
+                        None => return Err(CacheFailure::PendingSendNotFound),
+                        Some(existing) if existing != operation_id => {
+                            return Err(CacheFailure::PendingSendMismatch);
+                        }
+                        Some(_) => {}
+                    }
+                    transaction.execute(
+                        "DELETE FROM mail_pending_send
+                         WHERE account_id = ?1 AND operation_id = ?2",
+                        params![account_id, operation_id],
+                    )?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::public)
+        }
+    }
+
     fn remove_account(
         &self,
         account_id: &AccountId,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
         let validation = self.check_account(account_id);
-        let inner = Arc::clone(&self.inner);
+        let account_id = account_id.clone();
+        let lifecycle_lock_path = self.lifecycle_lock_path.clone();
+        let account_lock = Arc::clone(&self.account_lock);
         async move {
             validation?;
-            inner.remove().await
+            let removal_lock =
+                security::AccountRemovalLock::acquire(&lifecycle_lock_path, account_lock)?;
+            self.remove_account_under_lock(&account_id, removal_lock)
+                .await
         }
     }
+}
+
+impl CalendarCache for SqliteMailCache {
+    fn ensure_view(
+        &self,
+        view: &CalendarViewReference,
+    ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(view);
+        let account_id = view.account_id().as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    insert_calendar_view_state(&transaction, &account_id, scope)?;
+                    let state = read_calendar_sync_state(&transaction, &account_id, scope)?;
+                    transaction.commit()?;
+                    Ok(state)
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn commit_delta_page(
+        &self,
+        view: &CalendarViewReference,
+        page: CalendarDeltaPage,
+        completed_at: SystemTime,
+    ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(view);
+        let completion = timestamp_parts(completed_at).map_err(|_| CalendarCacheError::InvalidData);
+        let view = view.clone();
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            let completed_at = completion?;
+            let (changes, progress) = page.into_parts();
+            let commit = CalendarPageCommit {
+                view,
+                scope,
+                changes,
+                progress,
+                completed_at,
+            };
+            client
+                .conn_mut_and_then(move |connection| commit_calendar_page(connection, commit))
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn list_events(
+        &self,
+        view: &CalendarViewReference,
+    ) -> impl Future<Output = Result<Vec<CalendarOccurrence>, CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(view);
+        let view = view.clone();
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            client
+                .conn_and_then(move |connection| {
+                    read_calendar_events(
+                        connection,
+                        CalendarEventScope {
+                            view: &view,
+                            range: scope,
+                        },
+                    )
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn stage_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(creation.view());
+        let creation = creation.clone();
+        let account_id = creation.view().account_id().as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    insert_calendar_view_state(&transaction, &account_id, scope)?;
+                    match read_pending_event_creation(&transaction, &account_id)? {
+                        Some(PendingCalendarEventCreation::Unresolved(existing))
+                            if existing == creation => {}
+                        Some(_) => return Err(CacheFailure::CreationAlreadyPending),
+                        None => write_pending_event_creation(&transaction, &creation)?,
+                    }
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn pending_event_creation(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<Option<PendingCalendarEventCreation>, CalendarCacheError>> + Send + '_
+    {
+        let validation = if &self.account_id == account_id {
+            Ok(())
+        } else {
+            Err(CalendarCacheError::AccountMismatch)
+        };
+        let account_id = account_id.as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_and_then(move |connection| {
+                    read_pending_event_creation(connection, &account_id)
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn mark_event_creation_rejected(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(creation.view());
+        let creation = creation.clone();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    mark_pending_event_creation_rejected(&transaction, &creation)?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn discard_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(creation.view());
+        let creation = creation.clone();
+        let account_id = creation.view().account_id().as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    match read_pending_event_creation(&transaction, &account_id)? {
+                        None => {}
+                        Some(PendingCalendarEventCreation::Rejected(pending))
+                            if pending == creation =>
+                        {
+                            let deleted = transaction.execute(
+                                "DELETE FROM calendar_pending_event_creation
+                                 WHERE account_id = ?1 AND creation_id = ?2",
+                                params![account_id, creation.id().as_uuid().to_string()],
+                            )?;
+                            if deleted != 1 {
+                                return Err(CacheFailure::InvalidData);
+                            }
+                        }
+                        Some(_) => return Err(CacheFailure::CreationAlreadyPending),
+                    }
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn commit_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+        event: &CalendarOccurrence,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(creation.view());
+        let creation = creation.clone();
+        let event = event.clone();
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            if !confirms_calendar_event_creation(&creation, &event) {
+                return Err(CalendarCacheError::InvalidData);
+            }
+            let account_id = creation.view().account_id().as_str().to_owned();
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    let pending = read_pending_event_creation(&transaction, &account_id)?;
+                    if pending != Some(PendingCalendarEventCreation::Unresolved(creation.clone())) {
+                        return Err(CacheFailure::InvalidData);
+                    }
+                    write_calendar_event(
+                        &transaction,
+                        CalendarEventScope {
+                            view: creation.view(),
+                            range: scope,
+                        },
+                        &event,
+                    )?;
+                    let deleted = transaction.execute(
+                        "DELETE FROM calendar_pending_event_creation
+                         WHERE account_id = ?1 AND creation_id = ?2",
+                        params![account_id, creation.id().as_uuid().to_string()],
+                    )?;
+                    if deleted != 1 {
+                        return Err(CacheFailure::InvalidData);
+                    }
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn commit_event_update(
+        &self,
+        update: &CalendarEventUpdate,
+        event: &CalendarOccurrence,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(update.source().occurrence().reference());
+        let update = update.clone();
+        let event = event.clone();
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            if !update.confirms(&event) {
+                return Err(CalendarCacheError::InvalidData);
+            }
+            let account_id = update
+                .source()
+                .occurrence()
+                .reference()
+                .account_id()
+                .as_str()
+                .to_owned();
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    commit_calendar_event_update(&transaction, &account_id, scope, &event)?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn commit_event_deletion(
+        &self,
+        event: &EditableCalendarEvent,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(event.occurrence().reference());
+        let event = event.clone();
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            let account_id = event
+                .occurrence()
+                .reference()
+                .account_id()
+                .as_str()
+                .to_owned();
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    commit_calendar_event_deletion(&transaction, &account_id, scope, &event)?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn remove_account(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let removal = <Self as MailCache>::remove_account(self, account_id);
+        async move {
+            removal.await.map_err(|error| match error {
+                MailCacheError::AccountMismatch => CalendarCacheError::AccountMismatch,
+                MailCacheError::InvalidData => CalendarCacheError::InvalidData,
+                MailCacheError::InUse => CalendarCacheError::InUse,
+                MailCacheError::Unavailable
+                | MailCacheError::MissingEncryptionKey
+                | MailCacheError::MessageNotCached
+                | MailCacheError::SyncStateChanged
+                | MailCacheError::PendingSendMismatch
+                | MailCacheError::PendingSendNotFound
+                | MailCacheError::OperationInProgress => CalendarCacheError::Unavailable,
+                MailCacheError::SendAlreadyPending => CalendarCacheError::PendingMailSend,
+                MailCacheError::CalendarEventCreationUnresolved => {
+                    CalendarCacheError::UnresolvedEventCreation
+                }
+            })
+        }
+    }
+}
+
+fn commit_calendar_page(
+    connection: &mut Connection,
+    commit: CalendarPageCommit,
+) -> CacheResult<CalendarSyncState> {
+    let scope = CalendarEventScope {
+        view: &commit.view,
+        range: commit.scope,
+    };
+    let account_id = scope.account_id().to_owned();
+    let transaction = connection.transaction()?;
+    insert_calendar_view_state(&transaction, &account_id, commit.scope)?;
+    apply_calendar_changes(&transaction, scope, commit.changes)?;
+    persist_calendar_progress(
+        &transaction,
+        CalendarProgressCommit {
+            account_id: account_id.clone(),
+            scope: commit.scope,
+            progress: commit.progress,
+            completed_at: commit.completed_at,
+        },
+    )?;
+    let state = read_calendar_sync_state(&transaction, &account_id, commit.scope)?;
+    transaction.commit()?;
+    Ok(state)
+}
+
+fn apply_calendar_changes(
+    transaction: &async_sqlite::rusqlite::Transaction<'_>,
+    scope: CalendarEventScope<'_>,
+    changes: Vec<CalendarDeltaChange>,
+) -> CacheResult<()> {
+    for change in changes {
+        apply_calendar_change(transaction, scope, change)?;
+    }
+    Ok(())
+}
+
+fn apply_calendar_change(
+    transaction: &async_sqlite::rusqlite::Transaction<'_>,
+    scope: CalendarEventScope<'_>,
+    change: CalendarDeltaChange,
+) -> CacheResult<()> {
+    match change {
+        CalendarDeltaChange::Removed { id } => {
+            delete_calendar_event(transaction, scope, id.as_str())
+        }
+        CalendarDeltaChange::Upsert { id, patch } => {
+            apply_calendar_upsert(transaction, scope, id, patch)
+        }
+    }
+}
+
+fn apply_calendar_upsert(
+    transaction: &async_sqlite::rusqlite::Transaction<'_>,
+    scope: CalendarEventScope<'_>,
+    id: einfach_mail_domain::EventId,
+    patch: CalendarOccurrencePatch,
+) -> CacheResult<()> {
+    let occurrence = calendar_occurrence_after_patch(transaction, scope, &id, patch)?;
+    if occurrence.overlaps_view() {
+        write_calendar_event(transaction, scope, &occurrence)
+    } else {
+        delete_calendar_event(transaction, scope, id.as_str())
+    }
+}
+
+fn calendar_occurrence_after_patch(
+    transaction: &async_sqlite::rusqlite::Transaction<'_>,
+    scope: CalendarEventScope<'_>,
+    id: &einfach_mail_domain::EventId,
+    patch: CalendarOccurrencePatch,
+) -> CacheResult<CalendarOccurrence> {
+    match read_calendar_event(transaction, scope, id.as_str())? {
+        Some(mut occurrence) => {
+            patch
+                .apply_to(&mut occurrence)
+                .map_err(|_| CacheFailure::InvalidData)?;
+            Ok(occurrence)
+        }
+        None => patch
+            .into_new(scope.view.clone(), id.clone())
+            .map_err(|_| CacheFailure::InvalidData),
+    }
+}
+
+fn persist_calendar_progress(
+    transaction: &async_sqlite::rusqlite::Transaction<'_>,
+    update: CalendarProgressCommit,
+) -> CacheResult<()> {
+    let (delta_link, next_link, last_sync) = match update.progress {
+        CalendarDeltaProgress::Next(link) => (None, Some(link), None),
+        CalendarDeltaProgress::Complete(link) => (Some(link), None, Some(update.completed_at)),
+    };
+    transaction.execute(
+        UPDATE_CALENDAR_SYNC_PROGRESS,
+        params![
+            update.account_id,
+            update.scope.start_seconds,
+            update.scope.start_nanoseconds,
+            update.scope.end_seconds,
+            update.scope.end_nanoseconds,
+            update.scope.local_start_julian_day,
+            update.scope.local_end_julian_day,
+            delta_link.map(|link| link.as_str().to_owned()),
+            next_link.map(|link| link.as_str().to_owned()),
+            last_sync.map(|(seconds, _)| seconds),
+            last_sync.map(|(_, nanoseconds)| nanoseconds)
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_calendar_view_state(
+    connection: &Connection,
+    account_id: &str,
+    scope: CalendarScope,
+) -> CacheResult<()> {
+    connection.execute(
+        "INSERT OR IGNORE INTO calendar_view_sync_state (
+            account_id,
+            range_start_seconds,
+            range_start_nanoseconds,
+            range_end_seconds,
+            range_end_nanoseconds,
+            local_start_julian_day,
+            local_end_julian_day
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            account_id,
+            scope.start_seconds,
+            scope.start_nanoseconds,
+            scope.end_seconds,
+            scope.end_nanoseconds,
+            scope.local_start_julian_day,
+            scope.local_end_julian_day
+        ],
+    )?;
+    Ok(())
+}
+
+fn read_calendar_sync_state(
+    connection: &Connection,
+    account_id: &str,
+    scope: CalendarScope,
+) -> CacheResult<CalendarSyncState> {
+    let raw = connection
+        .query_row(
+            "SELECT delta_link, next_link, last_sync_seconds, last_sync_nanoseconds
+             FROM calendar_view_sync_state
+             WHERE account_id = ?1
+               AND range_start_seconds = ?2
+               AND range_start_nanoseconds = ?3
+               AND range_end_seconds = ?4
+               AND range_end_nanoseconds = ?5
+               AND local_start_julian_day = ?6
+               AND local_end_julian_day = ?7",
+            params![
+                account_id,
+                scope.start_seconds,
+                scope.start_nanoseconds,
+                scope.end_seconds,
+                scope.end_nanoseconds,
+                scope.local_start_julian_day,
+                scope.local_end_julian_day
+            ],
+            |row| {
+                Ok(RawCalendarSyncState {
+                    delta_link: row.get(0)?,
+                    next_link: row.get(1)?,
+                    last_sync_seconds: row.get(2)?,
+                    last_sync_nanoseconds: row.get(3)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or(CacheFailure::InvalidData)?;
+    let last_synchronized_at = match (raw.last_sync_seconds, raw.last_sync_nanoseconds) {
+        (None, None) => None,
+        (Some(seconds), Some(nanoseconds)) => Some(timestamp_from_parts(seconds, nanoseconds)?),
+        _ => return Err(CacheFailure::InvalidData),
+    };
+    CalendarSyncState::from_checkpoint(
+        raw.delta_link.map(CalendarDeltaLink::from_opaque),
+        raw.next_link.map(CalendarDeltaLink::from_opaque),
+        last_synchronized_at,
+    )
+    .map_err(|_| CacheFailure::InvalidData)
+}
+
+struct RawCalendarSyncState {
+    delta_link: Option<String>,
+    next_link: Option<String>,
+    last_sync_seconds: Option<i64>,
+    last_sync_nanoseconds: Option<i64>,
+}
+
+struct RawPendingEventCreation {
+    range_start_seconds: i64,
+    range_start_nanoseconds: i64,
+    range_end_seconds: i64,
+    range_end_nanoseconds: i64,
+    local_start_julian_day: i32,
+    local_end_julian_day: i32,
+    creation_id: String,
+    subject: String,
+    local_start_seconds: i64,
+    local_start_nanoseconds: i64,
+    local_end_seconds: i64,
+    local_end_nanoseconds: i64,
+    time_zone: String,
+    start_seconds: i64,
+    start_nanoseconds: i64,
+    end_seconds: i64,
+    end_nanoseconds: i64,
+    resolution: String,
+    view_scope: String,
+}
+
+fn raw_pending_event_creation_from_row(
+    row: &async_sqlite::rusqlite::Row<'_>,
+) -> async_sqlite::rusqlite::Result<RawPendingEventCreation> {
+    Ok(RawPendingEventCreation {
+        range_start_seconds: row.get(0)?,
+        range_start_nanoseconds: row.get(1)?,
+        range_end_seconds: row.get(2)?,
+        range_end_nanoseconds: row.get(3)?,
+        local_start_julian_day: row.get(4)?,
+        local_end_julian_day: row.get(5)?,
+        creation_id: row.get(6)?,
+        subject: row.get(7)?,
+        local_start_seconds: row.get(8)?,
+        local_start_nanoseconds: row.get(9)?,
+        local_end_seconds: row.get(10)?,
+        local_end_nanoseconds: row.get(11)?,
+        time_zone: row.get(12)?,
+        start_seconds: row.get(13)?,
+        start_nanoseconds: row.get(14)?,
+        end_seconds: row.get(15)?,
+        end_nanoseconds: row.get(16)?,
+        resolution: row.get(17)?,
+        view_scope: row.get(18)?,
+    })
+}
+
+fn read_pending_event_creation(
+    connection: &Connection,
+    account_id: &str,
+) -> CacheResult<Option<PendingCalendarEventCreation>> {
+    let raw = connection
+        .query_row(
+            "SELECT range_start_seconds, range_start_nanoseconds,
+                    range_end_seconds, range_end_nanoseconds,
+                    local_start_julian_day, local_end_julian_day,
+                    creation_id, subject,
+                    local_start_seconds, local_start_nanoseconds,
+                    local_end_seconds, local_end_nanoseconds,
+                    time_zone, start_seconds, start_nanoseconds,
+                    end_seconds, end_nanoseconds, resolution, view_scope
+             FROM calendar_pending_event_creation
+             WHERE account_id = ?1",
+            [account_id],
+            raw_pending_event_creation_from_row,
+        )
+        .optional()?;
+    raw.map(|raw| decode_pending_event_creation(raw, account_id))
+        .transpose()
+}
+
+fn mark_pending_event_creation_rejected(
+    transaction: &Transaction<'_>,
+    creation: &CalendarEventCreation,
+) -> CacheResult<()> {
+    let account_id = creation.view().account_id().as_str();
+    match read_pending_event_creation(transaction, account_id)? {
+        None => Ok(()),
+        Some(pending) if pending.creation() == creation => {
+            let updated = transaction.execute(
+                "UPDATE calendar_pending_event_creation
+                 SET resolution = 'rejected'
+                 WHERE account_id = ?1 AND creation_id = ?2",
+                params![account_id, creation.id().as_uuid().to_string()],
+            )?;
+            if updated == 1 {
+                Ok(())
+            } else {
+                Err(CacheFailure::InvalidData)
+            }
+        }
+        Some(_) => Err(CacheFailure::CreationAlreadyPending),
+    }
+}
+
+fn decode_pending_event_creation(
+    raw: RawPendingEventCreation,
+    account_id: &str,
+) -> CacheResult<PendingCalendarEventCreation> {
+    let account_id =
+        AccountId::try_from(account_id.to_owned()).map_err(|_| CacheFailure::InvalidData)?;
+    let start = offset_datetime_from_parts(raw.range_start_seconds, raw.range_start_nanoseconds)?;
+    let end = offset_datetime_from_parts(raw.range_end_seconds, raw.range_end_nanoseconds)?;
+    let start_date =
+        Date::from_julian_day(raw.local_start_julian_day).map_err(|_| CacheFailure::InvalidData)?;
+    let end_date =
+        Date::from_julian_day(raw.local_end_julian_day).map_err(|_| CacheFailure::InvalidData)?;
+    let range = CalendarViewRange::new(start, end, start_date, end_date)
+        .map_err(|_| CacheFailure::InvalidData)?;
+    let view = CalendarViewReference::new(account_id, range);
+    let local_start =
+        primitive_datetime_from_parts(raw.local_start_seconds, raw.local_start_nanoseconds)?;
+    let local_end =
+        primitive_datetime_from_parts(raw.local_end_seconds, raw.local_end_nanoseconds)?;
+    let time_zone =
+        CalendarTimeZoneId::try_from(raw.time_zone).map_err(|_| CacheFailure::InvalidData)?;
+    let start = offset_datetime_from_parts(raw.start_seconds, raw.start_nanoseconds)?;
+    let end = offset_datetime_from_parts(raw.end_seconds, raw.end_nanoseconds)?;
+    let draft =
+        CalendarEventDraft::timed(raw.subject, local_start, local_end, time_zone, start, end)
+            .map_err(|_| CacheFailure::InvalidData)?;
+    let id =
+        CalendarEventCreationId::parse(&raw.creation_id).map_err(|_| CacheFailure::InvalidData)?;
+    let creation = match raw.view_scope.as_str() {
+        "bounded" => CalendarEventCreation::try_restore(id, view, draft),
+        "legacy_unbounded" => Ok(CalendarEventCreation::restore_legacy_pending(
+            id, view, draft,
+        )),
+        _ => return Err(CacheFailure::InvalidData),
+    }
+    .map_err(|_| CacheFailure::InvalidData)?;
+    match raw.resolution.as_str() {
+        "unresolved" => Ok(PendingCalendarEventCreation::Unresolved(creation)),
+        "rejected" => Ok(PendingCalendarEventCreation::Rejected(creation)),
+        _ => Err(CacheFailure::InvalidData),
+    }
+}
+
+fn write_pending_event_creation(
+    connection: &Connection,
+    creation: &CalendarEventCreation,
+) -> CacheResult<()> {
+    if creation.is_legacy_pending() {
+        return Err(CacheFailure::InvalidData);
+    }
+    let CalendarOccurrenceTime::Timed { start, end } = creation.draft().time() else {
+        return Err(CacheFailure::InvalidData);
+    };
+    if !creation.draft().time().overlaps(creation.view().range()) {
+        return Err(CacheFailure::InvalidData);
+    }
+    let scope = CalendarScope::from_view(creation.view());
+    let (local_start_seconds, local_start_nanoseconds) =
+        primitive_datetime_parts(creation.draft().local_start());
+    let (local_end_seconds, local_end_nanoseconds) =
+        primitive_datetime_parts(creation.draft().local_end());
+    let (start_seconds, start_nanoseconds) = offset_datetime_parts(*start);
+    let (end_seconds, end_nanoseconds) = offset_datetime_parts(*end);
+    connection.execute(
+        "INSERT INTO calendar_pending_event_creation (
+            account_id,
+            range_start_seconds,
+            range_start_nanoseconds,
+            range_end_seconds,
+            range_end_nanoseconds,
+            local_start_julian_day,
+            local_end_julian_day,
+            creation_id,
+            subject,
+            local_start_seconds,
+            local_start_nanoseconds,
+            local_end_seconds,
+            local_end_nanoseconds,
+            time_zone,
+            start_seconds,
+            start_nanoseconds,
+            end_seconds,
+            end_nanoseconds,
+            view_scope
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+            ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 'bounded'
+         )",
+        params![
+            creation.view().account_id().as_str(),
+            scope.start_seconds,
+            scope.start_nanoseconds,
+            scope.end_seconds,
+            scope.end_nanoseconds,
+            scope.local_start_julian_day,
+            scope.local_end_julian_day,
+            creation.id().as_uuid().to_string(),
+            creation.draft().subject(),
+            local_start_seconds,
+            local_start_nanoseconds,
+            local_end_seconds,
+            local_end_nanoseconds,
+            creation.draft().time_zone().as_str(),
+            start_seconds,
+            start_nanoseconds,
+            end_seconds,
+            end_nanoseconds
+        ],
+    )?;
+    Ok(())
+}
+
+fn primitive_datetime_parts(value: PrimitiveDateTime) -> (i64, i64) {
+    offset_datetime_parts(value.assume_utc())
+}
+
+fn primitive_datetime_from_parts(seconds: i64, nanoseconds: i64) -> CacheResult<PrimitiveDateTime> {
+    let value = offset_datetime_from_parts(seconds, nanoseconds)?;
+    Ok(PrimitiveDateTime::new(value.date(), value.time()))
+}
+
+fn confirms_calendar_event_creation(
+    creation: &CalendarEventCreation,
+    event: &CalendarOccurrence,
+) -> bool {
+    event.reference() == creation.view()
+        && event.subject() == Some(creation.draft().subject())
+        && event.time() == creation.draft().time()
+        && event.overlaps_view()
+}
+
+const UPSERT_CALENDAR_EVENT: &str = "INSERT INTO calendar_events (
+    account_id,
+    range_start_seconds,
+    range_start_nanoseconds,
+    range_end_seconds,
+    range_end_nanoseconds,
+    local_start_julian_day,
+    local_end_julian_day,
+    event_id,
+    subject,
+    location,
+    is_all_day,
+    start_seconds,
+    start_nanoseconds,
+    end_seconds,
+    end_nanoseconds,
+    start_julian_day,
+    end_julian_day,
+    original_start_time_zone,
+    original_end_time_zone
+) VALUES (
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+    ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+)
+ON CONFLICT (
+    account_id,
+    range_start_seconds,
+    range_start_nanoseconds,
+    range_end_seconds,
+    range_end_nanoseconds,
+    local_start_julian_day,
+    local_end_julian_day,
+    event_id
+) DO UPDATE SET
+    subject = excluded.subject,
+    location = excluded.location,
+    is_all_day = excluded.is_all_day,
+    start_seconds = excluded.start_seconds,
+    start_nanoseconds = excluded.start_nanoseconds,
+    end_seconds = excluded.end_seconds,
+    end_nanoseconds = excluded.end_nanoseconds,
+    start_julian_day = excluded.start_julian_day,
+    end_julian_day = excluded.end_julian_day,
+    original_start_time_zone = excluded.original_start_time_zone,
+    original_end_time_zone = excluded.original_end_time_zone";
+
+const UPDATE_CALENDAR_SYNC_PROGRESS: &str = "UPDATE calendar_view_sync_state
+    SET delta_link = COALESCE(?8, delta_link),
+        next_link = ?9,
+        last_sync_seconds = COALESCE(?10, last_sync_seconds),
+        last_sync_nanoseconds = COALESCE(?11, last_sync_nanoseconds)
+    WHERE account_id = ?1
+      AND range_start_seconds = ?2
+      AND range_start_nanoseconds = ?3
+      AND range_end_seconds = ?4
+      AND range_end_nanoseconds = ?5
+      AND local_start_julian_day = ?6
+      AND local_end_julian_day = ?7";
+
+fn delete_calendar_event(
+    connection: &Connection,
+    scope: CalendarEventScope<'_>,
+    event_id: &str,
+) -> CacheResult<()> {
+    connection.execute(
+        "DELETE FROM calendar_events
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7
+           AND event_id = ?8",
+        params![
+            scope.account_id(),
+            scope.range.start_seconds,
+            scope.range.start_nanoseconds,
+            scope.range.end_seconds,
+            scope.range.end_nanoseconds,
+            scope.range.local_start_julian_day,
+            scope.range.local_end_julian_day,
+            event_id
+        ],
+    )?;
+    Ok(())
+}
+
+fn commit_calendar_event_update(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    source_range: CalendarScope,
+    event: &CalendarOccurrence,
+) -> CacheResult<()> {
+    require_cached_source_view(transaction, account_id, source_range)?;
+    let scopes = cached_calendar_scopes(transaction, account_id)?;
+    transaction.execute(
+        "DELETE FROM calendar_events WHERE account_id = ?1 AND event_id = ?2",
+        params![account_id, event.id().as_str()],
+    )?;
+    write_event_to_cached_scopes(transaction, account_id, scopes, event)
+}
+
+fn commit_calendar_event_deletion(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    source_range: CalendarScope,
+    event: &EditableCalendarEvent,
+) -> CacheResult<()> {
+    require_cached_source_view(transaction, account_id, source_range)?;
+    transaction.execute(
+        "DELETE FROM calendar_events WHERE account_id = ?1 AND event_id = ?2",
+        params![account_id, event.occurrence().id().as_str(),],
+    )?;
+    Ok(())
+}
+
+fn require_cached_source_view(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    source_range: CalendarScope,
+) -> CacheResult<()> {
+    let source_view_exists = transaction
+        .query_row(
+            "SELECT 1 FROM calendar_view_sync_state
+             WHERE account_id = ?1
+               AND range_start_seconds = ?2
+               AND range_start_nanoseconds = ?3
+               AND range_end_seconds = ?4
+               AND range_end_nanoseconds = ?5
+               AND local_start_julian_day = ?6
+               AND local_end_julian_day = ?7",
+            params![
+                account_id,
+                source_range.start_seconds,
+                source_range.start_nanoseconds,
+                source_range.end_seconds,
+                source_range.end_nanoseconds,
+                source_range.local_start_julian_day,
+                source_range.local_end_julian_day,
+            ],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if source_view_exists {
+        Ok(())
+    } else {
+        Err(CacheFailure::InvalidData)
+    }
+}
+
+fn cached_calendar_scopes(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+) -> CacheResult<Vec<CalendarScope>> {
+    let mut statement = transaction.prepare(
+        "SELECT range_start_seconds, range_start_nanoseconds,
+                range_end_seconds, range_end_nanoseconds,
+                local_start_julian_day, local_end_julian_day
+         FROM calendar_view_sync_state
+         WHERE account_id = ?1",
+    )?;
+    statement
+        .query_map([account_id], calendar_scope_from_row)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn calendar_scope_from_row(
+    row: &async_sqlite::rusqlite::Row<'_>,
+) -> async_sqlite::rusqlite::Result<CalendarScope> {
+    Ok(CalendarScope {
+        start_seconds: row.get(0)?,
+        start_nanoseconds: row.get(1)?,
+        end_seconds: row.get(2)?,
+        end_nanoseconds: row.get(3)?,
+        local_start_julian_day: row.get(4)?,
+        local_end_julian_day: row.get(5)?,
+    })
+}
+
+fn write_event_to_cached_scopes(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    scopes: Vec<CalendarScope>,
+    event: &CalendarOccurrence,
+) -> CacheResult<()> {
+    let account_id =
+        AccountId::try_from(account_id.to_owned()).map_err(|_| CacheFailure::InvalidData)?;
+    for range in scopes {
+        let view_range = range.view_range()?;
+        if !event.time().overlaps(&view_range) {
+            continue;
+        }
+        let view = CalendarViewReference::new(account_id.clone(), view_range);
+        write_calendar_event(
+            transaction,
+            CalendarEventScope { view: &view, range },
+            event,
+        )?;
+    }
+    Ok(())
+}
+
+fn write_calendar_event(
+    connection: &Connection,
+    scope: CalendarEventScope<'_>,
+    event: &CalendarOccurrence,
+) -> CacheResult<()> {
+    let time_columns = CalendarEventTimeColumns::from_time(event.time());
+    connection.execute(
+        UPSERT_CALENDAR_EVENT,
+        params![
+            scope.account_id(),
+            scope.range.start_seconds,
+            scope.range.start_nanoseconds,
+            scope.range.end_seconds,
+            scope.range.end_nanoseconds,
+            scope.range.local_start_julian_day,
+            scope.range.local_end_julian_day,
+            event.id().as_str(),
+            event.subject(),
+            event.location(),
+            time_columns.is_all_day,
+            time_columns.start_seconds,
+            time_columns.start_nanoseconds,
+            time_columns.end_seconds,
+            time_columns.end_nanoseconds,
+            time_columns.start_day,
+            time_columns.end_day,
+            event.original_start_time_zone(),
+            event.original_end_time_zone()
+        ],
+    )?;
+    Ok(())
+}
+
+fn read_calendar_event(
+    connection: &Connection,
+    scope: CalendarEventScope<'_>,
+    event_id: &str,
+) -> CacheResult<Option<CalendarOccurrence>> {
+    let raw = connection
+        .query_row(
+            "SELECT event_id, subject, location, is_all_day,
+                    start_seconds, start_nanoseconds, end_seconds, end_nanoseconds,
+                    start_julian_day, end_julian_day,
+                    original_start_time_zone, original_end_time_zone
+             FROM calendar_events
+             WHERE account_id = ?1
+               AND range_start_seconds = ?2
+               AND range_start_nanoseconds = ?3
+               AND range_end_seconds = ?4
+               AND range_end_nanoseconds = ?5
+               AND local_start_julian_day = ?6
+               AND local_end_julian_day = ?7
+               AND event_id = ?8",
+            params![
+                scope.account_id(),
+                scope.range.start_seconds,
+                scope.range.start_nanoseconds,
+                scope.range.end_seconds,
+                scope.range.end_nanoseconds,
+                scope.range.local_start_julian_day,
+                scope.range.local_end_julian_day,
+                event_id
+            ],
+            raw_calendar_event_from_row,
+        )
+        .optional()?;
+    raw.map(|raw| decode_calendar_event(raw, scope.view))
+        .transpose()
+}
+
+fn read_calendar_events(
+    connection: &Connection,
+    scope: CalendarEventScope<'_>,
+) -> CacheResult<Vec<CalendarOccurrence>> {
+    let mut statement = connection.prepare(
+        "SELECT event_id, subject, location, is_all_day,
+                start_seconds, start_nanoseconds, end_seconds, end_nanoseconds,
+                start_julian_day, end_julian_day,
+                original_start_time_zone, original_end_time_zone
+         FROM calendar_events
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7
+         ORDER BY is_all_day DESC, start_julian_day, start_seconds, event_id",
+    )?;
+    let raw_events = statement.query_map(
+        params![
+            scope.account_id(),
+            scope.range.start_seconds,
+            scope.range.start_nanoseconds,
+            scope.range.end_seconds,
+            scope.range.end_nanoseconds,
+            scope.range.local_start_julian_day,
+            scope.range.local_end_julian_day
+        ],
+        raw_calendar_event_from_row,
+    )?;
+    raw_events
+        .map(|raw| decode_calendar_event(raw?, scope.view))
+        .filter_map(|event| match event {
+            Ok(event) if event.overlaps_view() => Some(Ok(event)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+struct RawCalendarEvent {
+    id: String,
+    subject: Option<String>,
+    location: Option<String>,
+    is_all_day: bool,
+    start_seconds: Option<i64>,
+    start_nanoseconds: Option<i64>,
+    end_seconds: Option<i64>,
+    end_nanoseconds: Option<i64>,
+    start_julian_day: Option<i32>,
+    end_julian_day: Option<i32>,
+    original_start_time_zone: Option<String>,
+    original_end_time_zone: Option<String>,
+}
+
+fn raw_calendar_event_from_row(
+    row: &async_sqlite::rusqlite::Row<'_>,
+) -> async_sqlite::rusqlite::Result<RawCalendarEvent> {
+    Ok(RawCalendarEvent {
+        id: row.get(0)?,
+        subject: row.get(1)?,
+        location: row.get(2)?,
+        is_all_day: row.get::<_, i64>(3)? != 0,
+        start_seconds: row.get(4)?,
+        start_nanoseconds: row.get(5)?,
+        end_seconds: row.get(6)?,
+        end_nanoseconds: row.get(7)?,
+        start_julian_day: row.get(8)?,
+        end_julian_day: row.get(9)?,
+        original_start_time_zone: row.get(10)?,
+        original_end_time_zone: row.get(11)?,
+    })
+}
+
+fn decode_calendar_event(
+    raw: RawCalendarEvent,
+    view: &CalendarViewReference,
+) -> CacheResult<CalendarOccurrence> {
+    let id =
+        einfach_mail_domain::EventId::try_from(raw.id).map_err(|_| CacheFailure::InvalidData)?;
+    let (start, end) = if raw.is_all_day {
+        if raw.start_seconds.is_some()
+            || raw.start_nanoseconds.is_some()
+            || raw.end_seconds.is_some()
+            || raw.end_nanoseconds.is_some()
+        {
+            return Err(CacheFailure::InvalidData);
+        }
+        let start = Date::from_julian_day(raw.start_julian_day.ok_or(CacheFailure::InvalidData)?)
+            .map_err(|_| CacheFailure::InvalidData)?;
+        let end = Date::from_julian_day(raw.end_julian_day.ok_or(CacheFailure::InvalidData)?)
+            .map_err(|_| CacheFailure::InvalidData)?;
+        (start.midnight().assume_utc(), end.midnight().assume_utc())
+    } else {
+        if raw.start_julian_day.is_some() || raw.end_julian_day.is_some() {
+            return Err(CacheFailure::InvalidData);
+        }
+        (
+            offset_datetime_from_parts(
+                raw.start_seconds.ok_or(CacheFailure::InvalidData)?,
+                raw.start_nanoseconds.ok_or(CacheFailure::InvalidData)?,
+            )?,
+            offset_datetime_from_parts(
+                raw.end_seconds.ok_or(CacheFailure::InvalidData)?,
+                raw.end_nanoseconds.ok_or(CacheFailure::InvalidData)?,
+            )?,
+        )
+    };
+
+    let mut patch = CalendarOccurrencePatch::new();
+    patch.set_subject(raw.subject);
+    patch.set_location(raw.location);
+    patch.set_original_start_time_zone(raw.original_start_time_zone);
+    patch.set_original_end_time_zone(raw.original_end_time_zone);
+    let mut time_patch = CalendarOccurrenceTimePatch::new();
+    time_patch.set_start(start);
+    time_patch.set_end(end);
+    time_patch.set_is_all_day(raw.is_all_day);
+    patch.set_time(time_patch);
+    patch
+        .into_new(view.clone(), id)
+        .map_err(|_| CacheFailure::InvalidData)
+}
+
+fn offset_datetime_parts(date_time: OffsetDateTime) -> (i64, i64) {
+    (
+        date_time.unix_timestamp(),
+        i64::from(date_time.nanosecond()),
+    )
+}
+
+fn offset_datetime_from_parts(seconds: i64, nanoseconds: i64) -> CacheResult<OffsetDateTime> {
+    if !(0..1_000_000_000).contains(&nanoseconds) {
+        return Err(CacheFailure::InvalidData);
+    }
+    OffsetDateTime::from_unix_timestamp(seconds)
+        .and_then(|date_time| date_time.replace_nanosecond(nanoseconds as u32))
+        .map_err(|_| CacheFailure::InvalidData)
 }
 
 fn validate_folder_snapshot(
@@ -681,6 +2386,148 @@ fn insert_folder(
     Ok(())
 }
 
+struct StoredPendingSend {
+    operation_id: String,
+    target_kind: String,
+    target: StoredPendingSendTarget,
+    created_seconds: i64,
+    created_nanoseconds: i64,
+}
+
+struct StoredPendingSendTarget {
+    recipient: Option<String>,
+    subject: Option<String>,
+    source_folder_id: Option<String>,
+    source_message_id: Option<String>,
+}
+
+impl StoredPendingSend {
+    fn read(connection: &Connection, account_id: &str) -> CacheResult<Option<Self>> {
+        connection
+            .query_row(
+                "SELECT operation_id, target_kind, recipient, subject,
+                        source_folder_id, source_message_id,
+                        created_seconds, created_nanoseconds
+                 FROM mail_pending_send WHERE account_id = ?1",
+                [account_id],
+                Self::from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn from_row(row: &async_sqlite::rusqlite::Row<'_>) -> SqlResult<Self> {
+        Ok(Self {
+            operation_id: row.get(0)?,
+            target_kind: row.get(1)?,
+            target: StoredPendingSendTarget {
+                recipient: row.get(2)?,
+                subject: row.get(3)?,
+                source_folder_id: row.get(4)?,
+                source_message_id: row.get(5)?,
+            },
+            created_seconds: row.get(6)?,
+            created_nanoseconds: row.get(7)?,
+        })
+    }
+
+    fn into_domain(self, account_id: &str) -> CacheResult<PendingMailSend> {
+        let Self {
+            operation_id,
+            target_kind,
+            target,
+            created_seconds,
+            created_nanoseconds,
+        } = self;
+        let account_id =
+            AccountId::try_from(account_id.to_owned()).map_err(|_| CacheFailure::InvalidData)?;
+        let operation_id = Uuid::parse_str(&operation_id)
+            .map(MailSendOperationId::from_uuid)
+            .map_err(|_| CacheFailure::InvalidData)?;
+        let created_at = timestamp_from_parts(created_seconds, created_nanoseconds)?;
+        match target_kind.as_str() {
+            "new_message" => target.into_new_message(account_id, operation_id, created_at),
+            "reply" => target.into_reply(account_id, operation_id, created_at),
+            _ => Err(CacheFailure::InvalidData),
+        }
+    }
+}
+
+impl StoredPendingSendTarget {
+    fn into_new_message(
+        self,
+        account_id: AccountId,
+        operation_id: MailSendOperationId,
+        created_at: SystemTime,
+    ) -> CacheResult<PendingMailSend> {
+        let (recipient, subject) = self.new_message_values()?;
+        Ok(PendingMailSend::for_new_message(
+            account_id,
+            operation_id,
+            recipient,
+            subject,
+            created_at,
+        ))
+    }
+
+    fn new_message_values(self) -> CacheResult<(MailRecipient, MailSubject)> {
+        if self.source_folder_id.is_some() || self.source_message_id.is_some() {
+            return Err(CacheFailure::InvalidData);
+        }
+        let recipient = self
+            .recipient
+            .ok_or(CacheFailure::InvalidData)?
+            .parse::<MailRecipient>()
+            .map_err(|_| CacheFailure::InvalidData)?;
+        let subject = self
+            .subject
+            .ok_or(CacheFailure::InvalidData)?
+            .parse::<MailSubject>()
+            .map_err(|_| CacheFailure::InvalidData)?;
+        Ok((recipient, subject))
+    }
+
+    fn into_reply(
+        self,
+        account_id: AccountId,
+        operation_id: MailSendOperationId,
+        created_at: SystemTime,
+    ) -> CacheResult<PendingMailSend> {
+        let (source, subject) = self.reply_values(account_id)?;
+        Ok(PendingMailSend::for_reply(
+            source,
+            operation_id,
+            subject,
+            created_at,
+        ))
+    }
+
+    fn reply_values(
+        self,
+        account_id: AccountId,
+    ) -> CacheResult<(MailReplySource, Option<Box<str>>)> {
+        if self.recipient.is_some() {
+            return Err(CacheFailure::InvalidData);
+        }
+        let folder_id = FolderId::try_from(self.source_folder_id.ok_or(CacheFailure::InvalidData)?)
+            .map_err(|_| CacheFailure::InvalidData)?;
+        let message_id =
+            MessageId::try_from(self.source_message_id.ok_or(CacheFailure::InvalidData)?)
+                .map_err(|_| CacheFailure::InvalidData)?;
+        let source = MailReplySource::new(FolderReference::new(account_id, folder_id), message_id);
+        Ok((source, self.subject.map(String::into_boxed_str)))
+    }
+}
+
+fn read_pending_send(
+    connection: &Connection,
+    account_id: &str,
+) -> CacheResult<Option<PendingMailSend>> {
+    StoredPendingSend::read(connection, account_id)?
+        .map(|pending| pending.into_domain(account_id))
+        .transpose()
+}
+
 fn read_folders(connection: &Connection, account_id: &str) -> CacheResult<Vec<MailFolder>> {
     let mut statement = connection.prepare(
         "SELECT folder_id, parent_folder_id, display_name
@@ -724,7 +2571,7 @@ fn read_messages(
     let mut statement = connection.prepare(
         "SELECT message_id, subject, from_display_name, from_address,
                 sender_display_name, sender_address, received_seconds,
-                received_nanoseconds, is_read
+                received_nanoseconds, is_read, flag_status
          FROM mail_messages
          WHERE account_id = ?1 AND folder_id = ?2
          ORDER BY received_seconds DESC, received_nanoseconds DESC, message_id ASC",
@@ -752,6 +2599,89 @@ fn folder_exists(connection: &Connection, folder: &FolderReference) -> CacheResu
     Ok(exists)
 }
 
+fn move_cached_message(
+    transaction: &Transaction<'_>,
+    source_folder: &FolderReference,
+    destination_folder: &FolderReference,
+    message_id: &MessageId,
+) -> CacheResult<()> {
+    if !folder_exists(transaction, destination_folder)? {
+        return Err(CacheFailure::InvalidData);
+    }
+    insert_or_merge_destination_message(
+        transaction,
+        source_folder,
+        destination_folder,
+        message_id,
+    )?;
+    remove_source_message(transaction, source_folder, message_id)
+}
+
+fn insert_or_merge_destination_message(
+    transaction: &Transaction<'_>,
+    source_folder: &FolderReference,
+    destination_folder: &FolderReference,
+    message_id: &MessageId,
+) -> CacheResult<()> {
+    let inserted = transaction.execute(
+        MOVE_CACHED_MESSAGE_SQL,
+        params![
+            source_folder.account_id().as_str(),
+            source_folder.folder_id().as_str(),
+            message_id.as_str(),
+            destination_folder.folder_id().as_str()
+        ],
+    )?;
+    if inserted != 1 {
+        return Err(CacheFailure::MessageNotCached);
+    }
+    Ok(())
+}
+
+fn remove_source_message(
+    transaction: &Transaction<'_>,
+    source_folder: &FolderReference,
+    message_id: &MessageId,
+) -> CacheResult<()> {
+    let removed = transaction.execute(
+        "DELETE FROM mail_messages
+         WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+        params![
+            source_folder.account_id().as_str(),
+            source_folder.folder_id().as_str(),
+            message_id.as_str()
+        ],
+    )?;
+    if removed != 1 {
+        return Err(CacheFailure::MessageNotCached);
+    }
+    Ok(())
+}
+
+const MOVE_CACHED_MESSAGE_SQL: &str = "
+    INSERT INTO mail_messages (
+        account_id, folder_id, message_id, subject,
+        from_display_name, from_address, sender_display_name, sender_address,
+        received_seconds, received_nanoseconds, is_read, flag_status,
+        body_type, body_content
+    )
+    SELECT account_id, ?4, message_id, subject,
+           from_display_name, from_address, sender_display_name, sender_address,
+           received_seconds, received_nanoseconds, is_read, flag_status,
+           body_type, body_content
+    FROM mail_messages
+    WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3
+    ON CONFLICT (account_id, folder_id, message_id) DO UPDATE SET
+        subject = COALESCE(mail_messages.subject, excluded.subject),
+        from_display_name = COALESCE(mail_messages.from_display_name, excluded.from_display_name),
+        from_address = COALESCE(mail_messages.from_address, excluded.from_address),
+        sender_display_name = COALESCE(mail_messages.sender_display_name, excluded.sender_display_name),
+        sender_address = COALESCE(mail_messages.sender_address, excluded.sender_address),
+        flag_status = COALESCE(mail_messages.flag_status, excluded.flag_status),
+        body_type = COALESCE(mail_messages.body_type, excluded.body_type),
+        body_content = COALESCE(mail_messages.body_content, excluded.body_content)
+";
+
 fn read_cached_message(
     connection: &Connection,
     folder: &FolderReference,
@@ -761,7 +2691,7 @@ fn read_cached_message(
         .query_row(
             "SELECT message_id, subject, from_display_name, from_address,
                     sender_display_name, sender_address, received_seconds,
-                    received_nanoseconds, is_read, body_type, body_content
+                    received_nanoseconds, is_read, flag_status, body_type, body_content
              FROM mail_messages
              WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
             params![
@@ -772,8 +2702,8 @@ fn read_cached_message(
             |row| {
                 Ok((
                     raw_message_from_row(row)?,
-                    row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             },
         )
@@ -798,6 +2728,7 @@ fn raw_message_from_row(row: &async_sqlite::rusqlite::Row<'_>) -> SqlResult<RawM
         received_seconds: row.get(6)?,
         received_nanoseconds: row.get(7)?,
         is_read: row.get(8)?,
+        flag_status: row.get(9)?,
     })
 }
 
@@ -811,6 +2742,7 @@ struct RawMessage {
     received_seconds: i64,
     received_nanoseconds: i64,
     is_read: bool,
+    flag_status: Option<String>,
 }
 
 fn decode_message(folder: &FolderReference, raw: RawMessage) -> CacheResult<MailMessage> {
@@ -828,8 +2760,37 @@ fn decode_message(folder: &FolderReference, raw: RawMessage) -> CacheResult<Mail
         MessageOrigin::new(from, sender),
         received_at,
         read_state,
+        raw.flag_status
+            .as_deref()
+            .map(follow_up_flag_status_from_name)
+            .transpose()?,
     );
     Ok(MailMessage::new(folder.clone(), id, metadata))
+}
+
+fn read_state_from_bool(is_read: bool) -> ReadState {
+    if is_read {
+        ReadState::Read
+    } else {
+        ReadState::Unread
+    }
+}
+
+fn follow_up_flag_status_from_name(name: &str) -> CacheResult<FollowUpFlagStatus> {
+    match name {
+        "not_flagged" => Ok(FollowUpFlagStatus::NotFlagged),
+        "flagged" => Ok(FollowUpFlagStatus::Flagged),
+        "complete" => Ok(FollowUpFlagStatus::Complete),
+        _ => Err(CacheFailure::InvalidData),
+    }
+}
+
+fn follow_up_flag_status_name(status: FollowUpFlagStatus) -> &'static str {
+    match status {
+        FollowUpFlagStatus::NotFlagged => "not_flagged",
+        FollowUpFlagStatus::Flagged => "flagged",
+        FollowUpFlagStatus::Complete => "complete",
+    }
 }
 
 fn decode_mailbox(
@@ -1036,7 +2997,7 @@ fn read_cached_metadata(
         .query_row(
             "SELECT message_id, subject, from_display_name, from_address,
                     sender_display_name, sender_address, received_seconds,
-                    received_nanoseconds, is_read
+                    received_nanoseconds, is_read, flag_status
              FROM mail_messages
              WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
             params![
@@ -1064,8 +3025,9 @@ fn store_message_metadata(
         "INSERT INTO mail_messages (
             account_id, folder_id, message_id, subject,
             from_display_name, from_address, sender_display_name, sender_address,
-            received_seconds, received_nanoseconds, is_read, full_sync_generation
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            received_seconds, received_nanoseconds, is_read, flag_status,
+            full_sync_generation
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT (account_id, folder_id, message_id) DO UPDATE SET
             subject = excluded.subject,
             from_display_name = excluded.from_display_name,
@@ -1075,6 +3037,7 @@ fn store_message_metadata(
             received_seconds = excluded.received_seconds,
             received_nanoseconds = excluded.received_nanoseconds,
             is_read = excluded.is_read,
+            flag_status = excluded.flag_status,
             full_sync_generation = excluded.full_sync_generation,
             body_type = NULL,
             body_content = NULL",
@@ -1090,6 +3053,9 @@ fn store_message_metadata(
             received_seconds,
             received_nanoseconds,
             matches!(metadata.read_state(), ReadState::Read),
+            metadata
+                .follow_up_flag_status()
+                .map(follow_up_flag_status_name),
             full_sync_generation
         ],
     )?;
@@ -1253,6 +3219,11 @@ fn update_sync_progress(
                     checkpoint_revision
                 ],
             )?;
+            transaction.execute(
+                "DELETE FROM mail_folder_write_sync_requirement
+                 WHERE account_id = ?1 AND folder_id = ?2",
+                params![folder.account_id().as_str(), folder.folder_id().as_str()],
+            )?;
         }
     }
     Ok(())
@@ -1310,13 +3281,17 @@ fn timestamp_from_parts(seconds: i64, nanoseconds: i64) -> CacheResult<SystemTim
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use einfach_mail_application::{MailCache, MailCacheError};
+    use einfach_mail_application::{CalendarCache, CalendarCacheError, MailCache, MailCacheError};
     use einfach_mail_domain::{
-        AccountId, FolderId, FolderReference, MailFolder, MessageBodyType, MessageDeltaChange,
-        MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
+        AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrencePatch,
+        CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange,
+        CalendarViewReference, EventId, FolderId, FolderReference, FollowUpFlagStatus, MailFolder,
+        MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+        MessageDeltaProgress, MessageId, MessageMetadataPatch, PendingCalendarEventCreation,
         ReadState,
     };
     use tempfile::TempDir;
+    use time::{Date, Month, PrimitiveDateTime, Time};
 
     use super::{SqliteMailCache, timestamp_from_parts, timestamp_parts};
     const DATABASE_KEY_BYTE: u8 = 0x51;
@@ -1344,6 +3319,70 @@ mod tests {
 
     fn message_id(value: &str) -> MessageId {
         MessageId::try_from(value.to_owned()).expect("synthetic message ID is non-empty")
+    }
+
+    fn calendar_view(account: &AccountId) -> CalendarViewReference {
+        let start_date = Date::from_calendar_date(2030, Month::January, 7)
+            .expect("synthetic view start date is valid");
+        let end_date = Date::from_calendar_date(2030, Month::January, 14)
+            .expect("synthetic view end date is valid");
+        let range = CalendarViewRange::new(
+            start_date.midnight().assume_utc(),
+            end_date.midnight().assume_utc(),
+            start_date,
+            end_date,
+        )
+        .expect("synthetic calendar range is valid");
+        CalendarViewReference::new(account.clone(), range)
+    }
+
+    fn calendar_creation(view: CalendarViewReference) -> CalendarEventCreation {
+        let date = Date::from_calendar_date(2030, Month::January, 8)
+            .expect("synthetic event date is valid");
+        let local_start = PrimitiveDateTime::new(
+            date,
+            Time::from_hms(9, 30, 0).expect("synthetic local start is valid"),
+        );
+        let local_end = PrimitiveDateTime::new(
+            date,
+            Time::from_hms(10, 0, 0).expect("synthetic local end is valid"),
+        );
+        let draft = CalendarEventDraft::timed(
+            "Synthetic planning meeting".to_owned(),
+            local_start,
+            local_end,
+            CalendarTimeZoneId::try_from("Etc/UTC".to_owned())
+                .expect("synthetic time zone is valid"),
+            date.with_hms(9, 30, 0)
+                .expect("synthetic UTC start is valid")
+                .assume_utc(),
+            date.with_hms(10, 0, 0)
+                .expect("synthetic UTC end is valid")
+                .assume_utc(),
+        )
+        .expect("synthetic calendar event draft is valid");
+        CalendarEventCreation::try_new(view, draft)
+            .expect("synthetic event endpoints fit the selected week")
+    }
+
+    fn calendar_event(creation: &CalendarEventCreation) -> einfach_mail_domain::CalendarOccurrence {
+        let CalendarOccurrenceTime::Timed { start, end } = creation.draft().time() else {
+            panic!("synthetic calendar creation uses a timed event");
+        };
+        let mut patch = CalendarOccurrencePatch::new();
+        patch.set_subject(Some(creation.draft().subject().to_owned()));
+        let mut event_time = CalendarOccurrenceTimePatch::new();
+        event_time.set_start(*start);
+        event_time.set_end(*end);
+        event_time.set_is_all_day(false);
+        patch.set_time(event_time);
+        patch
+            .into_new(
+                creation.view().clone(),
+                EventId::try_from("synthetic-created-event".to_owned())
+                    .expect("synthetic event identifier is valid"),
+            )
+            .expect("synthetic created calendar event is valid")
     }
 
     async fn open_test_cache(directory: &TempDir, account_id: AccountId) -> SqliteMailCache {
@@ -1396,14 +3435,24 @@ mod tests {
                 "https://graph.microsoft.com/v1.0/messages?$skiptoken=synthetic-next".to_owned(),
             );
             let page = MessageDeltaPage::new(page, MessageDeltaProgress::Next(link.clone()));
-            let first_commit = cache
-                .commit_delta_page(&folder_reference, &initial_state, page.clone(), cutoff)
-                .await
-                .expect("first page commits with its resumable cursor");
+            let first_commit = MailCache::commit_delta_page(
+                &cache,
+                &folder_reference,
+                &initial_state,
+                page.clone(),
+                cutoff,
+            )
+            .await
+            .expect("first page commits with its resumable cursor");
             assert_eq!(
-                cache
-                    .commit_delta_page(&folder_reference, &initial_state, page, cutoff)
-                    .await,
+                MailCache::commit_delta_page(
+                    &cache,
+                    &folder_reference,
+                    &initial_state,
+                    page,
+                    cutoff,
+                )
+                .await,
                 Err(MailCacheError::SyncStateChanged)
             );
             assert_eq!(first_commit.next_link(), Some(&link));
@@ -1420,6 +3469,42 @@ mod tests {
             );
 
             let message = message_id("message-at-cutoff");
+            assert_eq!(
+                cache
+                    .message_read_state(&folder_reference, &message)
+                    .await
+                    .expect("cached state is readable"),
+                Some(ReadState::Unread)
+            );
+            cache
+                .set_message_read_state(&folder_reference, &message, ReadState::Read)
+                .await
+                .expect("confirmed synthetic read state is stored");
+            cache
+                .set_message_read_state(&folder_reference, &message, ReadState::Read)
+                .await
+                .expect("repeating the confirmed state remains idempotent");
+            assert_eq!(
+                cache
+                    .message_read_state(&folder_reference, &message)
+                    .await
+                    .expect("updated state is readable"),
+                Some(ReadState::Read)
+            );
+            let missing_message = message_id("missing-message");
+            assert_eq!(
+                cache
+                    .message_read_state(&folder_reference, &missing_message)
+                    .await
+                    .expect("missing cached state is represented as absence"),
+                None
+            );
+            assert_eq!(
+                cache
+                    .set_message_read_state(&folder_reference, &missing_message, ReadState::Read,)
+                    .await,
+                Err(MailCacheError::MessageNotCached)
+            );
             cache
                 .store_message_body(
                     &folder_reference,
@@ -1431,7 +3516,11 @@ mod tests {
                 )
                 .await
                 .expect("opened synthetic body is saved");
-            cache.close_for_tests().await;
+            cache
+                .client
+                .close()
+                .await
+                .expect("synthetic cache connection closes");
 
             let reopened = open_test_cache(&directory, account).await;
             let persisted_state = reopened
@@ -1447,6 +3536,7 @@ mod tests {
                 .expect("cached message is readable after restart")
                 .expect("message remains in the folder cache");
             assert_eq!(stored_message.id(), &message);
+            assert_eq!(stored_message.metadata().read_state(), ReadState::Read);
             assert_eq!(
                 stored_body
                     .as_ref()
@@ -1454,10 +3544,110 @@ mod tests {
                 Some("<p>Synthetic offline body</p>")
             );
 
-            let database_bytes = std::fs::read(&reopened.inner.database_path)
+            let database_bytes = std::fs::read(&reopened.database_path)
                 .expect("synthetic encrypted database is readable as bytes");
             assert_ne!(&database_bytes[..SQLITE_HEADER.len()], SQLITE_HEADER);
             reopened.close_for_tests().await;
+        });
+    }
+
+    #[test]
+    fn confirmed_flag_and_recovery_marker_commit_in_one_transaction() {
+        smol::block_on(async {
+            let directory = TempDir::new().expect("temporary directory is created");
+            let account = account_id("synthetic-account");
+            let cached_folder = folder(&account, "folder-inbox");
+            let folder_reference = cached_folder.reference().clone();
+            let message = message_id("synthetic-message");
+            let cutoff = UNIX_EPOCH + Duration::from_secs(100);
+            let cache = open_test_cache(&directory, account.clone()).await;
+            cache
+                .replace_folders(&account, vec![cached_folder])
+                .await
+                .expect("synthetic folder is cached");
+            let state = cache
+                .ensure_sync_state(&folder_reference, cutoff)
+                .await
+                .expect("initial checkpoint is saved");
+            let mut patch = complete_patch(Some("Synthetic message"), cutoff, ReadState::Unread);
+            patch.set_follow_up_flag_status(Some(FollowUpFlagStatus::NotFlagged));
+            let page = MessageDeltaPage::new(
+                vec![MessageDeltaChange::Upsert {
+                    id: message.clone(),
+                    patch,
+                }],
+                MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(
+                    "https://graph.microsoft.com/v1.0/messages?$deltatoken=synthetic".to_owned(),
+                )),
+            );
+            MailCache::commit_delta_page(&cache, &folder_reference, &state, page, cutoff)
+                .await
+                .expect("synthetic message is cached");
+            cache
+                .require_folder_write_sync(&folder_reference)
+                .await
+                .expect("recovery marker is staged");
+            cache
+                .execute_batch_for_tests(
+                    "CREATE TRIGGER fail_flag_marker_delete
+                     BEFORE DELETE ON mail_folder_write_sync_requirement
+                     BEGIN SELECT RAISE(ABORT, 'synthetic marker failure'); END;",
+                )
+                .await
+                .expect("synthetic failure trigger is installed");
+
+            assert_eq!(
+                cache
+                    .set_message_follow_up_flag_status(
+                        &folder_reference,
+                        &message,
+                        FollowUpFlagStatus::Flagged,
+                    )
+                    .await,
+                Err(MailCacheError::Unavailable)
+            );
+            assert!(
+                cache
+                    .folder_write_sync_required(&folder_reference)
+                    .await
+                    .expect("failed transaction leaves the marker in place")
+            );
+            assert_eq!(
+                cache
+                    .read_message(&folder_reference, &message)
+                    .await
+                    .expect("message is readable after transaction rollback")
+                    .and_then(|(message, _)| message.metadata().follow_up_flag_status()),
+                Some(FollowUpFlagStatus::NotFlagged)
+            );
+
+            cache
+                .execute_batch_for_tests("DROP TRIGGER fail_flag_marker_delete;")
+                .await
+                .expect("synthetic failure trigger is removed");
+            cache
+                .set_message_follow_up_flag_status(
+                    &folder_reference,
+                    &message,
+                    FollowUpFlagStatus::Flagged,
+                )
+                .await
+                .expect("confirmed status and marker removal commit together");
+            assert!(
+                !cache
+                    .folder_write_sync_required(&folder_reference)
+                    .await
+                    .expect("successful transaction clears the marker")
+            );
+            assert_eq!(
+                cache
+                    .read_message(&folder_reference, &message)
+                    .await
+                    .expect("message is readable after confirmed update")
+                    .and_then(|(message, _)| message.metadata().follow_up_flag_status()),
+                Some(FollowUpFlagStatus::Flagged)
+            );
+            cache.close_for_tests().await;
         });
     }
 
@@ -1561,5 +3751,169 @@ mod tests {
                 timestamp
             );
         }
+    }
+
+    #[test]
+    fn pending_calendar_event_survives_restart_blocks_removal_and_confirms_atomically() {
+        smol::block_on(async {
+            let directory = TempDir::new().expect("temporary directory is created");
+            let account = account_id("synthetic-account");
+            let view = calendar_view(&account);
+            let creation = calendar_creation(view.clone());
+            let cache = open_test_cache(&directory, account.clone()).await;
+
+            cache
+                .stage_event_creation(&creation)
+                .await
+                .expect("synthetic event operation is staged");
+            cache
+                .stage_event_creation(&creation)
+                .await
+                .expect("repeating the same staging operation is idempotent");
+            let other_creation = calendar_creation(view.clone());
+            assert_eq!(
+                cache.stage_event_creation(&other_creation).await,
+                Err(CalendarCacheError::CreationAlreadyPending)
+            );
+            assert_eq!(
+                cache.pending_event_creation(&account).await,
+                Ok(Some(PendingCalendarEventCreation::Unresolved(
+                    creation.clone()
+                )))
+            );
+            cache.close_for_tests().await;
+            drop(cache);
+
+            let reopened = open_test_cache(&directory, account.clone()).await;
+            assert_eq!(
+                reopened.pending_event_creation(&account).await,
+                Ok(Some(PendingCalendarEventCreation::Unresolved(
+                    creation.clone()
+                )))
+            );
+            assert_eq!(
+                MailCache::remove_account(&reopened, &account).await,
+                Err(MailCacheError::CalendarEventCreationUnresolved)
+            );
+            assert_eq!(
+                CalendarCache::remove_account(&reopened, &account).await,
+                Err(CalendarCacheError::UnresolvedEventCreation)
+            );
+            assert!(directory.path().join("mail.sqlite3").exists());
+            let other_account = account_id("synthetic-other-account");
+            assert_eq!(
+                reopened.pending_event_creation(&other_account).await,
+                Err(CalendarCacheError::AccountMismatch)
+            );
+            let other_creation = calendar_creation(calendar_view(&other_account));
+            assert_eq!(
+                reopened.stage_event_creation(&other_creation).await,
+                Err(CalendarCacheError::AccountMismatch)
+            );
+            let event = calendar_event(&creation);
+            let mut mismatched_patch = CalendarOccurrencePatch::new();
+            mismatched_patch.set_subject(Some("Different synthetic event".to_owned()));
+            let CalendarOccurrenceTime::Timed { start, end } = event.time() else {
+                panic!("synthetic confirmed calendar event is timed");
+            };
+            let mut mismatched_time = CalendarOccurrenceTimePatch::new();
+            mismatched_time.set_start(*start);
+            mismatched_time.set_end(*end);
+            mismatched_time.set_is_all_day(false);
+            mismatched_patch.set_time(mismatched_time);
+            let mismatched_event = mismatched_patch
+                .into_new(
+                    view.clone(),
+                    EventId::try_from("synthetic-different-event".to_owned())
+                        .expect("synthetic event identifier is valid"),
+                )
+                .expect("synthetic mismatched event has a valid time");
+            assert_eq!(
+                reopened
+                    .commit_event_creation(&creation, &mismatched_event)
+                    .await,
+                Err(CalendarCacheError::InvalidData)
+            );
+            assert_eq!(
+                reopened.pending_event_creation(&account).await,
+                Ok(Some(PendingCalendarEventCreation::Unresolved(
+                    creation.clone()
+                )))
+            );
+            assert!(
+                reopened
+                    .list_events(&view)
+                    .await
+                    .expect("synthetic event list is readable")
+                    .is_empty()
+            );
+
+            reopened
+                .commit_event_creation(&creation, &event)
+                .await
+                .expect("Graph-confirmed synthetic event commits");
+            assert_eq!(reopened.pending_event_creation(&account).await, Ok(None));
+            assert_eq!(
+                reopened
+                    .list_events(&view)
+                    .await
+                    .expect("confirmed synthetic event is cached")
+                    .as_slice(),
+                std::slice::from_ref(&event)
+            );
+            reopened.close_for_tests().await;
+        });
+    }
+
+    #[test]
+    fn rejected_calendar_event_survives_restart_and_can_be_discarded_locally() {
+        smol::block_on(async {
+            let directory = TempDir::new().expect("temporary directory is created");
+            let account = account_id("synthetic-account");
+            let creation = calendar_creation(calendar_view(&account));
+            let cache = open_test_cache(&directory, account.clone()).await;
+            cache
+                .stage_event_creation(&creation)
+                .await
+                .expect("synthetic event operation is staged");
+
+            assert_eq!(
+                cache.discard_event_creation(&creation).await,
+                Err(CalendarCacheError::CreationAlreadyPending)
+            );
+            assert_eq!(
+                cache.pending_event_creation(&account).await,
+                Ok(Some(PendingCalendarEventCreation::Unresolved(
+                    creation.clone()
+                )))
+            );
+
+            cache
+                .mark_event_creation_rejected(&creation)
+                .await
+                .expect("the synthetic Graph rejection is persisted");
+            cache.close_for_tests().await;
+
+            let reopened = open_test_cache(&directory, account.clone()).await;
+            assert_eq!(
+                reopened.pending_event_creation(&account).await,
+                Ok(Some(PendingCalendarEventCreation::Rejected(
+                    creation.clone()
+                )))
+            );
+            assert!(
+                !reopened
+                    .has_unresolved_event_creation(&account)
+                    .await
+                    .expect("rejected operations do not block account removal")
+            );
+
+            reopened
+                .discard_event_creation(&creation)
+                .await
+                .expect("rejected operation can be cleared without another Graph request");
+            assert_eq!(reopened.pending_event_creation(&account).await, Ok(None));
+            reopened.close_for_tests().await;
+        });
     }
 }

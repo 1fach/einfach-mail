@@ -30,7 +30,7 @@ Graph IDs are case-sensitive. Standard Outlook item IDs can change when an item 
 
 ### Permissions
 
-Use delegated permissions and ask only for scopes needed by the enabled workflow. A possible staged plan is `Mail.Read` and `Calendars.Read` for read-only access, then `Mail.ReadWrite`, `Mail.Send`, and `Calendars.ReadWrite` when the user enables the corresponding write features. `Mail.Send` is a separate scope and does not require `Mail.ReadWrite` to send a message. Confirm exact scope requirements against every endpoint before implementation.
+Use delegated permissions and ask only for scopes needed by the enabled workflow. Initial sign-in requests `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access`. If Microsoft denies an explicit read-state change, ADR 0015 allows a separate permission review that requests `Mail.ReadWrite` in place of `Mail.Read`. This scope permits creating, reading, updating, and deleting mail. Einfach Mail uses the resulting access for mail reading and read-state changes; this feature adds no create, delete, or send behavior. The app does not request `Mail.Send`. Future send or calendar-write actions need separate scope and behavior decisions. `Mail.Send` is a separate scope and does not require `Mail.ReadWrite` to send a message.
 
 Do not request application permissions for this signed-in desktop client. They can grant access without a signed-in user and require broader administrative consent.
 

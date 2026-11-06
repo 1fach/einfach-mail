@@ -3,24 +3,39 @@
 //! This crate coordinates domain behavior without depending on a UI framework, Microsoft Graph, or a database.
 
 mod account;
+mod account_session;
+mod calendar;
 mod email_html;
 mod mail;
 mod mail_cache;
 mod mail_workflow;
 
 pub use account::{
-    AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
+    AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
+    AccountWorkflow,
+};
+pub use account_session::{
+    AccountCacheFactory, AccountSession, AccountSessionFactory, AccountSessionFuture,
+    CalendarSession, MailSession,
+};
+pub use calendar::{
+    CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
+    CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
+    CalendarOperationError, CalendarProvider, CalendarSnapshot, CalendarSyncReport,
+    CalendarSyncState, CalendarWorkflow, CalendarWorkflowError, CalendarWriteReadiness,
 };
 pub use email_html::{
     ExternalMessageLink, MessageBodyForDisplay, SanitizedEmailHtml, allowed_external_message_url,
     prepare_message_body_for_display,
 };
 pub use mail::{
-    MailOperationError, MailProvider, MessageDeltaPageResponse, MessageDeltaRequest,
-    MessageDeltaResponse,
+    MailOperationError, MailProvider, MailSendProviderError, MessageDeltaPageResponse,
+    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
-pub use mail_cache::{MailCache, MailCacheError, MailCacheFactory, MailSyncState};
+pub use mail_cache::{MailCache, MailCacheError, MailSyncState};
 pub use mail_workflow::{
-    MailSession, MailSessionFactory, MailSessionFuture, MailSyncProgress, MailSyncReport,
-    MailWorkflow, MailWorkflowError, MailWorkflowFactory, OpenedMessage,
+    AccountSessionWorkflowFactory, FollowUpFlagUpdateOutcome, MailSendOutcome,
+    MailSendResolutionError, MailSendWorkflowError, MailSyncProgress, MailSyncReport, MailWorkflow,
+    MailWorkflowError, MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
+    WellKnownFolderMoveOutcome,
 };

@@ -1,6 +1,6 @@
 # ADR 0038: Share mail cache handles by account
 
-- Status: Accepted for Linux
+- Status: Superseded by ADR 0043
 - Date: 2026-11-06
 - Owners: Project maintainer
 
@@ -30,6 +30,7 @@ Application workflows reserve the account before cache removal. Removal closes t
 - Cache opening and factory-level removal return `MailCacheError::OperationInProgress` when another process holds the account lock.
 - Account removal is serialized with provider sync and body-fetch operations created by the same mail workflow factory.
 - Linux tests verify that sibling sessions share a client, removal closes the client for every session, and a new cache can open after successful removal.
+- ADR 0043 replaces the factory-level weak-handle registry with one cache handle per account session and shared account lock leases. Mail and calendar workflows in a session still share one cache client; removal requires exclusive account-lock ownership.
 
 ## Sources
 

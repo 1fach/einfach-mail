@@ -10,16 +10,21 @@ name = "einfach-mail"
 path = "src/main.rs"
 
 [dependencies]
+chrono.workspace = true
 gpui-kit.workspace = true
 einfach-mail-application = { path = "../../crates/application" }
 einfach-mail-domain = { path = "../../crates/domain" }
 einfach-mail-persistence = { path = "../../crates/persistence" }
 einfach-mail-microsoft-graph = { path = "../../crates/providers/microsoft-graph" }
+jiff.workspace = true
+time.workspace = true
 uuid.workspace = true
 tokio.workspace = true
+xdg.workspace = true
 
 [dev-dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false, features = ["test-support"] }
+tokio.workspace = true
 
 [lints]
 workspace = true

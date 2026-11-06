@@ -83,6 +83,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "addr-spec"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40684472b7e790159f392c064c78628bf73302c848a7c8560284cd12df9b8160"
+dependencies = [
+ "rustc_version",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1678,7 +1688,9 @@ dependencies = [
  "ammonia",
  "einfach-mail-domain",
  "html2text",
+ "smol",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-util",
  "url",
@@ -1704,19 +1716,28 @@ dependencies = [
 name = "einfach-mail-desktop"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "einfach-mail-application",
  "einfach-mail-domain",
  "einfach-mail-microsoft-graph",
  "einfach-mail-persistence",
  "gpui-kit",
  "gpui-pre",
+ "jiff",
+ "time",
  "tokio",
  "uuid",
+ "xdg",
 ]
 
 [[package]]
 name = "einfach-mail-domain"
 version = "0.1.0"
+dependencies = [
+ "addr-spec",
+ "time",
+ "uuid",
+]
 
 [[package]]
 name = "einfach-mail-email-html-proof"
@@ -1751,6 +1772,7 @@ version = "0.1.0"
 dependencies = [
  "einfach-mail-application",
  "einfach-mail-domain",
+ "headers",
  "httpdate",
  "httpmock",
  "huskarl",
@@ -1774,6 +1796,7 @@ name = "einfach-mail-persistence"
 version = "0.1.0"
 dependencies = [
  "async-sqlite",
+ "blocking",
  "einfach-mail-application",
  "einfach-mail-domain",
  "getrandom 0.4.3",
@@ -1784,6 +1807,8 @@ dependencies = [
  "smol",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
+ "uuid",
  "xdg",
  "zeroize",
 ]
@@ -3231,6 +3256,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "headers"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc2700e3fe555c3310aa7286cac6167449f2c87e0eb58769c9208a1c58a1d106"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "headers-core",
+ "http",
+ "httpdate",
+ "mime",
+ "sha1",
+]
+
+[[package]]
+name = "headers-core"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54b4a22553d4242c49fddb9ba998a99962b5cc6f22cb5a3482bec22522403ce4"
+dependencies = [
+ "http",
+]
+
+[[package]]
 name = "heapless"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3926,6 +3975,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -6849,6 +6899,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7909,6 +7970,15 @@ name = "unicode-linebreak"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-properties"
