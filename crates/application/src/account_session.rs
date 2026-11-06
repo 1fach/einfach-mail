@@ -15,7 +15,8 @@ use crate::{
     CalendarWorkflow, CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCache, MailCacheError,
     MailProvider, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError,
     MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError,
-    MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
+    MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome, WellKnownFolderMoveOutcome,
+    WellKnownMailFolder,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -136,6 +137,27 @@ pub trait MailSession: Send + Sync {
         message_id: &'a MessageId,
         destination_folder: &'a FolderReference,
     ) -> AccountSessionFuture<'a, Result<MessageMoveOutcome, MailWorkflowError>>;
+
+    /// Moves a cached message into a well-known folder in the signed-in account.
+    ///
+    /// The workflow requires a successful account sync in this session and leaves the cached
+    /// source untouched unless the provider confirms the move.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailWorkflowError::AlreadyInWellKnownFolder`] when the source is already the
+    /// requested folder, [`MailWorkflowError::WellKnownFolderUnavailable`] when the destination
+    /// is not visible in the active account, [`MailWorkflowError::InvalidMoveDestination`] when
+    /// the source is no longer visible, [`MailWorkflowError::AccountSyncRequired`] before a
+    /// successful session sync, [`MailWorkflowError::FolderSyncRequired`] when either folder needs
+    /// reconciliation, or another provider, cache, or reservation error when the move cannot
+    /// complete.
+    fn move_message_to_well_known_folder<'a>(
+        &'a self,
+        source_folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        destination: WellKnownMailFolder,
+    ) -> AccountSessionFuture<'a, Result<WellKnownFolderMoveOutcome, MailWorkflowError>>;
 
     /// Sends a plain-text message and saves a body-free marker before dispatch.
     fn send_message<'a>(
@@ -455,6 +477,20 @@ where
             source_folder,
             message_id,
             destination_folder,
+        ))
+    }
+
+    fn move_message_to_well_known_folder<'a>(
+        &'a self,
+        source_folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        destination: WellKnownMailFolder,
+    ) -> AccountSessionFuture<'a, Result<WellKnownFolderMoveOutcome, MailWorkflowError>> {
+        Box::pin(MailWorkflow::move_message_to_well_known_folder(
+            self,
+            source_folder,
+            message_id,
+            destination,
         ))
     }
 

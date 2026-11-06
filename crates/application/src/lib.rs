@@ -30,11 +30,12 @@ pub use email_html::{
 };
 pub use mail::{
     MailOperationError, MailProvider, MailSendProviderError, MessageDeltaPageResponse,
-    MessageDeltaRequest, MessageDeltaResponse,
+    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 pub use mail_cache::{MailCache, MailCacheError, MailSyncState};
 pub use mail_workflow::{
     AccountSessionWorkflowFactory, FollowUpFlagUpdateOutcome, MailSendOutcome,
     MailSendResolutionError, MailSendWorkflowError, MailSyncProgress, MailSyncReport, MailWorkflow,
     MailWorkflowError, MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
+    WellKnownFolderMoveOutcome,
 };
