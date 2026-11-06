@@ -47,3 +47,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0042](0042-keyboard-navigation-for-calendar-agenda.md) | Use one listbox for weekly agenda navigation | Accepted; manual Linux accessibility review remains open |
 | [0043](0043-per-account-mail-and-calendar-session.md) | Use one per-account mail and calendar session | Accepted |
 | [0044](0044-block-calendar-actions-during-replacement-sync.md) | Block calendar actions during replacement sync | Accepted |
+| [0045](0045-incremental-graph-permissions.md) | Request Graph permissions incrementally | Accepted; live consent verification remains open |

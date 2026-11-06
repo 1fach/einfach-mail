@@ -12,11 +12,11 @@ Wino Mail's shared authenticator calls Microsoft Graph `/me` after sign-in and s
 
 ## Decision
 
-Use Microsoft Graph `GET /me?$select=id,displayName,mail,userPrincipalName` for the first connected-account identity. Request delegated `User.Read`, `Mail.Read`, and `offline_access` through the `organizations` authority. Explain that `Mail.Read` is read-only and that the app fetches a message body only after the user opens it. Do not request `Mail.ReadWrite`, send permission, or application permissions.
+Use Microsoft Graph `GET /me?$select=id,displayName,mail,userPrincipalName` for the first connected-account identity. On initial connection, request delegated `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access` through the `organizations` authority. Explain that `Mail.Read` is read-only and that the app fetches a message body only after the user opens it. Keep additional mail, calendar, and send permissions out of this request. See [ADR 0045](0045-incremental-graph-permissions.md) for later user-reviewed requests. Do not request application permissions.
 
 Do not request `openid` or `profile`, consume an ID token, or add a custom multi-tenant OIDC issuer validator for this workflow. The provider parses the Graph response at its boundary and returns a provider-independent account identity. Use Graph `id` as the opaque account identifier. Use `displayName` for the label. Prefer `mail` for the mailbox address and retain `userPrincipalName` separately because they can differ. Treat `mail` as optional.
 
-Keep access and refresh tokens inside the Microsoft provider. Do not expose Graph response types to application workflows or GPUI views. Do not request `User.Read.All`, `Mail.ReadWrite`, send permission, or application permissions.
+Keep access and refresh tokens inside the Microsoft provider. Do not expose Graph response types to application workflows or GPUI views. Do not request `User.Read.All` or application permissions.
 
 ## Alternatives
 

@@ -87,7 +87,7 @@ Synthetic Graph, workflow, persistence, and headless GPUI tests cover mail and c
 
 ## Design risks
 
-- No dedicated Microsoft 365 test tenant or public app registration is available. Live Entra behavior, complete Graph mailbox sync, Mail.ReadWrite consent, and read-state and follow-up flag PATCH behavior remain unverified under issues #3, #8, #24, and #32.
+- No dedicated Microsoft 365 test tenant or public app registration is available. Live Entra consent and Graph behavior remain unverified under issues #3, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, and #42.
 - Issue #9 remains open for real-window layout, operating-system clipboard behavior, and system-browser launch. Headless GPUI tests do not establish those behaviors.
 - Calendar recurrence, daylight-saving boundaries, and all-day semantics have synthetic coverage only. Keep issue #6 open for tenant verification; keep issue #22 open for manual Linux accessibility and layout review.
 - Reply recipient routing and Sent Items reconciliation have synthetic coverage only. Keep issue #30 open for tenant verification.

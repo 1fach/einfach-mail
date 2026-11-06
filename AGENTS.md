@@ -21,7 +21,7 @@ Read nearby source and tests before editing them. Treat checked-in files as the 
 - Keep implementation plans and acceptance criteria in issues once the repository has a remote. Do not copy issue plans into `status.md`.
 - Update `docs/project/roadmap.md` when a milestone changes. Mark completed work only after checking the resulting code or behavior.
 - Do not add personal agent memory files. Durable project facts belong in the files above.
-- The pinned rust and GPUI Kit agent guidance lives in `.agents/skills/`. `skills-lock.json` records its upstream source and SHA-256 hashes for the copied files. Do not edit copied skill files by hand.
+- Agent guidance lives in `.agents/skills/`. `skills-lock.json` records each source and computed hash. Use the Skills CLI, normally `npx skills add`, to add or update skills; do not edit copied skill files or the lock by hand. Use a repo-relative local source for project-owned skills that have no upstream.
 
 ## Look for a library before writing general-purpose code
 
