@@ -109,14 +109,36 @@ impl SecretServiceRefreshTokenStore {
         }
     }
 
+    /// Creates an isolated store for Secret Service integration tests.
     #[cfg(test)]
-    fn with_account(account: String) -> Self {
+    pub(super) fn with_account(account: String) -> Self {
         Self { account }
     }
 
     fn entry(&self) -> Result<Entry, AccountOperationError> {
         Entry::new(CREDENTIAL_SERVICE, &self.account)
             .map_err(|_| AccountOperationError::CredentialStoreUnavailable)
+    }
+}
+
+/// Removes a synthetic credential from Secret Service when the test ends.
+#[cfg(test)]
+pub(super) struct SecretServiceCredentialCleanup(SecretServiceRefreshTokenStore);
+
+#[cfg(test)]
+impl SecretServiceCredentialCleanup {
+    /// Retains the store so its credential can be removed when the guard drops.
+    pub(super) fn new(store: SecretServiceRefreshTokenStore) -> Self {
+        Self(store)
+    }
+}
+
+#[cfg(test)]
+impl Drop for SecretServiceCredentialCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.delete() {
+            eprintln!("could not remove synthetic provider credential: {error}");
+        }
     }
 }
 
@@ -259,17 +281,10 @@ mod tests {
     use einfach_mail_domain::AccountId;
     use huskarl::token::RefreshToken;
 
-    use super::{CredentialIdentity, RefreshTokenStore, SecretServiceRefreshTokenStore};
-
-    struct CredentialCleanup(SecretServiceRefreshTokenStore);
-
-    impl Drop for CredentialCleanup {
-        fn drop(&mut self) {
-            if let Err(error) = self.0.delete() {
-                eprintln!("could not remove synthetic provider credential: {error}");
-            }
-        }
-    }
+    use super::{
+        CredentialIdentity, RefreshTokenStore, SecretServiceCredentialCleanup,
+        SecretServiceRefreshTokenStore,
+    };
 
     #[test]
     #[ignore = "requires an unlocked Linux Secret Service session"]
@@ -282,7 +297,7 @@ mod tests {
             "provider-test-{}-{timestamp}",
             std::process::id(),
         ));
-        let _cleanup = CredentialCleanup(store.clone());
+        let _cleanup = SecretServiceCredentialCleanup::new(store.clone());
         let original_token = synthetic_refresh_token("synthetic-refresh-token-original");
         let rotated_token = synthetic_refresh_token("synthetic-refresh-token-rotated");
         let account_id = synthetic_account_id();
