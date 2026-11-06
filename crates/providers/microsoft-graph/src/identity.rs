@@ -26,6 +26,12 @@ const CALLBACK_PATH: &str = "/callback";
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(600);
 const BASE_AUTHORIZATION_SCOPES: [&str; 4] =
     ["Calendars.Read", "Mail.Read", "User.Read", "offline_access"];
+const CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
+    "Calendars.ReadWrite",
+    "Mail.Read",
+    "User.Read",
+    "offline_access",
+];
 pub(super) const SEND_MAIL_AUTHORIZATION_SCOPES: [&str; 5] = [
     "Calendars.Read",
     "Mail.Read",
@@ -303,8 +309,9 @@ impl AuthorizationParameters {
 pub(super) fn authorization_scopes(request: AccountPermissionRequest) -> &'static [&'static str] {
     match request {
         AccountPermissionRequest::Current => &BASE_AUTHORIZATION_SCOPES,
-        AccountPermissionRequest::SendMail => &SEND_MAIL_AUTHORIZATION_SCOPES,
         AccountPermissionRequest::MailReadWrite => &MAIL_READ_WRITE_AUTHORIZATION_SCOPES,
+        AccountPermissionRequest::CalendarReadWrite => &CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES,
+        AccountPermissionRequest::SendMail => &SEND_MAIL_AUTHORIZATION_SCOPES,
     }
 }
 
@@ -350,8 +357,9 @@ mod tests {
     use url::Url;
 
     use super::{
-        BASE_AUTHORIZATION_SCOPES, Endpoints, MAIL_READ_WRITE_AUTHORIZATION_SCOPES,
-        SEND_MAIL_AUTHORIZATION_SCOPES, authorization_scopes, validate_authorization_request,
+        BASE_AUTHORIZATION_SCOPES, CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES, Endpoints,
+        MAIL_READ_WRITE_AUTHORIZATION_SCOPES, SEND_MAIL_AUTHORIZATION_SCOPES, authorization_scopes,
+        validate_authorization_request,
     };
     use einfach_mail_application::AccountPermissionRequest;
 
@@ -485,5 +493,10 @@ mod tests {
         assert!(
             !authorization_scopes(AccountPermissionRequest::Current).contains(&"Mail.ReadWrite")
         );
+        let requested = authorization_scopes(AccountPermissionRequest::CalendarReadWrite);
+        assert_eq!(requested, &CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES);
+        assert!(requested.contains(&"Calendars.ReadWrite"));
+        assert!(!requested.contains(&"Mail.ReadWrite"));
+        assert!(!requested.contains(&"Mail.Send"));
     }
 }

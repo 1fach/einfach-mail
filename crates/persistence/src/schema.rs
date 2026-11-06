@@ -8,7 +8,7 @@ use crate::store::{CacheFailure, CacheResult};
 pub(super) const MESSAGE_QUERY_VERSION: i64 = 2;
 const FLAG_SCHEMA_VERSION: usize = 5;
 const REPLY_SCHEMA_BASE_VERSION: usize = 7;
-const LATEST_SCHEMA_VERSION: usize = 8;
+const REPLY_SCHEMA_REPAIRED_VERSION: usize = 8;
 
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -283,6 +283,72 @@ fn migrations() -> Migrations<'static> {
 
             DROP TABLE mail_pending_send_v1;",
         ),
+        M::up(
+            "CREATE TABLE calendar_pending_event_creation (
+                account_id TEXT PRIMARY KEY NOT NULL,
+                range_start_seconds INTEGER NOT NULL,
+                range_start_nanoseconds INTEGER NOT NULL
+                    CHECK (range_start_nanoseconds BETWEEN 0 AND 999999999),
+                range_end_seconds INTEGER NOT NULL,
+                range_end_nanoseconds INTEGER NOT NULL
+                    CHECK (range_end_nanoseconds BETWEEN 0 AND 999999999),
+                local_start_julian_day INTEGER NOT NULL,
+                local_end_julian_day INTEGER NOT NULL,
+                creation_id TEXT NOT NULL UNIQUE,
+                subject TEXT NOT NULL,
+                local_start_seconds INTEGER NOT NULL,
+                local_start_nanoseconds INTEGER NOT NULL
+                    CHECK (local_start_nanoseconds BETWEEN 0 AND 999999999),
+                local_end_seconds INTEGER NOT NULL,
+                local_end_nanoseconds INTEGER NOT NULL
+                    CHECK (local_end_nanoseconds BETWEEN 0 AND 999999999),
+                time_zone TEXT NOT NULL,
+                start_seconds INTEGER NOT NULL,
+                start_nanoseconds INTEGER NOT NULL
+                    CHECK (start_nanoseconds BETWEEN 0 AND 999999999),
+                end_seconds INTEGER NOT NULL,
+                end_nanoseconds INTEGER NOT NULL
+                    CHECK (end_nanoseconds BETWEEN 0 AND 999999999),
+                FOREIGN KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) REFERENCES calendar_view_sync_state (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) ON DELETE CASCADE,
+                CHECK (local_start_julian_day < local_end_julian_day),
+                CHECK (
+                    local_start_seconds < local_end_seconds
+                    OR (local_start_seconds = local_end_seconds
+                        AND local_start_nanoseconds < local_end_nanoseconds)
+                ),
+                CHECK (
+                    start_seconds < end_seconds
+                    OR (start_seconds = end_seconds
+                        AND start_nanoseconds < end_nanoseconds)
+                )
+            );",
+        ),
+        M::up(
+            "ALTER TABLE calendar_pending_event_creation
+                ADD COLUMN resolution TEXT NOT NULL DEFAULT 'unresolved'
+                CHECK (resolution IN ('unresolved', 'rejected'));",
+        ),
+        M::up(
+            "ALTER TABLE calendar_pending_event_creation
+                ADD COLUMN view_scope TEXT NOT NULL DEFAULT 'legacy_unbounded'
+                CHECK (view_scope IN ('bounded', 'legacy_unbounded'));",
+        ),
     ])
 }
 
@@ -330,7 +396,7 @@ fn repair_reply_schema(connection: &mut Connection) -> Result<(), CacheFailure> 
                     REFERENCES mail_folders (account_id, folder_id)
                     ON DELETE CASCADE
             );
-            PRAGMA user_version = {LATEST_SCHEMA_VERSION};"
+            PRAGMA user_version = {REPLY_SCHEMA_REPAIRED_VERSION};"
         ))
         .map_err(|_| CacheFailure::Unavailable)?;
     transaction.commit().map_err(|_| CacheFailure::Unavailable)
@@ -777,5 +843,59 @@ mod tests {
             )
             .expect("pending-send table remains available");
         assert!(pending_send_exists);
+    }
+
+    #[test]
+    fn event_creation_migrations_preserve_legacy_marker_recovery_policy() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database opens");
+        migrations()
+            .to_version(&mut connection, 9)
+            .expect("previous schema is applied");
+        connection
+            .execute(
+                "INSERT INTO calendar_view_sync_state (
+                    account_id, range_start_seconds, range_start_nanoseconds,
+                    range_end_seconds, range_end_nanoseconds, local_start_julian_day,
+                    local_end_julian_day
+                ) VALUES (
+                    ?1, 1893974400, 0, 1894579200, 0, 2462504, 2462511
+                )",
+                ["synthetic-account"],
+            )
+            .expect("legacy calendar view is stored");
+        connection
+            .execute(
+                "INSERT INTO calendar_pending_event_creation (
+                    account_id, range_start_seconds, range_start_nanoseconds,
+                    range_end_seconds, range_end_nanoseconds, local_start_julian_day,
+                    local_end_julian_day, creation_id, subject, local_start_seconds,
+                    local_start_nanoseconds, local_end_seconds, local_end_nanoseconds,
+                    time_zone, start_seconds, start_nanoseconds, end_seconds,
+                    end_nanoseconds
+                ) VALUES (
+                    ?1, 1893974400, 0, 1894579200, 0, 2462504, 2462511,
+                    ?2, 'Synthetic event', 1894006800, 0, 1894010400, 0,
+                    'Etc/UTC', 1894006800, 0, 1894010400, 0
+                )",
+                params!["synthetic-account", "8d719f02-64d5-4c4b-905e-0d8ca42c21a8"],
+            )
+            .expect("legacy event creation marker is stored");
+
+        migrations()
+            .to_latest(&mut connection)
+            .expect("event creation resolution migrations apply");
+        let marker_metadata = connection
+            .query_row(
+                "SELECT resolution, view_scope FROM calendar_pending_event_creation
+                 WHERE account_id = ?1",
+                ["synthetic-account"],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("legacy marker remains recoverable");
+
+        assert_eq!(
+            marker_metadata,
+            ("unresolved".to_owned(), "legacy_unbounded".to_owned())
+        );
     }
 }
