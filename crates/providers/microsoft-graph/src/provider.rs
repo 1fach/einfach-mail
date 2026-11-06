@@ -26,7 +26,7 @@ use crate::{
 };
 use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarOperationError, CalendarProvider,
+    CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
     MailOperationError, MailProvider, MailSendProviderError, MessageDeltaRequest,
     MessageDeltaResponse, WellKnownMailFolder,
 };
@@ -505,7 +505,7 @@ impl CalendarProvider for MicrosoftGraphProvider {
         &self,
         view: &CalendarViewReference,
         request: CalendarDeltaRequest,
-    ) -> impl Future<Output = Result<CalendarDeltaPageResponse, CalendarOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<CalendarDeltaResponse, CalendarOperationError>> + Send + '_
     {
         let config = Arc::clone(&self.config);
         let view = view.clone();

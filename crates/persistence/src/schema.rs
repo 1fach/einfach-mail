@@ -349,6 +349,119 @@ fn migrations() -> Migrations<'static> {
                 ADD COLUMN view_scope TEXT NOT NULL DEFAULT 'legacy_unbounded'
                 CHECK (view_scope IN ('bounded', 'legacy_unbounded'));",
         ),
+        M::up(
+            "ALTER TABLE calendar_view_sync_state
+                ADD COLUMN replacement_active INTEGER NOT NULL DEFAULT 0
+                CHECK (replacement_active IN (0, 1));
+
+            CREATE TABLE calendar_event_rebuild (
+                account_id TEXT NOT NULL,
+                range_start_seconds INTEGER NOT NULL,
+                range_start_nanoseconds INTEGER NOT NULL,
+                range_end_seconds INTEGER NOT NULL,
+                range_end_nanoseconds INTEGER NOT NULL,
+                local_start_julian_day INTEGER NOT NULL,
+                local_end_julian_day INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                is_in_view INTEGER NOT NULL CHECK (is_in_view IN (0, 1)),
+                subject TEXT,
+                location TEXT,
+                is_all_day INTEGER NOT NULL CHECK (is_all_day IN (0, 1)),
+                start_seconds INTEGER,
+                start_nanoseconds INTEGER,
+                end_seconds INTEGER,
+                end_nanoseconds INTEGER,
+                start_julian_day INTEGER,
+                end_julian_day INTEGER,
+                original_start_time_zone TEXT,
+                original_end_time_zone TEXT,
+                PRIMARY KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day,
+                    event_id
+                ),
+                FOREIGN KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) REFERENCES calendar_view_sync_state (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) ON DELETE CASCADE,
+                CHECK ((start_nanoseconds IS NULL) = (start_seconds IS NULL)),
+                CHECK ((end_nanoseconds IS NULL) = (end_seconds IS NULL)),
+                CHECK (start_nanoseconds IS NULL
+                       OR start_nanoseconds BETWEEN 0 AND 999999999),
+                CHECK (end_nanoseconds IS NULL
+                       OR end_nanoseconds BETWEEN 0 AND 999999999),
+                CHECK (
+                    (is_all_day = 0
+                     AND start_seconds IS NOT NULL
+                     AND end_seconds IS NOT NULL
+                     AND start_julian_day IS NULL
+                     AND end_julian_day IS NULL)
+                    OR
+                    (is_all_day = 1
+                     AND start_seconds IS NULL
+                     AND end_seconds IS NULL
+                     AND start_julian_day IS NOT NULL
+                     AND end_julian_day IS NOT NULL
+                     AND start_julian_day < end_julian_day)
+                )
+            );
+
+            CREATE TABLE calendar_event_rebuild_removed (
+                account_id TEXT NOT NULL,
+                range_start_seconds INTEGER NOT NULL,
+                range_start_nanoseconds INTEGER NOT NULL,
+                range_end_seconds INTEGER NOT NULL,
+                range_end_nanoseconds INTEGER NOT NULL,
+                local_start_julian_day INTEGER NOT NULL,
+                local_end_julian_day INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                PRIMARY KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day,
+                    event_id
+                ),
+                FOREIGN KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) REFERENCES calendar_view_sync_state (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) ON DELETE CASCADE
+            );",
+        ),
     ])
 }
 
@@ -897,5 +1010,82 @@ mod tests {
             marker_metadata,
             ("unresolved".to_owned(), "legacy_unbounded".to_owned())
         );
+    }
+    #[test]
+    fn calendar_replacement_migration_preserves_existing_events_and_cursor() {
+        let mut connection = Connection::open_in_memory().expect("in-memory database opens");
+        let migrations = migrations();
+        migrations
+            .to_version(&mut connection, 4)
+            .expect("calendar schema is created");
+        connection
+            .execute_batch(
+                "INSERT INTO calendar_view_sync_state (
+                    account_id, range_start_seconds, range_start_nanoseconds,
+                    range_end_seconds, range_end_nanoseconds,
+                    local_start_julian_day, local_end_julian_day,
+                    delta_link, next_link, last_sync_seconds, last_sync_nanoseconds
+                 ) VALUES (
+                    'account', 100, 0, 200, 0, 2462500, 2462507,
+                    'synthetic-delta', NULL, 300, 0
+                 );
+                 INSERT INTO calendar_events (
+                    account_id, range_start_seconds, range_start_nanoseconds,
+                    range_end_seconds, range_end_nanoseconds,
+                    local_start_julian_day, local_end_julian_day, event_id,
+                    subject, location, is_all_day,
+                    start_seconds, start_nanoseconds, end_seconds, end_nanoseconds,
+                    start_julian_day, end_julian_day,
+                    original_start_time_zone, original_end_time_zone
+                 ) VALUES (
+                    'account', 100, 0, 200, 0, 2462500, 2462507, 'event',
+                    'Synthetic event', NULL, 0, 120, 0, 150, 0,
+                    NULL, NULL, NULL, NULL
+                 );",
+            )
+            .expect("existing calendar snapshot is inserted");
+
+        migrations
+            .to_latest(&mut connection)
+            .expect("calendar replacement migration applies");
+
+        let sync_state = connection
+            .query_row(
+                "SELECT delta_link, next_link, last_sync_seconds,
+                        last_sync_nanoseconds, replacement_active
+                 FROM calendar_view_sync_state
+                 WHERE account_id = 'account'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .expect("existing calendar cursor remains readable");
+        let event = connection
+            .query_row(
+                "SELECT event_id, subject
+                 FROM calendar_events WHERE account_id = 'account'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("existing calendar event remains readable");
+
+        assert_eq!(
+            sync_state,
+            (
+                Some("synthetic-delta".to_owned()),
+                None,
+                Some(300),
+                Some(0),
+                0
+            )
+        );
+        assert_eq!(event, ("event".to_owned(), "Synthetic event".to_owned()));
     }
 }

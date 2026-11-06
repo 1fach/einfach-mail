@@ -12,6 +12,7 @@ const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
 const FOLDER_SELECT: &str = "id,displayName,isHidden";
 const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead,flag";
 pub(super) const CALENDAR_EVENT_EDIT_SELECT: &str = "id,subject,location,start,end,isAllDay,originalStartTimeZone,originalEndTimeZone,type,isOrganizer,attendees,isOnlineMeeting,changeKey";
+pub(super) const MAX_GRAPH_CALENDAR_DELTA_URL_BYTES: usize = 16 * 1024;
 
 #[derive(Clone)]
 pub(super) struct GraphAuthority {
@@ -191,6 +192,64 @@ impl GraphAuthority {
         Ok(GraphUrl(link.to_owned()))
     }
 
+    pub(super) fn calendar_delta_opaque_link(&self, link: &str) -> Result<GraphUrl, GraphError> {
+        if link.len() > MAX_GRAPH_CALENDAR_DELTA_URL_BYTES {
+            return Err(GraphError::ResponseTooLarge);
+        }
+        self.opaque_link(link)
+    }
+
+    pub(super) fn calendar_delta_reset_link(
+        &self,
+        range: &CalendarViewRange,
+        location: &str,
+    ) -> Result<GraphUrl, GraphError> {
+        let reset_link = self.calendar_delta_opaque_link(location)?;
+        let expected_url = Url::parse(self.calendar_view_delta_path(range)?.as_str())
+            .map_err(|_| GraphError::UnsafeLink)?;
+        let expected_start = range
+            .start()
+            .format(&Rfc3339)
+            .map_err(|_| GraphError::InvalidRecord)?;
+        let expected_end = range
+            .end()
+            .format(&Rfc3339)
+            .map_err(|_| GraphError::InvalidRecord)?;
+        let reset_url = Url::parse(reset_link.as_str()).map_err(|_| GraphError::UnsafeLink)?;
+        let query = reset_url.query().ok_or(GraphError::UnsafeLink)?;
+        if query
+            .split('&')
+            .any(|pair| !pair.contains('=') || !has_valid_percent_encoding(pair))
+        {
+            return Err(GraphError::UnsafeLink);
+        }
+        let mut has_start = false;
+        let mut has_end = false;
+        let mut has_empty_delta_token = false;
+        for (name, value) in reset_url.query_pairs() {
+            match name.as_ref() {
+                "startDateTime" if !has_start && value == expected_start.as_str() => {
+                    has_start = true;
+                }
+                "endDateTime" if !has_end && value == expected_end.as_str() => {
+                    has_end = true;
+                }
+                "$deltatoken" if !has_empty_delta_token && value.is_empty() => {
+                    has_empty_delta_token = true;
+                }
+                _ => return Err(GraphError::UnsafeLink),
+            }
+        }
+        if reset_url.path() != expected_url.path()
+            || !has_start
+            || !has_end
+            || !has_empty_delta_token
+        {
+            return Err(GraphError::UnsafeLink);
+        }
+        Ok(reset_link)
+    }
+
     pub(super) fn message_delta_reset_link(
         &self,
         folder_id: &str,
@@ -315,6 +374,27 @@ fn has_user_info_separator(raw_url: &str) -> bool {
         })
 }
 
+fn has_valid_percent_encoding(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+        } else if bytes
+            .get(index + 1)
+            .is_some_and(|byte| byte.is_ascii_hexdigit())
+            && bytes
+                .get(index + 2)
+                .is_some_and(|byte| byte.is_ascii_hexdigit())
+        {
+            index += 3;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
 #[derive(Clone)]
 pub(super) struct GraphUrl(String);
 
@@ -424,6 +504,59 @@ mod tests {
         assert_eq!(
             url.query_pairs().collect::<Vec<_>>(),
             [("$select".into(), CALENDAR_EVENT_EDIT_SELECT.into())]
+        );
+    }
+
+    #[test]
+    fn accepts_only_bounded_reset_links_for_the_exact_calendar_range() {
+        let start_date = Date::from_calendar_date(2030, Month::January, 7)
+            .expect("synthetic week start date is valid");
+        let end_date = Date::from_calendar_date(2030, Month::January, 14)
+            .expect("synthetic week end date is valid");
+        let range = CalendarViewRange::new(
+            start_date.midnight().assume_utc(),
+            end_date.midnight().assume_utc(),
+            start_date,
+            end_date,
+        )
+        .expect("synthetic calendar range is valid");
+        let valid_link = "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=";
+        let authority = authority();
+
+        assert_eq!(
+            authority
+                .calendar_delta_reset_link(&range, valid_link)
+                .expect("reset link matches the requested view")
+                .as_str(),
+            valid_link
+        );
+        for link in [
+            "https://example.test/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=",
+            "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-21T00%3A00%3A00Z&$deltatoken=",
+            "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z",
+            "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=expired",
+            "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=",
+            "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=&$deltatoken=",
+            "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=&$top=50",
+            "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z%2&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=",
+            "https://graph.microsoft.com/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken",
+            "https://graph.microsoft.com/v1.0/me/events/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=",
+        ] {
+            assert_eq!(
+                authority.calendar_delta_reset_link(&range, link).err(),
+                Some(GraphError::UnsafeLink)
+            );
+        }
+
+        let oversized_link = format!(
+            "{valid_link}{}",
+            "x".repeat(super::MAX_GRAPH_CALENDAR_DELTA_URL_BYTES)
+        );
+        assert_eq!(
+            authority
+                .calendar_delta_reset_link(&range, &oversized_link)
+                .err(),
+            Some(GraphError::ResponseTooLarge)
         );
     }
 

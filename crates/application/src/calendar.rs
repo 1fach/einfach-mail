@@ -121,22 +121,39 @@ impl CalendarDeltaPageResponse {
     }
 }
 
+/// One calendar delta page or a provider-confirmed expired cursor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CalendarDeltaResponse {
+    /// Contains event changes and the next-page or completed delta link.
+    Page(CalendarDeltaPageResponse),
+    /// Reports an expired cursor.
+    /// When `reset_link` is `None`, the workflow resumes with the fixed-range
+    /// initial query.
+    Reset {
+        /// The validated replacement URL returned by the provider, if any.
+        reset_link: Option<CalendarDeltaLink>,
+        /// Bytes read from the reset response body or its `Location` header.
+        response_bytes: usize,
+    },
+}
+
 /// Calendar operations required by the application.
 pub trait CalendarProvider: Send + Sync {
-    /// Loads one delta page for an account's primary-calendar view.
+    /// Loads one delta page or expired-cursor reset for a primary-calendar view.
     ///
     /// The provider rejects a view scoped to another account. Continuation
     /// links are opaque and are validated before the user's token is attached.
     ///
     /// # Errors
     ///
-    /// Returns a user-safe provider error when sign-in, access, transport,
-    /// response validation, or resource limits prevent loading the page.
+    /// Returns a reset only for an expired continuation cursor. Returns a
+    /// user-safe provider error when sign-in, access, transport, response
+    /// validation, or resource limits prevent loading the response.
     fn calendar_delta_page(
         &self,
         view: &CalendarViewReference,
         request: CalendarDeltaRequest,
-    ) -> impl Future<Output = Result<CalendarDeltaPageResponse, CalendarOperationError>> + Send + '_;
+    ) -> impl Future<Output = Result<CalendarDeltaResponse, CalendarOperationError>> + Send + '_;
 
     /// Creates one event for the operation's account and exact primary-calendar view.
     ///
@@ -231,6 +248,17 @@ pub struct CalendarSyncState {
     delta_link: Option<CalendarDeltaLink>,
     next_link: Option<CalendarDeltaLink>,
     last_synchronized_at: Option<SystemTime>,
+    mode: CalendarSyncMode,
+}
+
+/// Identifies which calendar snapshot a saved cursor continues.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalendarSyncMode {
+    /// Continues updates against the active snapshot.
+    Incremental,
+    /// Rebuilds a snapshot while leaving the active snapshot visible.
+    Replacement,
 }
 
 impl CalendarSyncState {
@@ -241,6 +269,7 @@ impl CalendarSyncState {
             delta_link: None,
             next_link: None,
             last_synchronized_at: None,
+            mode: CalendarSyncMode::Incremental,
         }
     }
 
@@ -254,6 +283,7 @@ impl CalendarSyncState {
         delta_link: Option<CalendarDeltaLink>,
         next_link: Option<CalendarDeltaLink>,
         last_synchronized_at: Option<SystemTime>,
+        mode: CalendarSyncMode,
     ) -> Result<Self, CalendarCacheError> {
         if last_synchronized_at.is_some() && delta_link.is_none() {
             return Err(CalendarCacheError::InvalidData);
@@ -262,6 +292,7 @@ impl CalendarSyncState {
             delta_link,
             next_link,
             last_synchronized_at,
+            mode,
         })
     }
 
@@ -283,9 +314,23 @@ impl CalendarSyncState {
         self.last_synchronized_at
     }
 
+    /// Returns whether the saved cursor belongs to an active replacement scan.
+    #[must_use]
+    pub fn replacement_active(&self) -> bool {
+        self.mode == CalendarSyncMode::Replacement
+    }
+
     /// Selects the interrupted page before the completed-round cursor.
     #[must_use]
     pub fn request(&self) -> CalendarDeltaRequest {
+        if self.replacement_active() {
+            return self
+                .next_link
+                .as_ref()
+                .map_or(CalendarDeltaRequest::Initial, |link| {
+                    CalendarDeltaRequest::Continue(link.clone())
+                });
+        }
         self.next_link
             .as_ref()
             .or(self.delta_link.as_ref())
@@ -305,6 +350,7 @@ impl std::fmt::Debug for CalendarSyncState {
             )
             .field("next_link", &self.next_link.as_ref().map(|_| "<redacted>"))
             .field("last_synchronized_at", &self.last_synchronized_at)
+            .field("replacement_active", &self.replacement_active())
             .finish()
     }
 }
@@ -323,10 +369,22 @@ pub trait CalendarCache: Send + Sync {
         view: &CalendarViewReference,
     ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_;
 
+    /// Reports whether any view for the account has an incomplete replacement scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::AccountMismatch`] for another account or
+    /// [`CalendarCacheError::Unavailable`] when the database cannot be read.
+    fn account_has_active_replacement(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<bool, CalendarCacheError>> + Send + '_;
+
     /// Applies one event page and advances its checkpoint in the same transaction.
     ///
-    /// Incomplete updates apply only to cached occurrences. The cache ignores
-    /// upserts that no longer overlap the fixed view and deletes their prior row.
+    /// Replacement pages remain staged until their final page commits. Sparse
+    /// updates apply only to known occurrences, and out-of-view events stay
+    /// staged for later pages but do not appear in the active view.
     ///
     /// # Errors
     ///
@@ -338,6 +396,22 @@ pub trait CalendarCache: Send + Sync {
         view: &CalendarViewReference,
         page: CalendarDeltaPage,
         completed_at: SystemTime,
+    ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_;
+
+    /// Starts a replacement scan while preserving the active snapshot and cursor.
+    ///
+    /// `reset_link` must already have passed the provider's authority and range
+    /// checks. Starting another reset clears staging data for this exact view.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::AccountMismatch`] for another account,
+    /// [`CalendarCacheError::InvalidData`] for malformed stored state or
+    /// [`CalendarCacheError::Unavailable`] when the transaction fails.
+    fn begin_full_resync(
+        &self,
+        view: &CalendarViewReference,
+        reset_link: Option<CalendarDeltaLink>,
     ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_;
 
     /// Returns cached events that overlap the requested view range.
@@ -492,7 +566,7 @@ pub enum CalendarWorkflowError {
     /// The provider returned an edit snapshot for another event or account.
     #[error("the calendar service returned an unexpected event for editing")]
     InvalidEditableEvent,
-    /// A complete calendar sync is required before an event write.
+    /// A view sync or account replacement scan must finish before a calendar write.
     #[error("sync the calendar before changing calendar events")]
     CalendarWriteSyncRequired,
     /// The provider repeated a cursor before completing the current round.
@@ -504,6 +578,9 @@ pub enum CalendarWorkflowError {
     /// The current sync attempt reached its response size limit and is resumable.
     #[error("calendar synchronization reached its response size limit")]
     ResponseLimitExceeded,
+    /// The provider invalidated more than one cursor in this synchronization attempt.
+    #[error("calendar synchronization repeatedly reset its cursor")]
+    DeltaResetLimitExceeded,
     /// The synchronization reservation could not be read or released.
     #[error("the calendar workflow state is unavailable")]
     StateUnavailable,
@@ -526,11 +603,11 @@ impl CalendarSyncReport {
 /// Calendar write state for one view and its account.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CalendarWriteReadiness {
-    /// This view and all recovery-required views for the account are synchronized.
+    /// This view has completed a sync, and no account view needs recovery.
     Ready,
     /// This view has not completed a successful sync in the current workflow.
     ViewSyncRequired,
-    /// At least one previously synchronized view for this account needs recovery.
+    /// An account view needs recovery or has an active replacement scan.
     AccountSyncRequired,
 }
 
@@ -618,12 +695,14 @@ pub enum CalendarEventDeletionOutcome {
 
 const MAX_PAGES_PER_VIEW_ROUND: usize = 1_000;
 const MAX_SYNC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DELTA_RESETS_PER_VIEW_ROUND: usize = 1;
 
 struct CalendarSyncRound {
     state: CalendarSyncState,
     seen_requests: std::collections::HashSet<Option<CalendarDeltaLink>>,
     page_count: usize,
     response_bytes: usize,
+    reset_count: usize,
 }
 
 impl CalendarSyncRound {
@@ -633,6 +712,7 @@ impl CalendarSyncRound {
             seen_requests: std::collections::HashSet::new(),
             page_count: 0,
             response_bytes: 0,
+            reset_count: 0,
         }
     }
 
@@ -649,11 +729,7 @@ impl CalendarSyncRound {
         page: &CalendarDeltaPage,
         page_bytes: usize,
     ) -> Result<(), CalendarWorkflowError> {
-        self.response_bytes = self
-            .response_bytes
-            .checked_add(page_bytes)
-            .filter(|total| *total <= MAX_SYNC_RESPONSE_BYTES)
-            .ok_or(CalendarWorkflowError::ResponseLimitExceeded)?;
+        self.add_response_bytes(page_bytes)?;
         if let einfach_mail_domain::CalendarDeltaProgress::Next(link) = page.progress()
             && self.seen_requests.contains(&Some(link.clone()))
         {
@@ -662,9 +738,25 @@ impl CalendarSyncRound {
         Ok(())
     }
 
+    fn add_response_bytes(&mut self, response_bytes: usize) -> Result<(), CalendarWorkflowError> {
+        self.response_bytes = self
+            .response_bytes
+            .checked_add(response_bytes)
+            .filter(|total| *total <= MAX_SYNC_RESPONSE_BYTES)
+            .ok_or(CalendarWorkflowError::ResponseLimitExceeded)?;
+        Ok(())
+    }
+
     fn commit(&mut self, state: CalendarSyncState) {
         self.state = state;
         self.page_count += 1;
+    }
+
+    fn restart_after_reset(&mut self, state: CalendarSyncState) -> bool {
+        self.state = state;
+        self.seen_requests.clear();
+        self.reset_count += 1;
+        self.reset_count <= MAX_DELTA_RESETS_PER_VIEW_ROUND
     }
 
     fn is_complete(&self) -> bool {
@@ -750,11 +842,19 @@ where
         let sync_state = self.cache.ensure_view(view).await?;
         let events = self.cache.list_events(view).await?;
         let pending_creation = self.cache.pending_event_creation(view.account_id()).await?;
+        let account_has_active_replacement = self
+            .cache
+            .account_has_active_replacement(view.account_id())
+            .await?;
         let recovery = self
             .write_recovery
             .lock()
             .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
-        let write_readiness = recovery.readiness_for(view);
+        let write_readiness = if account_has_active_replacement {
+            CalendarWriteReadiness::AccountSyncRequired
+        } else {
+            recovery.readiness_for(view)
+        };
         Ok(CalendarSnapshot {
             events,
             sync_state,
@@ -766,13 +866,14 @@ where
     /// Synchronizes all pages for one fixed primary-calendar view.
     ///
     /// Each page and its continuation link commit together. An interrupted
-    /// round resumes at its saved next link the next time this method runs.
+    /// replacement scan resumes from its saved link while the prior snapshot
+    /// remains visible.
     ///
     /// # Errors
     ///
     /// Returns a provider or cache error when a page cannot be loaded or
     /// committed, [`CalendarWorkflowError::RepeatedCursor`] for a looped link,
-    /// a page or response limit error while preserving resumable state, or
+    /// a page, response, or reset limit error while preserving resumable state, or
     /// [`CalendarWorkflowError::OperationInProgress`] when another operation
     /// owns the account.
     pub async fn sync_view(
@@ -821,17 +922,16 @@ where
         &self,
         creation: &CalendarEventCreation,
     ) -> Result<CalendarEventCreationOutcome, CalendarWorkflowError> {
-        let _reservation = reserve_calendar_view(&self.reservations, creation.view()).map_err(
-            |error| match error {
+        let _reservation = reserve_account(&self.reservations, creation.view().account_id())
+            .map_err(|error| match error {
                 AccountReservationError::OperationInProgress => {
                     CalendarWorkflowError::OperationInProgress
                 }
                 AccountReservationError::StateUnavailable => {
                     CalendarWorkflowError::StateUnavailable
                 }
-            },
-        )?;
-        self.ensure_calendar_write_ready(creation.view())?;
+            })?;
+        self.ensure_calendar_write_ready(creation.view()).await?;
         self.cache.stage_event_creation(creation).await?;
         let event = match self.provider.create_event(creation).await {
             Ok(event) => event,
@@ -918,7 +1018,7 @@ where
                     CalendarWorkflowError::StateUnavailable
                 }
             })?;
-        self.ensure_calendar_write_ready(event.reference())?;
+        self.ensure_calendar_write_ready(event.reference()).await?;
         let editable = self.provider.editable_event(event).await?;
         if editable.occurrence().reference() != event.reference()
             || editable.occurrence().id() != event.id()
@@ -962,7 +1062,7 @@ where
                     CalendarWorkflowError::StateUnavailable
                 }
             })?;
-        self.ensure_calendar_write_ready(view)?;
+        self.ensure_calendar_write_ready(view).await?;
         let event = match self.provider.update_event(update).await {
             Ok(event) => event,
             Err(error) => {
@@ -1019,7 +1119,7 @@ where
                     CalendarWorkflowError::StateUnavailable
                 }
             })?;
-        self.ensure_calendar_write_ready(view)?;
+        self.ensure_calendar_write_ready(view).await?;
         if let Err(error) = self.provider.delete_event(event).await {
             if matches!(
                 error,
@@ -1038,10 +1138,17 @@ where
         }
     }
 
-    fn ensure_calendar_write_ready(
+    async fn ensure_calendar_write_ready(
         &self,
         view: &CalendarViewReference,
     ) -> Result<(), CalendarWorkflowError> {
+        if self
+            .cache
+            .account_has_active_replacement(view.account_id())
+            .await?
+        {
+            return Err(CalendarWorkflowError::CalendarWriteSyncRequired);
+        }
         let recovery = self
             .write_recovery
             .lock()
@@ -1112,15 +1219,36 @@ where
         round: &mut CalendarSyncRound,
     ) -> Result<bool, CalendarWorkflowError> {
         let request = round.next_request()?;
-        let response = self.provider.calendar_delta_page(view, request).await?;
-        let (page, page_bytes) = response.into_parts();
-        round.validate_response(&page, page_bytes)?;
-        let state = self
-            .cache
-            .commit_delta_page(view, page, SystemTime::now())
-            .await?;
-        round.commit(state);
-        Ok(round.is_complete())
+        match self
+            .provider
+            .calendar_delta_page(view, request.clone())
+            .await?
+        {
+            CalendarDeltaResponse::Page(response) => {
+                let (page, page_bytes) = response.into_parts();
+                round.validate_response(&page, page_bytes)?;
+                let state = self
+                    .cache
+                    .commit_delta_page(view, page, SystemTime::now())
+                    .await?;
+                round.commit(state);
+                Ok(round.is_complete())
+            }
+            CalendarDeltaResponse::Reset {
+                reset_link,
+                response_bytes,
+            } => {
+                if request == CalendarDeltaRequest::Initial {
+                    return Err(CalendarOperationError::InvalidResponse.into());
+                }
+                round.add_response_bytes(response_bytes)?;
+                let state = self.cache.begin_full_resync(view, reset_link).await?;
+                if !round.restart_after_reset(state) {
+                    return Err(CalendarWorkflowError::DeltaResetLimitExceeded);
+                }
+                Ok(false)
+            }
+        }
     }
 }
 

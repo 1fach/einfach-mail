@@ -17,12 +17,12 @@ use async_sqlite::{
     Client,
     rusqlite::{
         Connection, OptionalExtension, Result as SqlResult, Transaction, TransactionBehavior,
-        params,
+        params, params_from_iter,
     },
 };
 use einfach_mail_application::{
-    AccountCacheFactory, CalendarCache, CalendarCacheError, CalendarSyncState, MailCache,
-    MailCacheError, MailSyncState,
+    AccountCacheFactory, CalendarCache, CalendarCacheError, CalendarSyncMode, CalendarSyncState,
+    MailCache, MailCacheError, MailSyncState,
 };
 use einfach_mail_domain::{
     AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
@@ -138,6 +138,7 @@ struct CalendarProgressCommit {
     scope: CalendarScope,
     progress: CalendarDeltaProgress,
     completed_at: (i64, i64),
+    finish_replacement: bool,
 }
 
 struct CalendarEventTimeColumns {
@@ -1186,6 +1187,26 @@ impl CalendarCache for SqliteMailCache {
         }
     }
 
+    fn account_has_active_replacement(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<bool, CalendarCacheError>> + Send + '_ {
+        let validation = self
+            .check_account(account_id)
+            .map_err(|_| CalendarCacheError::AccountMismatch);
+        let account_id = account_id.as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_and_then(move |connection| {
+                    calendar_account_has_active_replacement(connection, &account_id)
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
     fn commit_delta_page(
         &self,
         view: &CalendarViewReference,
@@ -1209,6 +1230,26 @@ impl CalendarCache for SqliteMailCache {
             };
             client
                 .conn_mut_and_then(move |connection| commit_calendar_page(connection, commit))
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn begin_full_resync(
+        &self,
+        view: &CalendarViewReference,
+        reset_link: Option<CalendarDeltaLink>,
+    ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(view);
+        let account_id = view.account_id().as_str().to_owned();
+        let reset_link = reset_link.map(|link| link.as_str().to_owned());
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    begin_calendar_full_resync(connection, &account_id, scope, reset_link)
+                })
                 .await
                 .map_err(CacheFailure::calendar_public)
         }
@@ -1479,6 +1520,20 @@ impl CalendarCache for SqliteMailCache {
     }
 }
 
+fn calendar_account_has_active_replacement(
+    connection: &Connection,
+    account_id: &str,
+) -> CacheResult<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(
+                SELECT 1 FROM calendar_view_sync_state
+                WHERE account_id = ?1 AND replacement_active = 1
+            )",
+        [account_id],
+        |row| row.get(0),
+    )?)
+}
+
 fn commit_calendar_page(
     connection: &mut Connection,
     commit: CalendarPageCommit,
@@ -1490,7 +1545,23 @@ fn commit_calendar_page(
     let account_id = scope.account_id().to_owned();
     let transaction = connection.transaction()?;
     insert_calendar_view_state(&transaction, &account_id, commit.scope)?;
-    apply_calendar_changes(&transaction, scope, commit.changes)?;
+    let replacing =
+        read_calendar_sync_state(&transaction, &account_id, commit.scope)?.replacement_active();
+    let finish_replacement =
+        replacing && matches!(&commit.progress, CalendarDeltaProgress::Complete(_));
+    apply_calendar_changes(
+        &transaction,
+        scope,
+        commit.changes,
+        if replacing {
+            CalendarEventTable::Rebuild
+        } else {
+            CalendarEventTable::Active
+        },
+    )?;
+    if finish_replacement {
+        replace_calendar_snapshot(&transaction, scope)?;
+    }
     persist_calendar_progress(
         &transaction,
         CalendarProgressCommit {
@@ -1498,6 +1569,7 @@ fn commit_calendar_page(
             scope: commit.scope,
             progress: commit.progress,
             completed_at: commit.completed_at,
+            finish_replacement,
         },
     )?;
     let state = read_calendar_sync_state(&transaction, &account_id, commit.scope)?;
@@ -1505,62 +1577,269 @@ fn commit_calendar_page(
     Ok(state)
 }
 
+fn begin_calendar_full_resync(
+    connection: &mut Connection,
+    account_id: &str,
+    scope: CalendarScope,
+    reset_link: Option<String>,
+) -> CacheResult<CalendarSyncState> {
+    let transaction = connection.transaction()?;
+    insert_calendar_view_state(&transaction, account_id, scope)?;
+    transaction.execute(
+        "DELETE FROM calendar_event_rebuild
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7",
+        params_from_iter(calendar_scope_params(account_id, scope)),
+    )?;
+    transaction.execute(
+        "DELETE FROM calendar_event_rebuild_removed
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7",
+        params_from_iter(calendar_scope_params(account_id, scope)),
+    )?;
+    let changed = transaction.execute(
+        "UPDATE calendar_view_sync_state
+         SET next_link = ?8, replacement_active = 1
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7",
+        params![
+            account_id,
+            scope.start_seconds,
+            scope.start_nanoseconds,
+            scope.end_seconds,
+            scope.end_nanoseconds,
+            scope.local_start_julian_day,
+            scope.local_end_julian_day,
+            reset_link
+        ],
+    )?;
+    if changed != 1 {
+        return Err(CacheFailure::InvalidData);
+    }
+    let state = read_calendar_sync_state(&transaction, account_id, scope)?;
+    transaction.commit()?;
+    Ok(state)
+}
+
+fn calendar_scope_params(
+    account_id: &str,
+    scope: CalendarScope,
+) -> [async_sqlite::rusqlite::types::Value; 7] {
+    [
+        account_id.to_owned().into(),
+        scope.start_seconds.into(),
+        scope.start_nanoseconds.into(),
+        scope.end_seconds.into(),
+        scope.end_nanoseconds.into(),
+        i64::from(scope.local_start_julian_day).into(),
+        i64::from(scope.local_end_julian_day).into(),
+    ]
+}
+
+fn replace_calendar_snapshot(
+    transaction: &async_sqlite::rusqlite::Transaction<'_>,
+    scope: CalendarEventScope<'_>,
+) -> CacheResult<()> {
+    let scope_params = || calendar_scope_params(scope.account_id(), scope.range);
+    transaction.execute(
+        "DELETE FROM calendar_events
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7",
+        params_from_iter(scope_params()),
+    )?;
+    transaction.execute(
+        "INSERT INTO calendar_events (
+            account_id,
+            range_start_seconds,
+            range_start_nanoseconds,
+            range_end_seconds,
+            range_end_nanoseconds,
+            local_start_julian_day,
+            local_end_julian_day,
+            event_id,
+            subject,
+            location,
+            is_all_day,
+            start_seconds,
+            start_nanoseconds,
+            end_seconds,
+            end_nanoseconds,
+            start_julian_day,
+            end_julian_day,
+            original_start_time_zone,
+            original_end_time_zone
+         )
+         SELECT
+            account_id,
+            range_start_seconds,
+            range_start_nanoseconds,
+            range_end_seconds,
+            range_end_nanoseconds,
+            local_start_julian_day,
+            local_end_julian_day,
+            event_id,
+            subject,
+            location,
+            is_all_day,
+            start_seconds,
+            start_nanoseconds,
+            end_seconds,
+            end_nanoseconds,
+            start_julian_day,
+            end_julian_day,
+            original_start_time_zone,
+            original_end_time_zone
+         FROM calendar_event_rebuild
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7
+           AND is_in_view = 1",
+        params_from_iter(scope_params()),
+    )?;
+    transaction.execute(
+        "DELETE FROM calendar_event_rebuild
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7",
+        params_from_iter(scope_params()),
+    )?;
+    transaction.execute(
+        "DELETE FROM calendar_event_rebuild_removed
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7",
+        params_from_iter(scope_params()),
+    )?;
+    Ok(())
+}
+
 fn apply_calendar_changes(
     transaction: &async_sqlite::rusqlite::Transaction<'_>,
     scope: CalendarEventScope<'_>,
     changes: Vec<CalendarDeltaChange>,
+    table: CalendarEventTable,
 ) -> CacheResult<()> {
+    let context = CalendarEventChangeContext {
+        transaction,
+        scope,
+        table,
+    };
     for change in changes {
-        apply_calendar_change(transaction, scope, change)?;
+        context.apply(change)?;
     }
     Ok(())
 }
 
-fn apply_calendar_change(
-    transaction: &async_sqlite::rusqlite::Transaction<'_>,
-    scope: CalendarEventScope<'_>,
-    change: CalendarDeltaChange,
-) -> CacheResult<()> {
-    match change {
-        CalendarDeltaChange::Removed { id } => {
-            delete_calendar_event(transaction, scope, id.as_str())
-        }
-        CalendarDeltaChange::Upsert { id, patch } => {
-            apply_calendar_upsert(transaction, scope, id, patch)
-        }
-    }
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CalendarEventTable {
+    Active,
+    Rebuild,
 }
 
-fn apply_calendar_upsert(
-    transaction: &async_sqlite::rusqlite::Transaction<'_>,
-    scope: CalendarEventScope<'_>,
-    id: einfach_mail_domain::EventId,
-    patch: CalendarOccurrencePatch,
-) -> CacheResult<()> {
-    let occurrence = calendar_occurrence_after_patch(transaction, scope, &id, patch)?;
-    if occurrence.overlaps_view() {
-        write_calendar_event(transaction, scope, &occurrence)
-    } else {
-        delete_calendar_event(transaction, scope, id.as_str())
-    }
+struct CalendarEventChangeContext<'scope, 'connection> {
+    transaction: &'scope async_sqlite::rusqlite::Transaction<'connection>,
+    scope: CalendarEventScope<'scope>,
+    table: CalendarEventTable,
 }
 
-fn calendar_occurrence_after_patch(
-    transaction: &async_sqlite::rusqlite::Transaction<'_>,
-    scope: CalendarEventScope<'_>,
-    id: &einfach_mail_domain::EventId,
-    patch: CalendarOccurrencePatch,
-) -> CacheResult<CalendarOccurrence> {
-    match read_calendar_event(transaction, scope, id.as_str())? {
-        Some(mut occurrence) => {
-            patch
-                .apply_to(&mut occurrence)
-                .map_err(|_| CacheFailure::InvalidData)?;
-            Ok(occurrence)
+impl CalendarEventChangeContext<'_, '_> {
+    fn apply(&self, change: CalendarDeltaChange) -> CacheResult<()> {
+        match change {
+            CalendarDeltaChange::Removed { id } => {
+                delete_calendar_event_from(self.transaction, self.scope, id.as_str(), self.table)?;
+                match self.table {
+                    CalendarEventTable::Active => Ok(()),
+                    CalendarEventTable::Rebuild => {
+                        mark_calendar_rebuild_removed(self.transaction, self.scope, id.as_str())
+                    }
+                }
+            }
+            CalendarDeltaChange::Upsert { id, patch } => self.apply_upsert(id, patch),
         }
-        None => patch
-            .into_new(scope.view.clone(), id.clone())
-            .map_err(|_| CacheFailure::InvalidData),
+    }
+
+    fn apply_upsert(
+        &self,
+        id: einfach_mail_domain::EventId,
+        patch: CalendarOccurrencePatch,
+    ) -> CacheResult<()> {
+        let occurrence = self.occurrence_after_patch(&id, patch)?;
+        match self.table {
+            CalendarEventTable::Active if occurrence.overlaps_view() => {
+                write_calendar_event(self.transaction, self.scope, &occurrence)
+            }
+            CalendarEventTable::Active => {
+                delete_calendar_event_from(self.transaction, self.scope, id.as_str(), self.table)
+            }
+            CalendarEventTable::Rebuild => {
+                clear_calendar_rebuild_removed(self.transaction, self.scope, id.as_str())?;
+                write_calendar_rebuild_event(self.transaction, self.scope, &occurrence)
+            }
+        }
+    }
+
+    fn occurrence_after_patch(
+        &self,
+        id: &einfach_mail_domain::EventId,
+        patch: CalendarOccurrencePatch,
+    ) -> CacheResult<CalendarOccurrence> {
+        let removed_from_rebuild = self.table == CalendarEventTable::Rebuild
+            && calendar_rebuild_event_was_removed(self.transaction, self.scope, id.as_str())?;
+        let existing = match read_calendar_event_from(
+            self.transaction,
+            self.scope,
+            id.as_str(),
+            self.table,
+        )? {
+            Some(occurrence) => Some(occurrence),
+            None if self.table == CalendarEventTable::Rebuild && !removed_from_rebuild => {
+                read_calendar_event(self.transaction, self.scope, id.as_str())?
+            }
+            None => None,
+        };
+        match existing {
+            Some(mut occurrence) => {
+                patch
+                    .apply_to(&mut occurrence)
+                    .map_err(|_| CacheFailure::InvalidData)?;
+                Ok(occurrence)
+            }
+            None => patch
+                .into_new(self.scope.view.clone(), id.clone())
+                .map_err(|_| CacheFailure::InvalidData),
+        }
     }
 }
 
@@ -1585,7 +1864,8 @@ fn persist_calendar_progress(
             delta_link.map(|link| link.as_str().to_owned()),
             next_link.map(|link| link.as_str().to_owned()),
             last_sync.map(|(seconds, _)| seconds),
-            last_sync.map(|(_, nanoseconds)| nanoseconds)
+            last_sync.map(|(_, nanoseconds)| nanoseconds),
+            i64::from(update.finish_replacement)
         ],
     )?;
     Ok(())
@@ -1626,7 +1906,8 @@ fn read_calendar_sync_state(
 ) -> CacheResult<CalendarSyncState> {
     let raw = connection
         .query_row(
-            "SELECT delta_link, next_link, last_sync_seconds, last_sync_nanoseconds
+            "SELECT delta_link, next_link, last_sync_seconds, last_sync_nanoseconds,
+                    replacement_active
              FROM calendar_view_sync_state
              WHERE account_id = ?1
                AND range_start_seconds = ?2
@@ -1650,6 +1931,7 @@ fn read_calendar_sync_state(
                     next_link: row.get(1)?,
                     last_sync_seconds: row.get(2)?,
                     last_sync_nanoseconds: row.get(3)?,
+                    replacement_active: row.get(4)?,
                 })
             },
         )
@@ -1660,10 +1942,16 @@ fn read_calendar_sync_state(
         (Some(seconds), Some(nanoseconds)) => Some(timestamp_from_parts(seconds, nanoseconds)?),
         _ => return Err(CacheFailure::InvalidData),
     };
+    let mode = match raw.replacement_active {
+        0 => CalendarSyncMode::Incremental,
+        1 => CalendarSyncMode::Replacement,
+        _ => return Err(CacheFailure::InvalidData),
+    };
     CalendarSyncState::from_checkpoint(
         raw.delta_link.map(CalendarDeltaLink::from_opaque),
         raw.next_link.map(CalendarDeltaLink::from_opaque),
         last_synchronized_at,
+        mode,
     )
     .map_err(|_| CacheFailure::InvalidData)
 }
@@ -1673,6 +1961,7 @@ struct RawCalendarSyncState {
     next_link: Option<String>,
     last_sync_seconds: Option<i64>,
     last_sync_nanoseconds: Option<i64>,
+    replacement_active: i64,
 }
 
 struct RawPendingEventCreation {
@@ -1948,11 +2237,60 @@ ON CONFLICT (
     original_start_time_zone = excluded.original_start_time_zone,
     original_end_time_zone = excluded.original_end_time_zone";
 
+const UPSERT_CALENDAR_REBUILD_EVENT: &str = "INSERT INTO calendar_event_rebuild (
+    account_id,
+    range_start_seconds,
+    range_start_nanoseconds,
+    range_end_seconds,
+    range_end_nanoseconds,
+    local_start_julian_day,
+    local_end_julian_day,
+    event_id,
+    is_in_view,
+    subject,
+    location,
+    is_all_day,
+    start_seconds,
+    start_nanoseconds,
+    end_seconds,
+    end_nanoseconds,
+    start_julian_day,
+    end_julian_day,
+    original_start_time_zone,
+    original_end_time_zone
+) VALUES (
+    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+    ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+)
+ON CONFLICT (
+    account_id,
+    range_start_seconds,
+    range_start_nanoseconds,
+    range_end_seconds,
+    range_end_nanoseconds,
+    local_start_julian_day,
+    local_end_julian_day,
+    event_id
+) DO UPDATE SET
+    is_in_view = excluded.is_in_view,
+    subject = excluded.subject,
+    location = excluded.location,
+    is_all_day = excluded.is_all_day,
+    start_seconds = excluded.start_seconds,
+    start_nanoseconds = excluded.start_nanoseconds,
+    end_seconds = excluded.end_seconds,
+    end_nanoseconds = excluded.end_nanoseconds,
+    start_julian_day = excluded.start_julian_day,
+    end_julian_day = excluded.end_julian_day,
+    original_start_time_zone = excluded.original_start_time_zone,
+    original_end_time_zone = excluded.original_end_time_zone";
+
 const UPDATE_CALENDAR_SYNC_PROGRESS: &str = "UPDATE calendar_view_sync_state
     SET delta_link = COALESCE(?8, delta_link),
         next_link = ?9,
         last_sync_seconds = COALESCE(?10, last_sync_seconds),
-        last_sync_nanoseconds = COALESCE(?11, last_sync_nanoseconds)
+        last_sync_nanoseconds = COALESCE(?11, last_sync_nanoseconds),
+        replacement_active = CASE WHEN ?12 = 1 THEN 0 ELSE replacement_active END
     WHERE account_id = ?1
       AND range_start_seconds = ?2
       AND range_start_nanoseconds = ?3
@@ -1961,13 +2299,18 @@ const UPDATE_CALENDAR_SYNC_PROGRESS: &str = "UPDATE calendar_view_sync_state
       AND local_start_julian_day = ?6
       AND local_end_julian_day = ?7";
 
-fn delete_calendar_event(
+fn delete_calendar_event_from(
     connection: &Connection,
     scope: CalendarEventScope<'_>,
     event_id: &str,
+    table: CalendarEventTable,
 ) -> CacheResult<()> {
-    connection.execute(
-        "DELETE FROM calendar_events
+    let table_name = match table {
+        CalendarEventTable::Active => "calendar_events",
+        CalendarEventTable::Rebuild => "calendar_event_rebuild",
+    };
+    let query = format!(
+        "DELETE FROM {table_name}
          WHERE account_id = ?1
            AND range_start_seconds = ?2
            AND range_start_nanoseconds = ?3
@@ -1975,7 +2318,10 @@ fn delete_calendar_event(
            AND range_end_nanoseconds = ?5
            AND local_start_julian_day = ?6
            AND local_end_julian_day = ?7
-           AND event_id = ?8",
+           AND event_id = ?8"
+    );
+    connection.execute(
+        &query,
         params![
             scope.account_id(),
             scope.range.start_seconds,
@@ -2140,26 +2486,168 @@ fn write_calendar_event(
     Ok(())
 }
 
+fn write_calendar_rebuild_event(
+    connection: &Connection,
+    scope: CalendarEventScope<'_>,
+    event: &CalendarOccurrence,
+) -> CacheResult<()> {
+    let time_columns = CalendarEventTimeColumns::from_time(event.time());
+    connection.execute(
+        UPSERT_CALENDAR_REBUILD_EVENT,
+        params![
+            scope.account_id(),
+            scope.range.start_seconds,
+            scope.range.start_nanoseconds,
+            scope.range.end_seconds,
+            scope.range.end_nanoseconds,
+            scope.range.local_start_julian_day,
+            scope.range.local_end_julian_day,
+            event.id().as_str(),
+            i64::from(event.overlaps_view()),
+            event.subject(),
+            event.location(),
+            time_columns.is_all_day,
+            time_columns.start_seconds,
+            time_columns.start_nanoseconds,
+            time_columns.end_seconds,
+            time_columns.end_nanoseconds,
+            time_columns.start_day,
+            time_columns.end_day,
+            event.original_start_time_zone(),
+            event.original_end_time_zone()
+        ],
+    )?;
+    Ok(())
+}
+
+fn mark_calendar_rebuild_removed(
+    connection: &Connection,
+    scope: CalendarEventScope<'_>,
+    event_id: &str,
+) -> CacheResult<()> {
+    connection.execute(
+        "INSERT OR IGNORE INTO calendar_event_rebuild_removed (
+            account_id,
+            range_start_seconds,
+            range_start_nanoseconds,
+            range_end_seconds,
+            range_end_nanoseconds,
+            local_start_julian_day,
+            local_end_julian_day,
+            event_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            scope.account_id(),
+            scope.range.start_seconds,
+            scope.range.start_nanoseconds,
+            scope.range.end_seconds,
+            scope.range.end_nanoseconds,
+            scope.range.local_start_julian_day,
+            scope.range.local_end_julian_day,
+            event_id
+        ],
+    )?;
+    Ok(())
+}
+
+fn clear_calendar_rebuild_removed(
+    connection: &Connection,
+    scope: CalendarEventScope<'_>,
+    event_id: &str,
+) -> CacheResult<()> {
+    connection.execute(
+        "DELETE FROM calendar_event_rebuild_removed
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7
+           AND event_id = ?8",
+        params![
+            scope.account_id(),
+            scope.range.start_seconds,
+            scope.range.start_nanoseconds,
+            scope.range.end_seconds,
+            scope.range.end_nanoseconds,
+            scope.range.local_start_julian_day,
+            scope.range.local_end_julian_day,
+            event_id
+        ],
+    )?;
+    Ok(())
+}
+
+fn calendar_rebuild_event_was_removed(
+    connection: &Connection,
+    scope: CalendarEventScope<'_>,
+    event_id: &str,
+) -> CacheResult<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM calendar_event_rebuild_removed
+                WHERE account_id = ?1
+                  AND range_start_seconds = ?2
+                  AND range_start_nanoseconds = ?3
+                  AND range_end_seconds = ?4
+                  AND range_end_nanoseconds = ?5
+                  AND local_start_julian_day = ?6
+                  AND local_end_julian_day = ?7
+                  AND event_id = ?8
+            )",
+            params![
+                scope.account_id(),
+                scope.range.start_seconds,
+                scope.range.start_nanoseconds,
+                scope.range.end_seconds,
+                scope.range.end_nanoseconds,
+                scope.range.local_start_julian_day,
+                scope.range.local_end_julian_day,
+                event_id
+            ],
+            |row| row.get(0),
+        )
+        .map_err(CacheFailure::from)
+}
+
 fn read_calendar_event(
     connection: &Connection,
     scope: CalendarEventScope<'_>,
     event_id: &str,
 ) -> CacheResult<Option<CalendarOccurrence>> {
+    read_calendar_event_from(connection, scope, event_id, CalendarEventTable::Active)
+}
+
+fn read_calendar_event_from(
+    connection: &Connection,
+    scope: CalendarEventScope<'_>,
+    event_id: &str,
+    table: CalendarEventTable,
+) -> CacheResult<Option<CalendarOccurrence>> {
+    let table_name = match table {
+        CalendarEventTable::Active => "calendar_events",
+        CalendarEventTable::Rebuild => "calendar_event_rebuild",
+    };
+    let query = format!(
+        "SELECT event_id, subject, location, is_all_day,
+                start_seconds, start_nanoseconds, end_seconds, end_nanoseconds,
+                start_julian_day, end_julian_day,
+                original_start_time_zone, original_end_time_zone
+         FROM {table_name}
+         WHERE account_id = ?1
+           AND range_start_seconds = ?2
+           AND range_start_nanoseconds = ?3
+           AND range_end_seconds = ?4
+           AND range_end_nanoseconds = ?5
+           AND local_start_julian_day = ?6
+           AND local_end_julian_day = ?7
+           AND event_id = ?8"
+    );
     let raw = connection
         .query_row(
-            "SELECT event_id, subject, location, is_all_day,
-                    start_seconds, start_nanoseconds, end_seconds, end_nanoseconds,
-                    start_julian_day, end_julian_day,
-                    original_start_time_zone, original_end_time_zone
-             FROM calendar_events
-             WHERE account_id = ?1
-               AND range_start_seconds = ?2
-               AND range_start_nanoseconds = ?3
-               AND range_end_seconds = ?4
-               AND range_end_nanoseconds = ?5
-               AND local_start_julian_day = ?6
-               AND local_end_julian_day = ?7
-               AND event_id = ?8",
+            &query,
             params![
                 scope.account_id(),
                 scope.range.start_seconds,

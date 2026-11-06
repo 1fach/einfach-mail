@@ -38,6 +38,7 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0031](0031-registered-loopback-port-for-entra.md) | Require a registered loopback port for Entra | Accepted for Linux; tenant verification open |
 | [0032](0032-recover-expired-message-delta-cursors.md) | Recover expired message delta cursors | Accepted for Linux; live Graph verification remains open |
 | [0034](0034-invalidate-cached-message-bodies-after-delta-updates.md) | Invalidate cached message bodies after delta updates | Accepted for Linux implementation |
+| [0036](0036-recover-expired-calendar-delta-cursors.md) | Recover expired calendar delta cursors | Accepted for Linux read-only calendar synchronization; live Graph verification remains open |
 | [0037](0037-reject-stale-mail-sync-pages.md) | Reject stale mail sync pages | Accepted for Linux implementation |
 | [0038](0038-share-mail-cache-handles-by-account.md) | Share mail cache handles by account | Superseded by ADR 0043 |
 | [0039](0039-move-messages-to-deleted-items.md) | Move messages to Deleted Items | Accepted; shared API superseded by ADR 0040 |
@@ -45,3 +46,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0041](0041-bind-saved-sign-in-to-cache-identity.md) | Bind saved sign-in to a verified cache identity | Accepted for Linux M1 |
 | [0042](0042-keyboard-navigation-for-calendar-agenda.md) | Use one listbox for weekly agenda navigation | Accepted; manual Linux accessibility review remains open |
 | [0043](0043-per-account-mail-and-calendar-session.md) | Use one per-account mail and calendar session | Accepted |
+| [0044](0044-block-calendar-actions-during-replacement-sync.md) | Block calendar actions during replacement sync | Accepted |

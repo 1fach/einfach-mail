@@ -17,8 +17,8 @@ use crate::{
     transport::{GraphOperation, GraphResponse, GraphTransportHandle},
 };
 use einfach_mail_application::{
-    CalendarDeltaPageResponse, CalendarDeltaRequest, MessageDeltaPageResponse, MessageDeltaRequest,
-    MessageDeltaResponse, WellKnownMailFolder,
+    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse,
+    MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage,
@@ -156,6 +156,9 @@ impl GraphApi {
                 )));
             }
             GraphResponse::MessageDeltaReset(None) => return Err(GraphError::InvalidResponse),
+            GraphResponse::CalendarViewDeltaReset { .. } => {
+                return Err(GraphError::InvalidResponse);
+            }
         };
         let response_bytes = response.len();
         let page = serde_json::from_slice::<GraphDeltaPage<WireMessageChange>>(&response)
@@ -177,20 +180,48 @@ impl GraphApi {
         view: &CalendarViewReference,
         request: CalendarDeltaRequest,
         token: std::sync::Arc<AccessToken>,
-    ) -> Result<CalendarDeltaPageResponse, GraphError> {
-        let request_url = match request {
-            CalendarDeltaRequest::Initial => {
-                self.authority.calendar_view_delta_path(view.range())?
-            }
-            CalendarDeltaRequest::Continue(link) => self.authority.opaque_link(link.as_str())?,
+    ) -> Result<CalendarDeltaResponse, GraphError> {
+        let (operation, request_url) = match request {
+            CalendarDeltaRequest::Initial => (
+                GraphOperation::CalendarViewDeltaInitial,
+                self.authority.calendar_view_delta_path(view.range())?,
+            ),
+            CalendarDeltaRequest::Continue(link) => (
+                GraphOperation::CalendarViewDeltaContinuation,
+                self.authority.calendar_delta_opaque_link(link.as_str())?,
+            ),
         };
         let response = self
             .transport
-            .get(GraphOperation::CalendarViewDelta, request_url, token)
+            .get_calendar_delta(operation, request_url, token)
             .await?;
-        let response_bytes = response.len();
-        let page = self.parse_calendar_delta_page(&response)?;
-        Ok(CalendarDeltaPageResponse::new(page, response_bytes))
+        match response {
+            GraphResponse::CalendarViewDeltaReset {
+                location,
+                response_bytes,
+            } => {
+                let reset_link = location
+                    .map(|location| {
+                        self.authority
+                            .calendar_delta_reset_link(view.range(), &location)
+                    })
+                    .transpose()?
+                    .map(|url| CalendarDeltaLink::from_opaque(url.as_str().to_owned()));
+                Ok(CalendarDeltaResponse::Reset {
+                    reset_link,
+                    response_bytes,
+                })
+            }
+            GraphResponse::Body(response) => {
+                let response_bytes = response.len();
+                let page = self.parse_calendar_delta_page(&response)?;
+                Ok(CalendarDeltaResponse::Page(CalendarDeltaPageResponse::new(
+                    page,
+                    response_bytes,
+                )))
+            }
+            GraphResponse::MessageDeltaReset(_) => Err(GraphError::InvalidResponse),
+        }
     }
 
     pub(super) async fn create_calendar_event(
@@ -457,11 +488,17 @@ impl GraphApi {
     ) -> Result<CalendarDeltaProgress, GraphError> {
         match (next_link, delta_link) {
             (Some(link), None) => Ok(CalendarDeltaProgress::Next(CalendarDeltaLink::from_opaque(
-                self.authority.opaque_link(&link)?.as_str().to_owned(),
+                self.authority
+                    .calendar_delta_opaque_link(&link)?
+                    .as_str()
+                    .to_owned(),
             ))),
             (None, Some(link)) => Ok(CalendarDeltaProgress::Complete(
                 CalendarDeltaLink::from_opaque(
-                    self.authority.opaque_link(&link)?.as_str().to_owned(),
+                    self.authority
+                        .calendar_delta_opaque_link(&link)?
+                        .as_str()
+                        .to_owned(),
                 ),
             )),
             _ => Err(GraphError::InvalidResponse),
@@ -1480,14 +1517,16 @@ mod tests {
     use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
     use url::Url;
 
-    use einfach_mail_application::{CalendarDeltaRequest, WellKnownMailFolder};
+    use einfach_mail_application::{
+        CalendarDeltaRequest, CalendarDeltaResponse, WellKnownMailFolder,
+    };
     use einfach_mail_domain::{
-        AccountId, CalendarDeltaChange, CalendarDeltaProgress, CalendarEventCreation,
-        CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft, CalendarOccurrence,
-        CalendarOccurrenceTime, CalendarTimeZoneId, CalendarViewRange, CalendarViewReference,
-        EditableCalendarEvent, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
-        MailRecipient, MailReplyDraft, MailReplySource, MailSubject, MessageDeltaChange, MessageId,
-        MessageMetadata, MessageOrigin, ReadState,
+        AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaProgress,
+        CalendarEventCreation, CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft,
+        CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId, CalendarViewRange,
+        CalendarViewReference, EditableCalendarEvent, FolderId, FolderReference,
+        FollowUpFlagStatus, MailDraft, MailRecipient, MailReplyDraft, MailReplySource, MailSubject,
+        MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, ReadState,
     };
 
     use super::{
@@ -2435,6 +2474,9 @@ mod tests {
             .calendar_delta_page(&view, CalendarDeltaRequest::Initial, Arc::clone(&token))
             .await
             .expect("synthetic bounded calendar delta request succeeds");
+        let CalendarDeltaResponse::Page(initial) = initial else {
+            panic!("initial request returns a page");
+        };
         assert!(initial.response_bytes() > 0);
         let (initial_page, _) = initial.into_parts();
         let (mut changes, progress) = initial_page.into_parts();
@@ -2466,6 +2508,9 @@ mod tests {
             .calendar_delta_page(&view, CalendarDeltaRequest::Continue(next), token)
             .await
             .expect("synthetic continuation request succeeds");
+        let CalendarDeltaResponse::Page(continuation) = continuation else {
+            panic!("continuation request returns a page");
+        };
         let (continuation_page, _) = continuation.into_parts();
         let (mut changes, progress) = continuation_page.into_parts();
         assert!(
@@ -2486,6 +2531,82 @@ mod tests {
 
         first_request.assert_async().await;
         continuation_request.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn calendar_410_reset_requires_a_valid_location_on_a_continuation() {
+        let server = MockServer::start_async().await;
+        let reset_link = format!(
+            "{}/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=",
+            server.base_url()
+        );
+        let mock_reset_link = reset_link.clone();
+        let expired = server
+            .mock_async(move |when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/calendarView/delta")
+                    .query_param("$deltatoken", "expired")
+                    .header("content-type", "application/json");
+                then.status(410).header("Location", mock_reset_link.clone());
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+        let response = api
+            .calendar_delta_page(
+                &synthetic_view(),
+                CalendarDeltaRequest::Continue(CalendarDeltaLink::from_opaque(format!(
+                    "{}/v1.0/me/calendarView/delta?$deltatoken=expired",
+                    server.base_url()
+                ))),
+                synthetic_access_token(),
+            )
+            .await
+            .expect("documented 410 reset URL is returned after validation");
+
+        assert_eq!(
+            response,
+            CalendarDeltaResponse::Reset {
+                reset_link: Some(CalendarDeltaLink::from_opaque(reset_link.clone())),
+                response_bytes: reset_link.len(),
+            }
+        );
+        expired.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn sync_state_not_found_starts_the_fixed_range_without_a_location() {
+        let server = MockServer::start_async().await;
+        let body = r#"{"error":{"code":"syncStateNotFound"}}"#;
+        let expired = server
+            .mock_async(move |when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/calendarView/delta")
+                    .query_param("$deltatoken", "expired")
+                    .header("content-type", "application/json");
+                then.status(400).body(body);
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+        let response = api
+            .calendar_delta_page(
+                &synthetic_view(),
+                CalendarDeltaRequest::Continue(CalendarDeltaLink::from_opaque(format!(
+                    "{}/v1.0/me/calendarView/delta?$deltatoken=expired",
+                    server.base_url()
+                ))),
+                synthetic_access_token(),
+            )
+            .await
+            .expect("documented expiration code is mapped without returning the error body");
+
+        assert_eq!(
+            response,
+            CalendarDeltaResponse::Reset {
+                reset_link: None,
+                response_bytes: body.len(),
+            }
+        );
+        expired.assert_async().await;
     }
 
     #[test]

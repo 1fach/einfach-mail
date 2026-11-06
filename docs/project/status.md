@@ -4,7 +4,7 @@ Last updated: 2026-11-06
 
 ## Current milestone
 
-M4 mail and calendar actions remain in progress. PR #53 merged into `candidate/issue-22-calendar-sync` on 2026-11-06 as merge commit `379ba105a4a7836412d5c0f81a86085372739ae3`, completing the native plain-text send implementation and closing issue #27. The merged stack also includes read-state updates, follow-up flags, saved-account identity, the calendar agenda, and account-cache lifecycle coordination. All four required checks passed on PR head `b2d067d42594d5f67770c2925fa8d30c34ee0b98`.
+M4 mail and calendar actions remain in progress. PR #47 merged read-only mail into `main` at `409d299ffbe`; PR #50 merged the Linux calendar agenda and its reviewed stack into `main` on 2026-11-06 as merge commit `8c10dca99fd8cc0a38f76fb11aed5a174b0970f8`. All four required PR #50 checks passed on head `0ecfc019ff661282bc6bf5bfe5ce522bbb77c4e3`. PR #51 implements issue #49 calendar cursor recovery on `main` after PRs #47 and #50 merged. ADR 0036 records the reset flow, ADR 0043 records the per-account session boundary, and ADR 0044 records the event-action gate during replacement scans. Keep issue #49 open until a Microsoft 365 tenant confirms the cursor-reset response shape.
 
 ## Active risks
 
@@ -15,7 +15,7 @@ M4 mail and calendar actions remain in progress. PR #53 merged into `candidate/i
 
 ## Next actions
 
-1. Continue the M1, M2, and M3 verification work recorded in the roadmap and GitHub issues.
+1. Keep issue #49 open until a Microsoft 365 tenant confirms the documented cursor-reset response shape.
 2. Keep issue #28 open until a dedicated Microsoft 365 test tenant is available for delegated consent and live Graph send verification.
 3. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
 
