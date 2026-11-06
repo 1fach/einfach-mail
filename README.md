@@ -40,7 +40,7 @@ CI runs the build, dependency, and test gates in [its Linux workflow](.github/wo
 - `crates/providers/microsoft-graph/` contains Linux OAuth, Graph profile, mail and calendar reads, explicit plain-text sends and replies, response mapping, and Secret Service refresh-token storage.
   Its tests exercise the production Graph adapter with synthetic HTTP fixtures; live Graph behavior remains unverified.
 - `crates/persistence/` owns the Linux XDG cache, SQLCipher schema and migrations, and atomic mail and calendar page commits.
-- `tools/authentication-proof/`, `tools/storage-proof/`, and `tools/email-html-proof/` contain synthetic test-only integration proofs; they expose no application API.
+- `tools/storage-proof/` contains an optional test-only Linux Secret Service and SQLCipher dependency proof. Its synthetic cache is separate from production persistence; it exposes no application API.
 - `docs/product/` contains product scope.
 - `docs/architecture/` describes module ownership and data flow.
 - `docs/decisions/` contains accepted and proposed architecture decisions plus the ADR template.

@@ -118,13 +118,13 @@ bash scripts/check-linux-local.sh
 
 The script runs the Rust 1.95 check, dependency-boundary and ban checks, the active Linux target graph, formatting, Clippy, documentation, RustSec, and workspace tests. If Perl lacks `FindBin.pm` but `pkg-config` finds system OpenSSL, it reports that it uses system OpenSSL for the local run. The workspace test command skips tests marked `ignore`.
 
-Run the storage dependency proof by itself when working on the encryption or credential-store choices:
+Run the separate storage dependency proof when reviewing the Linux Secret Service and SQLCipher dependencies:
 
 ```sh
 cargo test --locked --package einfach-mail-storage-proof
 ```
 
-On Linux, the default run includes a headless-safe test that verifies cache opening fails when Secret Service is unavailable. The credential lifecycle tests require an unlocked desktop Secret Service and are ignored by default. Run them explicitly with:
+This tool builds a synthetic encrypted cache separate from production persistence. Its default Linux run checks behavior when Secret Service is unavailable. The credential and SQLCipher lifecycle tests require an unlocked desktop Secret Service and are ignored by default. Run them explicitly with:
 
 ```sh
 cargo test --locked --package einfach-mail-storage-proof -- --ignored --test-threads=1

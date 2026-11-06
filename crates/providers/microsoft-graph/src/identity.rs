@@ -6,7 +6,7 @@ use std::{
 };
 
 use huskarl::{
-    core::{EndpointUrl, Error as HuskarlError, client_auth::NoAuth},
+    core::{EndpointUrl, Error as HuskarlError, RetryAdvice, client_auth::NoAuth},
     grant::{
         authorization_code::{AuthorizationCodeGrant, LoopbackError, StartInput, StartOutput},
         core::{OAuth2ExchangeGrant, TokenResponse},
@@ -334,7 +334,7 @@ fn map_loopback_error(error: LoopbackError) -> AccountOperationError {
 }
 
 fn map_authorization_error(error: &HuskarlError) -> AccountOperationError {
-    if error.verdict().is_some() {
+    if error.verdict().is_some() || error.retry_advice() == RetryAdvice::No {
         AccountOperationError::SignInFailed
     } else {
         AccountOperationError::ServiceUnavailable

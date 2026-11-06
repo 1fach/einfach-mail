@@ -1574,6 +1574,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_rejects_a_forged_callback_state_before_token_exchange() {
+        let server = MockServer::start_async().await;
+        let unexpected_token_exchange = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/token");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-access","expires_in":3600,"refresh_token":"synthetic-refresh"}"#,
+                    );
+            })
+            .await;
+        let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(None));
+        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
+        let connect_task = tokio::spawn(async move {
+            provider
+                .connect_account(AccountOperationCancellation::new())
+                .await
+        });
+        let authorization_url = browser_receiver
+            .recv()
+            .await
+            .expect("sign-in opens the test browser");
+        let mut callback_url =
+            callback_url_for_response(&authorization_url, "code", "synthetic-authorization-code");
+        callback_url
+            .query_pairs_mut()
+            .clear()
+            .append_pair("code", "synthetic-authorization-code")
+            .append_pair("state", "forged-state");
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client is valid")
+            .get(callback_url)
+            .send()
+            .await
+            .expect("forged callback reaches the loopback listener");
+
+        assert_eq!(
+            connect_task.await.expect("provider task completes"),
+            Err(AccountOperationError::SignInFailed)
+        );
+        assert_eq!(credentials.token_value(), None);
+        unexpected_token_exchange.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn connect_does_not_follow_a_token_endpoint_redirect() {
+        let server = MockServer::start_async().await;
+        let redirect_target_url = server.url("/token-redirect-target");
+        let token_redirect = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/token");
+                then.status(302).header("location", redirect_target_url);
+            })
+            .await;
+        let redirect_target = server
+            .mock_async(|when, then| {
+                when.path("/token-redirect-target");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-access","expires_in":3600,"refresh_token":"synthetic-refresh"}"#,
+                    );
+            })
+            .await;
+        let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(None));
+        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
+        let connect_task = tokio::spawn(async move {
+            provider
+                .connect_account(AccountOperationCancellation::new())
+                .await
+        });
+        let authorization_url = browser_receiver
+            .recv()
+            .await
+            .expect("sign-in opens the test browser");
+        let callback_response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client is valid")
+            .get(callback_url_for_response(
+                &authorization_url,
+                "code",
+                "synthetic-authorization-code",
+            ))
+            .send()
+            .await
+            .expect("loopback callback reaches the test listener");
+
+        assert!(callback_response.status().is_success());
+        assert!(
+            connect_task
+                .await
+                .expect("provider task completes")
+                .is_err()
+        );
+        assert_eq!(credentials.token_value(), None);
+        token_redirect.assert_calls_async(1).await;
+        redirect_target.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
     #[ignore = "requires an unlocked Linux Secret Service session"]
     async fn provider_credential_lifecycle_uses_secret_service_across_restore() {
         let server = MockServer::start_async().await;
