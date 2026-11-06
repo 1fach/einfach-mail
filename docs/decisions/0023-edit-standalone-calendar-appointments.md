@@ -14,7 +14,7 @@ Changing attendee data can send meeting updates. Updating an online meeting body
 ## Decision
 
 - Offer editing for a cached event only after a fresh Graph read confirms all of the following: `type` is `singleInstance`, `isOrganizer` is `true`, `attendees` is present and empty, `isOnlineMeeting` is `false`, `isAllDay` is `false`, and the event has a valid `changeKey`, subject, start, and end. Refuse missing or contradictory metadata.
-- Use a native GPUI form to change only the subject and timed start/end. Keep recurrence, attendees, location, body, online-meeting data, and deletion out of this action. Convert edited local times with the existing Jiff/system-zone policy and reject DST gaps and folds. Existing event edits may move outside the currently displayed week; event creation keeps its current week limit.
+- Use a native GPUI form to change only the subject and timed start/end. Keep recurrence, attendees, location, body, online-meeting data, and deletion out of this action. Convert edited local times with Jiff and the Linux system zone. Reject DST gaps and folds under ADR 0016. Existing event edits may move outside the currently displayed week; event creation keeps its current week limit.
 - Capture the event's `changeKey` when opening the form. Immediately before a save, GET the event again and refuse the update if the key changed or eligibility no longer holds. This detects stale forms but is not an atomic concurrency guarantee: Graph's published event-update contract and OpenAPI do not document a conditional header, so a change in the final GET-to-PATCH interval remains possible.
 - Send one Graph v1.0 PATCH without automatic retry. Include `subject` only when changed. When either endpoint changes, send both `start` and `end` as UTC `dateTimeTimeZone` values. Omit every other property. Require the exact `200 OK`, same immutable event ID, and requested values before reporting success. Treat a lost or unreadable response as uncertain and ask the user to sync before deciding whether to edit again.
 - Model the checked edit snapshot and update as domain values. The application owns account-level calendar reservations during preflight and save, so no view delta or event creation can race with the update transaction. Do not hold a reservation while the user edits the form.
@@ -50,7 +50,6 @@ This decision supersedes the event-update exclusion in ADR 0016 only for the sta
 - [Microsoft Graph event resource](https://learn.microsoft.com/en-us/graph/api/resources/event?view=graph-rest-1.0)
 - [Microsoft Graph get event v1.0](https://learn.microsoft.com/en-us/graph/api/event-get?view=graph-rest-1.0)
 - [ADR 0006: Graph HTTP transport](0006-graph-http-transport.md)
-- [ADR 0012: Graph calendar occurrence times](0012-graph-calendar-occurrence-times.md)
 - [ADR 0014: Linux read-only primary calendar](0014-linux-read-only-calendar-workflow.md)
 - [ADR 0016: Create one-off timed events](0016-idempotent-primary-calendar-event-creation.md)
 - [Issue #39: Edit standalone calendar appointments](https://github.com/1fach/einfach-mail/issues/39)
