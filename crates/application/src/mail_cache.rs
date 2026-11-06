@@ -3,8 +3,8 @@
 use std::{future::Future, time::SystemTime};
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, MailFolder, MailMessage, MailSendOperationId, MessageBody,
-    MessageDeltaLink, PendingMailSend,
+    AccountId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, MailSendOperationId,
+    MessageBody, MessageDeltaLink, MessageId, PendingMailSend, ReadState,
 };
 use thiserror::Error;
 
@@ -34,6 +34,9 @@ pub enum MailCacheError {
     /// Another unresolved send already exists for this account.
     #[error("a previous mail send needs to be resolved")]
     SendAlreadyPending,
+    /// An unresolved calendar event creation must remain with its encrypted cache.
+    #[error("a calendar event creation needs recovery before account removal")]
+    CalendarEventCreationUnresolved,
     /// The operation ID does not match the account's pending send marker.
     #[error("the pending mail send does not match the requested operation")]
     PendingSendMismatch,
@@ -292,6 +295,106 @@ pub trait MailCache: Send + Sync {
     + Send
     + '_;
 
+    /// Returns the cached read state for a message in `folder`.
+    ///
+    /// `Ok(None)` means the message is not cached under this folder identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account or
+    /// [`MailCacheError::Unavailable`] when the cache cannot be read.
+    fn message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> impl Future<Output = Result<Option<ReadState>, MailCacheError>> + Send + '_;
+
+    /// Stores a confirmed read state for a message that remains in `folder`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::MessageNotCached`] when the message is absent,
+    /// [`MailCacheError::Unavailable`] when the write fails.
+    fn set_message_read_state(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        read_state: ReadState,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
+    /// Returns whether `folder` is blocked until a complete delta round commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account or
+    /// [`MailCacheError::Unavailable`] when the cache cannot be read.
+    fn folder_write_sync_required(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<bool, MailCacheError>> + Send + '_;
+
+    /// Commits a folder recovery marker before a message PATCH is dispatched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::InvalidData`] when the folder is absent, or
+    /// [`MailCacheError::Unavailable`] when the marker cannot be committed.
+    fn require_folder_write_sync(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
+    /// Removes a folder recovery marker after a definite provider rejection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account or
+    /// [`MailCacheError::Unavailable`] when the marker cannot be removed.
+    fn clear_folder_write_sync_requirement(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
+    /// Stores a confirmed follow-up flag status for a message in `folder`.
+    ///
+    /// The cache update and removal of the folder recovery marker commit together.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::MessageNotCached`] when the message is absent, or
+    /// [`MailCacheError::Unavailable`] when the update cannot be committed.
+    fn set_message_follow_up_flag_status(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        status: FollowUpFlagStatus,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
+    /// Moves a cached message between folders without dropping its body.
+    ///
+    /// When the destination already contains the same message ID,
+    /// the implementation keeps destination metadata and body values, fills
+    /// missing nullable metadata from the source, and copies the source body
+    /// only when the destination has no body. It then removes the source row in
+    /// the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] when either folder belongs
+    /// to another account, [`MailCacheError::MessageNotCached`] when the source
+    /// message is absent, [`MailCacheError::InvalidData`] when the destination
+    /// folder is not in the cache or both folder references are equal, or
+    /// [`MailCacheError::Unavailable`] when the transaction fails.
+    fn move_message(
+        &self,
+        source_folder: &FolderReference,
+        destination_folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
     /// Stores an opened raw body only when its message remains in the folder cache.
     ///
     /// # Errors
@@ -350,8 +453,9 @@ pub trait MailCache: Send + Sync {
     /// # Errors
     ///
     /// Returns [`MailCacheError::AccountMismatch`] for another account,
-    /// [`MailCacheError::SendAlreadyPending`] while an outcome is unresolved,
-    /// [`MailCacheError::OperationInProgress`] while a send is active, or
+    /// [`MailCacheError::SendAlreadyPending`] while a mail send is unresolved,
+    /// [`MailCacheError::CalendarEventCreationUnresolved`] while an event creation is unresolved,
+    /// [`MailCacheError::OperationInProgress`] while an operation is active, or
     /// [`MailCacheError::Unavailable`] when the cache cannot be inspected or removed.
     fn remove_account(
         &self,

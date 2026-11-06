@@ -726,7 +726,7 @@ impl WireMessage {
         } else {
             ReadState::Unread
         };
-        let metadata = MessageMetadata::new(self.subject, origin, received_at, read_state);
+        let metadata = MessageMetadata::new(self.subject, origin, received_at, read_state, None);
 
         Ok(MailMessage::new(folder, id, metadata))
     }
@@ -1228,6 +1228,7 @@ mod tests {
             ),
             synthetic_received_at(),
             ReadState::Read,
+            None,
         )
     }
 
@@ -1603,6 +1604,7 @@ mod tests {
                         ),
                         received_at,
                         ReadState::Read,
+                        None,
                     ),
                 ),
                 MailMessage::new(
@@ -1614,6 +1616,7 @@ mod tests {
                         MessageOrigin::new(None, None),
                         received_at,
                         ReadState::Unread,
+                        None,
                     ),
                 ),
                 MailMessage::new(
@@ -1628,6 +1631,7 @@ mod tests {
                         ),
                         received_at,
                         ReadState::Read,
+                        None,
                     ),
                 ),
             ]

@@ -116,10 +116,107 @@ impl fmt::Display for InvalidMailSubject {
 
 impl std::error::Error for InvalidMailSubject {}
 
+/// The account-scoped cached message that determines a reply's recipients.
+#[derive(Clone, Eq, PartialEq)]
+pub struct MailReplySource {
+    folder: FolderReference,
+    message_id: MessageId,
+}
+
+impl MailReplySource {
+    /// Creates a source reference from its cached folder and message IDs.
+    #[must_use]
+    pub fn new(folder: FolderReference, message_id: MessageId) -> Self {
+        Self { folder, message_id }
+    }
+
+    /// Returns the account that owns the source message.
+    #[must_use]
+    pub fn account_id(&self) -> &AccountId {
+        self.folder.account_id()
+    }
+
+    /// Returns the cached folder containing the source message.
+    #[must_use]
+    pub fn folder(&self) -> &FolderReference {
+        &self.folder
+    }
+
+    /// Returns the provider-issued ID of the source message.
+    #[must_use]
+    pub fn message_id(&self) -> &MessageId {
+        &self.message_id
+    }
+}
+
+impl fmt::Debug for MailReplySource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MailReplySource(<redacted>)")
+    }
+}
+
+/// An in-memory plain-text reply draft for a cached message.
+#[derive(Eq, PartialEq)]
+pub struct MailReplyDraft {
+    source: MailReplySource,
+    body: Box<str>,
+}
+
+impl MailReplyDraft {
+    /// Creates a reply draft with the source message and plain-text body.
+    #[must_use]
+    pub fn new(source: MailReplySource, body: String) -> Self {
+        Self {
+            source,
+            body: body.into_boxed_str(),
+        }
+    }
+
+    /// Returns the source whose reply recipients Graph will use.
+    #[must_use]
+    pub fn source(&self) -> &MailReplySource {
+        &self.source
+    }
+
+    /// Returns the plain-text reply body.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// Creates the body-free operation marker saved before submission.
+    #[must_use]
+    pub fn pending_send(
+        &self,
+        operation_id: MailSendOperationId,
+        source_subject: Option<&str>,
+        created_at: SystemTime,
+    ) -> PendingMailSend {
+        PendingMailSend::for_reply(
+            self.source.clone(),
+            operation_id,
+            source_subject.map(Into::into),
+            created_at,
+        )
+    }
+}
+
+impl fmt::Debug for MailReplyDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MailReplyDraft")
+            .field("source", &"<redacted>")
+            .field("body", &"<redacted>")
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod recipient_tests {
-    use super::{MailDraft, MailRecipient, MailSendOperationId, MailSubject};
-    use crate::AccountId;
+    use super::{
+        MailDraft, MailRecipient, MailReplyDraft, MailReplySource, MailSendOperationId, MailSubject,
+    };
+    use crate::{AccountId, FolderId, FolderReference, MessageId};
 
     #[test]
     fn parses_a_single_bare_address_and_trims_outer_whitespace() {
@@ -180,6 +277,40 @@ mod recipient_tests {
             assert!(!pending_debug.contains(value));
         }
     }
+
+    #[test]
+    fn reply_debug_output_redacts_source_and_body() {
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is non-empty");
+        let folder = FolderReference::new(
+            account,
+            FolderId::try_from("private-folder-id".to_owned())
+                .expect("synthetic folder ID is non-empty"),
+        );
+        let source = MailReplySource::new(
+            folder,
+            MessageId::try_from("private-message-id".to_owned())
+                .expect("synthetic message ID is non-empty"),
+        );
+        let draft = MailReplyDraft::new(source, "Synthetic private reply".to_owned());
+        let pending = draft.pending_send(
+            MailSendOperationId::new(),
+            Some("Synthetic source subject"),
+            std::time::UNIX_EPOCH,
+        );
+        let draft_debug = format!("{draft:?}");
+        let pending_debug = format!("{pending:?}");
+
+        for value in [
+            "private-folder-id",
+            "private-message-id",
+            "Synthetic private reply",
+            "Synthetic source subject",
+        ] {
+            assert!(!draft_debug.contains(value));
+            assert!(!pending_debug.contains(value));
+        }
+    }
 }
 
 /// An in-memory plain-text message ready for explicit submission.
@@ -227,7 +358,7 @@ impl MailDraft {
         operation_id: MailSendOperationId,
         created_at: SystemTime,
     ) -> PendingMailSend {
-        PendingMailSend::new(
+        PendingMailSend::for_new_message(
             account_id,
             operation_id,
             self.recipient.clone(),
@@ -283,15 +414,71 @@ impl Default for MailSendOperationId {
 pub struct PendingMailSend {
     account_id: AccountId,
     operation_id: MailSendOperationId,
-    recipient: MailRecipient,
-    subject: MailSubject,
+    target: MailSendTarget,
     created_at: SystemTime,
 }
 
-impl PendingMailSend {
-    /// Creates the body-free metadata used to reconcile a send operation.
+/// The body-free target details retained for one unresolved send.
+#[derive(Clone, Eq, PartialEq)]
+pub enum MailSendTarget {
+    /// A new message addressed to one recipient.
+    NewMessage {
+        /// The recipient retained for reconciliation.
+        recipient: MailRecipient,
+        /// The subject retained for reconciliation.
+        subject: MailSubject,
+    },
+    /// A reply tied to its original cached message.
+    Reply {
+        /// The original message whose reply recipients Graph will select.
+        source: MailReplySource,
+        /// The original subject, when available.
+        subject: Option<Box<str>>,
+    },
+}
+
+impl MailSendTarget {
+    /// Returns the new-message recipient, when this operation is not a reply.
     #[must_use]
-    pub fn new(
+    pub fn recipient(&self) -> Option<&MailRecipient> {
+        match self {
+            Self::NewMessage { recipient, .. } => Some(recipient),
+            Self::Reply { .. } => None,
+        }
+    }
+
+    /// Returns the retained subject, when one is available.
+    #[must_use]
+    pub fn subject(&self) -> Option<&str> {
+        match self {
+            Self::NewMessage { subject, .. } => Some(subject.as_str()),
+            Self::Reply { subject, .. } => subject.as_deref(),
+        }
+    }
+
+    /// Returns the source message, when this operation is a reply.
+    #[must_use]
+    pub fn reply_source(&self) -> Option<&MailReplySource> {
+        match self {
+            Self::NewMessage { .. } => None,
+            Self::Reply { source, .. } => Some(source),
+        }
+    }
+}
+
+impl fmt::Debug for MailSendTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NewMessage { .. } => "MailSendTarget::NewMessage(<redacted>)",
+            Self::Reply { .. } => "MailSendTarget::Reply(<redacted>)",
+        })
+    }
+}
+
+impl PendingMailSend {
+    /// Creates body-free metadata for a new-message send.
+    #[must_use]
+    pub fn for_new_message(
         account_id: AccountId,
         operation_id: MailSendOperationId,
         recipient: MailRecipient,
@@ -301,8 +488,23 @@ impl PendingMailSend {
         Self {
             account_id,
             operation_id,
-            recipient,
-            subject,
+            target: MailSendTarget::NewMessage { recipient, subject },
+            created_at,
+        }
+    }
+
+    /// Creates body-free metadata for a reply send.
+    #[must_use]
+    pub fn for_reply(
+        source: MailReplySource,
+        operation_id: MailSendOperationId,
+        subject: Option<Box<str>>,
+        created_at: SystemTime,
+    ) -> Self {
+        Self {
+            account_id: source.account_id().clone(),
+            operation_id,
+            target: MailSendTarget::Reply { source, subject },
             created_at,
         }
     }
@@ -319,16 +521,10 @@ impl PendingMailSend {
         self.operation_id
     }
 
-    /// Returns the recipient kept for reconciliation.
+    /// Returns the target details kept for reconciliation.
     #[must_use]
-    pub fn recipient(&self) -> &MailRecipient {
-        &self.recipient
-    }
-
-    /// Returns the subject kept for reconciliation.
-    #[must_use]
-    pub fn subject(&self) -> &str {
-        self.subject.as_str()
+    pub fn target(&self) -> &MailSendTarget {
+        &self.target
     }
 
     /// Returns when the app staged this operation.
@@ -637,6 +833,17 @@ pub enum ReadState {
     Unread,
 }
 
+/// The synchronized follow-up state of a message.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FollowUpFlagStatus {
+    /// The message has no follow-up flag.
+    NotFlagged,
+    /// The message is flagged for follow-up.
+    Flagged,
+    /// The follow-up flag is complete.
+    Complete,
+}
+
 /// Metadata shown when browsing a message list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageMetadata {
@@ -644,6 +851,7 @@ pub struct MessageMetadata {
     origin: MessageOrigin,
     received_at: SystemTime,
     read_state: ReadState,
+    follow_up_flag_status: Option<FollowUpFlagStatus>,
 }
 
 impl MessageMetadata {
@@ -654,12 +862,14 @@ impl MessageMetadata {
         origin: MessageOrigin,
         received_at: SystemTime,
         read_state: ReadState,
+        follow_up_flag_status: Option<FollowUpFlagStatus>,
     ) -> Self {
         Self {
             subject,
             origin,
             received_at,
             read_state,
+            follow_up_flag_status,
         }
     }
 
@@ -687,6 +897,14 @@ impl MessageMetadata {
         self.read_state
     }
 
+    /// Returns the synchronized follow-up flag status.
+    ///
+    /// `None` means the cache has no current status for this message.
+    #[must_use]
+    pub fn follow_up_flag_status(&self) -> Option<FollowUpFlagStatus> {
+        self.follow_up_flag_status
+    }
+
     /// Applies the changed fields in a message metadata patch.
     pub fn apply_patch(&mut self, patch: MessageMetadataPatch) {
         patch.subject.apply_to(&mut self.subject);
@@ -694,6 +912,9 @@ impl MessageMetadata {
         patch.sender.apply_to(&mut self.origin.sender);
         patch.received_at.apply_to(&mut self.received_at);
         patch.read_state.apply_to(&mut self.read_state);
+        patch
+            .follow_up_flag_status
+            .apply_to(&mut self.follow_up_flag_status);
     }
 }
 
@@ -705,6 +926,7 @@ pub struct MessageMetadataPatch {
     sender: FieldUpdate<Option<Mailbox>>,
     received_at: FieldUpdate<SystemTime>,
     read_state: FieldUpdate<ReadState>,
+    follow_up_flag_status: FieldUpdate<Option<FollowUpFlagStatus>>,
 }
 
 impl MessageMetadataPatch {
@@ -739,6 +961,11 @@ impl MessageMetadataPatch {
         self.read_state = FieldUpdate::Set(read_state);
     }
 
+    /// Replaces or clears the synchronized follow-up flag status.
+    pub fn set_follow_up_flag_status(&mut self, status: Option<FollowUpFlagStatus>) {
+        self.follow_up_flag_status = FieldUpdate::Set(status);
+    }
+
     /// Builds a new message when this patch includes every selected metadata field.
     #[must_use]
     pub fn into_complete_message(
@@ -751,11 +978,16 @@ impl MessageMetadataPatch {
         let sender = self.sender.into_value()?;
         let received_at = self.received_at.into_value()?;
         let read_state = self.read_state.into_value()?;
+        let follow_up_flag_status = match self.follow_up_flag_status {
+            FieldUpdate::Unchanged => None,
+            FieldUpdate::Set(status) => status,
+        };
         let metadata = MessageMetadata::new(
             subject,
             MessageOrigin::new(from, sender),
             received_at,
             read_state,
+            follow_up_flag_status,
         );
         Some(MailMessage::new(folder, id, metadata))
     }
@@ -833,8 +1065,8 @@ mod tests {
     use crate::{AccountId, EmptyMailboxAddress, FolderId, FolderReference, Mailbox};
 
     use super::{
-        FolderParentError, MailFolder, MessageBody, MessageBodyType, MessageMetadata,
-        MessageMetadataPatch, MessageOrigin, ReadState,
+        FolderParentError, FollowUpFlagStatus, MailFolder, MessageBody, MessageBodyType,
+        MessageMetadata, MessageMetadataPatch, MessageOrigin, ReadState,
     };
 
     fn folder_reference(account_id: &str, folder_id: &str) -> FolderReference {
@@ -903,6 +1135,7 @@ mod tests {
         patch.set_sender(Some(replacement_sender.clone()));
         patch.set_received_at(replacement_time);
         patch.set_read_state(ReadState::Unread);
+        patch.set_follow_up_flag_status(Some(FollowUpFlagStatus::Complete));
 
         metadata.apply_patch(patch);
 
@@ -911,6 +1144,10 @@ mod tests {
         assert_eq!(metadata.origin().sender(), Some(&replacement_sender));
         assert_eq!(metadata.received_at(), &replacement_time);
         assert_eq!(metadata.read_state(), ReadState::Unread);
+        assert_eq!(
+            metadata.follow_up_flag_status(),
+            Some(FollowUpFlagStatus::Complete)
+        );
     }
 
     #[test]
@@ -968,6 +1205,7 @@ mod tests {
             ),
             SystemTime::UNIX_EPOCH,
             ReadState::Read,
+            None,
         )
     }
 

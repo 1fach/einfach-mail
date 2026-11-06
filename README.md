@@ -1,6 +1,6 @@
 # Einfach Mail
 
-Einfach Mail is a Rust desktop mail and calendar client with Microsoft 365 integration. The native UI uses GPUI Kit. Linux is the sole development and validation target for the current milestones; Windows and macOS support follow later. The M2 mail candidate adds read-only synchronization, encrypted offline browsing, and sanitized native message rendering. The M3 calendar branch adds read-only primary-calendar synchronization and a cached Linux weekly agenda. Its full local gate and source review pass. Manual desktop accessibility review and live tenant verification remain open. See [project status](docs/project/status.md) for current review state.
+Einfach Mail is a Rust desktop mail and calendar client with Microsoft 365 integration. The native UI uses GPUI Kit. Linux is the sole development and validation target for the current milestones; Windows and macOS support follow later. The M2 mail candidate adds read-only synchronization, encrypted offline browsing, and sanitized native message rendering. The M3 calendar branch adds read-only primary-calendar synchronization and a cached Linux weekly agenda. M4 adds explicit read-state and follow-up flag changes, plain-text sends, and replies to cached messages after Graph confirmation. Manual desktop accessibility review and live tenant verification remain open. See [project status](docs/project/status.md) for current review state.
 
 The first provider target is Exchange Online through Microsoft Graph. Exchange Server installed on premises is outside the first release scope. See the [product brief](docs/product/brief.md) and [Microsoft Graph research](docs/research/microsoft-graph.md).
 
@@ -37,7 +37,7 @@ CI runs the build, dependency, and test gates in [its Linux workflow](.github/wo
 - `apps/desktop/` contains the GPUI application and native views.
 - `crates/domain/` contains provider-independent account, folder, message, calendar occurrence, and sync values.
 - `crates/application/` contains account, mail, and calendar workflows; cache/provider ports; cancellation ordering; and the application-owned email sanitizer.
-- `crates/providers/microsoft-graph/` contains Linux OAuth, Graph profile, mail and calendar reads, response mapping, and Secret Service refresh-token storage.
+- `crates/providers/microsoft-graph/` contains Linux OAuth, Graph profile, mail and calendar reads, explicit plain-text sends and replies, response mapping, and Secret Service refresh-token storage.
 - `crates/persistence/` owns the Linux XDG cache, SQLCipher schema and migrations, and atomic mail and calendar page commits.
 - `tools/authentication-proof/`, `tools/storage-proof/`, `tools/graph-transport-proof/`, and `tools/email-html-proof/` contain synthetic test-only integration proofs; they expose no application API.
 - `docs/product/` contains product scope.

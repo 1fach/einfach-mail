@@ -6,7 +6,8 @@ use einfach_mail_application::{
     MailSendWorkflowError, MailSession,
 };
 use einfach_mail_domain::{
-    AccountId, InvalidMailSubject, MailDraft, MailRecipient, MailSubject, PendingMailSend,
+    AccountId, InvalidMailSubject, MailDraft, MailRecipient, MailReplyDraft, MailReplySource,
+    MailSendTarget, MailSubject, PendingMailSend,
 };
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
@@ -57,6 +58,7 @@ pub(crate) struct MailComposer {
     workflow: Arc<dyn MailSession>,
     permission_requester: Option<Arc<dyn MailPermissionRequester>>,
     account_id: AccountId,
+    target: ComposerTarget,
     recipient: Entity<InputState>,
     subject: Entity<InputState>,
     body: Entity<TextareaState>,
@@ -66,6 +68,41 @@ pub(crate) struct MailComposer {
     duplicate_confirmation_required: bool,
     status: ComposerStatus,
     task: Option<Task<()>>,
+}
+
+#[derive(Clone)]
+pub(super) enum ComposerTarget {
+    NewMessage,
+    Reply {
+        source: MailReplySource,
+        subject: Option<String>,
+    },
+}
+
+pub(super) struct MailComposerContext {
+    pub(super) workflow: Arc<dyn MailSession>,
+    pub(super) permission_requester: Option<Arc<dyn MailPermissionRequester>>,
+    pub(super) account_id: AccountId,
+    pub(super) pending: Result<Option<PendingMailSend>, MailCacheError>,
+    pub(super) target: ComposerTarget,
+}
+
+struct ComposerFields {
+    recipient: Entity<InputState>,
+    subject: Entity<InputState>,
+    body: Entity<TextareaState>,
+}
+
+struct PendingComposerState {
+    pending: Option<PendingMailSend>,
+    certainty: Option<PendingSendCertainty>,
+    available: bool,
+    status: ComposerStatus,
+}
+
+enum ComposerSubmission {
+    NewMessage(MailDraft),
+    Reply(MailReplyDraft),
 }
 
 #[derive(Clone, Copy)]
@@ -82,6 +119,7 @@ enum ComposerStatus {
     PermissionUpdated,
     PermissionRenewalFailed(AccountOperationError),
     ProviderFailed(MailSendProviderError),
+    ReplySourceUnavailable,
     CacheFailed(MailCacheError),
     CacheUnavailable,
     DuplicateConfirmation,
@@ -100,43 +138,92 @@ enum DraftError {
     InvalidSubject(InvalidMailSubject),
 }
 
+impl PendingComposerState {
+    fn from_result(pending: Result<Option<PendingMailSend>, MailCacheError>) -> Self {
+        let available = pending.is_ok();
+        let pending = pending.ok().flatten();
+        let certainty = pending.as_ref().map(|_| PendingSendCertainty::Unknown);
+        let status = if available {
+            ComposerStatus::Editing
+        } else {
+            ComposerStatus::CacheUnavailable
+        };
+        Self {
+            pending,
+            certainty,
+            available,
+            status,
+        }
+    }
+}
+
+async fn submit_composer_message(
+    workflow: &dyn MailSession,
+    account_id: &AccountId,
+    submission: ComposerSubmission,
+) -> Result<MailSendOutcome, MailSendWorkflowError> {
+    match submission {
+        ComposerSubmission::NewMessage(draft) => {
+            workflow
+                .send_message(account_id, draft, SystemTime::now())
+                .await
+        }
+        ComposerSubmission::Reply(draft) => {
+            workflow
+                .reply_to_message(account_id, draft, SystemTime::now())
+                .await
+        }
+    }
+}
+
 impl MailComposer {
     pub(crate) fn new(
-        workflow: Arc<dyn MailSession>,
-        permission_requester: Option<Arc<dyn MailPermissionRequester>>,
-        account_id: AccountId,
-        pending: Result<Option<PendingMailSend>, MailCacheError>,
+        context: MailComposerContext,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let fields = Self::new_fields(&context.target, window, cx);
+        Self::from_context(context, fields)
+    }
+
+    fn from_context(context: MailComposerContext, fields: ComposerFields) -> Self {
+        let pending = PendingComposerState::from_result(context.pending);
+        Self {
+            workflow: context.workflow,
+            permission_requester: context.permission_requester,
+            account_id: context.account_id,
+            target: context.target,
+            recipient: fields.recipient,
+            subject: fields.subject,
+            body: fields.body,
+            pending_certainty: pending.certainty,
+            pending: pending.pending,
+            pending_state_available: pending.available,
+            duplicate_confirmation_required: false,
+            status: pending.status,
+            task: None,
+        }
+    }
+
+    fn new_fields(
+        target: &ComposerTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ComposerFields {
         let recipient = cx.new(|cx| InputState::new(window, cx).placeholder("name@example.com"));
         let subject = cx.new(|cx| InputState::new(window, cx).placeholder("Subject"));
         let body = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Write a plain-text message")
+                .placeholder(match target {
+                    ComposerTarget::NewMessage => "Write a plain-text message",
+                    ComposerTarget::Reply { .. } => "Write a plain-text reply",
+                })
                 .rows(8)
         });
-        let (pending, pending_state_available) = match pending {
-            Ok(pending) => (pending, true),
-            Err(_) => (None, false),
-        };
-        Self {
-            workflow,
-            permission_requester,
-            account_id,
+        ComposerFields {
             recipient,
             subject,
             body,
-            pending_certainty: pending.as_ref().map(|_| PendingSendCertainty::Unknown),
-            pending,
-            pending_state_available,
-            duplicate_confirmation_required: false,
-            status: if pending_state_available {
-                ComposerStatus::Editing
-            } else {
-                ComposerStatus::CacheUnavailable
-            },
-            task: None,
         }
     }
 
@@ -144,9 +231,25 @@ impl MailComposer {
         self.task.is_some()
     }
 
-    fn build_draft(&self, cx: &gpui_kit::App) -> Result<MailDraft, DraftError> {
-        let recipient_value = self.recipient.read(cx).value();
-        let recipient = recipient_value
+    fn build_submission(&self, cx: &gpui_kit::App) -> Result<ComposerSubmission, DraftError> {
+        let body = self.body.read(cx).value().to_string();
+        match &self.target {
+            ComposerTarget::NewMessage => self.build_new_message(cx, body),
+            ComposerTarget::Reply { source, .. } => Ok(ComposerSubmission::Reply(
+                MailReplyDraft::new(source.clone(), body),
+            )),
+        }
+    }
+
+    fn build_new_message(
+        &self,
+        cx: &gpui_kit::App,
+        body: String,
+    ) -> Result<ComposerSubmission, DraftError> {
+        let recipient = self
+            .recipient
+            .read(cx)
+            .value()
             .parse::<MailRecipient>()
             .map_err(|_| DraftError::InvalidRecipient)?;
         let subject = self
@@ -155,8 +258,9 @@ impl MailComposer {
             .value()
             .parse::<MailSubject>()
             .map_err(DraftError::InvalidSubject)?;
-        let body = self.body.read(cx).value().to_string();
-        Ok(MailDraft::new(recipient, subject, body))
+        Ok(ComposerSubmission::NewMessage(MailDraft::new(
+            recipient, subject, body,
+        )))
     }
 
     fn can_send(&self) -> bool {
@@ -174,7 +278,7 @@ impl MailComposer {
         if !self.can_send() {
             return;
         }
-        let draft = match self.build_draft(cx) {
+        let submission = match self.build_submission(cx) {
             Ok(draft) => draft,
             Err(error) => {
                 self.status = ComposerStatus::InvalidDraft(error);
@@ -182,16 +286,19 @@ impl MailComposer {
                 return;
             }
         };
+        self.start_submission(submission, cx);
+    }
+
+    fn start_submission(&mut self, submission: ComposerSubmission, cx: &mut Context<Self>) {
         let workflow = Arc::clone(&self.workflow);
         let account_id = self.account_id.clone();
         self.status = ComposerStatus::Sending;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let result = workflow
-                .send_message(&account_id, draft, SystemTime::now())
-                .await;
+            let submission_result =
+                submit_composer_message(workflow.as_ref(), &account_id, submission).await;
             let pending_result = workflow.load_pending_send(&account_id).await;
             let _ = this.update(cx, |composer, cx| {
-                composer.apply_send_result(result, pending_result, cx);
+                composer.apply_send_result(submission_result, pending_result, cx);
             });
         }));
         cx.notify();
@@ -268,7 +375,7 @@ impl MailComposer {
                 provider,
                 cache,
             }) => {
-                self.pending = Some(pending);
+                self.pending = Some(*pending);
                 self.pending_certainty = Some(PendingSendCertainty::Rejected(provider));
                 ComposerStatus::RejectedNeedsResolution(cache)
             }
@@ -277,6 +384,9 @@ impl MailComposer {
             }
             Err(MailSendWorkflowError::Provider(error)) => ComposerStatus::ProviderFailed(error),
             Err(MailSendWorkflowError::Cache(error)) => ComposerStatus::CacheFailed(error),
+            Err(MailSendWorkflowError::ReplySourceNotCached) => {
+                ComposerStatus::ReplySourceUnavailable
+            }
             Err(MailSendWorkflowError::PendingResolutionRequired(pending)) => {
                 self.pending = Some(pending);
                 self.pending_certainty = Some(PendingSendCertainty::Unknown);
@@ -433,7 +543,7 @@ impl MailComposer {
                 "I checked Sent Items",
             ),
         };
-        div()
+        let mut pending_view = div()
             .id("mail-pending-send")
             .debug_selector(|| "mail-pending-send".to_owned())
             .role(Role::Alert)
@@ -443,9 +553,21 @@ impl MailComposer {
             .p_3()
             .bg(colors.muted)
             .text_color(colors.foreground)
-            .child(copy)
-            .child(format!("To: {}", pending.recipient().as_str()))
-            .child(format!("Subject: {}", pending.subject()))
+            .child(copy);
+        pending_view = match pending.target() {
+            MailSendTarget::NewMessage { recipient, subject } => pending_view
+                .child(format!("To: {}", recipient.as_str()))
+                .child(format!("Subject: {}", subject.as_str())),
+            MailSendTarget::Reply { subject, .. } => {
+                let pending_view = pending_view.child("Reply to the source message");
+                if let Some(subject) = subject {
+                    pending_view.child(format!("Original subject: {subject}"))
+                } else {
+                    pending_view.child("Original message has no subject")
+                }
+            }
+        };
+        pending_view
             .child(format!(
                 "Started: {}",
                 format_system_time(pending.created_at())
@@ -462,62 +584,7 @@ impl MailComposer {
     }
 
     fn render_status(&self, colors: ColorTokens, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (role, text) = match self.status {
-            ComposerStatus::Editing => return None,
-            ComposerStatus::InvalidDraft(error) => (Role::Alert, draft_error_text(error)),
-            ComposerStatus::Sending => (Role::Status, "Sending message…".to_owned()),
-            ComposerStatus::Accepted => (
-                Role::Status,
-                "Microsoft accepted the message for processing. This does not confirm delivery."
-                    .to_owned(),
-            ),
-            ComposerStatus::AcceptedNeedsResolution => (
-                Role::Status,
-                "Microsoft accepted the message, but the local send marker remains. Clear it before sending another message."
-                    .to_owned(),
-            ),
-            ComposerStatus::RejectedNeedsResolution(error) => (
-                Role::Alert,
-                format!(
-                    "Microsoft rejected this message, but the local send marker could not be cleared. {}",
-                    cache_error_text(error)
-                ),
-            ),
-            ComposerStatus::OutcomeUnknown => (
-                Role::Alert,
-                "The send outcome is unknown. The app will not resend this message automatically. Check Sent Items."
-                    .to_owned(),
-            ),
-            ComposerStatus::PermissionRequired => (
-                Role::Alert,
-                "Microsoft denied send permission. Review the delegated Mail.Send request to continue."
-                    .to_owned(),
-            ),
-            ComposerStatus::RenewingPermission => (
-                Role::Status,
-                "Waiting for Microsoft permission review…".to_owned(),
-            ),
-            ComposerStatus::PermissionUpdated => (
-                Role::Status,
-                "Permission updated. No message was sent. Press Send to submit this message."
-                    .to_owned(),
-            ),
-            ComposerStatus::PermissionRenewalFailed(error) => {
-                (Role::Alert, permission_error_text(error).to_owned())
-            }
-            ComposerStatus::ProviderFailed(error) => (Role::Alert, send_error_text(error).to_owned()),
-            ComposerStatus::CacheFailed(error) => (Role::Alert, cache_error_text(error).to_owned()),
-            ComposerStatus::CacheUnavailable => (
-                Role::Alert,
-                "The local encrypted cache could not confirm send status. Resolve cache access before another send."
-                    .to_owned(),
-            ),
-            ComposerStatus::DuplicateConfirmation => (
-                Role::Alert,
-                "The earlier message may still arrive later. Sending again could create a duplicate."
-                    .to_owned(),
-            ),
-        };
+        let (role, text) = self.status_copy()?;
         let feedback = div()
             .id("mail-composer-status")
             .debug_selector(|| "mail-composer-status".to_owned())
@@ -529,30 +596,304 @@ impl MailComposer {
                 colors.muted_foreground
             })
             .child(text);
-        let feedback = match self.status {
-            ComposerStatus::PermissionRequired => feedback
-                .child(" The request is limited to sending as the signed-in account. Microsoft may show a consent screen in your system browser; approval grants permission but does not send this message. Return here and press Send to submit it.")
-                .child(
-                    Button::new("review-send-permission")
-                        .ghost()
-                        .debug_selector(|| "review-send-permission".to_owned())
-                        .label("Review Microsoft send permission…")
-                        .disabled(self.task.is_some() || self.pending.is_some())
-                        .on_click(cx.listener(|composer, _, _, cx| {
-                            composer.request_permission(cx);
-                        })),
-                ),
-            ComposerStatus::DuplicateConfirmation => feedback.child(
-                Button::new("confirm-duplicate-risk")
-                    .label("Allow another send")
-                    .disabled(self.task.is_some())
-                    .on_click(cx.listener(|composer, _, _, cx| {
-                        composer.confirm_duplicate_risk(cx);
-                    })),
+        match self.status {
+            ComposerStatus::PermissionRequired => Some(
+                feedback
+                    .child(" The request is limited to sending as the signed-in account. Microsoft may show a consent screen in your system browser; approval grants permission but does not send this message. Return here and press Send to submit it.")
+                    .child(self.permission_review_button(cx))
+                    .into_any_element(),
             ),
-            _ => feedback,
+            ComposerStatus::DuplicateConfirmation => Some(
+                feedback
+                    .child(self.duplicate_confirmation_button(cx))
+                    .into_any_element(),
+            ),
+            _ => Some(feedback.into_any_element()),
+        }
+    }
+
+    fn status_copy(&self) -> Option<(Role, String)> {
+        self.validation_status_copy()
+            .or_else(|| self.send_progress_copy())
+            .or_else(|| self.send_failure_copy())
+            .or_else(|| self.permission_status_copy())
+            .or_else(|| self.cache_status_copy())
+    }
+
+    fn validation_status_copy(&self) -> Option<(Role, String)> {
+        match self.status {
+            ComposerStatus::InvalidDraft(error) => Some((Role::Alert, draft_error_text(error))),
+            _ => None,
+        }
+    }
+
+    fn send_progress_copy(&self) -> Option<(Role, String)> {
+        match self.status {
+            ComposerStatus::Sending => Some((Role::Status, "Sending message…".to_owned())),
+            ComposerStatus::Accepted => Some((
+                Role::Status,
+                "Microsoft accepted the message for processing. This does not confirm delivery."
+                    .to_owned(),
+            )),
+            ComposerStatus::AcceptedNeedsResolution => Some((
+                Role::Status,
+                "Microsoft accepted the message, but the local send marker remains. Clear it before sending another message."
+                    .to_owned(),
+            )),
+            ComposerStatus::OutcomeUnknown => Some((
+                Role::Alert,
+                "The send outcome is unknown. The app will not resend this message automatically. Check Sent Items."
+                    .to_owned(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn send_failure_copy(&self) -> Option<(Role, String)> {
+        match self.status {
+            ComposerStatus::RejectedNeedsResolution(error) => Some((
+                Role::Alert,
+                format!(
+                    "Microsoft rejected this message, but the local send marker could not be cleared. {}",
+                    cache_error_text(error)
+                ),
+            )),
+            ComposerStatus::ProviderFailed(error) => {
+                Some((Role::Alert, send_error_text(error).to_owned()))
+            }
+            ComposerStatus::ReplySourceUnavailable => Some((
+                Role::Alert,
+                "The original message is no longer in the local cache. Reopen it before replying."
+                    .to_owned(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn permission_status_copy(&self) -> Option<(Role, String)> {
+        match self.status {
+            ComposerStatus::PermissionRequired => Some((
+                Role::Alert,
+                "Microsoft denied send permission. Review the delegated Mail.Send request to continue."
+                    .to_owned(),
+            )),
+            ComposerStatus::RenewingPermission => Some((
+                Role::Status,
+                "Waiting for Microsoft permission review…".to_owned(),
+            )),
+            ComposerStatus::PermissionUpdated => Some((
+                Role::Status,
+                "Permission updated. No message was sent. Press Send to submit this message."
+                    .to_owned(),
+            )),
+            ComposerStatus::PermissionRenewalFailed(error) => {
+                Some((Role::Alert, permission_error_text(error).to_owned()))
+            }
+            _ => None,
+        }
+    }
+
+    fn cache_status_copy(&self) -> Option<(Role, String)> {
+        match self.status {
+            ComposerStatus::CacheFailed(error) => {
+                Some((Role::Alert, cache_error_text(error).to_owned()))
+            }
+            ComposerStatus::CacheUnavailable => Some((
+                Role::Alert,
+                "The local encrypted cache could not confirm send status. Resolve cache access before another send."
+                    .to_owned(),
+            )),
+            ComposerStatus::DuplicateConfirmation => Some((
+                Role::Alert,
+                "The earlier message may still arrive later. Sending again could create a duplicate."
+                    .to_owned(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn permission_review_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("review-send-permission")
+            .ghost()
+            .debug_selector(|| "review-send-permission".to_owned())
+            .label("Review Microsoft send permission…")
+            .disabled(self.task.is_some() || self.pending.is_some())
+            .on_click(cx.listener(|composer, _, _, cx| composer.request_permission(cx)))
+            .into_any_element()
+    }
+
+    fn duplicate_confirmation_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("confirm-duplicate-risk")
+            .debug_selector(|| "confirm-duplicate-risk".to_owned())
+            .label("Allow another send")
+            .disabled(self.task.is_some())
+            .on_click(cx.listener(|composer, _, _, cx| composer.confirm_duplicate_risk(cx)))
+            .into_any_element()
+    }
+
+    fn fields_disabled(&self) -> bool {
+        self.pending.is_some()
+            || !self.pending_state_available
+            || self.task.is_some()
+            || self.duplicate_confirmation_required
+            || matches!(self.status, ComposerStatus::Accepted)
+    }
+
+    fn render_composer_content(
+        &mut self,
+        colors: ColorTokens,
+        fields_disabled: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("mail-composer")
+            .debug_selector(|| "mail-composer".to_owned())
+            .size_full()
+            .when(self.operation_in_progress(), |element| {
+                element.key_context(MAIL_COMPOSER_WRITE_PENDING_CONTEXT)
+            })
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .overflow_y_scrollbar()
+            .children(self.render_composer_children(colors, fields_disabled, cx))
+    }
+
+    fn render_composer_children(
+        &mut self,
+        colors: ColorTokens,
+        fields_disabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut children = vec![self.render_pending(colors, cx)];
+        children.extend(self.render_target_fields(fields_disabled));
+        children.push(self.render_body_field(fields_disabled));
+        children.extend(self.render_status(colors, cx));
+        children.push(self.render_disclaimer(colors));
+        children.push(self.render_send_action(cx));
+        children
+    }
+
+    fn render_target_fields(&self, fields_disabled: bool) -> Vec<AnyElement> {
+        match &self.target {
+            ComposerTarget::NewMessage => vec![
+                self.render_recipient_field(fields_disabled),
+                self.render_subject_field(fields_disabled),
+            ],
+            ComposerTarget::Reply { subject, .. } => {
+                vec![Self::render_reply_context(subject)]
+            }
+        }
+    }
+
+    fn render_recipient_field(&self, fields_disabled: bool) -> AnyElement {
+        Self::render_field(
+            "mail-recipient-field",
+            "To",
+            div()
+                .id("mail-recipient-input")
+                .debug_selector(|| "mail-recipient-input".to_owned())
+                .child(
+                    Input::new(&self.recipient)
+                        .aria_label("Recipient")
+                        .disabled(fields_disabled)
+                        .w_full(),
+                ),
+        )
+        .into_any_element()
+    }
+
+    fn render_subject_field(&self, fields_disabled: bool) -> AnyElement {
+        Self::render_field(
+            "mail-subject-field",
+            "Subject",
+            div()
+                .id("mail-subject-input")
+                .debug_selector(|| "mail-subject-input".to_owned())
+                .child(
+                    Input::new(&self.subject)
+                        .aria_label("Subject")
+                        .disabled(fields_disabled)
+                        .w_full(),
+                ),
+        )
+        .into_any_element()
+    }
+
+    fn render_reply_context(subject: &Option<String>) -> AnyElement {
+        div()
+            .id("mail-reply-context")
+            .debug_selector(|| "mail-reply-context".to_owned())
+            .text_sm()
+            .child("Microsoft will use the original message's reply recipients, including Reply-To when present.")
+            .children(subject.as_ref().map(|subject| {
+                div().text_sm().child(format!("Original subject: {subject}"))
+            }))
+            .into_any_element()
+    }
+
+    fn render_body_field(&self, fields_disabled: bool) -> AnyElement {
+        let (label, aria_label) = self.body_labels();
+        Self::render_field(
+            "mail-body-field",
+            label,
+            div()
+                .id("mail-body-input")
+                .debug_selector(|| "mail-body-input".to_owned())
+                .child(
+                    Textarea::new(&self.body)
+                        .aria_label(aria_label)
+                        .disabled(fields_disabled)
+                        .h(px(220.))
+                        .w_full(),
+                ),
+        )
+        .into_any_element()
+    }
+
+    fn body_labels(&self) -> (&'static str, &'static str) {
+        match &self.target {
+            ComposerTarget::NewMessage => ("Message", "Plain-text message"),
+            ComposerTarget::Reply { .. } => ("Reply", "Plain-text reply"),
+        }
+    }
+
+    fn render_disclaimer(&self, colors: ColorTokens) -> AnyElement {
+        let text = match &self.target {
+            ComposerTarget::NewMessage => {
+                "Messages use plain text and one recipient. The app saves no message body in its local send status."
+            }
+            ComposerTarget::Reply { .. } => {
+                "Replies use plain text. The app keeps reply content in memory and saves no body in its local send status."
+            }
         };
-        Some(feedback.into_any_element())
+        div()
+            .text_xs()
+            .text_color(colors.muted_foreground)
+            .child(text)
+            .into_any_element()
+    }
+
+    fn render_send_action(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .justify_end()
+            .gap_2()
+            .child(
+                Button::new("mail-send")
+                    .primary()
+                    .debug_selector(|| "mail-send-button".to_owned())
+                    .label(if matches!(self.status, ComposerStatus::Sending) {
+                        "Sending…"
+                    } else {
+                        "Send"
+                    })
+                    .loading(matches!(self.status, ComposerStatus::Sending))
+                    .disabled(!self.can_send())
+                    .on_click(cx.listener(|composer, _, _, cx| composer.submit(cx))),
+            )
+            .into_any_element()
     }
 }
 
@@ -561,96 +902,8 @@ impl EventEmitter<MailComposerEvent> for MailComposer {}
 impl Render for MailComposer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().semantic_tokens().colors;
-        let operation_in_progress = self.operation_in_progress();
-        let fields_disabled = self.pending.is_some()
-            || !self.pending_state_available
-            || self.task.is_some()
-            || self.duplicate_confirmation_required
-            || matches!(self.status, ComposerStatus::Accepted);
-        let send_disabled = !self.can_send();
-        let send_label = if matches!(self.status, ComposerStatus::Sending) {
-            "Sending…"
-        } else {
-            "Send"
-        };
-        let mut content = div()
-            .id("mail-composer")
-            .debug_selector(|| "mail-composer".to_owned())
-            .size_full()
-            .when(operation_in_progress, |element| {
-                element.key_context(MAIL_COMPOSER_WRITE_PENDING_CONTEXT)
-            })
-            .flex()
-            .flex_col()
-            .gap_4()
-            .p_4()
-            .overflow_y_scrollbar()
-            .child(self.render_pending(colors, cx))
-            .child(Self::render_field(
-                "mail-recipient-field",
-                "To",
-                div()
-                    .id("mail-recipient-input")
-                    .debug_selector(|| "mail-recipient-input".to_owned())
-                    .child(
-                        Input::new(&self.recipient)
-                            .aria_label("Recipient")
-                            .disabled(fields_disabled)
-                            .w_full(),
-                    ),
-            ))
-            .child(Self::render_field(
-                "mail-subject-field",
-                "Subject",
-                div()
-                    .id("mail-subject-input")
-                    .debug_selector(|| "mail-subject-input".to_owned())
-                    .child(
-                        Input::new(&self.subject)
-                            .aria_label("Subject")
-                            .disabled(fields_disabled)
-                            .w_full(),
-                    ),
-            ))
-            .child(Self::render_field(
-                "mail-body-field",
-                "Message",
-                div()
-                    .id("mail-body-input")
-                    .debug_selector(|| "mail-body-input".to_owned())
-                    .child(
-                        Textarea::new(&self.body)
-                            .aria_label("Plain-text message")
-                            .disabled(fields_disabled)
-                            .h(px(220.))
-                            .w_full(),
-                    ),
-            ));
-        if let Some(status) = self.render_status(colors, cx) {
-            content = content.child(status);
-        }
-        content
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.muted_foreground)
-                    .child("Messages use plain text and one recipient. The app saves no message body in its local send status."),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(
-                        Button::new("mail-send")
-                            .primary()
-                            .debug_selector(|| "mail-send-button".to_owned())
-                            .label(send_label)
-                            .loading(matches!(self.status, ComposerStatus::Sending))
-                            .disabled(send_disabled)
-                            .on_click(cx.listener(|composer, _, _, cx| composer.submit(cx))),
-                    ),
-            )
+        let fields_disabled = self.fields_disabled();
+        self.render_composer_content(colors, fields_disabled, cx)
     }
 }
 
@@ -717,6 +970,9 @@ fn cache_error_text(error: MailCacheError) -> &'static str {
         MailCacheError::AccountMismatch => "The pending send belongs to another account.",
         MailCacheError::SendAlreadyPending => {
             "A previous send needs review before another message can be submitted."
+        }
+        MailCacheError::CalendarEventCreationUnresolved => {
+            "A calendar event still needs recovery before the account cache can be removed."
         }
         MailCacheError::PendingSendMismatch | MailCacheError::PendingSendNotFound => {
             "The pending send changed. Reload mail before continuing."

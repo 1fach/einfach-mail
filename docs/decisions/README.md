@@ -24,7 +24,15 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0012](0012-application-owned-mail-sessions.md) | Keep mail sessions behind application workflows | Superseded by ADR 0038 |
 | [0013](0013-graph-account-identity.md) | Use the Graph profile for initial account identity | Accepted for Linux; live Entra verification open |
 | [0014](0014-linux-read-only-calendar-workflow.md) | Implement a cached Linux read-only primary calendar | Accepted for Linux; live Graph and manual UI verification remain open |
+| [0015](0015-idempotent-message-read-state-update.md) | Add idempotent message read-state updates | Accepted |
+| [0017](0017-safe-plain-text-mail-sending.md) | Send one plain-text message through Microsoft Graph | Accepted; live verification remains open |
+| [0018](0018-native-plain-text-message-reply.md) | Reply to one cached message through Microsoft Graph | Accepted; tenant verification remains open |
+| [0019](0019-follow-up-flags-on-cached-messages.md) | Set follow-up flags on cached messages | Accepted; live verification remains open |
+| [0023](0023-edit-standalone-calendar-appointments.md) | Edit standalone calendar appointments | Accepted; tenant verification remains open |
 | [0024](0024-keyboard-navigation-for-cached-messages.md) | Provide keyboard navigation for cached messages | Accepted |
+| [0026](0026-delete-standalone-calendar-appointments.md) | Delete standalone calendar appointments | Accepted; tenant verification remains open |
+| [0027](0027-serialize-mail-account-removal-with-mail-operations.md) | Serialize mail account removal with mail operations | Accepted |
+| [0028](0028-single-linux-desktop-process.md) | Allow one Linux desktop process per user | Accepted |
 | [0029](0029-retry-cache-removal-after-sidecar-failure.md) | Keep cache removal retryable after a sidecar failure | Accepted |
 | [0030](0030-account-operation-cancellation-boundary.md) | Order account cancellation against credential commits | Accepted for the Linux M1 account flow |
 | [0031](0031-registered-loopback-port-for-entra.md) | Require a registered loopback port for Entra | Accepted for Linux; tenant verification open |
@@ -32,3 +40,6 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0034](0034-invalidate-cached-message-bodies-after-delta-updates.md) | Invalidate cached message bodies after delta updates | Accepted for Linux implementation |
 | [0037](0037-reject-stale-mail-sync-pages.md) | Reject stale mail sync pages | Accepted for Linux implementation |
 | [0038](0038-per-account-mail-and-calendar-session.md) | Use one per-account mail and calendar session | Accepted |
+| [0039](0039-move-messages-to-deleted-items.md) | Move messages to Deleted Items | Accepted; shared API superseded by ADR 0040 |
+| [0040](0040-move-messages-to-the-default-archive-folder.md) | Move messages to the default Archive folder | Accepted |
+| [0041](0041-bind-saved-sign-in-to-cache-identity.md) | Bind saved sign-in to a verified cache identity | Accepted for Linux M1 |
