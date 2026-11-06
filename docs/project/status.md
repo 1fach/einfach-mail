@@ -16,11 +16,13 @@ Issue #27's plain-text send implementation is in draft PR #53, based on PR #52. 
 
 Issue #29's reply implementation is in draft PR #56, stacked on PR #55. Its older duplicate flags commit has been removed from the stack. The complete Linux gate passed on both final leaf branches. Keep issue #30 open for tenant-only consent, Reply-To, and Sent Items evidence.
 
-Issue #33's move is in PR #57, and issue #43's account-removal changes are in PR #58. The Move action stays disabled until sync clears the selected folder's write marker. PR #58 retains the account session and shared reservation registry for cache removal. It takes the Linux per-user process lock before GPUI startup. Its synthetic AccountView test opens Calendar, returns to Accounts, then verifies that sign-out retry reuses the session after an active-operation conflict. PRs #63 and #64 passed the complete Linux gate. Keep issue #34 open for tenant-only move and immutable-ID verification.
+Issue #33's move is in PR #57, and issue #43's account-removal changes are in PR #58. The Move action stays disabled until sync clears the selected folder's write marker. PR #58 retains the account session and shared reservation registry for cache removal. It takes the Linux per-user process lock before GPUI startup. Its synthetic AccountView test opens Calendar, returns to Accounts, then verifies that sign-out retry reuses the session after an active-operation conflict. PR #64 passed the complete Linux gate. The restacked PR #63 passed the local Linux gate and all four required GitHub checks. Keep issue #34 open for tenant-only move and immutable-ID verification.
 
-Issues #25, #39, and #41's event creation, editing, and deletion are integrated in ready PR #59, stacked on PR #58. Issues #39 and #41 are closed. PR #59 also contains the message Delete and Archive work from PRs #62 and #64; issues #35 and #37 are closed. Review found that event creation could stage a request before the first successful sync, contrary to ADR 0026. The workflow and native UI now require a successful sync of the target view, and all account recovery views must sync before another calendar write. Synthetic workflow and headless GPUI regressions cover initial-sync and account-recovery gating. The complete Linux project gate passes locally on the fix; the changed PR head still needs fresh GitHub checks before merge. Keep issue #25 open through integration into PR #58. Keep issues #26, #40, and #42 open for tenant verification. ADR 0026 records OData's weak-ETag comparison rule. The documented DELETE `If-Match` behavior remains unverified in Exchange Online. No tenant, live Graph request, real mailbox, or GUI was used.
+PR #59 merged into PR #58 at `333707c4e1eefbd96e83cfcde7948d58ef913ef3` on 2026-11-06. Issues #25, #39, and #41 cover event creation, editing, and deletion; all three issues are closed. PR #59 also carries the message Delete and Archive work from PRs #62 and #64; issues #35 and #37 are closed. The full Linux gate and all four required GitHub checks passed on PR #59 head `617da967e17c5c6e0548351c71d16cc8ad4c937a`. PR #58 remains under review. Wait for all four required checks before merging it into PR #57.
 
-Issue #48's saved sign-in identity check remains in draft PR #63, stacked on PR #59. Keep the draft on the updated #59 base and rerun its required checks after restacking. Keep issue #48 open through review and issue #3 open for live Entra verification. No test tenant, live Graph request, real mailbox, or desktop window was used.
+Review found that event creation could stage a request before the first successful sync, contrary to ADR 0026. The workflow and native UI now require a successful sync of the target view, and all account recovery views must sync before another calendar write. Synthetic workflow and headless GPUI regressions cover initial-sync and account-recovery gating. Keep issues #26, #40, and #42 open for tenant verification. ADR 0026 records OData's weak-ETag comparison rule. The documented DELETE `If-Match` behavior remains unverified in Exchange Online. No tenant, live Graph request, real mailbox, or GUI was used.
+
+Issue #48's saved sign-in identity migration remains in draft PR #63, based on PR #59 head `617da967e17c5c6e0548351c71d16cc8ad4c937a`. It retains pending identity across token rotation and restart, and blocks cache removal or replacement sign-in if identity cannot be verified. The full local Linux gate and all four required GitHub checks passed on the restacked branch. Keep PR #63 in draft and issue #48 open through source review. Live Entra and desktop Secret Service evidence remain under issue #3.
 
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
@@ -57,11 +59,12 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 
 ## Next actions
 
-1. Push the reviewed PR #59 sync-readiness fix, wait for all four required checks to pass, and merge it into PR #58. Keep draft PR #63 based on the updated #59 head and rerun its checks after restacking.
-2. Keep PR #47 in draft until issue #8's Microsoft 365 sync check and issue #9's real-window checks pass.
-3. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
-4. Keep issues #24, #28, #30, #32, #34, #36, #38, #40, and #42 open for tenant-only consent and Graph verification.
-5. Review the independent M3 follow-ups after their declared parent PRs clear their external blockers.
+1. Review PR #58's current head after its four required checks pass. Merge it into PR #57 only after review.
+2. Review the restacked draft PR #63, which has all four required checks green. Keep issue #48 open until that review is complete.
+3. Keep PR #47 in draft until issue #8's Microsoft 365 sync check and issue #9's real-window checks pass.
+4. Keep issue #22 open until the manual Linux review of screen-reader announcements, focus, scrolling, and layout is complete. Keep issue #6 open until live Graph recurrence, time-zone, and all-day behavior is verified.
+5. Keep issues #24, #28, #30, #32, #34, #36, #38, #40, and #42 open for tenant-only consent and Graph verification.
+6. Review the independent M3 follow-ups after their declared parent PRs clear their external blockers.
 
 ## Update rule
 
