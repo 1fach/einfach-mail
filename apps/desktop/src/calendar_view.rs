@@ -2385,7 +2385,11 @@ mod tests {
         assert!(rendered_sync_error, "calendar refresh reports its error");
         assert!(context.debug_bounds("calendar-sync-error").is_some());
         assert!(context.debug_bounds("calendar-utc-fallback").is_some());
-        assert!(context.debug_bounds("calendar-event").is_some());
+        assert!(
+            context
+                .debug_bounds("calendar-event-row-2030-01-07-synthetic-ui-event")
+                .is_some()
+        );
         assert!(context.debug_bounds("calendar-next-week").is_some());
 
         let next_week_button = context
