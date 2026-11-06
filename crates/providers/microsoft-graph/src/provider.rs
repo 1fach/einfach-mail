@@ -26,11 +26,12 @@ use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
     CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarOperationError, CalendarProvider,
     MailOperationError, MailProvider, MailSendProviderError, MessageDeltaRequest,
-    MessageDeltaResponse,
+    MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, CalendarViewReference, FolderReference, MailDraft, MailFolder,
-    MailMessage, MessageBody, MessageId, ReadState,
+    AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
+    CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
+    MailFolder, MailMessage, MailReplyDraft, MessageBody, MessageId, ReadState,
 };
 
 const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
@@ -168,7 +169,7 @@ impl AccountProvider for MicrosoftGraphProvider {
         worker::run_with_account_cancellation(
             move |_cancellation: CancellationToken| async move {
                 let authorized =
-                    authorize_profile(&config, &identity::BASE_AUTHORIZATION_SCOPES).await?;
+                    authorize_profile(&config, AccountPermissionRequest::Current).await?;
                 let mut session = config.session.lock().await;
                 commit_cancellation.begin_credential_commit()?;
                 config.credentials.save(&authorized.refresh_token)?;
@@ -190,12 +191,11 @@ impl AccountProvider for MicrosoftGraphProvider {
     ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let expected_account_id = expected_account_id.clone();
-        let requested_scopes = identity::authorization_scopes(request);
         let commit_cancellation = cancellation.clone();
 
         worker::run_with_account_cancellation(
             move |_cancellation: CancellationToken| async move {
-                let authorized = authorize_profile(&config, requested_scopes).await?;
+                let authorized = authorize_profile(&config, request).await?;
                 if authorized.profile.id() != &expected_account_id {
                     return Err(AccountOperationError::AccountMismatch);
                 }
@@ -245,6 +245,23 @@ impl MailProvider for MicrosoftGraphProvider {
                 .list_folders(&account_id, Arc::clone(&token))
                 .await;
             map_mail_result(&config, &account_id, &token, folders).await
+        })
+    }
+
+    fn well_known_folder(
+        &self,
+        account_id: &AccountId,
+        folder: WellKnownMailFolder,
+    ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let account_id = account_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let token = ensure_access_token(&config, &account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let folder_result = graph_api
+                .well_known_folder(&account_id, folder, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, &account_id, &token, folder_result).await
         })
     }
 
@@ -319,6 +336,50 @@ impl MailProvider for MicrosoftGraphProvider {
         })
     }
 
+    fn set_message_follow_up_flag_status(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        status: FollowUpFlagStatus,
+    ) -> impl Future<Output = Result<FollowUpFlagStatus, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let folder = folder.clone();
+        let message_id = message_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = folder.account_id();
+            let token = ensure_access_token(&config, account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let result = graph_api
+                .set_message_follow_up_flag_status(&message_id, status, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, account_id, &token, result).await
+        })
+    }
+
+    fn move_message(
+        &self,
+        source_folder: &FolderReference,
+        message_id: &MessageId,
+        destination_folder: &FolderReference,
+    ) -> impl Future<Output = Result<(), MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let source_folder = source_folder.clone();
+        let message_id = message_id.clone();
+        let destination_folder = destination_folder.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            if source_folder.account_id() != destination_folder.account_id() {
+                return Err(MailOperationError::AccountMismatch);
+            }
+            let account_id = source_folder.account_id();
+            let token = ensure_access_token(&config, account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let result = graph_api
+                .move_message(&message_id, &destination_folder, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, account_id, &token, result).await
+        })
+    }
+
     fn send_mail(
         &self,
         account_id: &AccountId,
@@ -332,10 +393,27 @@ impl MailProvider for MicrosoftGraphProvider {
                 .map_err(map_mail_operation_to_send)?;
             let graph_api = config.graph_api().map_err(map_send_graph_error)?;
             let result = graph_api.send_mail(&draft, Arc::clone(&token)).await;
-            if matches!(&result, Err(GraphError::AccessTokenRejected)) {
-                invalidate_access_token(&config, &account_id, &token).await;
+            map_send_submission_result(&config, &account_id, &token, result).await
+        })
+    }
+
+    fn reply_to_message(
+        &self,
+        account_id: &AccountId,
+        draft: MailReplyDraft,
+    ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let account_id = account_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            if draft.source().account_id() != &account_id {
+                return Err(MailSendProviderError::AccountMismatch);
             }
-            result.map_err(map_send_graph_error)
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_send)?;
+            let graph_api = config.graph_api().map_err(map_send_graph_error)?;
+            let result = graph_api.reply_to_message(&draft, Arc::clone(&token)).await;
+            map_send_submission_result(&config, &account_id, &token, result).await
         })
     }
 }
@@ -359,6 +437,91 @@ impl CalendarProvider for MicrosoftGraphProvider {
                 .calendar_delta_page(&view, request, Arc::clone(&token))
                 .await;
             map_calendar_result(&config, &account_id, &token, page).await
+        })
+    }
+
+    fn create_event(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<
+        Output = Result<einfach_mail_domain::CalendarOccurrence, CalendarOperationError>,
+    > + Send
+    + '_ {
+        let config = Arc::clone(&self.config);
+        let creation = creation.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = creation.view().account_id().clone();
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_calendar)?;
+            let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
+            let event = graph_api
+                .create_calendar_event(&creation, Arc::clone(&token))
+                .await;
+            map_calendar_result(&config, &account_id, &token, event).await
+        })
+    }
+
+    fn editable_event(
+        &self,
+        event: &CalendarOccurrence,
+    ) -> impl Future<Output = Result<EditableCalendarEvent, CalendarOperationError>> + Send + '_
+    {
+        let config = Arc::clone(&self.config);
+        let event = event.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = event.reference().account_id().clone();
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_calendar)?;
+            let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
+            let editable = graph_api
+                .editable_calendar_event(&event, Arc::clone(&token))
+                .await;
+            map_calendar_result(&config, &account_id, &token, editable).await
+        })
+    }
+
+    fn update_event(
+        &self,
+        update: &CalendarEventUpdate,
+    ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let update = update.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = update
+                .source()
+                .occurrence()
+                .reference()
+                .account_id()
+                .clone();
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_calendar)?;
+            let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
+            let event = graph_api
+                .update_calendar_event(&update, Arc::clone(&token))
+                .await;
+            map_calendar_result(&config, &account_id, &token, event).await
+        })
+    }
+
+    fn delete_event(
+        &self,
+        event: &EditableCalendarEvent,
+    ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let event = event.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = event.occurrence().reference().account_id().clone();
+            let token = ensure_access_token(&config, &account_id)
+                .await
+                .map_err(map_mail_operation_to_calendar)?;
+            let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
+            let result = graph_api
+                .delete_calendar_event(&event, Arc::clone(&token))
+                .await;
+            map_calendar_result(&config, &account_id, &token, result).await
         })
     }
 }
@@ -455,6 +618,19 @@ fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
     match error {
         GraphError::AccessTokenRejected => CalendarOperationError::SignInRequired,
         GraphError::AccessDenied => CalendarOperationError::AccessDenied,
+        GraphError::CalendarEventCreationRejected => CalendarOperationError::EventCreationRejected,
+        GraphError::CalendarEventCreationOutcomeUnknown => {
+            CalendarOperationError::CreationOutcomeUnknown
+        }
+        GraphError::CalendarEventNotEditable => CalendarOperationError::EventNotEditable,
+        GraphError::CalendarEventChanged => CalendarOperationError::EventChanged,
+        GraphError::CalendarEventUpdateOutcomeUnknown => {
+            CalendarOperationError::UpdateOutcomeUnknown
+        }
+        GraphError::CalendarEventDeletionRejected => CalendarOperationError::EventDeletionRejected,
+        GraphError::CalendarEventDeletionOutcomeUnknown => {
+            CalendarOperationError::DeleteOutcomeUnknown
+        }
         GraphError::RateLimited { retry_after } => {
             CalendarOperationError::RateLimited { retry_after }
         }
@@ -470,6 +646,7 @@ fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
         | GraphError::Transport
         | GraphError::SendRejected
         | GraphError::SendOutcomeUnknown
+        | GraphError::MessageMoveOutcomeUnknown
         | GraphError::InvalidToken => CalendarOperationError::ServiceUnavailable,
     }
 }
@@ -493,6 +670,18 @@ async fn invalidate_access_token(
     }
 }
 
+async fn map_send_submission_result(
+    config: &ProviderConfig,
+    account_id: &AccountId,
+    access_token: &Arc<AccessToken>,
+    result: Result<(), GraphError>,
+) -> Result<(), MailSendProviderError> {
+    if matches!(&result, Err(GraphError::AccessTokenRejected)) {
+        invalidate_access_token(config, account_id, access_token).await;
+    }
+    result.map_err(map_send_graph_error)
+}
+
 fn map_graph_error(error: GraphError) -> MailOperationError {
     match error {
         GraphError::AccessTokenRejected => MailOperationError::SignInRequired,
@@ -505,11 +694,19 @@ fn map_graph_error(error: GraphError) -> MailOperationError {
         GraphError::InvalidResponse | GraphError::UnsafeLink | GraphError::InvalidRecord => {
             MailOperationError::InvalidResponse
         }
+        GraphError::MessageMoveOutcomeUnknown => MailOperationError::MoveOutcomeUnknown,
         GraphError::WorkerStart
         | GraphError::WorkerClosed
         | GraphError::Transport
         | GraphError::SendRejected
         | GraphError::SendOutcomeUnknown
+        | GraphError::CalendarEventCreationRejected
+        | GraphError::CalendarEventCreationOutcomeUnknown
+        | GraphError::CalendarEventUpdateOutcomeUnknown
+        | GraphError::CalendarEventDeletionRejected
+        | GraphError::CalendarEventDeletionOutcomeUnknown
+        | GraphError::CalendarEventNotEditable
+        | GraphError::CalendarEventChanged
         | GraphError::InvalidToken => MailOperationError::ServiceUnavailable,
     }
 }
@@ -530,6 +727,14 @@ fn map_profile_graph_error(error: GraphError) -> AccountOperationError {
         | GraphError::InvalidToken
         | GraphError::SendRejected
         | GraphError::SendOutcomeUnknown
+        | GraphError::MessageMoveOutcomeUnknown
+        | GraphError::CalendarEventCreationRejected
+        | GraphError::CalendarEventCreationOutcomeUnknown
+        | GraphError::CalendarEventUpdateOutcomeUnknown
+        | GraphError::CalendarEventDeletionRejected
+        | GraphError::CalendarEventDeletionOutcomeUnknown
+        | GraphError::CalendarEventNotEditable
+        | GraphError::CalendarEventChanged
         | GraphError::RateLimited { .. } => AccountOperationError::ServiceUnavailable,
     }
 }
@@ -567,14 +772,22 @@ fn map_send_graph_error(error: GraphError) -> MailSendProviderError {
         | GraphError::UnsafeLink
         | GraphError::InvalidRecord
         | GraphError::ResponseTooLarge
+        | GraphError::PaginationLimitExceeded
         | GraphError::MessageUpdateOutcomeUnknown
-        | GraphError::PaginationLimitExceeded => MailSendProviderError::ServiceUnavailable,
+        | GraphError::MessageMoveOutcomeUnknown
+        | GraphError::CalendarEventCreationRejected
+        | GraphError::CalendarEventCreationOutcomeUnknown
+        | GraphError::CalendarEventUpdateOutcomeUnknown
+        | GraphError::CalendarEventDeletionRejected
+        | GraphError::CalendarEventDeletionOutcomeUnknown
+        | GraphError::CalendarEventNotEditable
+        | GraphError::CalendarEventChanged => MailSendProviderError::ServiceUnavailable,
     }
 }
 
 async fn authorize_profile(
     config: &ProviderConfig,
-    requested_scopes: &[&str],
+    request: AccountPermissionRequest,
 ) -> Result<AuthorizedAccount, AccountOperationError> {
     let client =
         http_client::build_client().map_err(|_| AccountOperationError::ServiceUnavailable)?;
@@ -584,7 +797,7 @@ async fn authorize_profile(
         &config.endpoints,
         client.clone(),
         config.browser.as_ref(),
-        requested_scopes,
+        request,
     )
     .await?;
     let refresh_token = response
@@ -613,14 +826,17 @@ mod tests {
             Arc, Barrier, Mutex, OnceLock,
             atomic::{AtomicBool, Ordering},
         },
-        time::Duration,
+        time::{Duration, SystemTime},
     };
 
     use httpmock::{
         Method::{GET, POST},
         MockServer,
     };
-    use huskarl::token::RefreshToken;
+    use huskarl::{
+        core::secrets::SecretString,
+        token::{AccessToken, BearerAccessToken, RefreshToken},
+    };
     use tokio::net::TcpListener;
     use tokio::sync::{mpsc, oneshot};
     use url::Url;
@@ -635,14 +851,17 @@ mod tests {
     };
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
-        AccountProvider, AccountWorkflow, MailOperationError, MailProvider, MessageDeltaRequest,
-        MessageDeltaResponse,
+        AccountProvider, AccountWorkflow, CalendarProvider, MailOperationError, MailProvider,
+        MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
     };
     use einfach_mail_domain::{
-        AccountId, FolderReference, MessageBodyType, MessageDeltaLink, MessageDeltaProgress,
+        AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrenceTime,
+        CalendarViewRange, CalendarViewReference, FolderId, FolderReference, MailReplyDraft,
+        MailReplySource, MessageBodyType, MessageDeltaLink, MessageDeltaProgress, MessageId,
     };
+    use time::{Date, Month, PrimitiveDateTime, Time};
 
-    use super::{MicrosoftGraphProvider, ProviderConfig};
+    use super::{MicrosoftGraphProvider, ProviderConfig, ProviderSession};
 
     struct MemoryRefreshTokenStore {
         token: Mutex<Option<RefreshToken>>,
@@ -739,6 +958,14 @@ mod tests {
             .expect("synthetic refresh token is valid")
     }
 
+    fn access_token(token_text: &str) -> Arc<AccessToken> {
+        Arc::new(AccessToken::Bearer(BearerAccessToken::new(
+            SecretString::new(token_text),
+            SystemTime::now(),
+            Some(Duration::from_secs(3_600)),
+        )))
+    }
+
     fn synthetic_provider(
         server: &MockServer,
         sender: mpsc::UnboundedSender<Url>,
@@ -827,6 +1054,212 @@ mod tests {
         assert!(response.status().is_success());
     }
 
+    #[tokio::test]
+    async fn reply_to_message_preserves_accepted_and_unknown_post_outcomes() {
+        let server = MockServer::start_async().await;
+        let accepted_reply = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/messages/source%2Fmessage/reply")
+                    .header("authorization", "Bearer synthetic-send-access")
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"message":{"body":{"contentType":"Text","content":"Synthetic reply body"}}}"#,
+                    );
+                then.status(202);
+            })
+            .await;
+        let ambiguous_reply = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/messages/source%2Fmessage/reply")
+                    .body(
+                        r#"{"message":{"body":{"contentType":"Text","content":"Synthetic uncertain reply body"}}}"#,
+                    );
+                then.status(500);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(None));
+        let provider = synthetic_provider(&server, browser_sender, credentials);
+        let account =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: account.clone(),
+            access_token: Some(access_token("synthetic-send-access")),
+        });
+        let folder = FolderReference::new(
+            account.clone(),
+            FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let source = MailReplySource::new(
+            folder,
+            MessageId::try_from("source/message".to_owned())
+                .expect("synthetic message ID is valid"),
+        );
+        let draft = MailReplyDraft::new(source.clone(), "Synthetic reply body".to_owned());
+
+        assert_eq!(provider.reply_to_message(&account, draft).await, Ok(()));
+        assert_eq!(
+            provider
+                .reply_to_message(
+                    &account,
+                    MailReplyDraft::new(source, "Synthetic uncertain reply body".to_owned(),),
+                )
+                .await,
+            Err(MailSendProviderError::OutcomeUnknown)
+        );
+        accepted_reply.assert_calls_async(1).await;
+        ambiguous_reply.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn reply_to_message_rejects_another_account_before_request() {
+        let server = MockServer::start_async().await;
+        let unexpected_reply = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/messages/source-message/reply");
+                then.status(202);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let provider = synthetic_provider(
+            &server,
+            browser_sender,
+            Arc::new(MemoryRefreshTokenStore::new(None)),
+        );
+        let account =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: account.clone(),
+            access_token: Some(access_token("synthetic-send-access")),
+        });
+        let other_account =
+            AccountId::try_from("account-456".to_owned()).expect("synthetic account ID is valid");
+        let folder = FolderReference::new(
+            other_account,
+            FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let source = MailReplySource::new(
+            folder,
+            MessageId::try_from("source-message".to_owned())
+                .expect("synthetic message ID is valid"),
+        );
+
+        assert_eq!(
+            provider
+                .reply_to_message(&account, MailReplyDraft::new(source, "reply".to_owned()))
+                .await,
+            Err(MailSendProviderError::AccountMismatch)
+        );
+        unexpected_reply.assert_calls_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn message_move_is_account_scoped_and_uses_graph_confirmation() {
+        let server = MockServer::start_async().await;
+        let move_request = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/messages/message-123/move")
+                    .header("authorization", "Bearer synthetic-move-access")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .body(r#"{"destinationId":"archive"}"#);
+                then.status(201)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"message-123","parentFolderId":"archive"}"#);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let provider = synthetic_provider(
+            &server,
+            browser_sender,
+            Arc::new(MemoryRefreshTokenStore::new(None)),
+        );
+        let account =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: account.clone(),
+            access_token: Some(access_token("synthetic-move-access")),
+        });
+        let source = FolderReference::new(
+            account.clone(),
+            FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let destination = FolderReference::new(
+            account,
+            FolderId::try_from("archive".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        let message_id =
+            MessageId::try_from("message-123".to_owned()).expect("synthetic message ID is valid");
+
+        assert_eq!(
+            provider
+                .move_message(&source, &message_id, &destination)
+                .await,
+            Ok(())
+        );
+        let other_account =
+            AccountId::try_from("other-account".to_owned()).expect("synthetic account ID is valid");
+        let other_destination = FolderReference::new(
+            other_account,
+            FolderId::try_from("archive".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        assert_eq!(
+            provider
+                .move_message(&source, &message_id, &other_destination)
+                .await,
+            Err(MailOperationError::AccountMismatch)
+        );
+        move_request.assert_calls_async(1).await;
+    }
+
+    #[tokio::test]
+    async fn well_known_folder_lookup_is_account_scoped() {
+        let server = MockServer::start_async().await;
+        let lookup = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/deleteditems")
+                    .query_param("$select", "id,displayName,isHidden")
+                    .header("authorization", "Bearer synthetic-deleted-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"deleted-folder","displayName":"Gelöschte Elemente","isHidden":false}"#);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let provider = synthetic_provider(
+            &server,
+            browser_sender,
+            Arc::new(MemoryRefreshTokenStore::new(None)),
+        );
+        let account =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: account.clone(),
+            access_token: Some(access_token("synthetic-deleted-access")),
+        });
+
+        let folder = provider
+            .well_known_folder(&account, WellKnownMailFolder::DeletedItems)
+            .await
+            .expect("synthetic Deleted Items folder resolves");
+        let other_account =
+            AccountId::try_from("other-account".to_owned()).expect("synthetic account ID is valid");
+
+        assert_eq!(folder.account_id(), &account);
+        assert_eq!(folder.folder_id().as_str(), "deleted-folder");
+        assert_eq!(
+            provider
+                .well_known_folder(&other_account, WellKnownMailFolder::DeletedItems)
+                .await,
+            Err(MailOperationError::AccountMismatch)
+        );
+        lookup.assert_calls_async(1).await;
+    }
+
     #[test]
     fn callback_port_defaults_to_ephemeral_and_rejects_invalid_values() {
         assert_eq!(
@@ -908,6 +1341,8 @@ mod tests {
         assert!(has_scope(&parameters, "User.Read"));
         assert!(has_scope(&parameters, "Mail.Read"));
         assert!(has_scope(&parameters, "Calendars.Read"));
+        assert!(!has_scope(&parameters, "Mail.ReadWrite"));
+        assert!(!has_scope(&parameters, "Calendars.ReadWrite"));
         assert!(has_scope(&parameters, "offline_access"));
         assert_eq!(
             parameters.get("code_challenge_method").map(String::as_str),
@@ -1290,7 +1725,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Calendars.ReadWrite Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -1338,7 +1773,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-rejected-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-rejected-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Calendars.ReadWrite Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -1496,6 +1931,94 @@ mod tests {
         profile_request.assert_async().await;
         restored_token.assert_async().await;
         restored_profile_request.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn calendar_permission_renewal_requests_only_calendar_write_access() {
+        let server = MockServer::start_async().await;
+        let token_exchange = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=authorization_code");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-calendar-write-access","expires_in":3600,"refresh_token":"synthetic-calendar-write-refresh","scope":"Calendars.ReadWrite Mail.Read User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let profile_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-calendar-write-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"account-123","displayName":"Ada Example"}"#);
+            })
+            .await;
+        let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
+            "synthetic-old-refresh",
+        ))));
+        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
+        let expected_account =
+            AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: expected_account.clone(),
+            access_token: Some(access_token("synthetic-old-access")),
+        });
+
+        let reauthorize_provider = provider.clone();
+        let reauthorize_account = expected_account.clone();
+        let reauthorization = tokio::spawn(async move {
+            reauthorize_provider
+                .reauthorize_account(
+                    &reauthorize_account,
+                    AccountPermissionRequest::CalendarReadWrite,
+                    AccountOperationCancellation::new(),
+                )
+                .await
+        });
+        let authorization_url = browser_receiver
+            .recv()
+            .await
+            .expect("calendar permission review opens the test browser");
+        let parameters = authorization_url
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert!(has_scope(&parameters, "Calendars.ReadWrite"));
+        assert!(!has_scope(&parameters, "Calendars.Read"));
+        assert!(has_scope(&parameters, "Mail.Read"));
+        assert!(!has_scope(&parameters, "Mail.ReadWrite"));
+        assert!(!has_scope(&parameters, "Mail.Send"));
+
+        let callback_response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client is valid")
+            .get(callback_url_for_response(
+                &authorization_url,
+                "code",
+                "synthetic-calendar-permission-code",
+            ))
+            .send()
+            .await
+            .expect("loopback callback reaches the test listener");
+        assert!(callback_response.status().is_success());
+        let profile = reauthorization
+            .await
+            .expect("calendar permission renewal task completes")
+            .expect("same-account calendar permission renewal succeeds");
+        assert_eq!(profile.id(), &expected_account);
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-calendar-write-refresh")
+        );
+        token_exchange.assert_async().await;
+        profile_request.assert_async().await;
     }
 
     #[tokio::test]
@@ -1786,5 +2309,183 @@ mod tests {
         initial_profile.assert_async().await;
         token_exchange.assert_async().await;
         other_profile.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_event_renews_delegated_access_and_posts_one_timed_primary_calendar_event() {
+        let server = MockServer::start_async().await;
+        let token_refresh = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=refresh_token");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-calendar-access","expires_in":3600,"refresh_token":"synthetic-calendar-refresh","scope":"Calendars.ReadWrite Mail.Read User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let profile_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-calendar-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"id":"account-calendar","displayName":"Synthetic Calendar Account"}"#,
+                    );
+            })
+            .await;
+        let date = Date::from_calendar_date(2030, Month::January, 8)
+            .expect("synthetic event date is valid");
+        let start = date
+            .with_hms(9, 30, 0)
+            .expect("synthetic event start is valid")
+            .assume_utc();
+        let end = date
+            .with_hms(10, 0, 0)
+            .expect("synthetic event end is valid")
+            .assume_utc();
+        let start_date = Date::from_calendar_date(2030, Month::January, 7)
+            .expect("synthetic week start is valid");
+        let end_date = Date::from_calendar_date(2030, Month::January, 14)
+            .expect("synthetic week end is valid");
+        let account = AccountId::try_from("account-calendar".to_owned())
+            .expect("synthetic account ID is valid");
+        let view = CalendarViewReference::new(
+            account.clone(),
+            CalendarViewRange::new(
+                start_date.midnight().assume_utc(),
+                end_date.midnight().assume_utc(),
+                start_date,
+                end_date,
+            )
+            .expect("synthetic calendar view is valid"),
+        );
+        let draft = CalendarEventDraft::timed(
+            "Synthetic planning meeting".to_owned(),
+            PrimitiveDateTime::new(
+                date,
+                Time::from_hms(9, 30, 0).expect("synthetic local start is valid"),
+            ),
+            PrimitiveDateTime::new(
+                date,
+                Time::from_hms(10, 0, 0).expect("synthetic local end is valid"),
+            ),
+            "Etc/UTC"
+                .to_owned()
+                .try_into()
+                .expect("synthetic source zone is valid"),
+            start,
+            end,
+        )
+        .expect("synthetic event draft is valid");
+        let creation = CalendarEventCreation::try_new(view.clone(), draft)
+            .expect("synthetic event endpoints fit the selected week");
+        let event_request = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1.0/me/calendar/events")
+                    .header("authorization", "Bearer synthetic-calendar-access")
+                    .header("content-type", "application/json")
+                    .header("prefer", "IdType=\"ImmutableId\"")
+                    .body_includes(r#""subject":"Synthetic planning meeting""#)
+                    .body_includes(r#""dateTime":"2030-01-08T09:30:00""#)
+                    .body_includes(r#""dateTime":"2030-01-08T10:00:00""#)
+                    .body_includes(r#""timeZone":"UTC""#)
+                    .body_includes(format!("\"transactionId\":\"{}\"", creation.id().as_uuid()));
+                then.status(201)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"id":"synthetic-created-event","subject":"Synthetic planning meeting","start":{"dateTime":"2030-01-08T09:30:00","timeZone":"UTC"},"end":{"dateTime":"2030-01-08T10:00:00","timeZone":"UTC"},"isAllDay":false}"#,
+                    );
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
+            "synthetic-calendar-refresh",
+        ))));
+        let provider = synthetic_provider(&server, browser_sender, credentials);
+        provider
+            .restore_account()
+            .await
+            .expect("synthetic account restores")
+            .expect("synthetic account is connected");
+
+        let event = provider
+            .create_event(&creation)
+            .await
+            .expect("delegated Graph event creation succeeds");
+        assert_eq!(event.reference(), &view);
+        assert_eq!(event.subject(), Some("Synthetic planning meeting"));
+        assert_eq!(event.time(), creation.draft().time());
+        assert!(matches!(event.time(), CalendarOccurrenceTime::Timed { .. }));
+        token_refresh.assert_async().await;
+        profile_request.assert_async().await;
+        event_request.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn create_event_rejects_a_view_for_another_signed_in_account_before_posting() {
+        let server = MockServer::start_async().await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
+            "synthetic-calendar-refresh",
+        ))));
+        let provider = synthetic_provider(&server, browser_sender, credentials);
+        *provider.config.session.lock().await = Some(ProviderSession {
+            account_id: AccountId::try_from("signed-in-calendar-account".to_owned())
+                .expect("synthetic signed-in account ID is valid"),
+            access_token: Some(access_token("synthetic-calendar-access")),
+        });
+        let date = Date::from_calendar_date(2030, Month::January, 8)
+            .expect("synthetic event date is valid");
+        let start_date = Date::from_calendar_date(2030, Month::January, 7)
+            .expect("synthetic week start is valid");
+        let end_date = Date::from_calendar_date(2030, Month::January, 14)
+            .expect("synthetic week end is valid");
+        let account = AccountId::try_from("other-calendar-account".to_owned())
+            .expect("synthetic foreign account ID is valid");
+        let view = CalendarViewReference::new(
+            account,
+            CalendarViewRange::new(
+                start_date.midnight().assume_utc(),
+                end_date.midnight().assume_utc(),
+                start_date,
+                end_date,
+            )
+            .expect("synthetic calendar view is valid"),
+        );
+        let draft = CalendarEventDraft::timed(
+            "Synthetic planning meeting".to_owned(),
+            PrimitiveDateTime::new(
+                date,
+                Time::from_hms(9, 30, 0).expect("synthetic local start is valid"),
+            ),
+            PrimitiveDateTime::new(
+                date,
+                Time::from_hms(10, 0, 0).expect("synthetic local end is valid"),
+            ),
+            "Etc/UTC"
+                .to_owned()
+                .try_into()
+                .expect("synthetic source zone is valid"),
+            date.with_hms(9, 30, 0)
+                .expect("synthetic UTC start is valid")
+                .assume_utc(),
+            date.with_hms(10, 0, 0)
+                .expect("synthetic UTC end is valid")
+                .assume_utc(),
+        )
+        .expect("synthetic event draft is valid");
+        let creation = CalendarEventCreation::try_new(view, draft)
+            .expect("synthetic event endpoints fit the selected week");
+
+        assert_eq!(
+            provider.create_event(&creation).await,
+            Err(einfach_mail_application::CalendarOperationError::AccountMismatch)
+        );
     }
 }

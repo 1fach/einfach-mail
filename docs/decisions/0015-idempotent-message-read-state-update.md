@@ -15,11 +15,11 @@ No dedicated Microsoft 365 test tenant is available. Local provider and workflow
 
 - Implement only an explicit set-read-state operation for a message already cached in the account and folder supplied by the caller. Accept a desired `ReadState`; do not expose a blind toggle or queue the action for offline replay.
 - Send one Graph v1.0 PATCH to `/me/messages/{id}` with a JSON body containing only `isRead`. Parse the returned `isRead` and require it to match the requested state before reporting server confirmation.
-- Do not automatically retry PATCH requests. After an uncertain result, require a successful account sync before exposing another read-state action.
+- Do not automatically retry PATCH requests. After an uncertain result, require the affected folder to complete a delta round before exposing another message write.
 - Treat redirects, server errors, request timeouts, transport failures, and worker loss after dispatch as unknown outcomes. Treat authorization and throttling responses as explicit failures; do not retry a throttled PATCH.
-- Reserve the folder operation while the write is in progress, so a delta sync cannot commit an older read-state value over the action. Persist the new state in the encrypted cache only after Graph confirms it.
+- Reserve the folder operation while the write is in progress, so a delta sync cannot commit an older read-state value over the action. Commit an account-and-folder recovery marker to SQLCipher before dispatching the PATCH. Persist the confirmed state and clear the marker in one transaction; leave it in place after an uncertain result or failed cache write. ADR 0019 shares this marker with follow-up flag updates.
 - If Graph confirms the state but the local cache update fails, return an outcome that distinguishes remote confirmation from local persistence. Update the open view to reflect the confirmed state and ask the user to sync the folder.
-- Keep read-state controls unavailable in a new mail view until its initial account sync succeeds. If sync fails, keep the controls unavailable and explain that another successful sync is required. This preserves the reconciliation requirement after an uncertain write when the user closes and reopens Mail.
+- Keep message-write controls unavailable in a new mail view until its initial account sync succeeds. If sync fails, keep the controls unavailable and explain that another successful sync is required. This preserves the reconciliation requirement after an uncertain write when the user closes and reopens Mail.
 - Add an explicit permission-update flow for an already connected account. It requests the current delegated scopes with `Mail.ReadWrite` in place of `Mail.Read`, checks that the returned profile has the existing account ID, and only then replaces the saved refresh token and active access token. Cancellation, denial, identity mismatch, or storage failure leaves the existing session and encrypted cache in place.
 - Explain the full `Mail.ReadWrite` capability before opening the browser. Do not request `Mail.Send` or add create, delete, move, archive, flag, or send actions in this change. The authorization flow remains delegated for the signed-in user.
 - Put the read-state action in the native message detail header. Show pending, confirmed, denied, offline, and failure feedback. Give a denied action a direct route back to Accounts, where the user can review permissions.
@@ -41,8 +41,8 @@ This decision supersedes the GET-only transport restriction in ADR 0006 only for
 
 - The OAuth scope set replaces delegated `Mail.Read` with `Mail.ReadWrite` while retaining `User.Read`, `Calendars.Read`, and `offline_access`. Existing accounts can request the updated grant without clearing their cache.
 - The broader permission can create and delete mail even though this feature only changes read state. The account UI must disclose that capability accurately; the app still has no send permission.
-- A failed or ambiguous PATCH leaves cached state unchanged. The user must complete a successful account sync before another read-state change.
-- A failed account sync keeps read-state controls unavailable until a later sync succeeds. Cached messages remain available for reading.
+- A failed or ambiguous PATCH leaves cached state unchanged. Its durable marker blocks read-state and follow-up flag writes in the affected folder until a complete delta round commits.
+- A failed initial account sync keeps message-write controls unavailable until a later sync succeeds. Cached messages remain available for reading.
 - An account mismatch during permission renewal cannot replace the saved credential or active account.
 - [Issue 23](https://github.com/1fach/einfach-mail/issues/23) tracks the local Linux implementation. [Issue 24](https://github.com/1fach/einfach-mail/issues/24) tracks test-tenant consent and Graph verification and remains open until that evidence exists.
 
