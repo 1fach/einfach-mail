@@ -15,9 +15,13 @@ flowchart LR
     Graph -->|HTTPS with a private delegated token| MS[Microsoft Graph v1.0]
 ```
 
-PR #47 contains the M2 read-only mail candidate. The M3 branch `candidate/issue-22-calendar-sync` adds a Linux-only, read-only weekly agenda on the same account session and encrypted cache. M4 adds explicit read-state updates, follow-up flags, plain-text sends, replies to cached messages, message moves, and native Archive and Delete actions. Archive moves mail to the default Outlook Archive folder; Delete moves it to recoverable Deleted Items. ADRs [0015](../decisions/0015-idempotent-message-read-state-update.md), [0017](../decisions/0017-safe-plain-text-mail-sending.md), [0018](../decisions/0018-native-plain-text-message-reply.md), [0019](../decisions/0019-follow-up-flags-on-cached-messages.md), [0020](../decisions/0020-move-cached-messages-between-folders.md), [0039](../decisions/0039-move-messages-to-deleted-items.md), and [0040](../decisions/0040-move-messages-to-the-default-archive-folder.md) record these actions.
+PR #47 merged M2 read-only mail into `main`. PR #50 merged the Linux read-only calendar agenda and its reviewed M4 action stack into `main` on 2026-11-06.
 
-PR #51 implements issue #49 expired calendar cursor recovery on a branch based on `main` after PRs #47 and #50 merged. Its accepted design is in [ADR 0036](../decisions/0036-recover-expired-calendar-delta-cursors.md). Live reset-response behavior remains unverified until a Microsoft 365 tenant is available.
+M4 mail actions include read-state updates, follow-up flags, plain-text sends and replies, message moves, Archive, and Delete. Event actions include creating, editing, and deleting supported timed appointments. Archive moves mail to the default Outlook Archive folder. Delete moves mail to recoverable Deleted Items.
+
+ADRs [0015](../decisions/0015-idempotent-message-read-state-update.md), [0017](../decisions/0017-safe-plain-text-mail-sending.md), [0018](../decisions/0018-native-plain-text-message-reply.md), [0019](../decisions/0019-follow-up-flags-on-cached-messages.md), [0020](../decisions/0020-move-cached-messages-between-folders.md), [0039](../decisions/0039-move-messages-to-deleted-items.md), and [0040](../decisions/0040-move-messages-to-the-default-archive-folder.md) record these actions.
+
+[PR #51](https://github.com/1fach/einfach-mail/pull/51) merged issue #49 calendar cursor recovery into `main` after PRs #47 and #50. Its accepted design is in [ADR 0036](../decisions/0036-recover-expired-calendar-delta-cursors.md). Live reset-response behavior remains unverified until a Microsoft 365 tenant is available.
 
 ## Module ownership
 
