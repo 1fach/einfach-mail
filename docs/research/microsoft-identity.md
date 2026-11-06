@@ -22,17 +22,17 @@ The app requests delegated Microsoft Graph permissions for the signed-in user. I
 
 ## Thunderbird implementation reference
 
-The [Thunderbird source reference](https://github.com/thunderbird/thunderbird-desktop/tree/357d2886624ab41e271aa1ba95fae257b1c7a12d) is upstream commit `357d2886624ab41e271aa1ba95fae257b1c7a12d` from 2026-10-31. Relevant files include `mailnews/base/src/OAuth2.sys.mjs`, `OAuth2Module.sys.mjs`, `OAuth2Providers.sys.mjs`, and the matching provider and flow tests.
+The local [Thunderbird source snapshot](../../repos/thunderbird/) points to upstream commit `177df5d51f7f9a3528514fb72d44fe67ed1b1fcb`, reviewed on 2026-11-06. Relevant files include `mailnews/base/src/OAuth2.sys.mjs`, `OAuth2Module.sys.mjs`, `OAuth2Providers.sys.mjs`, and the matching provider and flow tests.
 
 The code is useful for lifecycle questions: it opens the system browser, starts a loopback-only listener on an OS-assigned port, binds the exact callback URI into the authorization request, checks state, exchanges the one-time code, reuses saved refresh credentials, retries an `invalid_grant` once with interactive sign-in, and removes saved credentials when clearing tokens. Its Linux credential equivalent is not reusable: Thunderbird delegates storage to its own login manager, while this app's Linux boundary is the OS credential service accepted in ADR 0004.
 
-Do not copy Thunderbird's Microsoft provider configuration as the app's security design. The built-in Microsoft issuer sets `useExternalBrowser` but leaves `usePKCE` unset, and the OAuth implementation only sends a PKCE challenge when that flag is enabled. Its Graph scope set is behind the disabled-by-default `mail.graph.enabled` preference and requests broad read/write and send scopes. Its OAuth logs also include the authorization response URL, token request form data, and token response JSON. Keep PKCE, request only the delegated scopes needed for enabled features, and never log callback codes or token requests or responses.
+Do not use Thunderbird's Microsoft provider configuration as Einfach Mail's security design. The built-in Microsoft issuer enables `useExternalBrowser` but leaves `usePKCE` unset, so the OAuth implementation does not send a PKCE challenge. Its Graph scope set is behind the disabled-by-default `mail.graph.enabled` preference and requests broad mail read, write, and send scopes. Its OAuth logs include the authorization response URL, token request form data, and error response JSON. Keep PKCE enabled. Request only the delegated scopes needed for enabled features. Never log callback codes, token request data, or token responses.
 
-This review is source inspection, not a live Entra test. Thunderbird's ephemeral `127.0.0.1` callback does not establish that Entra accepts a registered fixed port for this app. MFA, Conditional Access, callback matching, consent revocation, refresh, and sign-out still require tenant evidence.
+This review is source inspection, not a live Entra test. Thunderbird binds its loopback listener to an OS-assigned port. That behavior does not establish whether Entra accepts an ephemeral port for Einfach Mail. [ADR 0031](../decisions/0031-registered-loopback-port-for-entra.md) selects a registered fixed port. MFA, Conditional Access, callback matching, consent revocation, refresh, and sign-out still require tenant evidence.
 
 ## Wino Mail implementation reference
 
-The [Wino Mail source reference](https://github.com/bkaankose/Wino-Mail/tree/517b9b9e42540ed76c732e926f6e05b91d8c322c) is upstream commit `517b9b9e42540ed76c732e926f6e05b91d8c322c` from 2026-10-31 and is GPL-3.0 licensed. We keep it for source inspection. No Wino code is copied into Einfach Mail.
+The local [Wino Mail source snapshot](../../repos/wino-mail/) points to upstream commit `c569dff5a4f97865b5258dc7960ec1d5a5fb1bbd`, reviewed on 2026-11-06. It is GPL-3.0 licensed. We keep it for source inspection. No Wino code is copied into Einfach Mail.
 
 Wino places shared Microsoft authentication in `Wino.Authentication.OutlookAuthenticator`. It delegates MSAL client construction, token-cache attachment, interactive UI, and local account removal to `IOutlookAuthenticationHost`. The shared authenticator first tries `AcquireTokenSilent`. It requests interactive sign-in through the host only when needed and when a live UI is available. It also keeps short-lived access tokens in a process-wide cache keyed by account, client, and scopes. Per-key semaphores prevent concurrent refresh-token redemption. This concurrency issue is relevant when designing our token-refresh path.
 
@@ -49,10 +49,10 @@ Axum 0.8.9 was evaluated as a loopback HTTP server candidate, but Huskarl accept
 ## Sources
 
 - [Microsoft authorization code flow](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)
-- [Thunderbird OAuth implementation at the reviewed snapshot](https://github.com/thunderbird/thunderbird-desktop/blob/357d2886624ab41e271aa1ba95fae257b1c7a12d/mailnews/base/src/OAuth2.sys.mjs)
-- [Thunderbird Microsoft OAuth provider configuration](https://github.com/thunderbird/thunderbird-desktop/blob/357d2886624ab41e271aa1ba95fae257b1c7a12d/mailnews/base/src/OAuth2Providers.sys.mjs)
-- [Wino Mail shared Outlook authenticator at the reviewed snapshot](https://github.com/bkaankose/Wino-Mail/blob/517b9b9e42540ed76c732e926f6e05b91d8c322c/src/Wino.Authentication/OutlookAuthenticator.cs)
-- [Wino Mail Windows MSAL host at the reviewed snapshot](https://github.com/bkaankose/Wino-Mail/blob/517b9b9e42540ed76c732e926f6e05b91d8c322c/src/Wino.Platform.Windows/WindowsOutlookAuthenticationHost.cs)
+- [Thunderbird OAuth implementation](../../repos/thunderbird/mailnews/base/src/OAuth2.sys.mjs)
+- [Thunderbird Microsoft OAuth provider configuration](../../repos/thunderbird/mailnews/base/src/OAuth2Providers.sys.mjs)
+- [Wino Mail shared Outlook authenticator](../../repos/wino-mail/src/Wino.Authentication/OutlookAuthenticator.cs)
+- [Wino Mail Windows MSAL host](../../repos/wino-mail/src/Wino.Platform.Windows/WindowsOutlookAuthenticationHost.cs)
 - [Microsoft identity platform scopes and OIDC](https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc)
 - [Configure desktop apps that call web APIs](https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-app-configuration)
 - [Redirect URI best practices and limitations](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url)
