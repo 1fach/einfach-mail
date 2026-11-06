@@ -4,9 +4,7 @@ Last updated: 2026-11-06
 
 ## Current milestone
 
-M4 mail and calendar actions remain in progress. PR #52's retryable account-cache removal changes are merged into `candidate/issue-22-calendar-sync` as merge commit `ffe4755ce4ce1b42529dbd37a56254e141f855c9`; all four required GitHub checks passed before merge. PR #54's reviewed read-state implementation is merged into PR #53 at `9522d7be4690d3c14d89719511ca067b95108e35`; the same stack includes follow-up flags and saved-account identity.
-
-PR #53 implements issue #27's single plain-text send. Its review worktree has integrated the latest `candidate/issue-22-calendar-sync` head `37a1c802a62ec781c8a7e5368ed0aea4f27efa34`, which carries the calendar agenda and account-cache lock changes. Source review found that a failed Linux `flock` upgrade could lose the cache's shared lock. The integrated branch now coordinates opens and removals with a lifecycle gate and restores shared ownership after failed removal. The source review and four exact-head GitHub checks still need to pass before merge. Issue #27 and PR #53 remain open; keep issue #28 open for tenant consent and Graph verification.
+M4 mail and calendar actions remain in progress. PR #53 merged into `candidate/issue-22-calendar-sync` on 2026-11-06 as merge commit `379ba105a4a7836412d5c0f81a86085372739ae3`, completing the native plain-text send implementation and closing issue #27. The merged stack also includes read-state updates, follow-up flags, saved-account identity, the calendar agenda, and account-cache lifecycle coordination. All four required checks passed on PR head `b2d067d42594d5f67770c2925fa8d30c34ee0b98`.
 
 ## Active risks
 
@@ -17,10 +15,9 @@ PR #53 implements issue #27's single plain-text send. Its review worktree has in
 
 ## Next actions
 
-1. Finish the source and security review of the integrated PR #53 head while preserving root WIP.
-2. Push the reviewed head once, wait for all four required exact-head checks, then post the review and merge PR #53 into `candidate/issue-22-calendar-sync` if it is clean.
-3. After merge, update issue #27 and the project records; keep issue #28 open for tenant-only evidence.
-4. Continue the independent M1, M2, and M3 verification work recorded in the roadmap and GitHub issues.
+1. Continue the M1, M2, and M3 verification work recorded in the roadmap and GitHub issues.
+2. Keep issue #28 open until a dedicated Microsoft 365 test tenant is available for delegated consent and live Graph send verification.
+3. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
 
 ## Update rule
 
