@@ -1,7 +1,7 @@
 //! Linux cache paths, file locking, and SQLCipher key access.
 
 use std::{
-    fs::{self, File, OpenOptions, Permissions},
+    fs::{self, File, OpenOptions, Permissions, TryLockError},
     io,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -23,8 +23,8 @@ const CREDENTIAL_SERVICE: &str = "com.1fach.einfach-mail";
 pub(super) struct OpenDatabase {
     pub(super) client: Client,
     pub(super) database_path: PathBuf,
-    pub(super) lock_path: PathBuf,
-    pub(super) credential_account: String,
+    pub(super) lock_file: File,
+    pub(super) credential_account: Option<String>,
 }
 
 struct DatabaseKey(Zeroizing<[u8; KEY_BYTES]>);
@@ -60,14 +60,13 @@ pub(super) async fn open_database(account_id: &AccountId) -> Result<OpenDatabase
     let (database_path, lock_path, credential_account) = cache_paths(account_id)?;
     let account_directory = database_path.parent().ok_or(MailCacheError::Unavailable)?;
     create_private_directory(account_directory)?;
-    let lock_file = open_lock_file(&lock_path)?;
-    lock_file.lock().map_err(|_| MailCacheError::Unavailable)?;
-    open_locked_database(database_path, lock_path, credential_account).await
+    let lock_file = lock_account_directory(&lock_path)?;
+    open_locked_database(database_path, lock_file, credential_account).await
 }
 
 async fn open_locked_database(
     database_path: PathBuf,
-    lock_path: PathBuf,
+    lock_file: File,
     credential_account: String,
 ) -> Result<OpenDatabase, MailCacheError> {
     let credential = credential_entry(&credential_account)?;
@@ -80,8 +79,8 @@ async fn open_locked_database(
     Ok(OpenDatabase {
         client,
         database_path,
-        lock_path,
-        credential_account,
+        lock_file,
+        credential_account: Some(credential_account),
     })
 }
 
@@ -130,14 +129,23 @@ async fn open_encrypted_client(
 pub(super) async fn open_test_database(
     database_path: &Path,
     key_byte: u8,
-) -> Result<Client, MailCacheError> {
+) -> Result<OpenDatabase, MailCacheError> {
+    let account_directory = database_path.parent().ok_or(MailCacheError::Unavailable)?;
+    create_private_directory(account_directory)?;
+    let lock_path = database_path.with_extension("lock");
+    let lock_file = lock_account_directory(&lock_path)?;
     secure_database_file(database_path)?;
     let key = DatabaseKey(Zeroizing::new([key_byte; KEY_BYTES]));
     let client = open_encrypted_client(database_path, &key).await?;
     schema::apply(&client)
         .await
         .map_err(super::store::CacheFailure::public)?;
-    Ok(client)
+    Ok(OpenDatabase {
+        client,
+        database_path: database_path.to_path_buf(),
+        lock_file,
+        credential_account: None,
+    })
 }
 
 fn cache_paths(account_id: &AccountId) -> Result<(PathBuf, PathBuf, String), MailCacheError> {
@@ -202,17 +210,6 @@ pub(super) fn remove_credential(account: &str) -> Result<(), MailCacheError> {
     }
 }
 
-pub(super) async fn delete_database_files(
-    client: &Client,
-    database_path: &Path,
-) -> Result<(), MailCacheError> {
-    client
-        .close()
-        .await
-        .map_err(|_| MailCacheError::Unavailable)?;
-    remove_database_files(database_path)
-}
-
 pub(super) fn remove_account_without_open_client(
     account_id: &AccountId,
 ) -> Result<(), MailCacheError> {
@@ -226,7 +223,7 @@ pub(super) fn remove_account_without_open_client(
     remove_credential(&credential_account)
 }
 
-fn remove_database_files(database_path: &Path) -> Result<(), MailCacheError> {
+pub(super) fn remove_database_files(database_path: &Path) -> Result<(), MailCacheError> {
     remove_file_if_present(database_path)?;
     remove_file_if_present(&with_suffix(database_path, "-wal"))?;
     remove_file_if_present(&with_suffix(database_path, "-shm"))
@@ -248,7 +245,10 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 pub(super) fn lock_account_directory(path: &Path) -> Result<File, MailCacheError> {
     let file = open_lock_file(path)?;
-    file.lock().map_err(|_| MailCacheError::Unavailable)?;
+    file.try_lock().map_err(|error| match error {
+        TryLockError::WouldBlock => MailCacheError::OperationInProgress,
+        TryLockError::Error(_) => MailCacheError::Unavailable,
+    })?;
     Ok(file)
 }
 

@@ -20,7 +20,7 @@ use einfach_mail_domain::{
 };
 use tempfile::TempDir;
 
-use crate::store::SqliteMailCache;
+use crate::store::{SqliteMailCache, SqliteMailCacheFactory};
 
 const DATABASE_KEY_BYTE: u8 = 0x62;
 
@@ -42,6 +42,7 @@ struct FixtureProvider {
 
 struct FixtureCacheFactory {
     database_directory: std::path::PathBuf,
+    cache_factory: SqliteMailCacheFactory,
 }
 
 impl MailCacheFactory for FixtureCacheFactory {
@@ -52,11 +53,11 @@ impl MailCacheFactory for FixtureCacheFactory {
         account_id: AccountId,
     ) -> impl Future<Output = Result<Self::Cache, MailCacheError>> + Send + '_ {
         let database_path = self.database_directory.join("mail.sqlite3");
+        let cache_factory = self.cache_factory.clone();
         async move {
-            Ok(
-                SqliteMailCache::open_with_test_key(database_path, account_id, DATABASE_KEY_BYTE)
-                    .await,
-            )
+            cache_factory
+                .open_with_test_key_for_account(database_path, account_id, DATABASE_KEY_BYTE)
+                .await
         }
     }
 
@@ -640,6 +641,7 @@ fn factory_sessions_share_folder_reservations_during_body_fetch() {
             provider,
             FixtureCacheFactory {
                 database_directory: directory.path().to_path_buf(),
+                cache_factory: SqliteMailCacheFactory::default(),
             },
         );
         let opening_session = factory
@@ -737,6 +739,7 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
             provider,
             FixtureCacheFactory {
                 database_directory: directory.path().to_path_buf(),
+                cache_factory: SqliteMailCacheFactory::default(),
             },
         );
         let syncing_session = factory
@@ -750,29 +753,37 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
         let executor = smol::Executor::new();
         let first_account = account.clone();
 
-        let (sync_result, competing_result) = smol::block_on(executor.run(async {
-            let sync_task = executor.spawn(async move {
-                syncing_session
-                    .synchronize_account(&first_account, started_at, &ignore_sync_progress)
+        let (sync_result, competing_result, session_removal, factory_removal) =
+            smol::block_on(executor.run(async {
+                let sync_task = executor.spawn(async move {
+                    syncing_session
+                        .synchronize_account(&first_account, started_at, &ignore_sync_progress)
+                        .await
+                });
+                started_receiver
+                    .recv()
                     .await
-            });
-            started_receiver
-                .recv()
-                .await
-                .expect("first delta request reaches its gate");
-            let competing_result = competing_session
-                .synchronize_account(
-                    &account,
-                    started_at + Duration::from_secs(1),
-                    &ignore_sync_progress,
+                    .expect("first delta request reaches its gate");
+                let competing_result = competing_session
+                    .synchronize_account(
+                        &account,
+                        started_at + Duration::from_secs(1),
+                        &ignore_sync_progress,
+                    )
+                    .await;
+                let session_removal = competing_session.remove_account_cache(&account).await;
+                let factory_removal = factory.remove_account_cache(&account).await;
+                release_sender
+                    .send(())
+                    .await
+                    .expect("first delta request gate is still open");
+                (
+                    sync_task.await,
+                    competing_result,
+                    session_removal,
+                    factory_removal,
                 )
-                .await;
-            release_sender
-                .send(())
-                .await
-                .expect("first delta request gate is still open");
-            (sync_task.await, competing_result)
-        }));
+            }));
 
         let report = sync_result.expect("first account synchronization completes");
         assert_eq!(report.folder_count(), 1);
@@ -781,6 +792,8 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
             Err(MailWorkflowError::OperationInProgress),
             "a competing sync is rejected before it can replace the folder snapshot"
         );
+        assert_eq!(session_removal, Err(MailCacheError::OperationInProgress));
+        assert_eq!(factory_removal, Err(MailCacheError::OperationInProgress));
         assert_eq!(folder_list_calls.load(Ordering::Relaxed), 1);
         let folders = competing_session
             .list_cached_folders(&account)
@@ -796,6 +809,76 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
         assert_eq!(
             messages[0].metadata().subject(),
             Some("Account snapshot survives")
+        );
+    });
+}
+
+#[test]
+fn sessions_share_one_cache_handle_and_removal_closes_every_session() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let cache = open_cache(&directory, account.clone()).await;
+        cache
+            .replace_folders(&account, vec![cached_folder])
+            .await
+            .expect("synthetic folder is cached");
+        cache.close_for_tests().await;
+
+        let factory = MailWorkflowFactory::new(
+            FixtureProvider::new(
+                account.clone(),
+                Vec::new(),
+                [],
+                Err(MailOperationError::ServiceUnavailable),
+            ),
+            FixtureCacheFactory {
+                database_directory: directory.path().to_path_buf(),
+                cache_factory: SqliteMailCacheFactory::default(),
+            },
+        );
+        let removing_session = factory
+            .open_session(account.clone())
+            .await
+            .expect("first session opens the account cache");
+        let sibling_session = factory
+            .open_session(account.clone())
+            .await
+            .expect("second session shares the account cache");
+        let other_factory = SqliteMailCacheFactory::default();
+        assert!(matches!(
+            other_factory
+                .open_with_test_key_for_account(
+                    directory.path().join("mail.sqlite3"),
+                    account.clone(),
+                    DATABASE_KEY_BYTE,
+                )
+                .await,
+            Err(MailCacheError::OperationInProgress)
+        ));
+
+        removing_session
+            .remove_account_cache(&account)
+            .await
+            .expect("account removal closes and deletes the shared cache");
+
+        assert_eq!(
+            sibling_session.list_cached_folders(&account).await,
+            Err(MailWorkflowError::Cache(MailCacheError::Unavailable))
+        );
+        assert!(!directory.path().join("mail.sqlite3").exists());
+
+        let reopened_session = factory
+            .open_session(account.clone())
+            .await
+            .expect("a new cache opens after removal releases the file lock");
+        assert_eq!(
+            reopened_session
+                .list_cached_folders(&account)
+                .await
+                .expect("new cache has no prior account folders"),
+            Vec::new()
         );
     });
 }

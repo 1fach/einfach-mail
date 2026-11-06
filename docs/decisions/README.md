@@ -29,3 +29,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0032](0032-recover-expired-message-delta-cursors.md) | Recover expired message delta cursors | Accepted for Linux; live Graph verification remains open |
 | [0034](0034-invalidate-cached-message-bodies-after-delta-updates.md) | Invalidate cached message bodies after delta updates | Accepted for Linux implementation |
 | [0037](0037-reject-stale-mail-sync-pages.md) | Reject stale mail sync pages | Accepted for Linux implementation |
+| [0038](0038-share-mail-cache-handles-by-account.md) | Share mail cache handles by account | Accepted for Linux |

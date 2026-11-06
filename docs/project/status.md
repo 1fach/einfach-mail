@@ -1,10 +1,10 @@
 # Project status
 
-Last updated: 2026-11-04
+Last updated: 2026-11-06
 
 ## Current milestone
 
-M2 read-only mail remains in draft review in PR #47. The prior PR head passed all four required GitHub checks. The reviewed follow-up adds shared account and folder reservations, persisted checkpoint revisions, and synthetic concurrency regressions for stale responses. The full Linux project gate passed locally on 2026-11-04, including workspace tests, Clippy, rustdoc, RustSec audit, and dependency-policy checks. Formatting, all 18 desktop tests, and workspace rustdoc passed again after the final copy and Rustdoc edits. The prior PR head's lockfile update uses upstream-fixed `async-executor` 1.14.1. No live Entra or Graph request has been made.
+M2 read-only mail is implemented in PR #47. The source review and local Linux project gate pass, including the shared-cache lifecycle regression. The test-tenant initial-sync check and real-window checks remain open; neither is claimed as live-verified. No live Entra or Graph request has been made.
 
 PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection and cancellation boundary. Keep issue #3 open until live Entra checks pass.
 
@@ -14,6 +14,7 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 - The account view uses an application workflow and provider-neutral profile. The Microsoft provider uses authorization code with PKCE, Graph `/me`, and Linux Secret Service for refresh credentials. Cancellation is ordered against credential commits so the view reports the operation's actual outcome.
 - The M2 candidate contains read-only folder and message synchronization, a fixed 90-day cutoff, encrypted transactions that commit each page and cursor together, fetch-on-open bodies, offline cached browsing, keyboard navigation, and native rendering of sanitized message content. Expired message delta cursors start a durable replacement scan while cached messages remain visible. The candidate contains no calendar workflows or mail-write actions.
 - Sessions created by one mail workflow factory share account and folder reservations. A sync reserves the account before folder enumeration and holds it through folder replacement and delta sync. Each persisted page or reset advances a checkpoint revision, and stale responses cannot advance or finalize a newer synchronization state.
+- Sessions created by one persistence factory share a SQLCipher client per account. Its exclusive cache lock remains held until removal finishes or the last session releases the handle. Account removal reserves the account before closing the shared client and deleting cache files and the Secret Service key.
 - Automated fixtures use synthetic data. The candidate includes Graph transport, persistence, sanitizer, and headless GPUI proof packages. The mail fixes pass the Rust 1.95 workspace/all-target check, full workspace tests, affected-crate Clippy, rustdoc, and formatting. Dependency-boundary and banned-framework checks pass. After CI identified yanked `async-executor` 1.14.0, the lockfile was updated to upstream-fixed 1.14.1; a fresh RustSec audit loaded 1,403 advisories and found no vulnerable or yanked locked crates, while reporting the eight upstream unmaintained crates already tracked in [dependency review](dependency-review.md). Environment-dependent Secret Service tests remain ignored. No live mailbox content is used.
 - No live Entra sign-in or Graph mailbox request has been performed. The candidate does not claim tenant verification.
 
@@ -26,9 +27,8 @@ PR #46 merged into `main` on 2026-11-02. It contains the M1 account connection a
 
 ## Next actions
 
-1. Keep PR #47 in draft until its checks pass, issue #8's Microsoft 365 initial-sync check passes, and issue #9's real-window checks pass.
-2. Keep issue #8 open until initial-sync completeness is verified against a Microsoft 365 test tenant.
-3. Keep issue #9 open until layout, clipboard behavior, and browser launch are verified in a safe Linux session.
+1. Keep issue #8 open until initial-sync completeness is verified against a Microsoft 365 test tenant.
+2. Keep issue #9 open until layout, clipboard behavior, and browser launch are verified in a safe Linux session.
 
 ## Update rule
 

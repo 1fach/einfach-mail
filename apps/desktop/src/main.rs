@@ -57,8 +57,10 @@ fn configured_account_services()
 
     let provider = MicrosoftGraphProvider::new(client_id, callback_port);
     let account_workflow = Arc::new(AccountWorkflow::new(provider.clone()));
-    let mail_session_factory: Arc<dyn MailSessionFactory> =
-        Arc::new(MailWorkflowFactory::new(provider, SqliteMailCacheFactory));
+    let mail_session_factory: Arc<dyn MailSessionFactory> = Arc::new(MailWorkflowFactory::new(
+        provider,
+        SqliteMailCacheFactory::default(),
+    ));
     Ok((account_workflow, mail_session_factory))
 }
 

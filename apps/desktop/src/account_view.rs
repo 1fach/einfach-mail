@@ -820,6 +820,9 @@ fn mail_cache_error_message(error: MailCacheError) -> &'static str {
         MailCacheError::Unavailable => {
             "The encrypted mail cache is unavailable. Unlock your Linux keyring and try again."
         }
+        MailCacheError::OperationInProgress => {
+            "The mail cache is in use. Wait for the current mail operation to finish and try again."
+        }
         _ => "The local mail cache could not be opened. Try again.",
     }
 }

@@ -175,34 +175,38 @@ pub trait MailSession: Send + Sync {
         message_id: &'a MessageId,
     ) -> MailSessionFuture<'a, Result<OpenedMessage, MailWorkflowError>>;
 
-    /// Removes this session's account cache and its local encryption key.
+    /// Reserves the account, then removes its cache and local encryption key.
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account does not own the cache or removal fails.
+    /// Returns [`MailCacheError::OperationInProgress`] when another mail operation owns the
+    /// account, or a cache error when the account does not own the cache or removal fails.
     fn remove_account_cache<'a>(
         &'a self,
         account_id: &'a AccountId,
     ) -> MailSessionFuture<'a, Result<(), MailCacheError>>;
 }
 
-/// Opens mail sessions and removes account caches when no session is open.
+/// Opens mail sessions and removes account caches under account reservations.
 pub trait MailSessionFactory: Send + Sync {
     /// Opens an account-scoped mail session.
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account cache or its credential is unavailable.
+    /// Returns a cache error when the account cache or its credential is unavailable, or
+    /// [`MailCacheError::OperationInProgress`] when removal is active or another cache handle
+    /// owns the exclusive account lock.
     fn open_session(
         &self,
         account_id: AccountId,
     ) -> MailSessionFuture<'_, Result<Arc<dyn MailSession>, MailCacheError>>;
 
-    /// Removes an account cache when no open session is available to remove it.
+    /// Reserves the account, then removes its cache when no session is available.
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account files or credential cannot be removed.
+    /// Returns [`MailCacheError::OperationInProgress`] when another mail operation owns the
+    /// account, or a cache error when the account files or credential cannot be removed.
     fn remove_account_cache<'a>(
         &'a self,
         account_id: &'a AccountId,
@@ -484,8 +488,10 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account does not own this cache or removal fails.
+    /// Returns [`MailCacheError::OperationInProgress`] when another mail operation owns the
+    /// account, or a cache error when the account does not own this cache or removal fails.
     pub async fn remove_account_cache(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
+        let _reservation = reserve_account_operation(&self.reservations, account_id)?;
         self.cache.remove_account(account_id).await?;
         Ok(())
     }
@@ -513,23 +519,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         &self,
         account: &AccountId,
     ) -> Result<OperationReservation, MailWorkflowError> {
-        let mut reservations = self
-            .reservations
-            .lock()
-            .map_err(|_| MailWorkflowError::StateUnavailable)?;
-        if reservations.accounts.contains(account)
-            || reservations
-                .folders
-                .iter()
-                .any(|folder| folder.account_id() == account)
-        {
-            return Err(MailWorkflowError::OperationInProgress);
-        }
-        reservations.accounts.insert(account.clone());
-        Ok(OperationReservation {
-            reservations: Arc::clone(&self.reservations),
-            key: ReservationKey::Account(account.clone()),
-        })
+        reserve_account_operation(&self.reservations, account).map_err(Into::into)
     }
 }
 
@@ -608,7 +598,57 @@ where
         &'a self,
         account_id: &'a AccountId,
     ) -> MailSessionFuture<'a, Result<(), MailCacheError>> {
-        Box::pin(self.cache_factory.remove_for_account(account_id))
+        let reservations = Arc::clone(&self.reservations);
+        Box::pin(async move {
+            let _reservation = reserve_account_operation(&reservations, account_id)?;
+            self.cache_factory.remove_for_account(account_id).await
+        })
+    }
+}
+
+fn reserve_account_operation(
+    reservations: &Arc<Mutex<ActiveOperations>>,
+    account: &AccountId,
+) -> Result<OperationReservation, ReservationError> {
+    let mut active = reservations
+        .lock()
+        .map_err(|_| ReservationError::StateUnavailable)?;
+    if active.accounts.contains(account)
+        || active
+            .folders
+            .iter()
+            .any(|folder| folder.account_id() == account)
+    {
+        return Err(ReservationError::OperationInProgress);
+    }
+    active.accounts.insert(account.clone());
+    Ok(OperationReservation {
+        reservations: Arc::clone(reservations),
+        key: ReservationKey::Account(account.clone()),
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ReservationError {
+    OperationInProgress,
+    StateUnavailable,
+}
+
+impl From<ReservationError> for MailWorkflowError {
+    fn from(error: ReservationError) -> Self {
+        match error {
+            ReservationError::OperationInProgress => Self::OperationInProgress,
+            ReservationError::StateUnavailable => Self::StateUnavailable,
+        }
+    }
+}
+
+impl From<ReservationError> for MailCacheError {
+    fn from(error: ReservationError) -> Self {
+        match error {
+            ReservationError::OperationInProgress => Self::OperationInProgress,
+            ReservationError::StateUnavailable => Self::Unavailable,
+        }
     }
 }
 

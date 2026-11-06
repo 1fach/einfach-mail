@@ -32,7 +32,7 @@ The dependency direction is desktop UI → application → domain, with Graph an
 ## Data flow
 
 1. A GPUI view calls an application workflow to list cached folders/messages, synchronize mail, or open a message.
-2. The workflow coordinates account-scoped operations through provider and cache ports. Graph OAuth tokens remain private to the provider.
+2. The workflow coordinates account-scoped operations through provider and cache ports. Sessions from one mail workflow factory share one SQLCipher cache handle per account. Graph OAuth tokens remain private to the provider.
 3. The Graph adapter validates and maps external responses into provider-independent values. It follows opaque next links through the private transport worker.
 4. The workflow applies the account's fixed 90-day cutoff and persists each page with its matching cursor update in one SQLCipher transaction. A folder becomes synchronized only after its complete page chain and final delta link commit.
 5. Opening a message returns an encrypted cached body when available. Otherwise, the workflow reserves the folder against account sync, rereads the message, fetches its body, and stores the raw form for offline reading.
@@ -47,6 +47,7 @@ The dependency direction is desktop UI → application → domain, with Graph an
 - Send `Content-Type: application/json` on initial and continuation message-delta GETs, as required by Microsoft Graph v1.0.
 - Commit each page and its restart checkpoint atomically. Keep each attempt within 1,000 pages and 64 MiB of response data per folder.
 - Share account and folder reservations among sessions from one workflow factory. Acquire the account reservation before listing or replacing folders and hold it through delta sync. Persist a checkpoint revision and accept a page or reset only when its request started from the current revision.
+- Reserve the account before cache removal. The persistence factory shares one live SQLCipher client and retains its exclusive lock file across sessions until removal completes or the last handle drops. See [ADR 0038](../decisions/0038-share-mail-cache-handles-by-account.md).
 - If Graph returns `410 Gone` for a message delta request, validate its reset URL and start a durable replacement generation. Keep unseen rows and their bodies until the final replacement page commits. A replacement upsert clears that message's cached body in the page transaction; completion deletes unseen rows and clears bodies for all retained rows atomically with the final cursor. See [ADR 0032](../decisions/0032-recover-expired-message-delta-cursors.md) and [ADR 0034](../decisions/0034-invalidate-cached-message-bodies-after-delta-updates.md).
 - Apply removals and sparse metadata patches only to messages already in the local scope. Preserve fields omitted from a sparse patch and distinguish explicit nulls for nullable fields.
 - Fetch bodies only after the user opens a message. Do not download attachments in M2.
@@ -60,7 +61,7 @@ Synthetic Graph, workflow, persistence, and headless GPUI tests cover pagination
 - Keep OAuth tokens out of views, application ports, SQLite rows, and message content. Store the refresh token in Linux Secret Service.
 - Treat message HTML as untrusted. Ammonia applies the allowlist in `crates/application`. Remote images, scripts, styles, frames, and other active content are removed. The view revalidates links when activated and supplies a non-networking image resolver.
 - Keep the main interface native GPUI. A browser engine for email would require a separate security decision and must remain a body-only leaf without app commands, tokens, IPC, or mailbox access.
-- Store cache files under the Linux XDG data home with private permissions. Encrypt them with SQLCipher and keep the cache key in Secret Service. Never replace a missing key automatically.
+- Store cache files under the Linux XDG data home with private permissions. Encrypt them with SQLCipher and keep the cache key in Secret Service. Retain the per-account lock for the lifetime of the shared cache handle. Never replace a missing key automatically.
 
 ## Design risks
 

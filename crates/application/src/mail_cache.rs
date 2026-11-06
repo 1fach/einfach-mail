@@ -18,6 +18,9 @@ pub enum MailCacheError {
     /// The cache exists but its encryption key is missing or malformed.
     #[error("the local mail cache encryption key is unavailable")]
     MissingEncryptionKey,
+    /// Another session or process is using the account's cache.
+    #[error("the local mail cache is already in use")]
+    OperationInProgress,
     /// Stored values do not satisfy the current mail domain contract.
     #[error("the local mail cache contains invalid data")]
     InvalidData,
@@ -298,7 +301,8 @@ pub trait MailCache: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`MailCacheError::AccountMismatch`] for another account or
+    /// Returns [`MailCacheError::AccountMismatch`] for another account,
+    /// [`MailCacheError::OperationInProgress`] when removal is already active, or
     /// [`MailCacheError::Unavailable`] when the credential or files cannot be removed.
     fn remove_account(
         &self,
@@ -315,7 +319,9 @@ pub trait MailCacheFactory: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account cache or its credential is unavailable.
+    /// Returns a cache error when the account cache or its credential is unavailable, or
+    /// [`MailCacheError::OperationInProgress`] when removal is active or another cache handle
+    /// owns the exclusive account lock.
     fn open_for_account(
         &self,
         account_id: AccountId,
@@ -325,7 +331,9 @@ pub trait MailCacheFactory: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account files or credential cannot be removed.
+    /// Returns a cache error when the account files or credential cannot be removed, or
+    /// [`MailCacheError::OperationInProgress`] when removal is active or another cache handle
+    /// owns the exclusive account lock.
     fn remove_for_account<'a>(
         &'a self,
         account_id: &'a AccountId,

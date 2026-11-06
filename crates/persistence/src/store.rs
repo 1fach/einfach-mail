@@ -1,8 +1,13 @@
 //! Account-scoped SQLCipher cache operations.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
+    fs::File,
     future::Future,
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -60,29 +65,117 @@ impl CacheFailure {
     }
 }
 
-/// One account's encrypted SQLCipher database and operating-system key reference.
+/// One account's shared encrypted SQLCipher database and operating-system key reference.
 #[derive(Clone)]
 pub struct SqliteMailCache {
+    inner: Arc<SqliteMailCacheInner>,
+}
+
+struct SqliteMailCacheInner {
     account_id: AccountId,
     client: Client,
     database_path: std::path::PathBuf,
-    lock_path: std::path::PathBuf,
-    credential_account: String,
+    credential_account: Option<String>,
+    lock_file: Mutex<Option<File>>,
+    client_closed: AtomicBool,
+    removed: AtomicBool,
+    removal_in_progress: AtomicBool,
 }
 
-/// Opens and removes account-scoped [`SqliteMailCache`] values.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SqliteMailCacheFactory;
+/// Shares one live SQLCipher cache handle per account across opened sessions.
+#[derive(Clone, Default)]
+pub struct SqliteMailCacheFactory {
+    open_caches: Arc<Mutex<HashMap<AccountId, Weak<SqliteMailCacheInner>>>>,
+}
+
+impl std::fmt::Debug for SqliteMailCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SqliteMailCache(<redacted>)")
+    }
+}
+
+impl std::fmt::Debug for SqliteMailCacheFactory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SqliteMailCacheFactory")
+    }
+}
+
+impl SqliteMailCacheFactory {
+    fn cached_inner(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Option<Arc<SqliteMailCacheInner>>, MailCacheError> {
+        let mut open_caches = self
+            .open_caches
+            .lock()
+            .map_err(|_| MailCacheError::Unavailable)?;
+        let Some(inner) = open_caches.get(account_id).and_then(Weak::upgrade) else {
+            open_caches.remove(account_id);
+            return Ok(None);
+        };
+        if inner.removed.load(Ordering::Acquire) {
+            open_caches.remove(account_id);
+            return Ok(None);
+        }
+        Ok(Some(inner))
+    }
+
+    async fn open_with<F>(
+        &self,
+        account_id: AccountId,
+        open_database: F,
+    ) -> Result<SqliteMailCache, MailCacheError>
+    where
+        F: Future<Output = Result<security::OpenDatabase, MailCacheError>>,
+    {
+        if let Some(inner) = self.cached_inner(&account_id)? {
+            if inner.client_closed.load(Ordering::Acquire)
+                || inner.removal_in_progress.load(Ordering::Acquire)
+            {
+                return Err(MailCacheError::OperationInProgress);
+            }
+            return Ok(SqliteMailCache { inner });
+        }
+
+        let opened = open_database.await?;
+        let cache = SqliteMailCache::from_open_database(account_id.clone(), opened);
+        self.open_caches
+            .lock()
+            .map_err(|_| MailCacheError::Unavailable)?
+            .insert(account_id, Arc::downgrade(&cache.inner));
+        Ok(cache)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn open_with_test_key_for_account(
+        &self,
+        database_path: std::path::PathBuf,
+        account_id: AccountId,
+        key_byte: u8,
+    ) -> Result<SqliteMailCache, MailCacheError> {
+        self.open_with(account_id, async move {
+            security::open_test_database(&database_path, key_byte).await
+        })
+        .await
+    }
+}
 
 impl MailCacheFactory for SqliteMailCacheFactory {
     type Cache = SqliteMailCache;
 
     async fn open_for_account(&self, account_id: AccountId) -> Result<Self::Cache, MailCacheError> {
-        SqliteMailCache::open_for_account(account_id).await
+        let account_for_open = account_id.clone();
+        self.open_with(account_id, async move {
+            security::open_database(&account_for_open).await
+        })
+        .await
     }
 
     async fn remove_for_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
-        SqliteMailCache::remove_for_account(account_id)
+        match self.cached_inner(account_id)? {
+            Some(inner) => SqliteMailCache { inner }.remove_account(account_id).await,
+            None => SqliteMailCache::remove_for_account(account_id),
+        }
     }
 }
 
@@ -94,23 +187,34 @@ impl SqliteMailCache {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when paths, Secret Service, SQLCipher, or migrations fail.
+    /// Returns a cache error when paths, Secret Service, SQLCipher, or migrations fail, or
+    /// [`MailCacheError::OperationInProgress`] when another cache handle owns the account lock.
     pub async fn open_for_account(account_id: AccountId) -> Result<Self, MailCacheError> {
         let opened = security::open_database(&account_id).await?;
-        Ok(Self {
-            account_id,
-            client: opened.client,
-            database_path: opened.database_path,
-            lock_path: opened.lock_path,
-            credential_account: opened.credential_account,
-        })
+        Ok(Self::from_open_database(account_id, opened))
+    }
+
+    fn from_open_database(account_id: AccountId, opened: security::OpenDatabase) -> Self {
+        Self {
+            inner: Arc::new(SqliteMailCacheInner {
+                account_id,
+                client: opened.client,
+                database_path: opened.database_path,
+                credential_account: opened.credential_account,
+                lock_file: Mutex::new(Some(opened.lock_file)),
+                client_closed: AtomicBool::new(false),
+                removed: AtomicBool::new(false),
+                removal_in_progress: AtomicBool::new(false),
+            }),
+        }
     }
 
     /// Removes an account's cache files and key when no cache handle is open.
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the cache path or credential service cannot be updated.
+    /// Returns a cache error when the cache path or credential service cannot be updated, or
+    /// [`MailCacheError::OperationInProgress`] when another cache handle owns the account lock.
     pub fn remove_for_account(account_id: &AccountId) -> Result<(), MailCacheError> {
         security::remove_account_without_open_client(account_id)
     }
@@ -121,29 +225,36 @@ impl SqliteMailCache {
         account_id: AccountId,
         key_byte: u8,
     ) -> Self {
-        let client = security::open_test_database(&database_path, key_byte)
+        let opened = security::open_test_database(&database_path, key_byte)
             .await
             .expect("synthetic encrypted cache opens");
-        let lock_path = database_path.with_extension("lock");
-        Self {
-            account_id,
-            client,
-            database_path,
-            lock_path,
-            credential_account: "synthetic-cache-key".to_owned(),
-        }
+        Self::from_open_database(account_id, opened)
     }
 
     #[cfg(test)]
     pub(super) async fn close_for_tests(&self) {
-        self.client
+        self.inner
+            .client
             .close()
             .await
-            .expect("synthetic encrypted cache connection closes");
+            .expect("synthetic cache connection closes");
+        self.inner.client_closed.store(true, Ordering::Release);
+        self.release_lock_file()
+            .expect("synthetic cache lock releases");
+    }
+
+    #[cfg(test)]
+    fn release_lock_file(&self) -> Result<(), MailCacheError> {
+        self.inner
+            .lock_file
+            .lock()
+            .map_err(|_| MailCacheError::Unavailable)?
+            .take();
+        Ok(())
     }
 
     fn check_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
-        if &self.account_id == account_id {
+        if &self.inner.account_id == account_id {
             Ok(())
         } else {
             Err(MailCacheError::AccountMismatch)
@@ -152,6 +263,45 @@ impl SqliteMailCache {
 
     fn check_folder(&self, folder: &FolderReference) -> Result<(), MailCacheError> {
         self.check_account(folder.account_id())
+    }
+}
+
+impl SqliteMailCacheInner {
+    async fn remove(&self) -> Result<(), MailCacheError> {
+        if self.removed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self
+            .removal_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(MailCacheError::OperationInProgress);
+        }
+
+        let result = self.finish_removal().await;
+        self.removal_in_progress.store(false, Ordering::Release);
+        result
+    }
+
+    async fn finish_removal(&self) -> Result<(), MailCacheError> {
+        if !self.client_closed.load(Ordering::Acquire) {
+            self.client
+                .close()
+                .await
+                .map_err(|_| MailCacheError::Unavailable)?;
+            self.client_closed.store(true, Ordering::Release);
+        }
+        security::remove_database_files(&self.database_path)?;
+        if let Some(credential_account) = &self.credential_account {
+            security::remove_credential(credential_account)?;
+        }
+        self.lock_file
+            .lock()
+            .map_err(|_| MailCacheError::Unavailable)?
+            .take();
+        self.removed.store(true, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -165,7 +315,7 @@ impl MailCache for SqliteMailCache {
             .check_account(account_id)
             .and_then(|()| validate_folder_snapshot(account_id, &folders));
         let account_id = account_id.as_str().to_owned();
-        let client = self.client.clone();
+        let client = self.inner.client.clone();
         async move {
             validation?;
             client
@@ -189,7 +339,7 @@ impl MailCache for SqliteMailCache {
             .check_folder(folder)
             .and_then(|()| timestamp_parts(initial_cutoff));
         let folder = folder.clone();
-        let client = self.client.clone();
+        let client = self.inner.client.clone();
         async move {
             let (cutoff_seconds, cutoff_nanoseconds) = validation?;
             client
@@ -229,7 +379,7 @@ impl MailCache for SqliteMailCache {
             .check_account(account_id)
             .and_then(|()| timestamp_parts(initial_cutoff));
         let account_id = account_id.as_str().to_owned();
-        let client = self.client.clone();
+        let client = self.inner.client.clone();
         async move {
             let (cutoff_seconds, cutoff_nanoseconds) = validation?;
             client
@@ -268,7 +418,7 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<Option<MailSyncState>, MailCacheError>> + Send + '_ {
         let validation = self.check_folder(folder);
         let folder = folder.clone();
-        let client = self.client.clone();
+        let client = self.inner.client.clone();
         async move {
             validation?;
             client
@@ -290,7 +440,7 @@ impl MailCache for SqliteMailCache {
             .and_then(|()| timestamp_parts(completed_at));
         let folder = folder.clone();
         let expected_state = expected_state.clone();
-        let client = self.client.clone();
+        let client = self.inner.client.clone();
         async move {
             let completed_at = validation?;
             let (changes, progress) = page.into_parts();
@@ -346,7 +496,7 @@ impl MailCache for SqliteMailCache {
         let folder = folder.clone();
         let expected_state = expected_state.clone();
         let reset_link = reset_link.as_str().to_owned();
-        let client = self.client.clone();
+        let client = self.inner.client.clone();
         async move {
             validation?;
             client
@@ -364,7 +514,7 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<Vec<MailFolder>, MailCacheError>> + Send + '_ {
         let validation = self.check_account(account_id);
         let account_id = account_id.as_str().to_owned();
-        let client = self.client.clone();
+        let client = self.inner.client.clone();
         async move {
             validation?;
             client
@@ -380,7 +530,7 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<Vec<MailMessage>, MailCacheError>> + Send + '_ {
         let validation = self.check_folder(folder);
         let folder = folder.clone();
-        let client = self.client.clone();
+        let client = self.inner.client.clone();
         async move {
             validation?;
             client
@@ -400,7 +550,7 @@ impl MailCache for SqliteMailCache {
         let validation = self.check_folder(folder);
         let folder = folder.clone();
         let message_id = message_id.clone();
-        let client = self.client.clone();
+        let client = self.inner.client.clone();
         async move {
             validation?;
             client
@@ -423,7 +573,7 @@ impl MailCache for SqliteMailCache {
         let message_id = message_id.clone();
         let body_type = body_type_name(body.content_type());
         let content = body.content().to_owned();
-        let client = self.client.clone();
+        let client = self.inner.client.clone();
         async move {
             validation?;
             client
@@ -455,15 +605,10 @@ impl MailCache for SqliteMailCache {
         account_id: &AccountId,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
         let validation = self.check_account(account_id);
-        let client = self.client.clone();
-        let lock_path = self.lock_path.clone();
-        let database_path = self.database_path.clone();
-        let credential_account = self.credential_account.clone();
+        let inner = Arc::clone(&self.inner);
         async move {
             validation?;
-            let _lock = security::lock_account_directory(&lock_path)?;
-            security::delete_database_files(&client, &database_path).await?;
-            security::remove_credential(&credential_account)
+            inner.remove().await
         }
     }
 }
@@ -1286,11 +1431,7 @@ mod tests {
                 )
                 .await
                 .expect("opened synthetic body is saved");
-            cache
-                .client
-                .close()
-                .await
-                .expect("synthetic cache connection closes");
+            cache.close_for_tests().await;
 
             let reopened = open_test_cache(&directory, account).await;
             let persisted_state = reopened
@@ -1313,7 +1454,7 @@ mod tests {
                 Some("<p>Synthetic offline body</p>")
             );
 
-            let database_bytes = std::fs::read(&reopened.database_path)
+            let database_bytes = std::fs::read(&reopened.inner.database_path)
                 .expect("synthetic encrypted database is readable as bytes");
             assert_ne!(&database_bytes[..SQLITE_HEADER.len()], SQLITE_HEADER);
             reopened.close_for_tests().await;
