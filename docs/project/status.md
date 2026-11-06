@@ -4,9 +4,9 @@ Last updated: 2026-11-06
 
 ## Current milestone
 
-M4 mail and calendar actions remain in progress. PR #52's retryable account-cache removal changes are merged into `candidate/issue-22-calendar-sync`. PR #54's reviewed read-state implementation is merged into PR #53 at `9522d7be4690d3c14d89719511ca067b95108e35`; the same stack includes follow-up flags and saved-account identity.
+M4 mail and calendar actions remain in progress. PR #52's retryable account-cache removal changes are merged into `candidate/issue-22-calendar-sync` as merge commit `ffe4755ce4ce1b42529dbd37a56254e141f855c9`; all four required GitHub checks passed before merge. PR #54's reviewed read-state implementation is merged into PR #53 at `9522d7be4690d3c14d89719511ca067b95108e35`; the same stack includes follow-up flags and saved-account identity.
 
-PR #53 implements issue #27's single plain-text send. Its review worktree is integrating the latest `candidate/issue-22-calendar-sync` head `ffe4755ce4ce1b42529dbd37a56254e141f855c9`, which also carries the calendar agenda and account-cache lock changes. Source review found that a failed Linux `flock` upgrade could lose the cache's shared lock. The integrated branch now coordinates opens and removals with a lifecycle gate and restores shared ownership after failed removal. The source review and four exact-head GitHub checks still need to pass before merge. Issue #27 and PR #53 remain open; keep issue #28 open for tenant consent and Graph verification.
+PR #53 implements issue #27's single plain-text send. Its review worktree has integrated the latest `candidate/issue-22-calendar-sync` head `37a1c802a62ec781c8a7e5368ed0aea4f27efa34`, which carries the calendar agenda and account-cache lock changes. Source review found that a failed Linux `flock` upgrade could lose the cache's shared lock. The integrated branch now coordinates opens and removals with a lifecycle gate and restores shared ownership after failed removal. The source review and four exact-head GitHub checks still need to pass before merge. Issue #27 and PR #53 remain open; keep issue #28 open for tenant consent and Graph verification.
 
 ## Active risks
 
