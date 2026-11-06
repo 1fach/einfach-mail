@@ -40,6 +40,7 @@ Every mailbox operation is scoped by the account. The application treats the IDs
 ## Consequences
 
 - Domain ID types stay provider-neutral at the API level, while retaining the provider-issued value unchanged.
+- A folder's parent must belong to the same account and identify a different folder.
 - Persistence uniqueness and lookup use the account ID plus the entity ID. SQLite comparisons must remain case-sensitive for provider IDs.
 - The Graph provider owns the immutable-ID request header and translates raw Graph IDs into domain ID types.
 - No local ID generator or UUID dependency is needed for the current identity model. Reconsider UUID-backed local identity before adding a second provider, cross-provider references, or app-owned objects that have no provider ID.

@@ -1,40 +1,64 @@
 //! Public Microsoft Graph provider and account workflow implementation.
 
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
-use huskarl::token::RefreshToken;
-use reqwest::{Client, redirect::Policy};
+use huskarl::token::{AccessToken, RefreshToken};
+use reqwest::Client;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
     CallbackPort,
     credential::{RefreshTokenStore, SecretServiceRefreshTokenStore},
-    graph, identity,
+    error::GraphError,
+    graph::GraphApi,
+    graph_url::GraphAuthority,
+    http_client, identity,
     identity::{BrowserLauncher, Endpoints, SystemBrowser},
+    transport::GraphTransport,
     worker,
 };
 use einfach_mail_application::{
-    AccountOperationCancellation, AccountOperationError, AccountProvider,
+    AccountOperationCancellation, AccountOperationError, AccountProvider, MailOperationError,
+    MailProvider, MessageDeltaRequest, MessageDeltaResponse,
 };
-use einfach_mail_domain::AccountProfile;
+use einfach_mail_domain::{
+    AccountId, AccountProfile, FolderReference, MailFolder, MailMessage, MessageBody, MessageId,
+};
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_ACCESS_TOKEN_LIFETIME: Duration = Duration::from_secs(3_600);
+const ACCESS_TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(300);
 
-/// Microsoft Graph account provider for the Linux desktop application.
+/// Microsoft Graph account and mail provider for the Linux desktop application.
 #[derive(Clone)]
 pub struct MicrosoftGraphProvider {
     config: Arc<ProviderConfig>,
 }
 
-#[derive(Clone)]
 struct ProviderConfig {
     client_id: Uuid,
     callback_port: CallbackPort,
     endpoints: Endpoints,
     browser: Arc<dyn BrowserLauncher>,
     credentials: Arc<dyn RefreshTokenStore>,
+    graph_authority: GraphAuthority,
+    graph_transport: OnceLock<Result<GraphTransport, GraphError>>,
+    session: tokio::sync::Mutex<Option<ProviderSession>>,
+}
+
+struct ProviderSession {
+    account_id: AccountId,
+    access_token: Option<Arc<AccessToken>>,
+}
+
+struct AuthorizedAccount {
+    profile: AccountProfile,
+    refresh_token: RefreshToken,
+    access_token: Arc<AccessToken>,
 }
 
 impl MicrosoftGraphProvider {
@@ -44,15 +68,35 @@ impl MicrosoftGraphProvider {
     /// never accepts or stores a client secret.
     #[must_use]
     pub fn new(client_id: Uuid, callback_port: CallbackPort) -> Self {
+        let endpoints = Endpoints::microsoft();
+        let graph_authority = GraphAuthority::from_profile_endpoint(&endpoints.graph_me)
+            .expect("the static Microsoft Graph profile URL is valid");
         Self {
             config: Arc::new(ProviderConfig {
                 client_id,
                 callback_port,
-                endpoints: Endpoints::microsoft(),
+                endpoints,
                 browser: Arc::new(SystemBrowser),
                 credentials: Arc::new(SecretServiceRefreshTokenStore::new()),
+                graph_authority,
+                graph_transport: OnceLock::new(),
+                session: tokio::sync::Mutex::new(None),
             }),
         }
+    }
+}
+
+impl ProviderConfig {
+    fn graph_api(&self) -> Result<GraphApi, GraphError> {
+        let transport = self
+            .graph_transport
+            .get_or_init(GraphTransport::start)
+            .as_ref()
+            .map_err(|error| *error)?;
+        Ok(GraphApi::new(
+            self.graph_authority.clone(),
+            transport.handle(),
+        ))
     }
 }
 
@@ -73,10 +117,13 @@ impl AccountProvider for MicrosoftGraphProvider {
         let config = Arc::clone(&self.config);
 
         worker::run(move |_cancellation: CancellationToken| async move {
+            let mut session = config.session.lock().await;
             let Some(refresh_token) = config.credentials.load()? else {
+                *session = None;
                 return Ok(None);
             };
-            let client = build_http_client()?;
+            let client = http_client::build_client()
+                .map_err(|_| AccountOperationError::ServiceUnavailable)?;
             let response = identity::refresh(
                 config.client_id,
                 &config.endpoints,
@@ -87,9 +134,17 @@ impl AccountProvider for MicrosoftGraphProvider {
 
             let replacement_token = response.refresh_token().cloned().unwrap_or(refresh_token);
             config.credentials.save(&replacement_token)?;
-            let profile =
-                graph::load_profile(&client, &config.endpoints.graph_me, response.access_token())
-                    .await?;
+            let access_token = Arc::new(response.access_token().clone());
+            let profile = config
+                .graph_api()
+                .map_err(map_profile_graph_error)?
+                .load_profile(&config.endpoints.graph_me, Arc::clone(&access_token))
+                .await
+                .map_err(map_profile_graph_error)?;
+            *session = Some(ProviderSession {
+                account_id: profile.id().clone(),
+                access_token: Some(access_token),
+            });
             Ok(Some(profile))
         })
     }
@@ -109,10 +164,15 @@ impl AccountProvider for MicrosoftGraphProvider {
 
         worker::run_with_account_cancellation(
             move |_cancellation: CancellationToken| async move {
-                let (profile, refresh_token) = authorize_profile(&config).await?;
+                let authorized = authorize_profile(&config).await?;
+                let mut session = config.session.lock().await;
                 commit_cancellation.begin_credential_commit()?;
-                config.credentials.save(&refresh_token)?;
-                Ok(profile)
+                config.credentials.save(&authorized.refresh_token)?;
+                *session = Some(ProviderSession {
+                    account_id: authorized.profile.id().clone(),
+                    access_token: Some(authorized.access_token),
+                });
+                Ok(authorized.profile)
             },
             cancellation,
         )
@@ -129,13 +189,18 @@ impl AccountProvider for MicrosoftGraphProvider {
 
         worker::run_with_account_cancellation(
             move |_cancellation: CancellationToken| async move {
-                let (profile, refresh_token) = authorize_profile(&config).await?;
-                if profile.id() != &expected_account_id {
+                let authorized = authorize_profile(&config).await?;
+                if authorized.profile.id() != &expected_account_id {
                     return Err(AccountOperationError::AccountMismatch);
                 }
+                let mut session = config.session.lock().await;
                 commit_cancellation.begin_credential_commit()?;
-                config.credentials.save(&refresh_token)?;
-                Ok(profile)
+                config.credentials.save(&authorized.refresh_token)?;
+                *session = Some(ProviderSession {
+                    account_id: authorized.profile.id().clone(),
+                    access_token: Some(authorized.access_token),
+                });
+                Ok(authorized.profile)
             },
             cancellation,
         )
@@ -150,15 +215,203 @@ impl AccountProvider for MicrosoftGraphProvider {
     /// Returns a credential-store error when Secret Service cannot remove the
     /// token.
     fn sign_out(&self) -> impl Future<Output = Result<(), AccountOperationError>> + Send + '_ {
-        let credentials = Arc::clone(&self.config.credentials);
-        worker::run(move |_cancellation: CancellationToken| async move { credentials.delete() })
+        let config = Arc::clone(&self.config);
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let mut session = config.session.lock().await;
+            config.credentials.delete()?;
+            *session = None;
+            Ok(())
+        })
+    }
+}
+
+impl MailProvider for MicrosoftGraphProvider {
+    fn list_folders(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<Vec<MailFolder>, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let account_id = account_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let token = ensure_access_token(&config, &account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let folders = graph_api
+                .list_folders(&account_id, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, &account_id, &token, folders).await
+        })
+    }
+
+    fn list_messages(
+        &self,
+        folder: &FolderReference,
+    ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let folder = folder.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = folder.account_id();
+            let token = ensure_access_token(&config, account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let messages = graph_api.list_messages(&folder, Arc::clone(&token)).await;
+            map_mail_result(&config, account_id, &token, messages).await
+        })
+    }
+
+    fn message_delta_page(
+        &self,
+        folder: &FolderReference,
+        request: MessageDeltaRequest,
+    ) -> impl Future<Output = Result<MessageDeltaResponse, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let folder = folder.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let account_id = folder.account_id();
+            let token = ensure_access_token(&config, account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let page = graph_api
+                .message_delta_page(&folder, request, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, account_id, &token, page).await
+        })
+    }
+
+    fn fetch_message_body(
+        &self,
+        folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let account_id = folder.account_id().clone();
+        let message_id = message_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let token = ensure_access_token(&config, &account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let body = graph_api
+                .fetch_message_body(&message_id, Arc::clone(&token))
+                .await;
+            map_mail_result(&config, &account_id, &token, body).await
+        })
+    }
+}
+
+async fn ensure_access_token(
+    config: &ProviderConfig,
+    account_id: &AccountId,
+) -> Result<Arc<AccessToken>, MailOperationError> {
+    let mut session = config.session.lock().await;
+    let Some(account_session) = session.as_ref() else {
+        return Err(MailOperationError::SignInRequired);
+    };
+    if &account_session.account_id != account_id {
+        return Err(MailOperationError::AccountMismatch);
+    }
+    if let Some(access_token) = account_session.access_token.as_ref()
+        && !access_token.is_expired(DEFAULT_ACCESS_TOKEN_LIFETIME, ACCESS_TOKEN_EXPIRY_MARGIN)
+    {
+        return Ok(Arc::clone(access_token));
+    }
+    let refresh_token = config
+        .credentials
+        .load()?
+        .ok_or(MailOperationError::SignInRequired)?;
+    let client = http_client::build_client().map_err(|_| MailOperationError::ServiceUnavailable)?;
+    refresh_access_token(config, &mut session, refresh_token, client).await
+}
+
+async fn refresh_access_token(
+    config: &ProviderConfig,
+    session: &mut Option<ProviderSession>,
+    refresh_token: RefreshToken,
+    client: Client,
+) -> Result<Arc<AccessToken>, MailOperationError> {
+    let response = identity::refresh(
+        config.client_id,
+        &config.endpoints,
+        client,
+        refresh_token.clone(),
+    )
+    .await?;
+    let replacement_token = response.refresh_token().cloned().unwrap_or(refresh_token);
+    config.credentials.save(&replacement_token)?;
+    let access_token = Arc::new(response.access_token().clone());
+    let Some(account_session) = session.as_mut() else {
+        return Err(MailOperationError::SignInRequired);
+    };
+    account_session.access_token = Some(Arc::clone(&access_token));
+    Ok(access_token)
+}
+
+async fn map_mail_result<T>(
+    config: &ProviderConfig,
+    account_id: &AccountId,
+    access_token: &Arc<AccessToken>,
+    mail_result: Result<T, GraphError>,
+) -> Result<T, MailOperationError> {
+    if matches!(&mail_result, Err(GraphError::AccessTokenRejected)) {
+        invalidate_access_token(config, account_id, access_token).await;
+    }
+    mail_result.map_err(map_graph_error)
+}
+
+async fn invalidate_access_token(
+    config: &ProviderConfig,
+    account_id: &AccountId,
+    rejected_token: &Arc<AccessToken>,
+) {
+    let mut session = config.session.lock().await;
+    let Some(account_session) = session.as_mut() else {
+        return;
+    };
+    if &account_session.account_id == account_id
+        && account_session
+            .access_token
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, rejected_token))
+    {
+        account_session.access_token = None;
+    }
+}
+
+fn map_graph_error(error: GraphError) -> MailOperationError {
+    match error {
+        GraphError::AccessTokenRejected => MailOperationError::SignInRequired,
+        GraphError::AccessDenied => MailOperationError::AccessDenied,
+        GraphError::RateLimited { retry_after } => MailOperationError::RateLimited { retry_after },
+        GraphError::ResponseTooLarge | GraphError::PaginationLimitExceeded => {
+            MailOperationError::ResourceLimitExceeded
+        }
+        GraphError::InvalidResponse | GraphError::UnsafeLink | GraphError::InvalidRecord => {
+            MailOperationError::InvalidResponse
+        }
+        GraphError::WorkerStart
+        | GraphError::WorkerClosed
+        | GraphError::Transport
+        | GraphError::InvalidToken => MailOperationError::ServiceUnavailable,
+    }
+}
+
+fn map_profile_graph_error(error: GraphError) -> AccountOperationError {
+    match error {
+        GraphError::AccessTokenRejected => AccountOperationError::AccessTokenRejected,
+        GraphError::AccessDenied => AccountOperationError::AccessDenied,
+        GraphError::InvalidResponse
+        | GraphError::UnsafeLink
+        | GraphError::InvalidRecord
+        | GraphError::ResponseTooLarge
+        | GraphError::PaginationLimitExceeded => AccountOperationError::ProfileUnavailable,
+        GraphError::WorkerStart
+        | GraphError::WorkerClosed
+        | GraphError::Transport
+        | GraphError::InvalidToken
+        | GraphError::RateLimited { .. } => AccountOperationError::ServiceUnavailable,
     }
 }
 
 async fn authorize_profile(
     config: &ProviderConfig,
-) -> Result<(AccountProfile, RefreshToken), AccountOperationError> {
-    let client = build_http_client()?;
+) -> Result<AuthorizedAccount, AccountOperationError> {
+    let client =
+        http_client::build_client().map_err(|_| AccountOperationError::ServiceUnavailable)?;
     let response = identity::authorize(
         config.client_id,
         config.callback_port,
@@ -171,26 +424,25 @@ async fn authorize_profile(
         .refresh_token()
         .cloned()
         .ok_or(AccountOperationError::SignInFailed)?;
-    let profile =
-        graph::load_profile(&client, &config.endpoints.graph_me, response.access_token()).await?;
-    Ok((profile, refresh_token))
-}
-
-fn build_http_client() -> Result<Client, AccountOperationError> {
-    Client::builder()
-        .redirect(Policy::none())
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .user_agent(concat!("Einfach Mail/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|_| AccountOperationError::ServiceUnavailable)
+    let access_token = Arc::new(response.access_token().clone());
+    let profile = config
+        .graph_api()
+        .map_err(map_profile_graph_error)?
+        .load_profile(&config.endpoints.graph_me, Arc::clone(&access_token))
+        .await
+        .map_err(map_profile_graph_error)?;
+    Ok(AuthorizedAccount {
+        profile,
+        refresh_token,
+        access_token,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
         net::{Ipv4Addr, SocketAddrV4},
-        sync::{Arc, Barrier, Mutex},
+        sync::{Arc, Barrier, Mutex, OnceLock},
         time::Duration,
     };
 
@@ -206,10 +458,17 @@ mod tests {
     use crate::{
         CallbackPort,
         credential::RefreshTokenStore,
+        error::GraphError,
+        graph_url::GraphAuthority,
         identity::{BrowserLauncher, Endpoints},
+        transport::GraphTransport,
     };
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
+        MailOperationError, MailProvider, MessageDeltaRequest, MessageDeltaResponse,
+    };
+    use einfach_mail_domain::{
+        AccountId, FolderReference, MessageBodyType, MessageDeltaLink, MessageDeltaProgress,
     };
 
     use super::{MicrosoftGraphProvider, ProviderConfig};
@@ -319,14 +578,25 @@ mod tests {
             client_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
                 .expect("synthetic client ID is valid"),
             callback_port: CallbackPort::Ephemeral,
+            graph_authority: GraphAuthority::from_profile_endpoint(&endpoints.graph_me)
+                .expect("synthetic Graph authority is valid"),
             endpoints,
             browser: Arc::new(TestBrowser { sender }),
             credentials,
+            graph_transport: fixture_transport(),
+            session: tokio::sync::Mutex::new(None),
         };
 
         MicrosoftGraphProvider {
             config: Arc::new(config),
         }
+    }
+
+    fn fixture_transport() -> OnceLock<Result<GraphTransport, GraphError>> {
+        let transport = GraphTransport::start_for_fixtures().expect("fixture transport starts");
+        let cell = OnceLock::new();
+        assert!(cell.set(Ok(transport)).is_ok());
+        cell
     }
 
     fn has_scope(parameters: &std::collections::HashMap<String, String>, expected: &str) -> bool {
@@ -409,7 +679,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-access","expires_in":3600,"refresh_token":"synthetic-refresh","scope":"User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-access","expires_in":3600,"refresh_token":"synthetic-refresh","scope":"Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -424,6 +694,16 @@ mod tests {
                     .body(
                         r#"{"id":"account-123","displayName":"Ada Example","mail":"ada@example.test","userPrincipalName":"ada@tenant.example.test"}"#,
                     );
+            })
+            .await;
+        let folder_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders")
+                    .header("authorization", "Bearer synthetic-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"value":[]}"#);
             })
             .await;
         let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
@@ -449,6 +729,7 @@ mod tests {
             Some("code")
         );
         assert!(has_scope(&parameters, "User.Read"));
+        assert!(has_scope(&parameters, "Mail.Read"));
         assert!(has_scope(&parameters, "offline_access"));
         assert_eq!(
             parameters.get("code_challenge_method").map(String::as_str),
@@ -493,14 +774,216 @@ mod tests {
             credentials.token_value().as_deref(),
             Some("synthetic-refresh")
         );
+        assert!(
+            provider
+                .list_folders(profile.id())
+                .await
+                .expect("connected session loads mail folders")
+                .is_empty()
+        );
         token_exchange.assert_async().await;
         profile_request.assert_async().await;
+        folder_request.assert_async().await;
 
         provider
             .sign_out()
             .await
             .expect("local sign-out removes the synthetic credential");
         assert_eq!(credentials.token_value(), None);
+    }
+
+    #[tokio::test]
+    async fn mail_provider_reads_scoped_folders_messages_delta_and_body() {
+        let server = MockServer::start_async().await;
+        let token_refresh = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=refresh_token")
+                    .body_includes("refresh_token=synthetic-old-refresh");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-mail-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Mail.Read User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let profile_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-mail-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"id":"account-mail","displayName":"Synthetic Account"}"#);
+            })
+            .await;
+        let root_folders = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders")
+                    .header("authorization", "Bearer synthetic-mail-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"value":[{"id":"folder-inbox","displayName":"Inbox","isHidden":false}]}"#,
+                    );
+            })
+            .await;
+        let child_folders = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/folder-inbox/childFolders")
+                    .header("authorization", "Bearer synthetic-mail-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"value":[]}"#);
+            })
+            .await;
+        let message_list = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/folder-inbox/messages")
+                    .header("authorization", "Bearer synthetic-mail-access")
+                    .header("prefer", "IdType=\"ImmutableId\"");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"value":[{"id":"message-1","subject":"Synthetic message","receivedDateTime":"2026-10-31T12:00:00Z","isRead":false}]}"#,
+                    );
+            })
+            .await;
+        let next_link = format!(
+            "{}/v1.0/me/mailFolders/folder-inbox/messages/delta?$skiptoken=opaque-next",
+            server.base_url()
+        );
+        let delta_link = format!(
+            "{}/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=opaque-final",
+            server.base_url()
+        );
+        let message_delta_initial = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/folder-inbox/messages/delta")
+                    .query_param_missing("$skiptoken")
+                    .header("authorization", "Bearer synthetic-mail-access")
+                    .header("content-type", "application/json");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({
+                        "value": [],
+                        "@odata.nextLink": next_link,
+                    }));
+            })
+            .await;
+        let message_delta_continuation = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/mailFolders/folder-inbox/messages/delta")
+                    .query_param("$skiptoken", "opaque-next")
+                    .header("authorization", "Bearer synthetic-mail-access")
+                    .header("content-type", "application/json");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({
+                        "value": [],
+                        "@odata.deltaLink": delta_link,
+                    }));
+            })
+            .await;
+        let message_body = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/messages/message-1")
+                    .query_param("$select", "body")
+                    .header("authorization", "Bearer synthetic-mail-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"body":{"contentType":"html","content":"<p>Safe fixture</p>"}}"#);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let credentials = Arc::new(MemoryRefreshTokenStore::new(Some(refresh_token(
+            "synthetic-old-refresh",
+        ))));
+        let provider = synthetic_provider(&server, browser_sender, credentials.clone());
+
+        let profile = provider
+            .restore_account()
+            .await
+            .expect("synthetic account restores")
+            .expect("synthetic account is present");
+        let folders = provider
+            .list_folders(profile.id())
+            .await
+            .expect("provider lists synthetic folders");
+        let folder = folders
+            .first()
+            .expect("synthetic inbox is present")
+            .reference()
+            .clone();
+        let messages = provider
+            .list_messages(&folder)
+            .await
+            .expect("provider lists synthetic message metadata");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].folder(), &folder);
+
+        let response = provider
+            .message_delta_page(&folder, MessageDeltaRequest::Initial)
+            .await
+            .expect("provider loads one synthetic delta page");
+        let MessageDeltaResponse::Page(page) = response else {
+            panic!("synthetic provider response is a page");
+        };
+        assert!(page.response_bytes() > 0);
+        let (page, _) = page.into_parts();
+        let MessageDeltaProgress::Next(next_link) = page.progress() else {
+            panic!("synthetic initial response contains a continuation link");
+        };
+        let response = provider
+            .message_delta_page(
+                &folder,
+                MessageDeltaRequest::Continue(MessageDeltaLink::from_opaque(
+                    next_link.as_str().to_owned(),
+                )),
+            )
+            .await
+            .expect("provider follows one synthetic continuation link");
+        let MessageDeltaResponse::Page(page) = response else {
+            panic!("synthetic continuation response is a page");
+        };
+        assert!(matches!(
+            page.into_parts().0.progress(),
+            MessageDeltaProgress::Complete(_)
+        ));
+        let body = provider
+            .fetch_message_body(&folder, messages[0].id())
+            .await
+            .expect("provider loads the requested synthetic body");
+        assert_eq!(body.content_type(), MessageBodyType::Html);
+        assert_eq!(body.content(), "<p>Safe fixture</p>");
+
+        let another_account = AccountId::try_from("another-account".to_owned())
+            .expect("synthetic account ID is non-empty");
+        let another_folder = FolderReference::new(another_account, folder.folder_id().clone());
+        assert_eq!(
+            provider.list_messages(&another_folder).await,
+            Err(MailOperationError::AccountMismatch)
+        );
+
+        token_refresh.assert_async().await;
+        profile_request.assert_async().await;
+        root_folders.assert_async().await;
+        child_folders.assert_async().await;
+        message_list.assert_async().await;
+        message_delta_initial.assert_async().await;
+        message_delta_continuation.assert_async().await;
+        message_body.assert_async().await;
+        assert_eq!(
+            credentials.token_value().as_deref(),
+            Some("synthetic-rotated-refresh")
+        );
     }
 
     #[tokio::test]
@@ -608,7 +1091,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-renewed-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;
@@ -656,7 +1139,7 @@ mod tests {
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(
-                        r#"{"token_type":"Bearer","access_token":"synthetic-rejected-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"User.Read offline_access"}"#,
+                        r#"{"token_type":"Bearer","access_token":"synthetic-rejected-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Mail.Read User.Read offline_access"}"#,
                     );
             })
             .await;

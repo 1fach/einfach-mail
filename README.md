@@ -1,6 +1,6 @@
 # Einfach Mail
 
-Einfach Mail is a Rust desktop mail and calendar client with Microsoft 365 integration. The native UI uses GPUI Kit. Linux is the sole development and validation target for the current milestones. Windows and macOS support follow later. Linux account connection, identity display, permission renewal, and cancellation ordering are implemented with synthetic provider, workflow, and headless UI tests. Live Entra behavior remains unverified under [issue #3](https://github.com/1fach/einfach-mail/issues/3). Mail, calendar, and synchronization are not implemented in the M1 candidate.
+Einfach Mail is a Rust desktop mail and calendar client with Microsoft 365 integration. The native UI uses GPUI Kit. Linux is the sole development and validation target for the current milestones; Windows and macOS support follow later. The local M2 candidate adds read-only mail synchronization, encrypted offline browsing, and sanitized native message rendering. Its Entra and Graph behavior has synthetic coverage but no live tenant verification. Calendar and mail-write workflows are outside this candidate. See [project status](docs/project/status.md) for the current review state.
 
 The first provider target is Exchange Online through Microsoft Graph. Exchange Server installed on premises is outside the first release scope. See the [product brief](docs/product/brief.md) and [Microsoft Graph research](docs/research/microsoft-graph.md).
 
@@ -35,10 +35,11 @@ CI runs the build, dependency, and test gates in [its Linux workflow](.github/wo
 ## Project map
 
 - `apps/desktop/` contains the GPUI application and native views.
-- `crates/domain/` contains provider-independent account profiles and account-scoped opaque identifiers. Mail and calendar entities are not implemented yet.
-- `crates/application/` contains the single-account workflow, provider port, and cancellation ordering across account credential commits. Mail and calendar workflows are not implemented yet.
-- `crates/providers/microsoft-graph/` contains Linux OAuth sign-in and permission renewal, Graph `/me` profile mapping, and Secret Service refresh-token storage. Mail and calendar Graph operations are not implemented yet.
-- `tools/storage-proof/` contains test-only SQLCipher and Linux Secret Service proofs; it exposes no application API.
+- `crates/domain/` contains provider-independent account, folder, message, and sync values.
+- `crates/application/` contains account and mail workflows, cache/provider ports, cancellation ordering, and the application-owned email sanitizer.
+- `crates/providers/microsoft-graph/` contains Linux OAuth, Graph profile and read-only mail operations, response mapping, and Secret Service refresh-token storage.
+- `crates/persistence/` owns the Linux XDG cache, SQLCipher schema, migrations, and atomic mail-page commits.
+- `tools/authentication-proof/`, `tools/storage-proof/`, `tools/graph-transport-proof/`, and `tools/email-html-proof/` contain synthetic test-only integration proofs; they expose no application API.
 - `docs/product/` contains product scope.
 - `docs/architecture/` describes module ownership and data flow.
 - `docs/decisions/` contains accepted and proposed architecture decisions plus the ADR template.
@@ -46,7 +47,7 @@ CI runs the build, dependency, and test gates in [its Linux workflow](.github/wo
 - `docs/project/workflow.md` defines how issues, implementation, verification, and decisions are handled.
 - `docs/research/` records source material and integration findings.
 - `docs/research/microsoft-identity.md` records Microsoft Entra desktop sign-in and broker constraints.
-- `docs/project/dependency-review.md` records crate candidates and the evidence needed before adoption.
+- `docs/project/dependency-review.md` records dependency choices and their review evidence.
 - `docs/research/gpui-kit.md` records the UI toolkit version, platform requirements, and optional email renderer limits.
 - `.agents/skills/` contains pinned rust and GPUI Kit coding and design guidance; `skills-lock.json` records the upstream repository and content hashes.
 - `AGENTS.md` is the required workflow and code guidance for contributors and coding agents.

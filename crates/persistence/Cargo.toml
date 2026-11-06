@@ -1,0 +1,27 @@
+[package]
+name = "einfach-mail-persistence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-sqlite.workspace = true
+einfach-mail-application = { path = "../application" }
+einfach-mail-domain = { path = "../domain" }
+getrandom.workspace = true
+hex.workspace = true
+rusqlite_migration.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring.workspace = true
+xdg.workspace = true
+
+[dev-dependencies]
+smol = "2.0.2"
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

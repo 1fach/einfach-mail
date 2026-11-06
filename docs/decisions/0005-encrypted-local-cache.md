@@ -1,28 +1,28 @@
 # ADR 0005: Use SQLCipher-backed SQLite for the local cache
 
-- Status: Accepted for Linux based on the Linux Secret Service proof
+- Status: Accepted for Linux; production cache adapter implemented with synthetic verification
 - Date: 2026-10-31
 - Owners: Project maintainer
 
 ## Context
 
-ADR 0004 requires durable offline mail and calendar data, with Graph changes and their sync cursor committed atomically. That cache needs relational queries for folders, message lists, calendar ranges, and pending operations. The product also requires an at-rest encryption decision before real mailbox data is stored.
+ADR 0004 requires durable offline mail and calendar data, with Graph changes and their sync cursor committed atomically. That cache needs relational queries for folders, message lists, calendar ranges, and pending operations. Mailbox data requires encryption at rest and account-scoped removal.
 
-The app is a native Rust desktop application. A pure-Rust UI and application stack is preferred, but the database choice must also provide mature relational behavior and a maintained encryption implementation. Linux is the only current development target. Linux Secret Service and cache-key lifecycle tests passed in Fedora on 2026-10-31, including the missing-key byte-preservation assertions; see [project status](../project/status.md). An earlier Windows Credential Manager proof remains platform-specific evidence and does not establish Windows support.
+The app is a native Rust desktop application. A pure-Rust UI and application stack is preferred, but the database choice must also provide mature relational behavior and a maintained encryption implementation. Linux is the only current development target. The Linux Secret Service key lifecycle proof passed on Fedora on 2026-10-31. The production cache adapter now has synthetic tests for encryption, transactions, checkpoint recovery, offline body reads, and cache-file removal; these tests do not verify a real Graph mailbox or every Secret Service implementation. See [project status](../project/status.md).
 
 ## Decision
 
-Prefer SQLCipher-backed SQLite behind the planned `crates/persistence/` boundary. The application and domain crates will not depend on rusqlite or SQLCipher types.
+Use SQLCipher-backed SQLite behind `crates/persistence/`. The application and domain crates do not depend on rusqlite or SQLCipher types.
 
-The current candidate set is `async-sqlite` 0.6.0 with `rusqlite_migration` 2.6.0. Configure `async-sqlite` with default features disabled and enable `bundled-sqlcipher-vendored-openssl`. Its default features include plain bundled SQLite and a WebAssembly SQLite backend, neither of which this desktop app needs. Its SQLCipher feature forwards to rusqlite. The wrapper uses a background worker and bounded queues, and its maintainers test it with both `smol` and Tokio. Use its single-connection `Client` unless a measured workload needs a pool.
+The production cache uses `async-sqlite` 0.6.0 with default features disabled and `bundled-sqlcipher-vendored-openssl`, plus `rusqlite_migration` 2.6.0. The wrapper's background worker and bounded queue keep SQLite work off the GPUI executor. Its default features include plain bundled SQLite and a WebAssembly SQLite backend, neither of which this desktop app needs. Use its single-connection `Client` unless a measured workload needs a pool. Resolve Linux user data paths with `xdg` 3.0.0 and keep cache files under the XDG data home. The `directories` 6.0.0 alternative has a broader project-directory API, but its GitHub upstream is archived and moved to Codeberg; `xdg` is the narrower fit for the current Linux target. Recheck maintenance before adopting another platform.
 
 The reviewed migration and executor crates depend on rusqlite 0.40.x, so Cargo resolves `rusqlite` 0.40.2. `rusqlite` 0.41.1 is newer, but the current `async-sqlite` and `rusqlite_migration` releases do not accept that line. Revisit this constraint when either library supports rusqlite 0.41.
 
-`rusqlite_migration` uses SQLite's `user_version` and applies migrations atomically. It has a smaller SQLite-specific dependency surface than Refinery 0.10.0, which supports rusqlite 0.40.x and Rust 1.92 but also provides other database backends, macros, and a CLI. Use `rusqlite_migration` for the SQLite-only cache. The exact candidate dependencies remain development dependencies in `tools/storage-proof/`; that package has no runtime code or application API. The implementation issue can add them to the persistence crate when it owns a real schema and cache workflow.
+`rusqlite_migration` uses SQLite's `user_version` and applies migrations atomically. It has a smaller SQLite-specific dependency surface than Refinery 0.10.0, which supports rusqlite 0.40.x and Rust 1.92 but also provides other database backends, macros, and a CLI. Use `rusqlite_migration` for the SQLite-only cache. `tools/storage-proof/` remains a separate test-only package and has no application API.
 
 `async-rusqlite` 0.6.0 is an alternative wrapper for rusqlite 0.41. It declares no MSRV, depends on `asyncified` for its channel implementation, and its README describes those channels as naive. Its README recommends `tokio-rusqlite` when executor independence is not needed. Do not use it for the current candidate set.
 
-Use `keyring` 4.2.0 with its `v1` API for Linux credential storage. This selects the zbus Secret Service backend. Do not enable `keyring`'s `cli` feature. The earlier Windows x64 proof in [PR #15](https://github.com/1fach/einfach-mail/pull/15) exercised Windows Credential Manager, but Windows support remains deferred. Recheck the credential-store candidate and run its platform proof when Windows or macOS support begins.
+Use `keyring` 4.2.0 with its `v1` API for Linux credential storage. This selects the zbus Secret Service backend. Do not enable `keyring`'s `cli` feature. The earlier Windows x64 proof in [PR #15](https://github.com/1fach/einfach-mail/pull/15) exercised Windows Credential Manager, but Windows support remains deferred. Recheck the credential-store choice and run its platform proof when Windows or macOS support begins.
 
 The Linux test-only proof passed on 2026-10-31 in a Fedora desktop session. GNOME Keyring provided the Secret Service. After `DatabaseKey::from_secret` changed to zeroize an intermediate key copy, both ignored lifecycle tests passed against the source then under review. They used random synthetic credentials and temporary files to reopen an encrypted database and backup, verify that a missing key did not trigger key replacement when only a backup remained, and check account removal. The updated missing-key test verified that the encrypted database and backup remain byte-for-byte unchanged when the credential is missing. See [project status](../project/status.md). Run the tests with `cargo test --locked -p einfach-mail-storage-proof -- --ignored --test-threads=1`.
 
@@ -64,12 +64,14 @@ The Linux proof package uses only `keyring`'s Secret Service path. Its default t
 
 ## Consequences
 
-- Persistence owns SQL schemas, migrations, encryption setup, and transactions. It commits Graph changes and the matching cursor together.
+- Persistence owns SQL schemas, migrations, encryption setup, and transactions. The production Linux adapter commits Graph page changes and matching cursors together.
 - SQLCipher is a deliberate native-code dependency in an otherwise Rust-first application because the compared pure-Rust database options do not meet the current relational and encryption requirements.
 - The earlier Windows test-only proof in PR #15 built vendored SQLCipher and OpenSSL on Windows x64. It exercised Windows Credential Manager, migrations, encrypted reads and writes, wrong-key rejection, backup reopening, missing-key behavior, and account removal.
 - The two ignored Linux Secret Service lifecycle tests passed in Fedora GNOME Keyring on 2026-10-31, including the missing-key byte-preservation assertions. The service was unlocked. A synthetic `NoStorageAccess` error covers the locked-store branch.
 - The proof uses a synthetic pending action. Losing the key leaves the encrypted files intact but makes the action inaccessible. Production code must report that state and must not generate a replacement key or replay the action.
 - The test-only backup proof applies the SQLCipher key to both database connections and verifies that the backup is encrypted and reopens with the original key. It does not export or package the key. Portable recovery remains unresolved.
+- Synthetic persistence tests cover account-scoped folders, fixed cutoffs, page/cursor atomicity, restart resume, opened-body caching, and 5,001-message pagination. They do not establish full Graph behavior; issue #3 and the tenant-only issue #8 acceptance criteria remain open.
+- Signing out a connected account removes its encrypted database, SQLite sidecars, and SQLCipher key before deleting the saved Microsoft sign-in. If cache cleanup fails, the desktop keeps the account connected so the user can retry.
 - Do not put mailbox content or OAuth tokens in test fixtures, logs, or the credential-store test evidence.
 
 ## Sources

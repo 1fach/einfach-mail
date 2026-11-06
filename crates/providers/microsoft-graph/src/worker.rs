@@ -7,11 +7,12 @@ use tokio_util::sync::CancellationToken;
 
 use einfach_mail_application::{AccountOperationCancellation, AccountOperationError};
 
-pub(super) async fn run<T, F, Fut>(operation: F) -> Result<T, AccountOperationError>
+pub(super) async fn run<T, E, F, Fut>(operation: F) -> Result<T, E>
 where
     T: Send + 'static,
+    E: From<AccountOperationError> + Send + 'static,
     F: FnOnce(CancellationToken) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, AccountOperationError>> + Send + 'static,
+    Fut: Future<Output = Result<T, E>> + Send + 'static,
 {
     run_inner(operation, None).await
 }
@@ -28,14 +29,15 @@ where
     run_inner(operation, Some(account_cancellation)).await
 }
 
-async fn run_inner<T, F, Fut>(
+async fn run_inner<T, E, F, Fut>(
     operation: F,
     account_cancellation: Option<AccountOperationCancellation>,
-) -> Result<T, AccountOperationError>
+) -> Result<T, E>
 where
     T: Send + 'static,
+    E: From<AccountOperationError> + Send + 'static,
     F: FnOnce(CancellationToken) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, AccountOperationError>> + Send + 'static,
+    Fut: Future<Output = Result<T, E>> + Send + 'static,
 {
     let cancellation = CancellationToken::new();
     let _cancel_when_dropped = CancelWhenDropped(cancellation.clone());
@@ -51,19 +53,20 @@ where
 
     response_receiver
         .await
-        .map_err(|_| AccountOperationError::ServiceUnavailable)?
+        .map_err(|_| E::from(AccountOperationError::ServiceUnavailable))?
 }
 
-fn spawn_worker<T, F, Fut>(
+fn spawn_worker<T, E, F, Fut>(
     operation: F,
     cancellation: CancellationToken,
     account_cancellation: Option<AccountOperationCancellation>,
-    response_sender: oneshot::Sender<Result<T, AccountOperationError>>,
-) -> Result<(), AccountOperationError>
+    response_sender: oneshot::Sender<Result<T, E>>,
+) -> Result<(), E>
 where
     T: Send + 'static,
+    E: From<AccountOperationError> + Send + 'static,
     F: FnOnce(CancellationToken) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, AccountOperationError>> + Send + 'static,
+    Fut: Future<Output = Result<T, E>> + Send + 'static,
 {
     thread::Builder::new()
         .name("einfach-mail-account".to_owned())
@@ -76,37 +79,39 @@ where
             );
         })
         .map(|_| ())
-        .map_err(|_| AccountOperationError::ServiceUnavailable)
+        .map_err(|_| E::from(AccountOperationError::ServiceUnavailable))
 }
 
-fn send_operation_result<T, F, Fut>(
+fn send_operation_result<T, E, F, Fut>(
     operation: F,
     cancellation: CancellationToken,
     account_cancellation: Option<AccountOperationCancellation>,
-    response_sender: oneshot::Sender<Result<T, AccountOperationError>>,
+    response_sender: oneshot::Sender<Result<T, E>>,
 ) where
     T: Send + 'static,
+    E: From<AccountOperationError> + Send + 'static,
     F: FnOnce(CancellationToken) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, AccountOperationError>> + Send + 'static,
+    Fut: Future<Output = Result<T, E>> + Send + 'static,
 {
     let operation_result = run_operation(operation, cancellation, account_cancellation);
     let _ = response_sender.send(operation_result);
 }
 
-fn run_operation<T, F, Fut>(
+fn run_operation<T, E, F, Fut>(
     operation: F,
     cancellation: CancellationToken,
     account_cancellation: Option<AccountOperationCancellation>,
-) -> Result<T, AccountOperationError>
+) -> Result<T, E>
 where
     T: Send + 'static,
+    E: From<AccountOperationError> + Send + 'static,
     F: FnOnce(CancellationToken) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, AccountOperationError>> + Send + 'static,
+    Fut: Future<Output = Result<T, E>> + Send + 'static,
 {
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|_| AccountOperationError::ServiceUnavailable)?;
+        .map_err(|_| E::from(AccountOperationError::ServiceUnavailable))?;
 
     runtime.block_on(async move {
         match account_cancellation {
@@ -114,14 +119,18 @@ where
                 biased;
                 () = account_cancellation.cancelled() => {
                     cancellation.cancel();
-                    Err(AccountOperationError::SignInCancelled)
+                    Err(E::from(AccountOperationError::SignInCancelled))
                 }
-                () = cancellation.cancelled() => Err(AccountOperationError::SignInCancelled),
+                () = cancellation.cancelled() => {
+                    Err(E::from(AccountOperationError::SignInCancelled))
+                },
                 operation_result = operation(cancellation.clone()) => operation_result,
             },
             None => tokio::select! {
                 biased;
-                () = cancellation.cancelled() => Err(AccountOperationError::SignInCancelled),
+                () = cancellation.cancelled() => {
+                    Err(E::from(AccountOperationError::SignInCancelled))
+                },
                 operation_result = operation(cancellation.clone()) => operation_result,
             },
         }
