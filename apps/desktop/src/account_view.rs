@@ -156,6 +156,9 @@ impl AccountStatus {
     fn reauthorization_error_message(error: AccountOperationError) -> &'static str {
         match error {
             AccountOperationError::SignInCancelled => "Permission review was cancelled.",
+            AccountOperationError::AccountMismatch => {
+                "Microsoft returned a different account. Your saved sign-in was not changed."
+            }
             _ => Self::error_message(error),
         }
     }
@@ -2055,6 +2058,14 @@ mod tests {
             )
         });
         assert!(connected);
+    }
+
+    #[test]
+    fn reauthorization_mismatch_copy_confirms_saved_sign_in_was_preserved() {
+        assert_eq!(
+            AccountStatus::reauthorization_error_message(AccountOperationError::AccountMismatch),
+            "Microsoft returned a different account. Your saved sign-in was not changed."
+        );
     }
 
     #[gpui::test]
