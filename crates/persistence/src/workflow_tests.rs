@@ -3719,28 +3719,14 @@ fn unknown_send_marker_survives_encrypted_restart_and_blocks_duplicate_send_and_
             MailSendOutcome::OutcomeUnknown(pending) => pending,
             other => panic!("expected unresolved send marker, got {other:?}"),
         };
-        let removal_cache = open_cache(&directory, account.clone()).await;
-
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            <SqliteMailCache as MailCache>::remove_account(&removal_cache, &account).await,
-            Err(MailCacheError::SendAlreadyPending)
-        );
-        assert_eq!(
-            <SqliteMailCache as einfach_mail_application::CalendarCache>::remove_account(
-                &removal_cache,
-                &account,
-            )
-            .await,
-            Err(CalendarCacheError::PendingMailSend)
-        );
         assert_eq!(
             workflow.load_pending_send(&account).await,
             Ok(Some(pending.clone()))
         );
         drop(workflow);
-        removal_cache.close_for_tests().await;
         cache.close_for_tests().await;
+        drop(cache);
 
         let encrypted_bytes = std::fs::read(directory.path().join("mail.sqlite3"))
             .expect("SQLCipher database remains on disk");
@@ -3769,6 +3755,17 @@ fn unknown_send_marker_survives_encrypted_restart_and_blocks_duplicate_send_and_
                 if saved == &pending
         ));
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            <SqliteMailCache as MailCache>::remove_account(&reopened, &account).await,
+            Err(MailCacheError::SendAlreadyPending)
+        );
+        assert_eq!(
+            <SqliteMailCache as einfach_mail_application::CalendarCache>::remove_account(
+                &reopened, &account,
+            )
+            .await,
+            Err(CalendarCacheError::PendingMailSend)
+        );
 
         workflow
             .resolve_pending_send(&account, pending.operation_id())

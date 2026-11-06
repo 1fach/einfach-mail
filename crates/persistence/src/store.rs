@@ -3782,6 +3782,7 @@ mod tests {
                 )))
             );
             cache.close_for_tests().await;
+            drop(cache);
 
             let reopened = open_test_cache(&directory, account.clone()).await;
             assert_eq!(
