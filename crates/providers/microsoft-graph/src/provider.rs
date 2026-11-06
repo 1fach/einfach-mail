@@ -958,7 +958,10 @@ mod tests {
 
     use crate::{
         CallbackPort,
-        credential::{CredentialIdentity, RefreshTokenStore, SavedRefreshToken},
+        credential::{
+            CredentialIdentity, RefreshTokenStore, SavedRefreshToken,
+            SecretServiceCredentialCleanup, SecretServiceRefreshTokenStore,
+        },
         error::GraphError,
         graph_url::GraphAuthority,
         identity::{BrowserLauncher, Endpoints},
@@ -970,9 +973,10 @@ mod tests {
         MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
     };
     use einfach_mail_domain::{
-        AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrenceTime,
-        CalendarViewRange, CalendarViewReference, FolderId, FolderReference, MailReplyDraft,
-        MailReplySource, MessageBodyType, MessageDeltaLink, MessageDeltaProgress, MessageId,
+        AccountId, AccountProfile, CalendarEventCreation, CalendarEventDraft,
+        CalendarOccurrenceTime, CalendarViewRange, CalendarViewReference, FolderId,
+        FolderReference, MailReplyDraft, MailReplySource, MessageBodyType, MessageDeltaLink,
+        MessageDeltaProgress, MessageId,
     };
     use time::{Date, Month, PrimitiveDateTime, Time};
 
@@ -1106,11 +1110,14 @@ mod tests {
         )))
     }
 
-    fn synthetic_provider(
+    fn synthetic_provider<C>(
         server: &MockServer,
         sender: mpsc::UnboundedSender<Url>,
-        credentials: Arc<MemoryRefreshTokenStore>,
-    ) -> MicrosoftGraphProvider {
+        credentials: Arc<C>,
+    ) -> MicrosoftGraphProvider
+    where
+        C: RefreshTokenStore + 'static,
+    {
         let endpoints = Endpoints {
             authorization: Url::parse(&server.url("/authorize"))
                 .expect("synthetic authorization endpoint is valid"),
@@ -1564,6 +1571,149 @@ mod tests {
             .await
             .expect("retry removes the synthetic credential");
         assert_eq!(credentials.token_value(), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an unlocked Linux Secret Service session"]
+    async fn provider_credential_lifecycle_uses_secret_service_across_restore() {
+        let server = MockServer::start_async().await;
+        let credentials = Arc::new(SecretServiceRefreshTokenStore::with_account(format!(
+            "provider-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        )));
+        let _cleanup = SecretServiceCredentialCleanup::new(credentials.as_ref().clone());
+        let (provider, profile) =
+            connect_with_secret_service(&server, Arc::clone(&credentials)).await;
+        let account_id = profile.id().clone();
+
+        assert_eq!(account_id.as_str(), "synthetic-account");
+        assert_saved_refresh_token(&credentials, &account_id, "synthetic-connect-refresh");
+        drop(provider);
+
+        let (provider, restored_profile) =
+            restore_with_secret_service(&server, Arc::clone(&credentials)).await;
+
+        assert_eq!(restored_profile.id(), &account_id);
+        assert_saved_refresh_token(&credentials, &account_id, "synthetic-rotated-refresh");
+        provider
+            .sign_out()
+            .await
+            .expect("sign-out removes the saved Secret Service credential");
+        assert!(
+            credentials
+                .load()
+                .expect("credential lookup succeeds")
+                .is_none()
+        );
+    }
+
+    async fn connect_with_secret_service(
+        server: &MockServer,
+        credentials: Arc<SecretServiceRefreshTokenStore>,
+    ) -> (MicrosoftGraphProvider, AccountProfile) {
+        let token_exchange = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=authorization_code");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-connect-access","expires_in":3600,"refresh_token":"synthetic-connect-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let profile_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-connect-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(SYNTHETIC_PROFILE_RESPONSE);
+            })
+            .await;
+        let (browser_sender, mut browser_receiver) = mpsc::unbounded_channel();
+        let provider = synthetic_provider(server, browser_sender, Arc::clone(&credentials));
+        let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
+        let connecting_workflow = Arc::clone(&workflow);
+        let connect_task = tokio::spawn(async move { connecting_workflow.connect_account().await });
+
+        complete_test_authorization(&mut browser_receiver, "synthetic-authorization-code").await;
+        let profile = connect_task
+            .await
+            .expect("synthetic provider connection completes")
+            .expect("synthetic account connection succeeds");
+        token_exchange.assert_async().await;
+        profile_request.assert_async().await;
+
+        (provider, profile)
+    }
+
+    async fn restore_with_secret_service(
+        server: &MockServer,
+        credentials: Arc<SecretServiceRefreshTokenStore>,
+    ) -> (MicrosoftGraphProvider, AccountProfile) {
+        let token_exchange = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/token")
+                    .body_includes("grant_type=refresh_token")
+                    .body_includes("refresh_token=synthetic-connect-refresh");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(
+                        r#"{"token_type":"Bearer","access_token":"synthetic-restore-access","expires_in":3600,"refresh_token":"synthetic-rotated-refresh","scope":"Calendars.Read Mail.Read User.Read offline_access"}"#,
+                    );
+            })
+            .await;
+        let profile_request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me")
+                    .header("authorization", "Bearer synthetic-restore-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(SYNTHETIC_PROFILE_RESPONSE);
+            })
+            .await;
+        let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+        let restored_provider =
+            synthetic_provider(server, browser_sender, Arc::clone(&credentials));
+        let profile = restored_provider
+            .restore_account()
+            .await
+            .expect("saved account restores with the mock provider")
+            .expect("verified synthetic account is present");
+
+        token_exchange.assert_async().await;
+        profile_request.assert_async().await;
+
+        (restored_provider, profile)
+    }
+
+    const SYNTHETIC_PROFILE_RESPONSE: &str = r#"{"id":"synthetic-account","displayName":"Synthetic Account","mail":"synthetic@example.test","userPrincipalName":"synthetic@tenant.example.test"}"#;
+
+    fn assert_saved_refresh_token(
+        credentials: &SecretServiceRefreshTokenStore,
+        expected_account_id: &AccountId,
+        expected_token: &str,
+    ) {
+        let saved_credential = credentials
+            .load()
+            .expect("synthetic Secret Service credential loads")
+            .expect("refresh token is present");
+
+        assert_eq!(saved_credential.account_id(), Some(expected_account_id));
+        assert_eq!(
+            saved_credential.expected_account_id(),
+            Some(expected_account_id)
+        );
+        assert_eq!(
+            saved_credential.token().token().expose_secret(),
+            expected_token
+        );
     }
 
     #[tokio::test]
