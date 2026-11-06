@@ -230,7 +230,7 @@ where
         cx: &mut Context<Self>,
     ) -> Self {
         let (view, selection) = selection.resolve(profile.id());
-        let mut calendar_view = Self::loading_for_selection(profile, session, view, selection);
+        let mut calendar_view = Self::loading_for_selection(profile, session, view, selection, cx);
         calendar_view.refresh(cx);
         calendar_view
     }
@@ -240,6 +240,7 @@ where
         session: Arc<S>,
         view: CalendarViewReference,
         selection: CalendarWeekSelection,
+        cx: &mut Context<Self>,
     ) -> Self {
         Self {
             profile,
@@ -1043,6 +1044,15 @@ fn render_agenda_day_heading(date: civil::Date) -> impl IntoElement {
         .text_sm()
         .font_bold()
         .child(date_label(date))
+}
+
+fn render_empty_day(colors: ColorTokens) -> impl IntoElement {
+    div()
+        .w_full()
+        .p_3()
+        .text_sm()
+        .text_color(colors.muted_foreground)
+        .child("No events")
 }
 
 fn current_week_start(time_zone: &TimeZone) -> Option<civil::Date> {
