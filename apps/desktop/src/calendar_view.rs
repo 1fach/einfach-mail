@@ -708,13 +708,17 @@ where
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let mut title_bar = div()
             .flex()
             .items_center()
             .justify_between()
             .gap_3()
             .child(Self::render_back_button(cx))
-            .child(self.render_calendar_title())
+            .child(self.render_calendar_title());
+        if let Some(edit_action) = self.render_selected_event_edit_action(cx) {
+            title_bar = title_bar.child(edit_action);
+        }
+        title_bar
             .child(self.render_event_button(cx))
             .child(self.render_sync_button(cx))
     }
@@ -888,8 +892,6 @@ where
                 AgendaRow::EmptyDay => event_list.child(render_empty_day(colors)),
                 AgendaRow::Event(event) => {
                     event_position += 1;
-                    let edit_action =
-                        self.render_event_edit_action(event.display.event, event.key.date, cx);
                     event_list.child(render_agenda_event(
                         event,
                         AgendaOptionPosition {
@@ -898,7 +900,6 @@ where
                             event_count,
                             selected: self.selected_agenda_event.as_ref() == Some(&event.key),
                         },
-                        edit_action,
                         colors,
                         cx,
                     ))
@@ -910,38 +911,30 @@ where
             .into_any_element()
     }
 
-    fn render_event_edit_action(
-        &self,
-        event: &CalendarOccurrence,
-        date: civil::Date,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        match event.time() {
-            CalendarOccurrenceTime::Timed { .. } => {
-                let cached_event = event.clone();
-                let button_id = format!(
-                    "calendar-event-edit-{}-{}",
-                    cached_event.id().as_str(),
-                    date.strftime("%Y-%m-%d")
-                );
-                Some(
-                    Button::new(button_id)
-                        .debug_selector(|| "calendar-event-edit".to_owned())
-                        .ghost()
-                        .label("Edit")
-                        .tab_stop(false)
-                        .disabled(
-                            self.sync_running
-                                || self.write_readiness != CalendarWriteReadiness::Ready,
-                        )
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            view.open_event_editor(cached_event.clone(), window, cx);
-                        }))
-                        .into_any_element(),
-                )
-            }
-            CalendarOccurrenceTime::AllDay { .. } => None,
+    fn render_selected_event_edit_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let selected = self.selected_agenda_event.as_ref()?;
+        let cached_event = self
+            .events
+            .iter()
+            .find(|event| event.id() == &selected.event_id)?;
+        if !matches!(cached_event.time(), CalendarOccurrenceTime::Timed { .. }) {
+            return None;
         }
+
+        let cached_event = cached_event.clone();
+        Some(
+            Button::new("calendar-event-edit")
+                .debug_selector(|| "calendar-event-edit".to_owned())
+                .ghost()
+                .label("Edit")
+                .disabled(
+                    self.sync_running || self.write_readiness != CalendarWriteReadiness::Ready,
+                )
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.open_event_editor(cached_event.clone(), window, cx);
+                }))
+                .into_any_element(),
+        )
     }
 }
 
@@ -1259,7 +1252,6 @@ fn timed_event_time_label(display_range: &TimedEventDisplayRange) -> String {
 fn render_agenda_event<S>(
     agenda_event: &AgendaEvent<'_>,
     position: AgendaOptionPosition,
-    edit_action: Option<AnyElement>,
     colors: ColorTokens,
     cx: &mut Context<CalendarView<S>>,
 ) -> impl IntoElement
@@ -1309,7 +1301,7 @@ where
                 colors.muted
             })
         })
-        .child(render_event_heading(&agenda_event.display, edit_action));
+        .child(render_event_heading(&agenda_event.display));
     if let Some(location) = agenda_event.display.event.location() {
         card = card.child(render_event_location(location, colors, selected));
     }
@@ -1332,10 +1324,7 @@ fn calendar_event_accessible_label(event: &DisplayEvent<'_>, date: civil::Date) 
     }
 }
 
-fn render_event_heading(
-    event: &DisplayEvent<'_>,
-    edit_action: Option<AnyElement>,
-) -> impl IntoElement {
+fn render_event_heading(event: &DisplayEvent<'_>) -> impl IntoElement {
     div()
         .flex()
         .items_start()
@@ -1343,7 +1332,6 @@ fn render_event_heading(
         .gap_3()
         .child(render_event_time(event))
         .child(render_event_subject(event))
-        .when_some(edit_action, |element, action| element.child(action))
 }
 
 fn render_event_time(event: &DisplayEvent<'_>) -> impl IntoElement {
@@ -2146,6 +2134,13 @@ mod tests {
         });
     }
 
+    fn select_default_timed_event(context: &mut VisualTestContext) {
+        let event = context
+            .debug_bounds("calendar-event-row-2030-01-09-synthetic-timed-event")
+            .expect("the default calendar cache contains a timed event");
+        context.simulate_click(event.center(), Modifiers::default());
+    }
+
     #[test]
     fn calendar_view_bounds_follow_local_monday_across_a_dst_transition() {
         let time_zone = TimeZone::get("America/New_York")
@@ -2258,6 +2253,7 @@ mod tests {
                 .cx
                 .update(|cx| view.read(cx).selected_agenda_event.is_none())
         );
+        assert!(context.debug_bounds("calendar-event-edit").is_none());
 
         context.update(gpui_kit::Window::focus_next);
         let mut list_focused =
@@ -2277,6 +2273,16 @@ mod tests {
 
         context.simulate_keystrokes("up");
         assert_selected_event(context, &view, "synthetic-calendar-event-20");
+        let edit_bounds = context
+            .debug_bounds("calendar-event-edit")
+            .expect("selecting a timed event exposes its edit command");
+        let list_bounds = context
+            .debug_bounds("calendar-event-list")
+            .expect("event list is rendered");
+        assert!(
+            edit_bounds.bottom() <= list_bounds.top(),
+            "the edit command stays outside listbox options; edit={edit_bounds:?}, list={list_bounds:?}"
+        );
         context.simulate_keystrokes("down");
         assert_selected_event(context, &view, "synthetic-calendar-event-20");
 
@@ -2833,6 +2839,7 @@ mod tests {
             })
         );
 
+        select_default_timed_event(context);
         let edit = context
             .debug_bounds("calendar-event-edit")
             .expect("timed calendar event offers an edit action");
@@ -3005,6 +3012,7 @@ mod tests {
             })
         );
 
+        select_default_timed_event(context);
         let edit = context
             .debug_bounds("calendar-event-edit")
             .expect("timed appointment offers an edit action");
@@ -3311,6 +3319,7 @@ mod tests {
             })
         );
 
+        select_default_timed_event(context);
         let edit = context
             .debug_bounds("calendar-event-edit")
             .expect("timed appointment offers an edit action");

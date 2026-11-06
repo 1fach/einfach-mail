@@ -21,7 +21,7 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0009](0009-account-scoped-domain-identifiers.md) | Use account-scoped opaque domain identifiers | Accepted |
 | [0010](0010-linux-first-development.md) | Focus current development on Linux | Accepted |
 | [0011](0011-initial-mail-sync-scope.md) | Define the initial read-only mail synchronization scope | Accepted |
-| [0012](0012-application-owned-mail-sessions.md) | Keep mail sessions behind application workflows | Superseded by ADR 0038 |
+| [0012](0012-application-owned-mail-sessions.md) | Keep mail sessions behind application workflows | Superseded by ADR 0043 |
 | [0013](0013-graph-account-identity.md) | Use the Graph profile for initial account identity | Accepted for Linux; live Entra verification open |
 | [0014](0014-linux-read-only-calendar-workflow.md) | Implement a cached Linux read-only primary calendar | Accepted for Linux; live Graph and manual UI verification remain open |
 | [0015](0015-idempotent-message-read-state-update.md) | Add idempotent message read-state updates | Accepted |
@@ -39,8 +39,9 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0032](0032-recover-expired-message-delta-cursors.md) | Recover expired message delta cursors | Accepted for Linux; live Graph verification remains open |
 | [0034](0034-invalidate-cached-message-bodies-after-delta-updates.md) | Invalidate cached message bodies after delta updates | Accepted for Linux implementation |
 | [0037](0037-reject-stale-mail-sync-pages.md) | Reject stale mail sync pages | Accepted for Linux implementation |
-| [0038](0038-per-account-mail-and-calendar-session.md) | Use one per-account mail and calendar session | Accepted |
+| [0038](0038-share-mail-cache-handles-by-account.md) | Share mail cache handles by account | Superseded by ADR 0043 |
 | [0039](0039-move-messages-to-deleted-items.md) | Move messages to Deleted Items | Accepted; shared API superseded by ADR 0040 |
 | [0040](0040-move-messages-to-the-default-archive-folder.md) | Move messages to the default Archive folder | Accepted |
 | [0041](0041-bind-saved-sign-in-to-cache-identity.md) | Bind saved sign-in to a verified cache identity | Accepted for Linux M1 |
 | [0042](0042-keyboard-navigation-for-calendar-agenda.md) | Use one listbox for weekly agenda navigation | Accepted; manual Linux accessibility review remains open |
+| [0043](0043-per-account-mail-and-calendar-session.md) | Use one per-account mail and calendar session | Accepted |

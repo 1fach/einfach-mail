@@ -32,7 +32,7 @@ The dependency direction is desktop UI → application → domain, with Graph an
 ## Data flow
 
 1. A GPUI view calls an application workflow to list cached folders/messages, synchronize mail, open a message, or load a calendar week.
-2. The account session composes focused mail and calendar sessions over the same account cache and provider. Calendar views use the application session for reads, synchronization, event creation, editing, deletion, and recovery. Graph OAuth tokens remain private to the provider.
+2. The account session composes focused mail and calendar sessions over the same account cache and provider. Calendar views use the application session for reads, synchronization, event creation, editing, deletion, and recovery. Graph OAuth tokens remain private to the provider. See [ADR 0043](../decisions/0043-per-account-mail-and-calendar-session.md).
 3. The Graph adapter validates and maps external responses into provider-independent values. It follows opaque next links through the private transport worker.
 4. The mail workflow applies the account's fixed 90-day cutoff and persists each page with its matching cursor update in one SQLCipher transaction. A folder becomes synchronized only after its complete page chain and final delta link commit.
 5. Opening a message returns an encrypted cached body when available. Otherwise, the workflow reserves the folder against account sync, rereads the message, fetches its body, and stores the raw form for offline reading.

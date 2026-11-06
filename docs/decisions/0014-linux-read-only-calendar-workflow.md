@@ -21,7 +21,7 @@ The first calendar view is a Linux weekly agenda for the signed-in user's primar
 - Render the weekly agenda in native GPUI. Keep provider and persistence calls out of views. Use Jiff only in Linux presentation code, format timed events in the detected system zone, label the UTC fallback, and never convert all-day dates through a time zone.
 - Use synthetic Graph, workflow, persistence, and headless UI tests. Keep issue #6 open for live recurrence, time-zone, and all-day verification. Keep manual screen-reader and pixel review open until it can be performed safely in a Linux desktop session.
 
-The per-account session that joins mail and calendar workflows is defined in [ADR 0038](0038-per-account-mail-and-calendar-session.md).
+The per-account session that joins mail and calendar workflows is defined in [ADR 0043](0043-per-account-mail-and-calendar-session.md).
 
 ## Alternatives
 
@@ -47,4 +47,4 @@ The per-account session that joins mail and calendar workflows is defined in [AD
 - [Microsoft Graph permissions reference](https://learn.microsoft.com/graph/permissions-reference?view=graph-rest-1.0)
 - [ADR 0006: Use a private Graph HTTP transport](0006-graph-http-transport.md)
 - [ADR 0005: Use SQLCipher-backed SQLite for the local cache](0005-encrypted-local-cache.md)
-- [ADR 0038: Use one per-account mail and calendar session](0038-per-account-mail-and-calendar-session.md)
+- [ADR 0043: Use one per-account mail and calendar session](0043-per-account-mail-and-calendar-session.md)
