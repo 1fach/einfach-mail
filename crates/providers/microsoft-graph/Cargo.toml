@@ -10,6 +10,7 @@ einfach-mail-domain = { path = "../../domain" }
 huskarl.workspace = true
 huskarl-reqwest.workspace = true
 httpdate.workspace = true
+headers.workspace = true
 keyring.workspace = true
 reqwest.workspace = true
 serde.workspace = true
