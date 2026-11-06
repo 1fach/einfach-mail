@@ -6,8 +6,6 @@ members = [
     "crates/domain",
     "crates/persistence",
     "crates/providers/microsoft-graph",
-    "tools/authentication-proof",
-    "tools/email-html-proof",
     "tools/storage-proof",
 ]
 

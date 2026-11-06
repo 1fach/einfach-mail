@@ -4,8 +4,6 @@ einfach-mail-application = ["einfach-mail-domain", "tokio-util"]
 einfach-mail-persistence = ["einfach-mail-application", "einfach-mail-domain"]
 einfach-mail-microsoft-graph = ["einfach-mail-application", "einfach-mail-domain"]
 einfach-mail-desktop = ["einfach-mail-application", "einfach-mail-domain", "einfach-mail-microsoft-graph", "einfach-mail-persistence"]
-einfach-mail-auth-proof = []
-einfach-mail-email-html-proof = ["einfach-mail-application", "einfach-mail-domain"]
 einfach-mail-storage-proof = []
 
 [options]

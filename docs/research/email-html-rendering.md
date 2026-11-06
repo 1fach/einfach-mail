@@ -46,14 +46,15 @@ The current GPUI Kit WebView guide documents WKWebView on macOS, WebView2 on Win
 5. Render `SanitizedEmailHtml` with `TextView::html`. Validate clicked URLs again. Open only HTTP or HTTPS links without user information. Override `image_source` so it resolves no images. Render the fallback as escaped text in a selectable native `TextView`. Show when formatting or trailing content was removed.
 6. Keep `gpui-webview` out of the first renderer. Reconsider it in a separate security ADR only if the native view fails supported mail-format checks and remote subresource blocking is proven across the supported platforms.
 
+## Current test evidence
+
+Production application tests exercise malformed markup, active elements, remote-resource markup, unapproved attributes, SVG and MathML nesting, CSS URL variants, and unsafe or obfuscated links. Positive cases cover common formatting, lists, and tables. Headless desktop tests exercise the cached `MailView`, safe and unsafe link clicks, selection, copy, and the oversized-body fallback. Persistence tests verify that the cache retains raw HTML and sanitizes it again after reopening. These tests use synthetic data and a non-networking image resolver; the former standalone HTML proof package duplicated this coverage and has been removed.
+
 ## Remaining evidence
 
-- Run Ammonia 4.2.4 against synthetic fixtures for malformed markup, scripts and event attributes, SVG/MathML mutation-XSS inputs, unsafe schemes, CSS URL case variations, remote images, frames, and forms.
-- Verify positive rendering for common paragraphs, emphasis, lists, links, and tables using synthetic content.
-- Verify link clicks reject every scheme except the allowed web schemes and never route content into app commands.
-- Verify the native renderer makes no automatic network requests for images, stylesheets, frames, or other content.
-- Verify copy, selection, large body behavior, and failure fallback on each supported target.
-- Run a RustSec audit against the resolved lockfile before adding Ammonia.
+- Review real-window layout, focus, selection, copy, and accessibility on Linux without using real mailbox data.
+- Verify operating-system clipboard behavior and system-browser launch manually.
+- Reconsider browser rendering only if native TextView fails accepted Linux format checks; any WebView decision needs separate evidence for remote-resource blocking, downloads, and navigation.
 
 ## Sources
 

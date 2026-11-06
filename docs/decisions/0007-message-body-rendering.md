@@ -14,7 +14,7 @@ The separate `gpui-webview` crate wraps Wry and uses WKWebView on macOS, WebView
 
 ## Decision
 
-Use Ammonia 4.2.4 for the application-owned message-body sanitization policy and GPUI Kit `TextView::html` for native rendering. Synthetic application, persistence, mailbox-view, and headless renderer tests cover the production path. GPUI Kit is already part of the workspace.
+Use Ammonia 4.2.4 for the application-owned message-body sanitization policy and GPUI Kit `TextView::html` for native rendering. Synthetic application, persistence, and headless `MailView` tests cover the production path. GPUI Kit is already part of the workspace. The former standalone HTML proof package duplicated this coverage and has been removed.
 
 The application workflow will accept the untrusted domain body and produce an opaque `SanitizedEmailHtml` value. Keep this type and the Ammonia allowlist policy in `crates/application`; do not add GPUI or Ammonia types to `crates/domain`. Do not persist the sanitized output: sanitize when a body is prepared for display so an updated policy is applied to cached mail too.
 

@@ -248,11 +248,26 @@ mod tests {
         allowed_external_message_url, prepare_message_body_for_display,
     };
 
+    fn sanitized_html_for_test(raw_html: &str) -> String {
+        let body = MessageBody::new(MessageBodyType::Html, raw_html.to_owned());
+        let MessageBodyForDisplay::SanitizedHtml(html) = prepare_message_body_for_display(&body)
+        else {
+            panic!("synthetic HTML remains within the rich-render limit");
+        };
+        html.as_str().to_owned()
+    }
+
     #[test]
     fn sanitizes_active_html_and_retains_common_formatting() {
         let body = MessageBody::new(
             MessageBodyType::Html,
-            r#"<p onclick="run()"><strong>safe</strong><a href="https://mail.example.test">link</a><img src="https://tracker.example.test/pixel"></p><script>secret marker</script>"#.to_owned(),
+            concat!(
+                "<p onclick=\"run()\"><strong>safe</strong><a href=\"https://mail.example.test\">link</a><img src=\"https://tracker.example.test/pixel\"></p>",
+                "<ul><li>first</li><li>second</li></ul>",
+                "<table><tbody><tr><th>key</th><td>value</td></tr></tbody></table>",
+                "<script>secret marker</script>"
+            )
+            .to_owned(),
         );
 
         let MessageBodyForDisplay::SanitizedHtml(html) = prepare_message_body_for_display(&body)
@@ -262,9 +277,150 @@ mod tests {
 
         assert!(html.as_str().contains("<strong>safe</strong>"));
         assert!(html.as_str().contains("href=\"https://mail.example.test\""));
+        assert!(
+            html.as_str()
+                .contains("<ul><li>first</li><li>second</li></ul>")
+        );
+        assert!(html.as_str().contains("<th>key</th>"));
+        assert!(html.as_str().contains("<td>value</td>"));
         assert!(!html.as_str().contains("onclick"));
         assert!(!html.as_str().contains("tracker.example.test"));
         assert!(!html.as_str().contains("secret marker"));
+    }
+
+    #[test]
+    fn removes_active_content_remote_resources_and_unapproved_attributes() {
+        let sanitized = sanitized_html_for_test(
+            r#"
+                <p class="mail" id="content" lang="en" title="Paragraph" style="color:red"
+                   onclick="run()" onmouseover="run()">readable</p>
+                <script>script marker</script>
+                <style>@import url(https://tracker.invalid/style.css);</style>
+                <img src="https://tracker.invalid/image.png" alt="image marker">
+                <a href="https://mail.example.invalid" target="_blank" onfocus="focus marker">safe label</a>
+                <link rel="stylesheet" href="https://tracker.invalid/linked.css">
+                <meta http-equiv="refresh" content="0;url=https://tracker.invalid/refresh">
+                <base href="https://tracker.invalid/">
+                <iframe src="https://tracker.invalid/frame">frame marker</iframe>
+                <form action="https://tracker.invalid/submit"><input value="form marker"><button>submit marker</button></form>
+                <object data="https://tracker.invalid/object">object marker</object>
+                <embed src="https://tracker.invalid/embed">
+                <video><source src="https://tracker.invalid/video"></video>
+                <audio><source src="https://tracker.invalid/audio"></audio>
+                <p>after</p>
+            "#,
+        );
+
+        for forbidden in [
+            "class=",
+            "id=",
+            "lang=",
+            "title=",
+            "style=",
+            "onclick",
+            "onmouseover",
+            "onfocus",
+            "target=",
+            "tracker.invalid",
+            "script marker",
+            "image marker",
+            "frame marker",
+            "form marker",
+            "focus marker",
+            "submit marker",
+            "object marker",
+            "<script",
+            "<style",
+            "<img",
+            "<link",
+            "<meta",
+            "<base",
+            "<iframe",
+            "<form",
+            "<object",
+            "<embed",
+            "<video",
+            "<audio",
+        ] {
+            assert!(
+                !sanitized.contains(forbidden),
+                "unexpected sanitized fragment: {forbidden}"
+            );
+        }
+        assert!(sanitized.contains("readable"));
+        assert!(sanitized.contains("safe label"));
+        assert!(sanitized.contains("after"));
+    }
+
+    #[test]
+    fn removes_svg_mathml_and_css_url_variants() {
+        let sanitized = sanitized_html_for_test(
+            r#"
+                <p>before</p>
+                <svg><foreignObject><p>svg mutation marker</p><math><mi>nested marker</mi></math></foreignObject></svg>
+                <math><mtext><svg><desc>math mutation marker</desc></svg></mtext></math>
+                <p style="background:url(https://tracker.invalid/lower)">lower</p>
+                <p style="background:URL(&quot;https://tracker.invalid/upper&quot;)">upper</p>
+                <p style="background:Url(https://tracker.invalid/mixed)">mixed</p>
+                <style>p { background: URL(https://tracker.invalid/block) }</style>
+                <p>after</p>
+            "#,
+        );
+
+        for forbidden in [
+            "svg mutation marker",
+            "nested marker",
+            "math mutation marker",
+            "<svg",
+            "<math",
+            "style=",
+            "<style",
+            "tracker.invalid",
+        ] {
+            assert!(
+                !sanitized.contains(forbidden),
+                "unexpected sanitized fragment: {forbidden}"
+            );
+        }
+        assert!(sanitized.contains("before"));
+        assert!(sanitized.contains("lower"));
+        assert!(sanitized.contains("upper"));
+        assert!(sanitized.contains("mixed"));
+        assert!(sanitized.contains("after"));
+    }
+
+    #[test]
+    fn sanitizes_malformed_html_to_a_stable_fragment() {
+        let sanitized = sanitized_html_for_test("<p>first <strong>bold</p>second <em>italic");
+
+        assert!(sanitized.contains("first"));
+        assert!(sanitized.contains("bold"));
+        assert!(sanitized.contains("second"));
+        assert!(sanitized.contains("italic"));
+        assert_eq!(sanitized, sanitized_html_for_test(&sanitized));
+    }
+
+    #[test]
+    fn removes_unsafe_and_relative_link_targets() {
+        for href in [
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "java&#x09;script:alert(1)",
+            "data:text/html,unsafe",
+            "vbscript:unsafe",
+            "file:///etc/passwd",
+            "mailto:person@example.invalid",
+            "/relative/path",
+            "//tracker.invalid/path",
+        ] {
+            let sanitized = sanitized_html_for_test(&format!("<a href=\"{href}\">link text</a>"));
+
+            assert!(
+                !sanitized.contains("href="),
+                "unsafe link target {href:?} survived: {sanitized}"
+            );
+            assert!(sanitized.contains("link text"));
+        }
     }
 
     #[test]
@@ -361,6 +517,8 @@ mod tests {
 
         for href in [
             "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "java&#x09;script:alert(1)",
             "data:text/html,unsafe",
             "mailto:person@example.test",
             "file:///etc/passwd",

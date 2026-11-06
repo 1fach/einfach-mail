@@ -5798,6 +5798,63 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn cached_html_mail_view_does_not_open_unsafe_links(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let (profile, cache, _) = fixture(account);
+        cache.0.lock().expect("fixture cache mutex is healthy").body = Some(MessageBody::new(
+            MessageBodyType::Html,
+            concat!(
+                "<p><a href=\"javascript:alert(1)\">Unsafe synthetic link</a></p>",
+                "<img src=\"https://tracker.example.test/pixel\">",
+                "<script>hidden script marker</script>"
+            )
+            .to_owned(),
+        ));
+        let workflow = Arc::new(MailWorkflow::new(
+            OfflineProvider {
+                body_fetches: Arc::new(AtomicUsize::new(0)),
+            },
+            cache,
+        ));
+        let (view, context) =
+            cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+
+        context.run_until_parked();
+        draw_mail_view(context);
+        let message_row = context
+            .debug_bounds("message-row-message-1")
+            .expect("cached message row is rendered");
+        context.simulate_click(message_row.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+
+        let sanitized_body = context.cx.update(|cx| {
+            let MessageState::Opened(opened) = &view.read(cx).message_state else {
+                return false;
+            };
+            let MessageBodyForDisplay::SanitizedHtml(html) = opened.body() else {
+                return false;
+            };
+            !html.as_str().contains("href=")
+                && !html.as_str().contains("tracker.example.test")
+                && !html.as_str().contains("hidden script marker")
+                && html.as_str().contains("Unsafe synthetic link")
+        });
+        assert!(sanitized_body);
+
+        let body_bounds = context
+            .debug_bounds("mail-message-html-body")
+            .expect("sanitized HTML body has a layout");
+        context.simulate_click(
+            point(body_bounds.left() + px(12.), body_bounds.top() + px(12.)),
+            Modifiers::default(),
+        );
+        assert_eq!(context.opened_url(), None);
+    }
+
+    #[gpui_kit::test]
     fn cached_html_mail_view_supports_selection_and_copy(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let account = AccountId::try_from("synthetic-account".to_owned())
