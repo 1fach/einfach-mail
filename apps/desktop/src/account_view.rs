@@ -182,7 +182,10 @@ fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static s
             "Microsoft will review the existing delegated access: User.Read, Mail.Read, Calendars.Read, and offline_access."
         }
         AccountPermissionRequest::MailReadWrite => {
-            "Microsoft grants Mail.ReadWrite, which can create, read, update, and delete mail in this account. Einfach Mail requests it to change a message's read state or follow-up flag after Microsoft denies that action. This permission review does not send or change a message, and it does not request Mail.Send. Continue opens Microsoft in your system browser."
+            "Microsoft grants Mail.ReadWrite, which can create, read, update, and delete mail in this account. Einfach Mail requests it when Microsoft denies a read-state change, follow-up flag change, message move, or message deletion. It uses the permission to set read state, update or clear follow-up flags, move messages between folders, and delete selected messages after confirmation. This permission review does not perform the action or send mail, and it does not request Mail.Send. Continue opens Microsoft in your system browser."
+        }
+        AccountPermissionRequest::CalendarReadWrite => {
+            "Microsoft grants Calendars.ReadWrite the ability to create, read, update, and delete calendar events. Einfach Mail requests it for supported one-off timed appointments after Microsoft denies an event change. This review does not repeat the failed action. Continue opens Microsoft in your system browser. Reopen Calendar and retry the event after review."
         }
         AccountPermissionRequest::SendMail => {
             "Microsoft grants Mail.Send so Einfach Mail can send mail as this account. It does not grant permission to read or change mail. Continue opens Microsoft in your system browser."
@@ -415,7 +418,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         });
         let account_session = self
             .close_mail_view(cx)
-            .or_else(|| self.close_calendar_view(cx));
+            .or_else(|| self.close_calendar_view(cx))
+            .or_else(|| self.account_session.clone());
         self.opening_content = None;
         self.session_open_error = None;
         self.status = AccountStatus::SigningOut;
@@ -432,14 +436,14 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         let mail_view = self.mail_view.take()?;
         drop(self.mail_view_subscription.take());
         mail_view.update(cx, |view, _| view.stop_pending_work());
-        self.account_session.take()
+        self.account_session.clone()
     }
 
     fn close_calendar_view(&mut self, cx: &mut Context<Self>) -> Option<Arc<dyn AccountSession>> {
         let calendar_view = self.calendar_view.take()?;
         drop(self.calendar_view_subscription.take());
         calendar_view.update(cx, |view, _| view.stop_pending_work());
-        self.account_session.take()
+        self.account_session.clone()
     }
 
     fn open_mail(&mut self, cx: &mut Context<Self>) {
@@ -460,14 +464,21 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .clone()
             .map(|workflow| -> Arc<dyn MailPermissionRequester> { workflow });
         let profile = profile.clone();
+        let retained_session = self.account_session.clone();
         self.opening_content = Some(OpeningContent::Mail);
         self.session_open_error = None;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let account_id = profile.id().clone();
-            let session = cx
-                .background_executor()
-                .spawn(async move { account_session_factory.open_session(account_id).await })
-                .await;
+            let session = match retained_session {
+                Some(session) => Ok(session),
+                None => {
+                    let account_id = profile.id().clone();
+                    cx.background_executor()
+                        .spawn(
+                            async move { account_session_factory.open_session(account_id).await },
+                        )
+                        .await
+                }
+            };
             match session {
                 Ok(session) => {
                     let _ = this.update(cx, |view, cx| {
@@ -529,14 +540,21 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         };
         let profile = profile.clone();
+        let retained_session = self.account_session.clone();
         self.opening_content = Some(OpeningContent::Calendar);
         self.session_open_error = None;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let account_id = profile.id().clone();
-            let session = cx
-                .background_executor()
-                .spawn(async move { account_session_factory.open_session(account_id).await })
-                .await;
+            let session = match retained_session {
+                Some(session) => Ok(session),
+                None => {
+                    let account_id = profile.id().clone();
+                    cx.background_executor()
+                        .spawn(
+                            async move { account_session_factory.open_session(account_id).await },
+                        )
+                        .await
+                }
+            };
             match session {
                 Ok(session) => {
                     let _ = this.update(cx, |view, cx| {
@@ -555,6 +573,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                                 CalendarViewEvent::BackToAccount => {
                                     drop(view.close_calendar_view(cx));
                                     cx.notify();
+                                }
+                                CalendarViewEvent::ReviewCalendarWritePermission => {
+                                    drop(view.close_calendar_view(cx));
+                                    view.prepare_permission_review(
+                                        AccountPermissionRequest::CalendarReadWrite,
+                                        cx,
+                                    );
                                 }
                             },
                         );
@@ -603,6 +628,14 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     let _ = this.update(cx, |view, cx| {
                         view.status = previous_status;
                         view.session_open_error = Some(error);
+                        if !matches!(
+                            error,
+                            MailCacheError::OperationInProgress
+                                | MailCacheError::SendAlreadyPending
+                                | MailCacheError::CalendarEventCreationUnresolved
+                        ) {
+                            view.account_session = None;
+                        }
                         view.task = None;
                         cx.notify();
                     });
@@ -611,6 +644,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             }
             let sign_out_result = workflow.sign_out().await;
             let _ = this.update(cx, |view, cx| {
+                view.account_session = None;
                 view.status = match sign_out_result {
                     Ok(()) => AccountStatus::Disconnected,
                     Err(error) => AccountStatus::Failed {
@@ -679,7 +713,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 div()
                     .text_sm()
                     .text_color(colors.muted_foreground)
-                    .child("Initial sign-in requests User.Read, Mail.Read, Calendars.Read, and offline_access. Mail.Read lets Einfach Mail read your mail, and Calendars.Read lets it read your primary calendar. If Microsoft denies a read-state change, a separate review can request Mail.ReadWrite, which permits creating, reading, updating, and deleting mail. The app uses the resulting access for its existing mail-reading features and to set messages read or unread. It does not request Mail.Send or calendar-write permissions."),
+                    .child("Initial sign-in requests User.Read, Mail.Read, Calendars.Read, and offline_access. Mail.Read lets Einfach Mail read your mail, and Calendars.Read lets it read your primary calendar. If Microsoft denies a read-state change, follow-up flag change, message move, or message deletion, a separate review can request Mail.ReadWrite, which permits creating, reading, updating, and deleting mail. The app uses this access to set messages read or unread, update or clear follow-up flags, move messages between folders, and delete selected messages after confirmation. If Microsoft denies a supported calendar change, a separate review can request Calendars.ReadWrite, which permits creating, reading, updating, and deleting calendar events. Einfach Mail uses it to create one-off timed appointments, update the title or time of supported standalone appointments you organize that have no attendees, and delete those appointments after confirmation. It does not create recurring or all-day events, send invitations, or create online meetings. The app does not request Mail.Send."),
             )
     }
 
@@ -911,6 +945,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             )
             .child(
                 Button::new("open-calendar")
+                    .debug_selector(|| "open-calendar".to_owned())
                     .outline()
                     .label(if calendar_opening {
                         "Opening calendar…"
@@ -1049,6 +1084,15 @@ async fn remove_account_cache(
 
 fn mail_cache_error_message(error: MailCacheError) -> &'static str {
     match error {
+        MailCacheError::OperationInProgress => {
+            "A mail or calendar operation is still active. Wait for it to finish, then try signing out again."
+        }
+        MailCacheError::SendAlreadyPending => {
+            "A previous send needs review. Open Mail, check Sent Items, and resolve it before signing out."
+        }
+        MailCacheError::CalendarEventCreationUnresolved => {
+            "A calendar event may already exist in Microsoft. Open Calendar and resolve the saved operation before signing out."
+        }
         MailCacheError::MissingEncryptionKey => {
             "The encrypted account cache key is missing. Remove the local cache before syncing again."
         }
@@ -1081,9 +1125,15 @@ mod tests {
     use super::{AccountStatus, AccountView, SetupIssue};
     use einfach_mail_application::{
         AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
-        AccountProvider, AccountWorkflow, MailCacheError,
+        AccountProvider, AccountSession, AccountSessionFactory, AccountSessionFuture,
+        AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome,
+        CalendarEventDeletionOutcome, CalendarEventUpdateOutcome, CalendarSession,
+        CalendarSnapshot, CalendarSyncReport, CalendarWorkflowError, MailCacheError, MailSession,
     };
-    use einfach_mail_domain::{AccountId, AccountProfile};
+    use einfach_mail_domain::{
+        AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
+        CalendarViewReference, EditableCalendarEvent,
+    };
 
     #[derive(Clone, Default)]
     struct TestProvider {
@@ -1099,6 +1149,132 @@ mod tests {
     struct CommitGate {
         started: mpsc::Sender<()>,
         finish: oneshot::Receiver<()>,
+    }
+
+    struct TestAccountSession {
+        removal_attempts: Arc<Mutex<Vec<AccountId>>>,
+    }
+
+    impl AccountSession for TestAccountSession {
+        fn mail_session(&self) -> Arc<dyn MailSession> {
+            panic!("the retained test session is not reopened")
+        }
+
+        fn calendar_session(&self) -> Arc<dyn CalendarSession> {
+            Arc::new(TestCalendarSession)
+        }
+
+        fn remove_account_cache<'a>(
+            &'a self,
+            account_id: &'a AccountId,
+        ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+            let attempts = Arc::clone(&self.removal_attempts);
+            let account_id = account_id.clone();
+            Box::pin(async move {
+                let mut attempts = attempts
+                    .lock()
+                    .expect("synthetic session removal log mutex is healthy");
+                attempts.push(account_id);
+                if attempts.len() == 1 {
+                    Err(MailCacheError::OperationInProgress)
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    struct TestCalendarSession;
+
+    impl CalendarSession for TestCalendarSession {
+        fn load_cached_view<'a>(
+            &'a self,
+            _: &'a CalendarViewReference,
+        ) -> AccountSessionFuture<'a, Result<CalendarSnapshot, CalendarWorkflowError>> {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn synchronize_view<'a>(
+            &'a self,
+            _: &'a CalendarViewReference,
+        ) -> AccountSessionFuture<'a, Result<CalendarSyncReport, CalendarWorkflowError>> {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn editable_event<'a>(
+            &'a self,
+            _: &'a CalendarOccurrence,
+        ) -> AccountSessionFuture<'a, Result<EditableCalendarEvent, CalendarWorkflowError>>
+        {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn create_event<'a>(
+            &'a self,
+            _: &'a CalendarEventCreation,
+        ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>>
+        {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn discard_rejected_event_creation<'a>(
+            &'a self,
+            _: &'a CalendarEventCreation,
+        ) -> AccountSessionFuture<'a, Result<(), CalendarWorkflowError>> {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn update_event<'a>(
+            &'a self,
+            _: &'a CalendarEventUpdate,
+        ) -> AccountSessionFuture<'a, Result<CalendarEventUpdateOutcome, CalendarWorkflowError>>
+        {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+
+        fn delete_event<'a>(
+            &'a self,
+            _: &'a EditableCalendarEvent,
+        ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>>
+        {
+            Box::pin(ready(Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable,
+            ))))
+        }
+    }
+
+    struct TestAccountSessionFactory {
+        session: Arc<dyn AccountSession>,
+        fallback_removals: Arc<AtomicBool>,
+    }
+
+    impl AccountSessionFactory for TestAccountSessionFactory {
+        fn open_session(
+            &self,
+            _: AccountId,
+        ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
+            Box::pin(ready(Ok(Arc::clone(&self.session))))
+        }
+
+        fn remove_account_cache<'a>(
+            &'a self,
+            _: &'a AccountId,
+        ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+            self.fallback_removals.store(true, Ordering::SeqCst);
+            Box::pin(ready(Err(MailCacheError::Unavailable)))
+        }
     }
 
     impl TestProvider {
@@ -1336,6 +1512,100 @@ mod tests {
     }
 
     #[gpui::test]
+    fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let provider = TestProvider::default();
+        let signed_out = Arc::clone(&provider.signed_out);
+        let workflow = Arc::new(AccountWorkflow::new(provider));
+        let removal_attempts = Arc::new(Mutex::new(Vec::new()));
+        let fallback_removals = Arc::new(AtomicBool::new(false));
+        let session: Arc<dyn AccountSession> = Arc::new(TestAccountSession {
+            removal_attempts: Arc::clone(&removal_attempts),
+        });
+        let factory: Arc<dyn AccountSessionFactory> = Arc::new(TestAccountSessionFactory {
+            session: Arc::clone(&session),
+            fallback_removals: Arc::clone(&fallback_removals),
+        });
+        let (view, context) =
+            cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+        context.run_until_parked();
+        let profile = AccountProfile::try_new(
+            AccountId::try_from("synthetic-account".to_owned())
+                .expect("synthetic account ID is valid"),
+            Some("Ada Example".to_owned()),
+            Some("ada@example.test".to_owned()),
+            Some("ada@tenant.example.test".to_owned()),
+        )
+        .expect("synthetic account profile is valid");
+        let account_id = profile.id().clone();
+        context.cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.status = AccountStatus::Connected(profile);
+                cx.notify();
+            });
+        });
+        draw_account_view(context);
+
+        click(context, "open-calendar");
+        let calendar_open = context
+            .cx
+            .update(|cx| view.read(cx).calendar_view.is_some());
+        assert!(calendar_open);
+
+        click(context, "calendar-back");
+        let returned_to_account = context
+            .cx
+            .update(|cx| view.read(cx).calendar_view.is_none());
+        assert!(returned_to_account);
+
+        let session_retained_after_return = context.cx.update(|cx| {
+            view.read(cx)
+                .account_session
+                .as_ref()
+                .is_some_and(|retained| Arc::ptr_eq(retained, &session))
+        });
+        assert!(session_retained_after_return);
+
+        click(context, "sign-out");
+
+        let retry_state_kept = context.cx.update(|cx| {
+            let account_view = view.read(cx);
+            matches!(
+                &account_view.status,
+                AccountStatus::Connected(profile) if profile.id() == &account_id
+            ) && account_view
+                .account_session
+                .as_ref()
+                .is_some_and(|retained| Arc::ptr_eq(retained, &session))
+        });
+        assert!(retry_state_kept);
+        assert_eq!(
+            *removal_attempts
+                .lock()
+                .expect("synthetic session removal log mutex is healthy"),
+            vec![account_id.clone()]
+        );
+        assert!(!fallback_removals.load(Ordering::SeqCst));
+
+        click(context, "sign-out");
+
+        let state_cleared = context.cx.update(|cx| {
+            let account_view = view.read(cx);
+            matches!(&account_view.status, AccountStatus::Disconnected)
+                && account_view.account_session.is_none()
+        });
+        assert!(state_cleared);
+        assert!(signed_out.load(Ordering::SeqCst));
+        assert_eq!(
+            *removal_attempts
+                .lock()
+                .expect("synthetic session removal log mutex is healthy"),
+            vec![account_id.clone(), account_id]
+        );
+        assert!(!fallback_removals.load(Ordering::SeqCst));
+    }
+
+    #[gpui::test]
     fn connection_cancel_resolves_before_and_during_credential_commit(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
@@ -1506,6 +1776,8 @@ mod tests {
         let disclosure =
             super::permission_review_disclosure(AccountPermissionRequest::MailReadWrite);
         assert!(disclosure.contains("create, read, update, and delete mail"));
+        assert!(disclosure.contains("move messages between folders"));
+        assert!(disclosure.contains("delete selected messages after confirmation"));
         assert!(disclosure.contains("does not request Mail.Send"));
         assert_eq!(
             *permission_request

@@ -3,16 +3,20 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
 
 use einfach_mail_domain::{
-    AccountId, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MailMessage, MailSendOperationId, MessageId, PendingMailSend, ReadState,
+    AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
+    CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
+    MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend,
+    ReadState,
 };
 
 use crate::{
-    CalendarCache, CalendarProvider, CalendarSnapshot, CalendarSyncReport, CalendarWorkflow,
-    CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCache, MailCacheError, MailProvider,
-    MailSendOutcome, MailSendResolutionError, MailSendWorkflowError, MailSyncProgress,
-    MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError, OpenedMessage,
-    ReadStateUpdateOutcome,
+    CalendarCache, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
+    CalendarEventUpdateOutcome, CalendarProvider, CalendarSnapshot, CalendarSyncReport,
+    CalendarWorkflow, CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCache, MailCacheError,
+    MailProvider, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError,
+    MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError,
+    MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome, WellKnownFolderMoveOutcome,
+    WellKnownMailFolder,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -119,11 +123,61 @@ pub trait MailSession: Send + Sync {
         status: FollowUpFlagStatus,
     ) -> AccountSessionFuture<'a, Result<FollowUpFlagUpdateOutcome, MailWorkflowError>>;
 
+    /// Moves a cached message to another visible folder in the same account.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider or cache error when the move cannot be confirmed,
+    /// [`MailWorkflowError::InvalidMoveDestination`] for a folder outside the
+    /// cached visible tree, or [`MailWorkflowError::OperationInProgress`] when
+    /// another operation owns either folder or the account.
+    fn move_message<'a>(
+        &'a self,
+        source_folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        destination_folder: &'a FolderReference,
+    ) -> AccountSessionFuture<'a, Result<MessageMoveOutcome, MailWorkflowError>>;
+
+    /// Moves a cached message into a well-known folder in the signed-in account.
+    ///
+    /// The workflow requires a successful account sync in this session and leaves the cached
+    /// source untouched unless the provider confirms the move.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailWorkflowError::AlreadyInWellKnownFolder`] when the source is already the
+    /// requested folder, [`MailWorkflowError::WellKnownFolderUnavailable`] when the destination
+    /// is not visible in the active account, [`MailWorkflowError::InvalidMoveDestination`] when
+    /// the source is no longer visible, [`MailWorkflowError::AccountSyncRequired`] before a
+    /// successful session sync, [`MailWorkflowError::FolderSyncRequired`] when either folder needs
+    /// reconciliation, or another provider, cache, or reservation error when the move cannot
+    /// complete.
+    fn move_message_to_well_known_folder<'a>(
+        &'a self,
+        source_folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        destination: WellKnownMailFolder,
+    ) -> AccountSessionFuture<'a, Result<WellKnownFolderMoveOutcome, MailWorkflowError>>;
+
     /// Sends a plain-text message and saves a body-free marker before dispatch.
     fn send_message<'a>(
         &'a self,
         account_id: &'a AccountId,
         draft: MailDraft,
+        created_at: SystemTime,
+    ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>>;
+
+    /// Replies to a cached message and saves a body-free marker before dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a provider error when the source belongs to another account or
+    /// Graph rejects the reply, a cache error before dispatch, or an unresolved
+    /// operation error when another send needs explicit resolution.
+    fn reply_to_message<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        draft: MailReplyDraft,
         created_at: SystemTime,
     ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>>;
 
@@ -172,6 +226,71 @@ pub trait CalendarSession: Send + Sync {
         &'a self,
         view: &'a CalendarViewReference,
     ) -> AccountSessionFuture<'a, Result<CalendarSyncReport, CalendarWorkflowError>>;
+
+    /// Loads and validates the current Graph version of a cached event for editing.
+    ///
+    /// The account reservation ends when this method returns so the user can
+    /// edit the form without blocking synchronization.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workflow error when the event cannot be loaded, does not meet
+    /// the supported edit rules, or another account operation is active.
+    fn editable_event<'a>(
+        &'a self,
+        event: &'a CalendarOccurrence,
+    ) -> AccountSessionFuture<'a, Result<EditableCalendarEvent, CalendarWorkflowError>>;
+
+    /// Creates a staged event and caches it after Graph confirms the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workflow error when creation could not be staged or when
+    /// another account operation is active. Unknown provider outcomes keep the
+    /// same operation available for recovery. A definitive rejection and
+    /// cleanup failure are returned as
+    /// [`CalendarEventCreationOutcome::RejectedButPending`].
+    fn create_event<'a>(
+        &'a self,
+        creation: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>>;
+
+    /// Clears a creation after Graph definitively rejected it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workflow error when the rejection cannot be recorded or the
+    /// local marker cannot be removed.
+    fn discard_rejected_event_creation<'a>(
+        &'a self,
+        creation: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<(), CalendarWorkflowError>>;
+
+    /// Updates one event and atomically reconciles its cached calendar views.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workflow error when Graph rejects or cannot confirm the update,
+    /// the event changes, or another account operation is active. A cache failure
+    /// after Graph confirms the update is returned as
+    /// [`CalendarEventUpdateOutcome::ConfirmedButNotCached`].
+    fn update_event<'a>(
+        &'a self,
+        update: &'a CalendarEventUpdate,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventUpdateOutcome, CalendarWorkflowError>>;
+
+    /// Deletes one confirmed standalone event and removes every cached view copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a workflow error when Graph rejects the deletion, the event is
+    /// stale, another operation owns the account, or a successful sync is
+    /// required. A cache failure after Graph confirms deletion is returned as
+    /// [`CalendarEventDeletionOutcome::DeletedButNotCached`].
+    fn delete_event<'a>(
+        &'a self,
+        event: &'a EditableCalendarEvent,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>>;
 }
 
 /// Mail and calendar sessions that share one account cache and removal lifecycle.
@@ -347,6 +466,34 @@ where
         ))
     }
 
+    fn move_message<'a>(
+        &'a self,
+        source_folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        destination_folder: &'a FolderReference,
+    ) -> AccountSessionFuture<'a, Result<MessageMoveOutcome, MailWorkflowError>> {
+        Box::pin(MailWorkflow::move_message(
+            self,
+            source_folder,
+            message_id,
+            destination_folder,
+        ))
+    }
+
+    fn move_message_to_well_known_folder<'a>(
+        &'a self,
+        source_folder: &'a FolderReference,
+        message_id: &'a MessageId,
+        destination: WellKnownMailFolder,
+    ) -> AccountSessionFuture<'a, Result<WellKnownFolderMoveOutcome, MailWorkflowError>> {
+        Box::pin(MailWorkflow::move_message_to_well_known_folder(
+            self,
+            source_folder,
+            message_id,
+            destination,
+        ))
+    }
+
     fn send_message<'a>(
         &'a self,
         account_id: &'a AccountId,
@@ -354,6 +501,17 @@ where
         created_at: SystemTime,
     ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>> {
         Box::pin(MailWorkflow::send_message(
+            self, account_id, draft, created_at,
+        ))
+    }
+
+    fn reply_to_message<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+        draft: MailReplyDraft,
+        created_at: SystemTime,
+    ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>> {
+        Box::pin(MailWorkflow::reply_to_message(
             self, account_id, draft, created_at,
         ))
     }
@@ -402,5 +560,42 @@ where
         view: &'a CalendarViewReference,
     ) -> AccountSessionFuture<'a, Result<CalendarSyncReport, CalendarWorkflowError>> {
         Box::pin(CalendarWorkflow::sync_view(self, view))
+    }
+
+    fn editable_event<'a>(
+        &'a self,
+        event: &'a CalendarOccurrence,
+    ) -> AccountSessionFuture<'a, Result<EditableCalendarEvent, CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::editable_event(self, event))
+    }
+
+    fn create_event<'a>(
+        &'a self,
+        creation: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::create_event(self, creation))
+    }
+
+    fn discard_rejected_event_creation<'a>(
+        &'a self,
+        creation: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<(), CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::discard_rejected_event_creation(
+            self, creation,
+        ))
+    }
+
+    fn update_event<'a>(
+        &'a self,
+        update: &'a CalendarEventUpdate,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventUpdateOutcome, CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::update_event(self, update))
+    }
+
+    fn delete_event<'a>(
+        &'a self,
+        event: &'a EditableCalendarEvent,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::delete_event(self, event))
     }
 }

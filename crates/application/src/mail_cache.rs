@@ -34,6 +34,9 @@ pub enum MailCacheError {
     /// Another unresolved send already exists for this account.
     #[error("a previous mail send needs to be resolved")]
     SendAlreadyPending,
+    /// An unresolved calendar event creation must remain with its encrypted cache.
+    #[error("a calendar event creation needs recovery before account removal")]
+    CalendarEventCreationUnresolved,
     /// The operation ID does not match the account's pending send marker.
     #[error("the pending mail send does not match the requested operation")]
     PendingSendMismatch,
@@ -370,6 +373,28 @@ pub trait MailCache: Send + Sync {
         status: FollowUpFlagStatus,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
 
+    /// Moves a cached message between folders without dropping its body.
+    ///
+    /// When the destination already contains the same message ID,
+    /// the implementation keeps destination metadata and body values, fills
+    /// missing nullable metadata from the source, and copies the source body
+    /// only when the destination has no body. It then removes the source row in
+    /// the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] when either folder belongs
+    /// to another account, [`MailCacheError::MessageNotCached`] when the source
+    /// message is absent, [`MailCacheError::InvalidData`] when the destination
+    /// folder is not in the cache or both folder references are equal, or
+    /// [`MailCacheError::Unavailable`] when the transaction fails.
+    fn move_message(
+        &self,
+        source_folder: &FolderReference,
+        destination_folder: &FolderReference,
+        message_id: &MessageId,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
     /// Stores an opened raw body only when its message remains in the folder cache.
     ///
     /// # Errors
@@ -428,8 +453,9 @@ pub trait MailCache: Send + Sync {
     /// # Errors
     ///
     /// Returns [`MailCacheError::AccountMismatch`] for another account,
-    /// [`MailCacheError::SendAlreadyPending`] while an outcome is unresolved,
-    /// [`MailCacheError::OperationInProgress`] while a send is active, or
+    /// [`MailCacheError::SendAlreadyPending`] while a mail send is unresolved,
+    /// [`MailCacheError::CalendarEventCreationUnresolved`] while an event creation is unresolved,
+    /// [`MailCacheError::OperationInProgress`] while an operation is active, or
     /// [`MailCacheError::Unavailable`] when the cache cannot be inspected or removed.
     fn remove_account(
         &self,
