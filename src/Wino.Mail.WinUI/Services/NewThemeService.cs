@@ -1,0 +1,1301 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using CommunityToolkit.Mvvm.Messaging;
+using CommunityToolkit.WinUI;
+using CommunityToolkit.WinUI.Helpers;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Markup;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Storage;
+using Windows.UI;
+using Windows.UI.ViewManagement;
+using Wino.Core.Domain;
+using Wino.Core.Domain.Enums;
+using Wino.Core.Domain.Exceptions;
+using Wino.Core.Domain.Interfaces;
+using Wino.Core.Domain.Models;
+using Wino.Core.Domain.Models.Personalization;
+using Wino.Mail.WinUI;
+using Wino.Mail.WinUI.Extensions;
+using Wino.Mail.WinUI.Helpers;
+using Wino.Mail.WinUI.Interfaces;
+using Wino.Mail.WinUI.Models.Personalization;
+using Wino.Mail.WinUI.Services;
+using Wino.Messaging.Client.Shell;
+using WinRT;
+using WinUIEx;
+
+namespace Wino.Services;
+
+/// <summary>
+/// Next-generation theme service with enhanced WinUI support including backdrop management
+/// </summary>
+public class NewThemeService : INewThemeService
+{
+    public const string CustomThemeFolderName = "CustomThemes";
+
+    public event EventHandler<ApplicationElementTheme>? ElementThemeChanged;
+    public event EventHandler<string>? AccentColorChanged;
+    public event EventHandler<WindowBackdropType>? BackdropChanged;
+
+    private const string AccentColorKey = WinoThemeCatalog.AccentColorKey;
+    private const string CurrentApplicationThemeKey = WinoThemeCatalog.CurrentApplicationThemeKey;
+    private const string WindowBackdropTypeKey = nameof(WindowBackdropTypeKey);
+
+    // Custom theme
+    public const string CustomThemeAccentColorKey = nameof(CustomThemeAccentColorKey);
+
+    // Keep reference so it does not get optimized/garbage collected
+    private readonly UISettings uiSettings = new UISettings();
+    private readonly IConfigurationService _configurationService;
+    private readonly IUnderlyingThemeService _underlyingThemeService;
+    private readonly IApplicationResourceManager<ResourceDictionary> _applicationResourceManager;
+    private readonly IWinoWindowManager _windowManager;
+    private readonly IPreferencesService _preferencesService;
+
+    // Keys and fonts must match Styles/WinoIcons.xaml; the fonts come from icons/tools/build_fonts.py.
+    private const string IconFontFamilyKey = "WinoIconFontFamily";
+    private const string MonochromeIconFontFamily = "ms-appx:///Assets/WinoIcons.ttf#WinoIcons";
+    private const string LightIconFontFamily = "ms-appx:///Assets/WinoIconsColor-Light.ttf#WinoIconsColorLight";
+    private const string DarkIconFontFamily = "ms-appx:///Assets/WinoIconsColor-Dark.ttf#WinoIconsColorDark";
+
+    // The catalog is shared with the other platforms so theme ids, accents and forced themes stay identical.
+    private List<AppThemeBase> preDefinedThemes { get; set; } = WinoThemeCatalog.PredefinedThemes
+        .Select(static theme => theme.IsSystemTheme
+            ? new SystemAppTheme(theme.Name, theme.Id)
+            : (AppThemeBase)new PreDefinedAppTheme(theme.Name, theme.Id, theme.AccentColor, theme.ForcedElementTheme))
+        .ToList();
+
+    public NewThemeService(IConfigurationService configurationService,
+                          IUnderlyingThemeService underlyingThemeService,
+                          IApplicationResourceManager<ResourceDictionary> applicationResourceManager,
+                          IWinoWindowManager windowManager,
+                          IPreferencesService preferencesService)
+    {
+        _configurationService = configurationService;
+        _underlyingThemeService = underlyingThemeService;
+        _applicationResourceManager = applicationResourceManager;
+        _windowManager = windowManager;
+        _preferencesService = preferencesService;
+    }
+
+    /// <summary>
+    /// Gets or sets (with LocalSettings persistence) the RequestedTheme of the root element.
+    /// </summary>
+    public ApplicationElementTheme RootTheme
+    {
+        get
+        {
+            var rootContent = TryGetShellRootContent();
+            if (rootContent == null || ContrastThemeHelper.IsActive)
+                return _configurationService.Get(UnderlyingThemeService.SelectedAppThemeKey, ApplicationElementTheme.Default);
+
+            return rootContent.RequestedTheme.ToWinoElementTheme();
+        }
+        set
+        {
+            var rootContent = TryGetShellRootContent();
+            if (rootContent != null)
+                rootContent.RequestedTheme = ContrastThemeHelper.IsActive ? ElementTheme.Default : value.ToWindowsElementTheme();
+
+            _configurationService.Set(UnderlyingThemeService.SelectedAppThemeKey, value);
+
+            if (!string.IsNullOrEmpty(accentColor))
+                UpdateAccentColor(accentColor);
+
+            UpdateSystemCaptionButtonColors();
+
+            // PopupRoot usually needs to react to changes.
+            NotifyThemeUpdate();
+        }
+    }
+
+    private Guid? currentApplicationThemeId;
+
+    public Guid? CurrentApplicationThemeId
+    {
+        get { return currentApplicationThemeId; }
+        set
+        {
+            currentApplicationThemeId = value;
+
+            _configurationService.Set(CurrentApplicationThemeKey, value);
+
+            var window = GetThemeWindow();
+            if (window != null)
+            {
+                window.DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await ApplyCustomThemeAsync(false);
+                });
+            }
+        }
+    }
+
+    private string accentColor = string.Empty;
+
+    public string AccentColor
+    {
+        get { return accentColor; }
+        set
+        {
+            accentColor = value;
+
+            UpdateAccentColor(string.IsNullOrWhiteSpace(value) ? GetSystemAccentColorHex() : value);
+
+            _configurationService.Set(AccentColorKey, value);
+            AccentColorChanged?.Invoke(this, value);
+        }
+    }
+
+    private WindowBackdropType currentBackdropType;
+
+    public WindowBackdropType CurrentBackdropType
+    {
+        get { return currentBackdropType; }
+        set
+        {
+            value = NormalizeBackdropType(value);
+
+            // Only update if the backdrop type has actually changed
+            if (currentBackdropType == value) return;
+
+            currentBackdropType = value;
+            _configurationService.Set(WindowBackdropTypeKey, (int)value);
+
+            var window = GetThemeWindow();
+            if (window != null)
+            {
+                window.DispatcherQueue.TryEnqueue(() =>
+                {
+                    ApplyBackdrop(value);
+                });
+            }
+        }
+    }
+
+    public bool IsCustomTheme
+    {
+        get
+        {
+            // If no theme is set, it's not a custom theme
+            if (currentApplicationThemeId == null) return false;
+
+            // Check if current theme is not in predefined themes (all themes now are custom or predefined, no system themes)
+            return !preDefinedThemes.Exists(a => a.Id == currentApplicationThemeId);
+        }
+    }
+
+    public FrameworkElement GetShellRootContent()
+    {
+        return TryGetShellRootContent() ?? throw new Exception("No root content found");
+    }
+
+    private bool isInitialized = false;
+
+    private const string ThemeNameKey = "ThemeName";
+    private const string DefaultThemeName = "Default";
+    private const string DefaultThemeDictionaryUri = "ms-appx:///AppThemes/Default.xaml";
+    private const string HighContrastThemeKey = "HighContrast";
+
+    // Pages read these with {ThemeResource}; a missing key is a XamlParseException at page load
+    // (MailListPage group header, CalendarPage). Only Custom.xaml defines them for High Contrast,
+    // where it maps them to the system window and highlight colors used here.
+    private static readonly (string Key, UIElementType SystemColor)[] RequiredHighContrastBrushes =
+    [
+        ("MailListHeaderBackgroundColor", UIElementType.Window),
+        ("CalendarDefaultHourBackgroundBrush", UIElementType.Window),
+        ("CalendarHoverHourBackgroundBrush", UIElementType.Highlight),
+        ("CalendarWorkHourBackgroundBrush", UIElementType.Window),
+        ("CalendarSelectedHourBackgroundBrush", UIElementType.Highlight)
+    ];
+
+    /// <summary>
+    /// Guarantees that a theme dictionary is merged and that it resolves every theme brush the
+    /// shell pages need, in every theme including High Contrast. Activation paths call this before
+    /// a window navigates its frame; it is cheap and idempotent. Must run on the UI thread.
+    /// </summary>
+    public void EnsureThemeResources()
+    {
+        var themeDictionary = FindMergedThemeDictionary();
+
+        if (themeDictionary == null)
+        {
+            // A failed theme swap or an unexpected resource change left no theme dictionary.
+            // Fall back to the Default theme rather than letting pages fail to parse.
+            Serilog.Log.Warning("No theme dictionary is merged. Restoring the Default theme resources.");
+
+            themeDictionary = new ResourceDictionary { Source = new Uri(DefaultThemeDictionaryUri) };
+            _applicationResourceManager.AddResource(themeDictionary);
+        }
+
+        EnsureHighContrastFallbacks(themeDictionary);
+    }
+
+    private static ResourceDictionary? FindMergedThemeDictionary()
+        => Application.Current.Resources.MergedDictionaries.LastOrDefault(dictionary => dictionary.ContainsKey(ThemeNameKey));
+
+    [DynamicWindowsRuntimeCast(typeof(ResourceDictionary))]
+    private void EnsureHighContrastFallbacks(ResourceDictionary themeDictionary)
+    {
+        if (!themeDictionary.ThemeDictionaries.TryGetValue(HighContrastThemeKey, out var existing) ||
+            existing is not ResourceDictionary highContrastDictionary)
+        {
+            highContrastDictionary = new ResourceDictionary();
+            themeDictionary.ThemeDictionaries[HighContrastThemeKey] = highContrastDictionary;
+        }
+
+        foreach (var (key, systemColor) in RequiredHighContrastBrushes)
+        {
+            if (highContrastDictionary.ContainsKey(key))
+                continue;
+
+            highContrastDictionary[key] = new SolidColorBrush(uiSettings.UIElementColor(systemColor));
+        }
+    }
+
+    public async Task InitializeAsync()
+    {
+        // Every window-creating activation path (launch, toast, tray, notification) awaits this.
+        // Check the merged theme resources each time, even after initialization.
+        EnsureThemeResources();
+
+        // Already initialized. There is no need.
+        if (isInitialized) return;
+
+        isContrastThemeApplied = ContrastThemeHelper.IsActive;
+        contrastDispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+
+        RootTheme = _configurationService.Get(UnderlyingThemeService.SelectedAppThemeKey, ApplicationElementTheme.Default);
+        AccentColor = _configurationService.Get(AccentColorKey, string.Empty);
+
+        // Set the current theme id. Don't set a default for backward compatibility.
+        var storedThemeId = _configurationService.Get<Guid?>(CurrentApplicationThemeKey, null);
+        currentApplicationThemeId = storedThemeId;
+
+        // Load the backdrop setting, default to Mica. Older releases stored
+        // AcrylicBase and AcrylicThin, which WinUI 3 renders identically to DesktopAcrylic.
+        var storedBackdropType = (WindowBackdropType)_configurationService.Get(WindowBackdropTypeKey, (int)WindowBackdropType.Mica);
+        currentBackdropType = NormalizeBackdropType(storedBackdropType);
+
+        if (storedBackdropType != currentBackdropType)
+            _configurationService.Set(WindowBackdropTypeKey, (int)currentBackdropType);
+
+        // Icon fonts are theme resources; set them before the theme refresh below re-evaluates everything.
+        ApplyIconStyle(refresh: false);
+
+        _preferencesService.PreferenceChanged -= PreferenceChanged;
+        _preferencesService.PreferenceChanged += PreferenceChanged;
+
+        await ApplyCustomThemeAsync(true);
+        ApplyBackdrop(currentBackdropType);
+
+        // Registering to color changes, thus we notice when user changes theme system wide
+
+        // TODO: WinUI: This event seems to be very unreliable. It causes a crash when the function runs under.
+        //uiSettings.ColorValuesChanged -= UISettingsColorChanged;
+        //uiSettings.ColorValuesChanged += UISettingsColorChanged;
+
+        // AccessibilitySettings.HighContrastChanged throws 0x80070490 when subscribed from a desktop
+        // window, which crashed every launch. A contrast theme change also changes the system colors,
+        // and this handler only queues work to the UI thread.
+        uiSettings.ColorValuesChanged -= SystemColorValuesChanged;
+        uiSettings.ColorValuesChanged += SystemColorValuesChanged;
+
+        isInitialized = true;
+    }
+
+    private bool isContrastThemeApplied;
+    private Microsoft.UI.Dispatching.DispatcherQueue? contrastDispatcherQueue;
+
+    private static readonly string[] AccentColorResourceKeys =
+    [
+        "SystemAccentColor",
+        "SystemAccentColorLight1",
+        "SystemAccentColorLight2",
+        "SystemAccentColorLight3",
+        "SystemAccentColorDark1",
+        "SystemAccentColorDark2",
+        "SystemAccentColorDark3"
+    ];
+
+    private void SystemColorValuesChanged(UISettings sender, object args) => QueueContrastThemeCheck();
+
+    private void QueueContrastThemeCheck()
+    {
+        var dispatcherQueue = contrastDispatcherQueue ?? GetThemeWindow()?.DispatcherQueue;
+        dispatcherQueue?.TryEnqueue(() => _ = ApplyContrastThemeChangeAsync());
+    }
+
+    private async Task ApplyContrastThemeChangeAsync()
+    {
+        var isContrastThemeActive = ContrastThemeHelper.IsActive;
+        if (isContrastThemeActive == isContrastThemeApplied) return;
+
+        isContrastThemeApplied = isContrastThemeActive;
+
+        try
+        {
+            if (isContrastThemeActive)
+            {
+                RemoveAccentColorOverrides();
+                ApplyContrastThemeDictionary();
+                RootTheme = _configurationService.Get(UnderlyingThemeService.SelectedAppThemeKey, ApplicationElementTheme.Default);
+            }
+            else
+            {
+                // Initializing mode keeps the user's stored accent instead of the theme's default one.
+                await ApplyCustomThemeCoreAsync(isInitializing: true, forceReapply: true, throwOnError: false);
+                RootTheme = _configurationService.Get(UnderlyingThemeService.SelectedAppThemeKey, ApplicationElementTheme.Default);
+                UpdateAccentColor(string.IsNullOrWhiteSpace(accentColor) ? GetSystemAccentColorHex() : accentColor);
+            }
+
+            ApplyBackdrop(currentBackdropType);
+            RefreshThemeResource();
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "Applying the contrast theme change failed.");
+            EnsureThemeResources();
+        }
+    }
+
+    // Wallpaper, acrylic and custom themes declare top-level brushes that win over their HighContrast
+    // dictionaries, so a contrast theme always runs on Default. The stored selection stays untouched.
+    private void ApplyContrastThemeDictionary()
+    {
+        var existingThemeDictionary = FindMergedThemeDictionary();
+
+        if (existingThemeDictionary != null
+            && existingThemeDictionary.TryGetValue(ThemeNameKey, out var themeName)
+            && themeName?.ToString() == DefaultThemeName)
+        {
+            EnsureHighContrastFallbacks(existingThemeDictionary);
+            return;
+        }
+
+        var contrastThemeDictionary = new ResourceDictionary { Source = new Uri(DefaultThemeDictionaryUri) };
+        EnsureHighContrastFallbacks(contrastThemeDictionary);
+        _applicationResourceManager.AddResource(contrastThemeDictionary);
+
+        if (existingThemeDictionary != null)
+            _applicationResourceManager.RemoveResource(existingThemeDictionary);
+    }
+
+    private void RemoveAccentColorOverrides()
+    {
+        var resources = Application.Current.Resources;
+
+        foreach (var key in AccentColorResourceKeys)
+        {
+            try
+            {
+                resources.Remove(key);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Accent override {key} was not removed: {ex.Message}");
+            }
+        }
+    }
+
+    [DynamicWindowsRuntimeCast(typeof(DesktopAcrylicBackdrop))]
+    public void ApplyBackdrop(WindowBackdropType backdropType)
+    {
+        backdropType = ContrastThemeHelper.IsActive ? WindowBackdropType.None : NormalizeBackdropType(backdropType);
+
+        if (GetThemeWindow() is not WindowEx windowEx)
+        {
+            Debug.WriteLine("No active WindowEx found, cannot apply backdrop");
+            return;
+        }
+
+        try
+        {
+            // Keep an existing backdrop connected when restoring an already themed window.
+            var matchesCurrentBackdrop = backdropType switch
+            {
+                WindowBackdropType.Mica => windowEx.SystemBackdrop is MicaBackdrop { Kind: Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base },
+                WindowBackdropType.MicaAlt => windowEx.SystemBackdrop is MicaBackdrop { Kind: Microsoft.UI.Composition.SystemBackdrops.MicaKind.BaseAlt },
+                WindowBackdropType.DesktopAcrylic => windowEx.SystemBackdrop is DesktopAcrylicBackdrop,
+                WindowBackdropType.None => windowEx.SystemBackdrop is null,
+                _ => false
+            };
+
+            if (matchesCurrentBackdrop)
+                return;
+
+            Microsoft.UI.Xaml.Media.SystemBackdrop? backdrop = backdropType switch
+            {
+                WindowBackdropType.Mica => new MicaBackdrop() { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base },
+                WindowBackdropType.MicaAlt => new MicaBackdrop() { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.BaseAlt },
+                WindowBackdropType.DesktopAcrylic => new DesktopAcrylicBackdrop(),
+                WindowBackdropType.None => null,
+                _ => new MicaBackdrop() { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base }
+            };
+
+            if (windowEx.SystemBackdrop != backdrop)
+            {
+                windowEx.SystemBackdrop = backdrop;
+
+                BackdropChanged?.Invoke(this, backdropType);
+
+                Debug.WriteLine($"Applied backdrop: {backdropType}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Failed to apply backdrop {backdropType}: {ex.Message}");
+        }
+    }
+
+    public async Task SetAccentColorAsync(string hexColor, bool preserveTheme = true)
+    {
+        if (string.IsNullOrEmpty(hexColor))
+        {
+            // Reset to system accent color
+            hexColor = GetSystemAccentColorHex();
+        }
+
+        if (preserveTheme)
+        {
+            // Just update accent color without changing theme
+            AccentColor = hexColor;
+        }
+        else
+        {
+            // This might trigger theme changes
+            AccentColor = hexColor;
+            await ApplyCustomThemeAsync(false);
+        }
+    }
+
+    private void NotifyThemeUpdate()
+    {
+        if (TryGetShellRootContent() is not UIElement rootContent) return;
+
+        _ = rootContent.DispatcherQueue.EnqueueAsync(() =>
+        {
+            ElementThemeChanged?.Invoke(this, RootTheme);
+            WeakReferenceMessenger.Default.Send(new ApplicationThemeChanged(_underlyingThemeService.IsUnderlyingThemeDark()));
+        }, Microsoft.UI.Dispatching.DispatcherQueuePriority.High);
+    }
+
+    public void UpdateSystemCaptionButtonColors()
+    {
+        var rootContent = TryGetShellRootContent();
+        if (rootContent == null) return;
+
+        rootContent.DispatcherQueue.TryEnqueue(() =>
+        {
+            if (GetThemeWindow() is not WindowEx mainWindow) return;
+
+            var isDarkTheme = _underlyingThemeService.IsUnderlyingThemeDark();
+            SystemCaptionButtonColorHelper.Apply(mainWindow.AppWindow.TitleBar, isDarkTheme);
+
+            Debug.WriteLine($"Updated title bar button colors for {(isDarkTheme ? "dark" : "light")} theme");
+        });
+    }
+
+    public void UpdateAccentColor(string hex)
+    {
+        // Change accent color if specified.
+        if (!string.IsNullOrEmpty(hex))
+        {
+            var rootContent = TryGetShellRootContent();
+            TrackAccentThemeSource(rootContent);
+
+            appliedAccentHex = hex;
+
+            if (ContrastThemeHelper.IsActive) return;
+
+            ApplyAccentPalette(hex, IsAccentThemeDark(rootContent));
+
+            RefreshThemeResource();
+        }
+    }
+
+    // The accent brushes are single instances shared by both themes, so their colors must
+    // match the theme the shell actually renders. The saved preference alone is not enough:
+    // a Default theme follows Windows after launch, and TextOnAccentFillColorPrimaryBrush
+    // already follows the rendered theme, so a mismatch puts black text on a dark accent.
+    private string appliedAccentHex = string.Empty;
+    private FrameworkElement? accentThemeSource;
+
+    private bool IsAccentThemeDark(FrameworkElement? rootContent)
+        => rootContent != null
+            ? rootContent.ActualTheme == ElementTheme.Dark
+            : _underlyingThemeService.IsUnderlyingThemeDark();
+
+    private void TrackAccentThemeSource(FrameworkElement? rootContent)
+    {
+        if (rootContent == null || ReferenceEquals(rootContent, accentThemeSource)) return;
+
+        if (accentThemeSource != null)
+            accentThemeSource.ActualThemeChanged -= AccentThemeSourceActualThemeChanged;
+
+        accentThemeSource = rootContent;
+        accentThemeSource.ActualThemeChanged += AccentThemeSourceActualThemeChanged;
+    }
+
+    private void AccentThemeSourceActualThemeChanged(FrameworkElement sender, object args)
+    {
+        // Brush color changes propagate without a theme refresh, so this cannot loop.
+        if (!string.IsNullOrEmpty(appliedAccentHex) && !ContrastThemeHelper.IsActive)
+            ApplyAccentPalette(appliedAccentHex, sender.ActualTheme == ElementTheme.Dark);
+    }
+
+    private void ApplyAccentPalette(string hex, bool isDarkTheme)
+    {
+        var color = CommunityToolkit.WinUI.Helpers.ColorHelper.ToColor(hex);
+        var white = Color.FromArgb(255, 255, 255, 255);
+        var black = Color.FromArgb(255, 0, 0, 0);
+        var light1 = BlendColor(color, white, 0.20);
+        var light2 = BlendColor(color, white, 0.40);
+        var light3 = BlendColor(color, white, 0.60);
+        var dark1 = BlendColor(color, black, 0.20);
+        var dark2 = BlendColor(color, black, 0.40);
+        var dark3 = BlendColor(color, black, 0.60);
+
+        SetColorResource("SystemAccentColor", color);
+        SetColorResource("SystemAccentColorLight1", light1);
+        SetColorResource("SystemAccentColorLight2", light2);
+        SetColorResource("SystemAccentColorLight3", light3);
+        SetColorResource("SystemAccentColorDark1", dark1);
+        SetColorResource("SystemAccentColorDark2", dark2);
+        SetColorResource("SystemAccentColorDark3", dark3);
+
+        // WinUI control templates redirect their checked/selected states to these
+        // semantic brushes. Mutating the existing brushes is important: many of
+        // those redirects are StaticResource references and retain the original
+        // brush instance for the lifetime of the application.
+        var accentFill = isDarkTheme ? light2 : dark1;
+        SetBrushResource("AccentFillColorDefaultBrush", accentFill);
+        SetBrushResource("AccentFillColorSecondaryBrush", accentFill, 0.90);
+        SetBrushResource("AccentFillColorTertiaryBrush", accentFill, 0.80);
+        SetBrushResource("AccentFillColorSelectedTextBackgroundBrush", color);
+
+        SetBrushResource("AccentTextFillColorPrimaryBrush", isDarkTheme ? light3 : dark2);
+        SetBrushResource("AccentTextFillColorSecondaryBrush", isDarkTheme ? light3 : dark3);
+        SetBrushResource("AccentTextFillColorTertiaryBrush", isDarkTheme ? light2 : dark1);
+
+        SetBrushResource("NavigationViewSelectionIndicatorForeground", accentFill);
+        SetBrushResource("SystemControlBackgroundAccentBrush", accentFill);
+        SetBrushResource("SystemColorControlAccentBrush", accentFill);
+    }
+
+    private void SetColorResource(string resourceKey, Color color)
+    {
+        if (_applicationResourceManager.ContainsResourceKey(resourceKey))
+        {
+            _applicationResourceManager.ReplaceResource(resourceKey, color);
+        }
+    }
+
+    [DynamicWindowsRuntimeCast(typeof(SolidColorBrush))]
+    private void SetBrushResource(string resourceKey, Color color, double opacity = 1)
+    {
+        if (!_applicationResourceManager.ContainsResourceKey(resourceKey))
+        {
+            return;
+        }
+
+        var brush = _applicationResourceManager.GetResource<object>(resourceKey) as SolidColorBrush;
+
+        if (brush != null)
+        {
+            brush.Color = color;
+            brush.Opacity = opacity;
+        }
+        else
+        {
+            _applicationResourceManager.ReplaceResource(resourceKey, new SolidColorBrush(color)
+            {
+                Opacity = opacity
+            });
+        }
+    }
+
+    private static Color BlendColor(Color source, Color target, double amount)
+    {
+        return Color.FromArgb(
+            source.A,
+            (byte)Math.Round(source.R + ((target.R - source.R) * amount)),
+            (byte)Math.Round(source.G + ((target.G - source.G) * amount)),
+            (byte)Math.Round(source.B + ((target.B - source.B) * amount)));
+    }
+
+    private void PreferenceChanged(object? sender, string propertyName)
+    {
+        if (propertyName != nameof(IPreferencesService.IconStyle)) return;
+
+        var dispatcherQueue = GetThemeWindow()?.DispatcherQueue;
+        if (dispatcherQueue == null)
+        {
+            ApplyIconStyle(refresh: false);
+            return;
+        }
+
+        dispatcherQueue.TryEnqueue(() => ApplyIconStyle(refresh: true));
+    }
+
+    public void ApplyIconStyle() => ApplyIconStyle(refresh: false);
+
+    /// <summary>
+    /// Points WinoIconFontFamily in the Light/Dark theme dictionaries of Styles/WinoIcons.xaml at the
+    /// monochrome or the colorful fonts. HighContrast always keeps the monochrome font.
+    /// </summary>
+    [DynamicWindowsRuntimeCast(typeof(ResourceDictionary))]
+    private void ApplyIconStyle(bool refresh)
+    {
+        var isColorful = _preferencesService.IconStyle == WinoIconStyle.Colorful;
+
+        var iconDictionary = Application.Current.Resources.MergedDictionaries
+            .FirstOrDefault(d => d.ThemeDictionaries.TryGetValue("Light", out var light)
+                && light is ResourceDictionary lightDictionary
+                && lightDictionary.ContainsKey(IconFontFamilyKey));
+
+        if (iconDictionary == null)
+        {
+            Debug.WriteLine("WinoIcons theme dictionary was not found; icon style is not applied.");
+            return;
+        }
+
+        SetIconFontFamily(iconDictionary, "Light", isColorful ? LightIconFontFamily : MonochromeIconFontFamily);
+        SetIconFontFamily(iconDictionary, "Dark", isColorful ? DarkIconFontFamily : MonochromeIconFontFamily);
+
+        if (refresh)
+            RefreshThemeResource();
+    }
+
+    [DynamicWindowsRuntimeCast(typeof(ResourceDictionary))]
+    private static void SetIconFontFamily(ResourceDictionary dictionary, string themeKey, string fontFamily)
+    {
+        if (dictionary.ThemeDictionaries.TryGetValue(themeKey, out var theme) && theme is ResourceDictionary themeDictionary)
+            themeDictionary[IconFontFamilyKey] = new FontFamily(fontFamily);
+    }
+
+    private void RefreshThemeResource()
+    {
+        var mainApplicationFrame = TryGetShellRootContent();
+        if (mainApplicationFrame == null) return;
+
+        if (mainApplicationFrame.RequestedTheme == ElementTheme.Dark)
+        {
+            mainApplicationFrame.RequestedTheme = ElementTheme.Light;
+            mainApplicationFrame.RequestedTheme = ElementTheme.Dark;
+        }
+        else if (mainApplicationFrame.RequestedTheme == ElementTheme.Light)
+        {
+            mainApplicationFrame.RequestedTheme = ElementTheme.Dark;
+            mainApplicationFrame.RequestedTheme = ElementTheme.Light;
+        }
+        else
+        {
+            var isUnderlyingDark = _underlyingThemeService.IsUnderlyingThemeDark();
+
+            mainApplicationFrame.RequestedTheme = isUnderlyingDark ? ElementTheme.Light : ElementTheme.Dark;
+            mainApplicationFrame.RequestedTheme = ElementTheme.Default;
+        }
+    }
+
+    public Task ApplyCustomThemeAsync(bool isInitializing)
+        => ApplyCustomThemeCoreAsync(isInitializing, forceReapply: false, throwOnError: false);
+
+    [DynamicWindowsRuntimeCast(typeof(ResourceDictionary))]
+    private async Task ApplyCustomThemeCoreAsync(bool isInitializing, bool forceReapply, bool throwOnError)
+    {
+        if (ContrastThemeHelper.IsActive)
+        {
+            ApplyContrastThemeDictionary();
+            UpdateSystemCaptionButtonColors();
+            return;
+        }
+
+        // If no theme ID is set, don't apply any theme (for backward compatibility)
+        if (currentApplicationThemeId == null)
+        {
+            Debug.WriteLine("No theme ID set, skipping theme application");
+            return;
+        }
+
+        AppThemeBase? applyingTheme = null;
+
+        var controlThemeList = new List<AppThemeBase>(preDefinedThemes);
+
+        // Don't search for custom themes if applying theme is already in pre-defined templates.
+        // This is important for startup performance because we won't be loading the custom themes on launch.
+
+        bool isApplyingPreDefinedTheme = preDefinedThemes.Exists(a => a.Id == currentApplicationThemeId);
+
+        if (isApplyingPreDefinedTheme)
+        {
+            applyingTheme = preDefinedThemes.Find(a => a.Id == currentApplicationThemeId);
+        }
+        else
+        {
+            // User applied custom theme. Load custom themes and find it there.
+
+            var customThemes = await GetCurrentCustomThemesAsync();
+
+            controlThemeList.AddRange(customThemes.Select(a => new CustomAppTheme(a)));
+
+            applyingTheme = controlThemeList.Find(a => a.Id == currentApplicationThemeId);
+
+            // If theme ID is not found in available themes, don't apply any theme (backward compatibility)
+            if (applyingTheme == null)
+            {
+                Debug.WriteLine($"Theme with ID {currentApplicationThemeId} not found, skipping theme application");
+                return;
+            }
+        }
+
+        if (applyingTheme == null)
+        {
+            Debug.WriteLine($"Theme with ID {currentApplicationThemeId} not found, skipping theme application");
+            return;
+        }
+
+        try
+        {
+            var existingThemeDictionary = _applicationResourceManager.GetLastResource();
+
+            if (existingThemeDictionary != null && existingThemeDictionary.TryGetValue("ThemeName", out object? themeNameString))
+            {
+                var themeName = themeNameString?.ToString();
+
+                // Applying different theme.
+                if (forceReapply || themeName != applyingTheme.ThemeName || applyingTheme is CustomAppTheme)
+                {
+                    var resourceDictionaryContent = await applyingTheme.GetThemeResourceDictionaryContentAsync();
+
+                    var resourceDictionary = XamlReader.Load(resourceDictionaryContent) as ResourceDictionary;
+                    if (resourceDictionary == null)
+                    {
+                        return;
+                    }
+
+                    // Custom themes require special attention for background image because 
+                    // they share the same base theme resource dictionary.
+
+                    if (applyingTheme is CustomAppTheme customTheme)
+                    {
+                        resourceDictionary["Wallpaper"] = $"ms-appdata:///local/{CustomThemeFolderName}/{applyingTheme.Id}.jpg";
+                        resourceDictionary["PreviewImage"] = $"ms-appdata:///local/{CustomThemeFolderName}/{applyingTheme.Id}_preview.jpg";
+
+                        var wallpaper = await LoadThemeImageAsync(applyingTheme.Id, $"{applyingTheme.Id}.jpg");
+                        ConfigureCustomThemeDictionary(resourceDictionary, customTheme.Metadata, wallpaper);
+                    }
+
+                    // Add the new theme before removing the old one, so there is never a moment
+                    // when no theme dictionary is merged while another window parses a page.
+                    EnsureHighContrastFallbacks(resourceDictionary);
+                    _applicationResourceManager.AddResource(resourceDictionary);
+                    _applicationResourceManager.RemoveResource(existingThemeDictionary);
+
+                    bool isSystemTheme = applyingTheme is SystemAppTheme || applyingTheme is CustomAppTheme;
+
+                    if (isSystemTheme)
+                    {
+                        // For system themes, set the RootElement theme from saved values.
+                        // Potential bug: When we set it to system default, theme is not applied when system and
+                        // app element theme is different :)
+
+                        var savedElement = _configurationService.Get(UnderlyingThemeService.SelectedAppThemeKey, ApplicationElementTheme.Default);
+                        RootTheme = savedElement;
+
+                        // Quickly switch theme to apply theme resource changes.
+                        RefreshThemeResource();
+                    }
+                    else
+                        RootTheme = applyingTheme.ForceElementTheme;
+
+                    // Theme has accent color. Override.
+                    if (!isInitializing)
+                    {
+                        AccentColor = applyingTheme.AccentColor;
+                    }
+                }
+                else
+                    UpdateSystemCaptionButtonColors();
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Apply theme failed -> {ex.Message}");
+
+            // A failure in the middle of the swap must not leave the application without theme
+            // resources. For example a custom palette that fails to apply.
+            EnsureThemeResources();
+
+            if (throwOnError)
+                throw;
+        }
+    }
+
+    [DynamicWindowsRuntimeCast(typeof(ImageBrush))]
+    [DynamicWindowsRuntimeCast(typeof(ResourceDictionary))]
+    private static void ConfigureCustomThemeDictionary(
+        ResourceDictionary dictionary,
+        CustomThemeMetadata metadata,
+        ImageSource? wallpaper)
+    {
+        if (dictionary["WinoApplicationBackgroundColor"] is ImageBrush imageBrush)
+        {
+            imageBrush.ImageSource = wallpaper;
+            imageBrush.Stretch = metadata.WallpaperFit == ThemeWallpaperFit.Fit ? Stretch.Uniform : Stretch.UniformToFill;
+            imageBrush.AlignmentX = metadata.WallpaperFit == ThemeWallpaperFit.Fit
+                ? AlignmentX.Center
+                : metadata.WallpaperAlignment switch
+                {
+                    ThemeWallpaperAlignment.TopLeft or ThemeWallpaperAlignment.Left or ThemeWallpaperAlignment.BottomLeft => AlignmentX.Left,
+                    ThemeWallpaperAlignment.TopRight or ThemeWallpaperAlignment.Right or ThemeWallpaperAlignment.BottomRight => AlignmentX.Right,
+                    _ => AlignmentX.Center
+                };
+            imageBrush.AlignmentY = metadata.WallpaperFit == ThemeWallpaperFit.Fit
+                ? AlignmentY.Center
+                : metadata.WallpaperAlignment switch
+                {
+                    ThemeWallpaperAlignment.TopLeft or ThemeWallpaperAlignment.Top or ThemeWallpaperAlignment.TopRight => AlignmentY.Top,
+                    ThemeWallpaperAlignment.BottomLeft or ThemeWallpaperAlignment.Bottom or ThemeWallpaperAlignment.BottomRight => AlignmentY.Bottom,
+                    _ => AlignmentY.Center
+                };
+        }
+
+        ApplyPalette(dictionary.ThemeDictionaries["Light"] as ResourceDictionary, metadata.LightPalette?.Resolve(false) ?? CustomThemePalette.CreateDefaults(false));
+        ApplyPalette(dictionary.ThemeDictionaries["Dark"] as ResourceDictionary, metadata.DarkPalette?.Resolve(true) ?? CustomThemePalette.CreateDefaults(true));
+    }
+
+    private static void ApplyPalette(ResourceDictionary? dictionary, CustomThemePalette palette)
+    {
+        if (dictionary == null)
+            return;
+
+        SetPaletteColor(dictionary, "MainCustomThemeColor", palette.MainCustomThemeColor, asColor: true);
+        SetPaletteColor(dictionary, "AppBarBackgroundColor", palette.MainCustomThemeColor);
+        SetPaletteColor(dictionary, "NavigationViewDefaultPaneBackground", palette.MainCustomThemeColor);
+        SetPaletteColor(dictionary, "NavigationViewExpandedPaneBackground", palette.MainCustomThemeColor);
+        SetPaletteColor(dictionary, "WelcomeOverlayBrush", palette.MainCustomThemeColor);
+        SetPaletteColor(dictionary, "MailListHeaderBackgroundColor", palette.MailListHeaderBackgroundColor);
+        SetPaletteColor(dictionary, "CalendarDefaultHourBackgroundBrush", palette.CalendarDefaultHourBackgroundBrush);
+        SetPaletteColor(dictionary, "CalendarHoverHourBackgroundBrush", palette.CalendarHoverHourBackgroundBrush);
+        SetPaletteColor(dictionary, "CalendarWorkHourBackgroundBrush", palette.CalendarWorkHourBackgroundBrush);
+        SetPaletteColor(dictionary, "CalendarSelectedHourBackgroundBrush", palette.CalendarSelectedHourBackgroundBrush);
+        SetPaletteColor(dictionary, "WinoContentZoneBackgroud", palette.WinoContentZoneBackgroud);
+        SetPaletteColor(dictionary, "ReadingPaneBackgroundColorBrush", palette.ReadingPaneBackgroundColorBrush);
+        SetPaletteColor(dictionary, "NavigationViewContentBackground", palette.NavigationViewContentBackground);
+    }
+
+    [DynamicWindowsRuntimeCast(typeof(SolidColorBrush))]
+    private static void SetPaletteColor(ResourceDictionary dictionary, string key, string? hex, bool asColor = false)
+    {
+        if (string.IsNullOrWhiteSpace(hex))
+            return;
+
+        var color = ColorHelper.ToColor(hex);
+
+        if (asColor)
+        {
+            dictionary[key] = color;
+        }
+        else if (dictionary.TryGetValue(key, out var value) && value is SolidColorBrush brush)
+        {
+            brush.Color = color;
+            brush.Opacity = 1;
+        }
+        else
+        {
+            dictionary[key] = new SolidColorBrush(color);
+        }
+    }
+
+    public async Task<List<AppThemeBase>> GetAvailableThemesAsync()
+    {
+        var availableThemes = new List<AppThemeBase>(preDefinedThemes);
+
+        var customThemes = await GetCurrentCustomThemesAsync();
+
+        availableThemes.AddRange(customThemes.Select(a => new CustomAppTheme(a)));
+
+        foreach (var theme in availableThemes)
+            await theme.LoadPreviewImageAsync();
+
+        return availableThemes;
+    }
+
+    public async Task SelectThemeAsync(Guid themeId, bool forceReapply = false)
+    {
+        var availableThemes = await GetAvailableThemesAsync();
+        if (availableThemes.All(theme => theme.Id != themeId))
+            throw new InvalidOperationException($"Theme '{themeId}' is not available.");
+
+        var previousState = CaptureRuntimeState();
+        currentApplicationThemeId = themeId;
+        _configurationService.Set(CurrentApplicationThemeKey, currentApplicationThemeId);
+
+        try
+        {
+            await ApplyCustomThemeCoreAsync(isInitializing: false, forceReapply: forceReapply, throwOnError: true);
+        }
+        catch
+        {
+            await RestoreRuntimeStateAsync(previousState);
+            throw;
+        }
+    }
+
+    public ThemeRuntimeState CaptureRuntimeState()
+        => new(currentApplicationThemeId, currentApplicationThemeId ?? WinoThemeCatalog.DefaultThemeId, AccentColor, RootTheme);
+
+    [DynamicWindowsRuntimeCast(typeof(ResourceDictionary))]
+    public async Task PreviewCustomThemeAsync(
+        CustomThemeMetadata metadata,
+        byte[]? wallpaperData,
+        ApplicationElementTheme elementTheme)
+    {
+        if (ContrastThemeHelper.IsActive)
+            return;
+
+        // The editor sends the picked bytes once and then null with an empty id, so the decoded
+        // image is kept for the rest of the session instead of decoding it on every color change.
+        if (wallpaperData is { Length: > 0 })
+        {
+            previewWallpaper = await CreateBitmapAsync(wallpaperData);
+            previewWallpaperKey = Guid.Empty;
+        }
+        else if (previewWallpaper == null || previewWallpaperKey != metadata.Id)
+        {
+            previewWallpaper = metadata.Id == Guid.Empty
+                ? null
+                : await LoadThemeImageAsync(metadata.Id, $"{metadata.Id}.jpg");
+            previewWallpaperKey = metadata.Id;
+        }
+
+        var customThemeFile = await StorageFile.GetFileFromApplicationUriAsync(new Uri("ms-appx:///AppThemes/Custom.xaml"));
+        var content = await FileIO.ReadTextAsync(customThemeFile);
+        var dictionary = XamlReader.Load(content) as ResourceDictionary
+                         ?? throw new InvalidOperationException("Custom theme resources could not be loaded.");
+        ConfigureCustomThemeDictionary(dictionary, metadata, previewWallpaper);
+
+        // Add first, then remove, so a theme dictionary is always merged.
+        var existingDictionary = _applicationResourceManager.GetLastResource();
+        _applicationResourceManager.AddResource(dictionary);
+
+        if (existingDictionary != null)
+            _applicationResourceManager.RemoveResource(existingDictionary);
+        RootTheme = elementTheme;
+        AccentColor = metadata.AccentColorHex;
+        RefreshThemeResource();
+    }
+
+    public async Task RestoreRuntimeStateAsync(ThemeRuntimeState state)
+    {
+        currentApplicationThemeId = state.EffectiveThemeId;
+        await ApplyCustomThemeCoreAsync(isInitializing: false, forceReapply: true, throwOnError: true);
+        RootTheme = state.ElementTheme;
+        AccentColor = state.AccentColor;
+        currentApplicationThemeId = state.ThemeId;
+        _configurationService.Set(CurrentApplicationThemeKey, currentApplicationThemeId);
+
+        previewWallpaper = null;
+        previewWallpaperKey = Guid.Empty;
+    }
+
+    private BitmapImage? previewWallpaper;
+    private Guid previewWallpaperKey;
+
+    public static string GetCustomThemeAssetPath(string fileName)
+        => Path.Combine(ApplicationData.Current.LocalFolder.Path, CustomThemeFolderName, fileName);
+
+    // Theme images are decoded from memory, never from their file. XAML keeps a file it decodes
+    // open for re-decoding at other sizes, which made saving the wallpaper of the active theme fail
+    // with E_ACCESSDENIED, and it caches by URI, which showed the old image after a save.
+    public static async Task<BitmapImage> CreateBitmapAsync(byte[] data)
+    {
+        using var stream = new MemoryStream(data);
+        var bitmap = new BitmapImage();
+        await bitmap.SetSourceAsync(stream.AsRandomAccessStream());
+        return bitmap;
+    }
+
+    private static async Task<BitmapImage?> LoadThemeImageAsync(Guid themeId, string fileName)
+    {
+        try
+        {
+            var path = GetCustomThemeAssetPath(fileName);
+            if (!File.Exists(path))
+                return null;
+
+            return await CreateBitmapAsync(await File.ReadAllBytesAsync(path));
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "Custom theme {ThemeId} image {FileName} could not be loaded.", themeId, fileName);
+            return null;
+        }
+    }
+
+    public async Task<CustomThemeMetadata?> GetCustomThemeAsync(Guid themeId)
+        => (await GetCurrentCustomThemesAsync()).FirstOrDefault(theme => theme.Id == themeId);
+
+    public async Task<CustomThemeMetadata> SaveCustomThemeAsync(CustomThemeSaveRequest request)
+    {
+        var themeName = request.Name?.Trim();
+        var themes = await GetCurrentCustomThemesAsync();
+        var validationError = CustomThemeSaveValidator.Validate(request, themes);
+        if (validationError != CustomThemeValidationError.None)
+        {
+            var message = validationError switch
+            {
+                CustomThemeValidationError.MissingName => Translator.Exception_CustomThemeMissingName,
+                CustomThemeValidationError.MissingWallpaper => Translator.Exception_CustomThemeMissingWallpaper,
+                CustomThemeValidationError.DuplicateName => Translator.Exception_CustomThemeExists,
+                CustomThemeValidationError.MissingTheme => Translator.SettingsCustomTheme_DeleteMissing,
+                CustomThemeValidationError.InvalidAccent => Translator.ApplicationThemeEditor_InvalidAccent,
+                _ => Translator.ApplicationThemeEditor_InvalidSurface
+            };
+            throw new CustomThemeCreationFailedException(message);
+        }
+
+        var accentColor = string.Empty;
+        if (!string.IsNullOrWhiteSpace(request.AccentColorHex))
+            ThemeColorValidator.TryNormalizeOpaque(request.AccentColorHex, out accentColor);
+
+        var savedTheme = new CustomThemeMetadata
+        {
+            Id = request.ThemeId ?? Guid.NewGuid(),
+            Name = themeName!,
+            AccentColorHex = accentColor,
+            LightPalette = request.LightPalette,
+            DarkPalette = request.DarkPalette,
+            WallpaperFit = request.WallpaperFit,
+            WallpaperAlignment = request.WallpaperFit == ThemeWallpaperFit.Fit
+                ? ThemeWallpaperAlignment.Center
+                : request.WallpaperAlignment
+        };
+
+        var themeFolder = await ApplicationData.Current.LocalFolder.CreateFolderAsync(CustomThemeFolderName, CreationCollisionOption.OpenIfExists);
+
+        if (request.WallpaperData is { Length: > 0 } wallpaperData)
+        {
+            var wallpaperFile = await ReplaceBytesAtomicallyAsync(themeFolder, $"{savedTheme.Id}.jpg", wallpaperData);
+            using var thumbnail = await wallpaperFile.GetThumbnailAsync(Windows.Storage.FileProperties.ThumbnailMode.PicturesView);
+            using var readerStream = thumbnail.AsStreamForRead();
+            var bytes = new byte[readerStream.Length];
+            await readerStream.ReadExactlyAsync(bytes);
+            await ReplaceBytesAtomicallyAsync(themeFolder, $"{savedTheme.Id}_preview.jpg", bytes);
+        }
+
+        var serialized = JsonSerializer.Serialize(savedTheme, DomainModelsJsonContext.Default.CustomThemeMetadata);
+        await ReplaceTextAtomicallyAsync(themeFolder, $"{savedTheme.Id}.json", serialized);
+
+        return savedTheme;
+    }
+
+    [DynamicWindowsRuntimeCast(typeof(StorageFile))]
+    private static async Task<StorageFile> ReplaceBytesAtomicallyAsync(StorageFolder folder, string fileName, byte[] data)
+    {
+        var tempFile = await folder.CreateFileAsync($"{fileName}.{Guid.NewGuid():N}.tmp", CreationCollisionOption.FailIfExists);
+        await FileIO.WriteBytesAsync(tempFile, data);
+        var existing = await folder.TryGetItemAsync(fileName) as StorageFile;
+
+        if (existing == null)
+            await tempFile.RenameAsync(fileName, NameCollisionOption.FailIfExists);
+        else
+            await tempFile.MoveAndReplaceAsync(existing);
+
+        return await folder.GetFileAsync(fileName);
+    }
+
+    [DynamicWindowsRuntimeCast(typeof(StorageFile))]
+    private static async Task ReplaceTextAtomicallyAsync(StorageFolder folder, string fileName, string text)
+    {
+        var tempFile = await folder.CreateFileAsync($"{fileName}.{Guid.NewGuid():N}.tmp", CreationCollisionOption.FailIfExists);
+        await FileIO.WriteTextAsync(tempFile, text);
+        var existing = await folder.TryGetItemAsync(fileName) as StorageFile;
+
+        if (existing == null)
+            await tempFile.RenameAsync(fileName, NameCollisionOption.FailIfExists);
+        else
+            await tempFile.MoveAndReplaceAsync(existing);
+    }
+
+    public async Task<List<CustomThemeMetadata>> GetCurrentCustomThemesAsync()
+    {
+        var results = new List<CustomThemeMetadata>();
+
+        var themeFolder = await ApplicationData.Current.LocalFolder.CreateFolderAsync(CustomThemeFolderName, CreationCollisionOption.OpenIfExists);
+
+        var allFiles = await themeFolder.GetFilesAsync();
+
+        var themeMetadatas = allFiles.Where(a => a.FileType == ".json");
+
+        foreach (var theme in themeMetadatas)
+        {
+            var metadata = await GetCustomMetadataAsync(theme).ConfigureAwait(false);
+
+            if (metadata == null) continue;
+
+            results.Add(metadata);
+        }
+
+        return results;
+    }
+
+    public async Task<bool> DeleteCustomThemeAsync(Guid themeId)
+    {
+        var themeFolder = await ApplicationData.Current.LocalFolder.CreateFolderAsync(CustomThemeFolderName, CreationCollisionOption.OpenIfExists);
+        var metadataFileName = $"{themeId}.json";
+        var themeItem = await themeFolder.TryGetItemAsync(metadataFileName);
+
+        if (themeItem == null)
+        {
+            return false;
+        }
+
+        if (currentApplicationThemeId == themeId)
+        {
+            currentApplicationThemeId = preDefinedThemes[0].Id;
+            _configurationService.Set(CurrentApplicationThemeKey, currentApplicationThemeId);
+            await ApplyCustomThemeAsync(false);
+        }
+
+        await DeleteThemeAssetIfExistsAsync(themeFolder, metadataFileName);
+        await DeleteThemeAssetIfExistsAsync(themeFolder, $"{themeId}.jpg");
+        await DeleteThemeAssetIfExistsAsync(themeFolder, $"{themeId}_preview.jpg");
+
+        return true;
+    }
+
+    private async Task<CustomThemeMetadata?> GetCustomMetadataAsync(IStorageFile file)
+    {
+        var fileContent = await FileIO.ReadTextAsync(file);
+
+        return JsonSerializer.Deserialize(fileContent, DomainModelsJsonContext.Default.CustomThemeMetadata);
+    }
+
+    private static async Task DeleteThemeAssetIfExistsAsync(StorageFolder themeFolder, string fileName)
+    {
+        var item = await themeFolder.TryGetItemAsync(fileName);
+
+        if (item != null)
+        {
+            await item.DeleteAsync();
+        }
+    }
+
+    public string GetSystemAccentColorHex()
+        => uiSettings.GetColorValue(UIColorType.Accent).ToHex();
+
+    public List<string> GetAvailableAccountColors()
+    {
+        return new List<string>()
+        {
+            "#e74c3c",
+            "#c0392b",
+            "#e53935",
+            "#d81b60",
+            
+            // Pinks
+            "#e91e63",
+            "#ec407a",
+            "#ff4081",
+
+            // Purples
+            "#9b59b6",
+            "#8e44ad",
+            "#673ab7",
+
+            // Blues
+            "#3498db",
+            "#2980b9",
+            "#2196f3",
+            "#03a9f4",
+            "#00bcd4",
+
+            // Teals
+            "#009688",
+            "#1abc9c",
+            "#16a085",
+
+            // Greens
+            "#2ecc71",
+            "#27ae60",
+            "#4caf50",
+            "#8bc34a",
+
+            // Yellows & Oranges
+            "#f1c40f",
+            "#f39c12",
+            "#ff9800",
+            "#ff5722",
+
+            // Browns
+            "#795548",
+            "#a0522d",
+
+            // Grays
+            "#9e9e9e",
+            "#607d8b",
+            "#34495e",
+            "#2c3e50",
+        };
+    }
+
+    public List<BackdropTypeWrapper> GetAvailableBackdropTypes()
+    {
+        return new List<BackdropTypeWrapper>
+        {
+            new BackdropTypeWrapper(WindowBackdropType.None, "None"),
+            new BackdropTypeWrapper(WindowBackdropType.Mica, "Mica"),
+            new BackdropTypeWrapper(WindowBackdropType.MicaAlt, "Mica Alt"),
+            new BackdropTypeWrapper(WindowBackdropType.DesktopAcrylic, "Desktop Acrylic")
+        };
+    }
+
+    private static WindowBackdropType NormalizeBackdropType(WindowBackdropType backdropType)
+    {
+#pragma warning disable CS0618 // Legacy values are intentionally supported for settings migration.
+        return backdropType is WindowBackdropType.AcrylicBase or WindowBackdropType.AcrylicThin
+            ? WindowBackdropType.DesktopAcrylic
+            : backdropType;
+#pragma warning restore CS0618
+    }
+
+    private WindowEx? GetThemeWindow() => _windowManager.ActiveWindow ?? WinoApplication.MainWindow;
+
+    [DynamicWindowsRuntimeCast(typeof(FrameworkElement))]
+    private FrameworkElement? TryGetShellRootContent()
+    {
+        var window = GetThemeWindow();
+        if (window == null)
+            return null;
+
+        try
+        {
+            if (window is IWinoShellWindow shellWindow)
+                return shellWindow.GetRootContent();
+
+            return window.Content as FrameworkElement;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Skipping root content lookup for closed window: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task ApplyThemeToActiveWindowAsync()
+    {
+        RootTheme = _configurationService.Get(UnderlyingThemeService.SelectedAppThemeKey, ApplicationElementTheme.Default);
+        await ApplyCustomThemeAsync(false);
+        ApplyBackdrop(currentBackdropType);
+        UpdateSystemCaptionButtonColors();
+    }
+}

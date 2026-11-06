@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Colour tokens of code-built Settings views and dialogs (light; values-night has the dark pair). -->
+<resources>
+  <color name="wino_raised_fill">#FFFFFFFF</color>
+  <color name="wino_strong_stroke">#24000000</color>
+  <color name="wino_pill_fill">#14000000</color>
+  <color name="wino_toggle_wash">#17000000</color>
+  <color name="wino_ripple_mask">#FFFFFFFF</color>
+  <color name="wino_checker_light">#FFFFFFFF</color>
+  <color name="wino_checker_dark">#FFCCCCCC</color>
+  <color name="wino_on_image_text">#FFFFFFFF</color>
+  <color name="wino_on_image_shadow">#A0000000</color>
+  <color name="wino_swatch_fallback">#FF808080</color>
+  <color name="wino_badge_fill">#FFE81123</color>
+  <color name="wino_on_badge">#FFFFFFFF</color>
+  <color name="wino_default_accent">#FF0078D7</color>
+  <!-- Settings rows and sections (canvas Android settings boards): the list under the sections, the section card, its
+       outline and row separators, values and chevrons, and the error colour of destructive action rows. -->
+  <color name="wino_settings_list_fill">#FFF7F7F8</color>
+  <color name="wino_settings_group_fill">#FFFFFFFF</color>
+  <color name="wino_settings_group_stroke">#14000000</color>
+  <color name="wino_settings_row_divider">#0F000000</color>
+  <color name="wino_settings_value">#FF5C5C5C</color>
+  <color name="wino_settings_chevron">#FF8A8A8A</color>
+  <color name="wino_settings_destructive">#FFB3261E</color>
+</resources>

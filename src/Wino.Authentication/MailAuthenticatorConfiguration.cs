@@ -1,0 +1,108 @@
+using System.Collections.Generic;
+using System.Linq;
+using Wino.Core.Domain.Enums;
+using Wino.Core.Domain.Interfaces;
+using Wino.Core.Domain.Models.Accounts;
+using Wino.Core.Domain.Models.Authentication;
+
+namespace Wino.Services;
+
+public class MailAuthenticatorConfiguration : IAuthenticatorConfig
+{
+    /// <summary>
+    /// The Google UWP client: Gmail mailboxes on Windows and Android's loopback fallback, and every Google token stored
+    /// before tokens recorded their client.
+    /// </summary>
+    public const string DesktopGmailClientId = "973025879644-s7b4ur9p3rlgop6a22u7iuptdc0brnrn.apps.googleusercontent.com";
+
+    private readonly IApplicationConfiguration _applicationConfiguration;
+
+    public MailAuthenticatorConfiguration(IApplicationConfiguration applicationConfiguration = null)
+        : this(applicationConfiguration, DesktopGmailClientId)
+    {
+    }
+
+    public MailAuthenticatorConfiguration(IApplicationConfiguration applicationConfiguration, string gmailAuthenticatorClientId)
+    {
+        _applicationConfiguration = applicationConfiguration;
+        GmailAuthenticatorClientId = gmailAuthenticatorClientId;
+    }
+
+    public string OutlookAuthenticatorClientId => OutlookClientIds.Current;
+    public string GmailAuthenticatorClientId { get; }
+    public string GmailTokenStoreIdentifier => AuthenticationTokenStorePaths.GmailTokenStoreFolderName;
+    public string ApplicationDisplayName => _applicationConfiguration?.ApplicationDisplayName ?? "Wino Mail";
+    public string GmailTokenStorePath => AuthenticationTokenStorePaths.GetGmailTokenStorePath(_applicationConfiguration);
+
+    public string[] GetOutlookScopes(ProviderAuthorizationRequest request)
+    {
+        var scopes = new List<string> { "email", "offline_access", "User.Read" };
+
+        if (request.IncludeMail)
+        {
+            scopes.AddRange([
+                "mail.readwrite",
+                "mail.send",
+                "Mail.Send.Shared",
+                "Mail.ReadWrite.Shared"
+            ]);
+        }
+
+        if (request.IncludeCalendar)
+        {
+            scopes.AddRange([
+                "Calendars.ReadBasic",
+                "Calendars.ReadWrite",
+                "Calendars.ReadWrite.Shared",
+                "Calendars.Read",
+                "Calendars.Read.Shared"
+            ]);
+        }
+
+        if (request.IncludeContacts)
+            scopes.Add("Contacts.ReadWrite");
+
+        if (request.IncludeTasks)
+            scopes.Add("Tasks.ReadWrite");
+
+        if (request.Features?.Contains(ProviderFeature.MailFilters) == true)
+            scopes.Add("MailboxSettings.ReadWrite");
+
+        return scopes.ToArray();
+    }
+
+    public string[] GetGmailScopes(ProviderAuthorizationRequest request)
+    {
+        var scopes = new List<string>
+        {
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/userinfo.email"
+        };
+
+        if (request.IncludeMail)
+        {
+            scopes.AddRange([
+                "https://mail.google.com/",
+                "https://www.googleapis.com/auth/gmail.labels"
+            ]);
+        }
+
+        if (request.IncludeCalendar)
+        {
+            scopes.AddRange([
+                "https://www.googleapis.com/auth/calendar",
+                "https://www.googleapis.com/auth/calendar.events",
+                "https://www.googleapis.com/auth/calendar.settings.readonly",
+                "https://www.googleapis.com/auth/drive.file"
+            ]);
+        }
+
+        if (request.IncludeContacts)
+            scopes.Add("https://www.googleapis.com/auth/contacts");
+
+        if (request.IncludeTasks)
+            scopes.Add("https://www.googleapis.com/auth/tasks");
+
+        return scopes.ToArray();
+    }
+}

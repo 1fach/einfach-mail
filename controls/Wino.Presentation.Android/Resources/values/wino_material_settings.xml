@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material 3 metrics of Settings, the theme gallery and the Daily briefing (canvas Material pass boards Settings,
+     ThemeGallery and Briefing, 15 Oct 2026). Pages and controls read only these. -->
+<resources>
+  <!-- Preference list items: 56 dp with one line, 72 dp with supporting text. -->
+  <dimen name="wino_m3_list_item_one_line">56dp</dimen>
+  <dimen name="wino_m3_list_item_two_line">72dp</dimen>
+  <!-- Root list: the leading glyph sits in a 40 dp slot; the subheaders start with it at 16 dp (canvas Material pass Settings). -->
+  <dimen name="wino_m3_settings_leading_slot">40dp</dimen>
+  <dimen name="wino_m3_settings_leading_glyph">24dp</dimen>
+  <dimen name="wino_m3_settings_subheader_height">48dp</dimen>
+  <dimen name="wino_m3_settings_subheader_bottom">8dp</dimen>
+
+  <!-- Theme gallery: cards in a grid of at least three columns on phones (120 dp tall, 12 dp corners, 12 dp gaps),
+       the selected card in a 2 dp primary stroke with a 24 dp check badge. -->
+  <dimen name="wino_m3_theme_card_min_width">104dp</dimen>
+  <dimen name="wino_m3_theme_card_height">120dp</dimen>
+  <dimen name="wino_m3_theme_card_radius">12dp</dimen>
+  <dimen name="wino_m3_theme_card_gap">12dp</dimen>
+  <dimen name="wino_m3_theme_card_stroke">2dp</dimen>
+  <dimen name="wino_m3_theme_card_padding_horizontal">10dp</dimen>
+  <dimen name="wino_m3_theme_card_padding_vertical">8dp</dimen>
+  <dimen name="wino_m3_theme_card_badge">24dp</dimen>
+  <dimen name="wino_m3_theme_card_badge_glyph">16dp</dimen>
+  <dimen name="wino_m3_theme_card_badge_margin">8dp</dimen>
+  <integer name="wino_m3_theme_card_min_columns">3</integer>
+
+  <!-- Accent swatches: 40 dp circles, 12 dp apart, the selected one in a 2 dp on-surface ring. -->
+  <dimen name="wino_m3_swatch">40dp</dimen>
+  <dimen name="wino_m3_swatch_gap">12dp</dimen>
+  <dimen name="wino_m3_swatch_ring">2dp</dimen>
+
+  <!-- Daily briefing: modal bottom sheet (compact, 28 dp top corners) or side sheet (medium and expanded, 400 dp). -->
+  <dimen name="wino_m3_briefing_side_width">400dp</dimen>
+  <dimen name="wino_m3_briefing_header_height">64dp</dimen>
+  <dimen name="wino_m3_briefing_header_padding_start">24dp</dimen>
+  <dimen name="wino_m3_briefing_header_padding_end">8dp</dimen>
+  <dimen name="wino_m3_briefing_header_glyph">24dp</dimen>
+  <dimen name="wino_m3_briefing_header_gap">16dp</dimen>
+  <dimen name="wino_m3_briefing_pager_height">48dp</dimen>
+  <dimen name="wino_m3_briefing_list_padding_horizontal">16dp</dimen>
+  <dimen name="wino_m3_briefing_list_padding_vertical">8dp</dimen>
+  <dimen name="wino_m3_briefing_card_gap">8dp</dimen>
+  <dimen name="wino_m3_briefing_card_radius">12dp</dimen>
+  <dimen name="wino_m3_briefing_card_padding_horizontal">16dp</dimen>
+  <dimen name="wino_m3_briefing_card_padding_vertical">12dp</dimen>
+  <dimen name="wino_m3_briefing_card_line_gap">4dp</dimen>
+  <dimen name="wino_m3_briefing_new_dot">8dp</dimen>
+  <dimen name="wino_m3_briefing_chip_height">24dp</dimen>
+  <dimen name="wino_m3_briefing_chip_padding">8dp</dimen>
+  <dimen name="wino_m3_briefing_chip_radius">8dp</dimen>
+  <dimen name="wino_m3_briefing_action_height">32dp</dimen>
+  <dimen name="wino_m3_briefing_action_glyph">16dp</dimen>
+  <dimen name="wino_m3_briefing_state_glyph">32dp</dimen>
+  <dimen name="wino_m3_briefing_state_padding">32dp</dimen>
+  <dimen name="wino_m3_briefing_footer_padding_horizontal">24dp</dimen>
+  <dimen name="wino_m3_briefing_footer_padding_vertical">12dp</dimen>
+  <dimen name="wino_m3_briefing_badge_offset">10dp</dimen>
+  <fraction name="wino_m3_briefing_sheet_screen_fraction">85%</fraction>
+
+  <!-- Title-only settings rows and the generic setting detail page (canvas Android settings boards SettingsControls and
+       SettingDetail, 15 Oct 2026): 56 dp rows (padding 16 start, 12 end, 8 vertical, 16 dp gaps), the trailing value at most
+       45 % of the row, a 12 dp chevron; sections are 12 dp cards with a 1 dp outline, 8 dp from the zone edge, 16 dp apart;
+       section headers 12 sp at 16 dp, footers 13 sp at 16 dp, 8 dp under the card; radio rows put a 20 dp radio first. -->
+  <dimen name="wino_m3_settings_row_height">56dp</dimen>
+  <dimen name="wino_m3_settings_row_padding_start">16dp</dimen>
+  <dimen name="wino_m3_settings_row_padding_end">12dp</dimen>
+  <dimen name="wino_m3_settings_row_padding_vertical">8dp</dimen>
+  <dimen name="wino_m3_settings_row_gap">16dp</dimen>
+  <fraction name="wino_m3_settings_value_max">45%</fraction>
+  <dimen name="wino_m3_settings_chevron">12dp</dimen>
+  <dimen name="wino_m3_settings_entity_leading">40dp</dimen>
+  <dimen name="wino_m3_settings_group_radius">12dp</dimen>
+  <dimen name="wino_m3_settings_group_stroke">1dp</dimen>
+  <dimen name="wino_m3_settings_group_margin">8dp</dimen>
+  <dimen name="wino_m3_settings_section_gap">16dp</dimen>
+  <dimen name="wino_m3_settings_header_start">8dp</dimen>
+  <dimen name="wino_m3_settings_header_bottom">4dp</dimen>
+  <dimen name="wino_m3_settings_footer_top">8dp</dimen>
+  <dimen name="wino_m3_settings_footer_start">8dp</dimen>
+  <dimen name="wino_m3_settings_divider">1dp</dimen>
+  <dimen name="wino_m3_settings_divider_inset">16dp</dimen>
+  <dimen name="wino_m3_settings_radio">20dp</dimen>
+  <dimen name="wino_m3_settings_content_padding">16dp</dimen>
+  <dimen name="wino_m3_settings_content_padding_vertical">12dp</dimen>
+  <dimen name="wino_m3_settings_list_bottom">24dp</dimen>
+  <dimen name="wino_settings_footer_line">18sp</dimen>
+  <fraction name="wino_m3_settings_disabled_alpha">38%</fraction>
+</resources>

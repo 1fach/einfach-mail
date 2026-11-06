@@ -1,0 +1,32 @@
+<Project InitialTargets="WinoValidateTargetPlatform">
+  <PropertyGroup>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <Nullable>annotations</Nullable>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(WinoIsReleaseBuild)' == 'true' and '$(TargetFramework)' != 'netstandard2.0' and '$(IsTestProject)' != 'true' and !$(TargetFramework.Contains('-macos')) and !$(TargetFramework.Contains('-ios')) and !$(TargetFramework.Contains('-android'))">
+    <!-- Release is the repository-wide Native AOT compatibility gate. -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(WinoIsReleaseBuild)' == 'true' and '$(TargetFramework)' == 'netstandard2.0'">
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- Platform build policy. The shared Release gate above applies to every platform. -->
+  <Import Project="build/Wino.Windows.targets" Condition="'$(WinoTargetPlatform)' == 'Windows'" />
+  <Import Project="build/Wino.MacOS.targets" Condition="'$(WinoTargetPlatform)' == 'MacOS' or $(TargetFramework.Contains('-macos'))" />
+  <Import Project="build/Wino.iOS.targets" Condition="'$(WinoTargetPlatform)' == 'iOS' or $(TargetFramework.Contains('-ios'))" />
+  <Import Project="build/Wino.Android.targets" Condition="'$(WinoTargetPlatform)' == 'Android' or $(TargetFramework.Contains('-android'))" />
+
+  <Target Name="WinoValidateTargetPlatform">
+    <Error Condition="'$(WinoTargetPlatform)' != '' and '$(WinoTargetPlatform)' != 'Windows' and '$(WinoTargetPlatform)' != 'MacOS' and '$(WinoTargetPlatform)' != 'iOS' and '$(WinoTargetPlatform)' != 'Android'"
+           Text="WinoTargetPlatform must be Windows, MacOS, iOS, or Android, not '$(WinoTargetPlatform)'." />
+  </Target>
+</Project>

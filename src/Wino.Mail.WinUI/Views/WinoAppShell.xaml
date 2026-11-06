@@ -1,0 +1,252 @@
+﻿<abstract:WinoAppShellAbstract
+    x:Class="Wino.Mail.WinUI.Views.WinoAppShell"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:abstract="using:Wino.Mail.WinUI.Views.Abstract"
+    xmlns:controls1="using:CommunityToolkit.WinUI.Controls"
+    xmlns:coreControls="using:Wino.Mail.WinUI.Controls"
+    xmlns:coreSelectors="using:Wino.Mail.WinUI.Selectors"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:domain="using:Wino.Core.Domain"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    xmlns:shellMenu="using:Wino.Mail.WinUI.Styles.ShellMenu"
+    x:Name="Root"
+    KeyboardAcceleratorPlacementMode="Hidden"
+    Loaded="OnLoaded"
+    mc:Ignorable="d">
+
+    <!--
+        The shell hosts a navigation menu but never builds one. Every item, template and
+        command belongs to the mode view model of whatever the inner frame navigated to.
+    -->
+    <Page.Resources>
+        <ResourceDictionary>
+            <!--
+                Each shell owns its menu templates. ItemsRepeater keeps recycled containers in a pool
+                attached to the DataTemplate, and a container's nested repeater keeps a raw pointer to
+                the NavigationView that first prepared it. Shared application-level templates let a
+                reopened shell reuse containers of a closed one, which crashes in NavigationView.
+            -->
+            <ResourceDictionary.MergedDictionaries>
+                <shellMenu:ShellMenuTemplates />
+            </ResourceDictionary.MergedDictionaries>
+
+            <coreSelectors:ShellMenuTemplateSelector
+                x:Key="ShellMenuTemplateSelector"
+                AccountCalendarGroupTemplate="{StaticResource AccountCalendarGroupTemplate}"
+                AccountTaskListGroupTemplate="{StaticResource AccountTaskListGroupTemplate}"
+                AccountTaskListTemplate="{StaticResource AccountTaskListTemplate}"
+                CalendarDatePickerTemplate="{StaticResource CalendarDatePickerTemplate}"
+                CalendarNewEventTemplate="{StaticResource CalendarNewEventTemplate}"
+                ContactCategoriesExpanderTemplate="{StaticResource ContactCategoriesExpanderTemplate}"
+                ContactCategoryFilterTemplate="{StaticResource ContactCategoryFilterTemplate}"
+                ContactFilterTemplate="{StaticResource ContactFilterTemplate}"
+                CreateNewMailTemplate="{StaticResource CreateNewMailTemplate}"
+                FixAuthenticationIssueTemplate="{StaticResource FixAuthenticationIssueTemplate}"
+                FixMissingFolderConfigTemplate="{StaticResource FixMissingFolderConfigTemplate}"
+                FolderMenuTemplate="{StaticResource FolderMenuTemplate}"
+                ImportantTaskTemplate="{StaticResource ImportantTaskTemplate}"
+                MailCategoryMenuTemplate="{StaticResource MailCategoryMenuTemplate}"
+                MergedAccountFolderMenuItemTemplate="{StaticResource MergedAccountFolderMenuItemTemplate}"
+                MergedAccountMoreFolderItemTemplate="{StaticResource MergedAccountMoreFolderItemTemplate}"
+                MergedAccountTemplate="{StaticResource MergedAccountTemplate}"
+                MergedMailCategoryMenuTemplate="{StaticResource MergedMailCategoryMenuTemplate}"
+                MyDayTaskTemplate="{StaticResource MyDayTaskTemplate}"
+                NewAddressListTemplate="{StaticResource NewAddressListTemplate}"
+                NewContactTemplate="{StaticResource NewContactTemplate}"
+                NewTaskListTemplate="{StaticResource NewTaskListTemplate}"
+                PlannedTaskTemplate="{StaticResource PlannedTaskTemplate}"
+                RatingItemTemplate="{StaticResource RatingItemTemplate}"
+                SeperatorTemplate="{StaticResource SeperatorTemplate}"
+                SettingsShellGroupItemTemplate="{StaticResource SettingsShellGroupItemTemplate}"
+                SettingsShellPageItemTemplate="{StaticResource SettingsShellPageItemTemplate}"
+                SettingsShellSectionItemTemplate="{StaticResource SettingsShellSectionItemTemplate}"
+                SettingsShellWinoAccountItemTemplate="{StaticResource SettingsShellWinoAccountItemTemplate}"
+                SettingsShellWinoIntelligenceItemTemplate="{StaticResource SettingsShellWinoIntelligenceItemTemplate}"
+                SharedAccountMenuTemplate="{StaticResource SharedAccountMenuTemplate}"
+                SharedCompactAccountMenuTemplate="{StaticResource SharedCompactAccountMenuTemplate}"
+                ShellSectionHeaderTemplate="{StaticResource ShellSectionHeaderTemplate}"
+                UngroupedCalendarTemplate="{StaticResource UngroupedCalendarTemplate}" />
+        </ResourceDictionary>
+    </Page.Resources>
+
+    <Grid x:Name="RootGrid">
+        <coreControls:WinoNavigationView
+            x:Name="navigationView"
+            HorizontalContentAlignment="Stretch"
+            VerticalContentAlignment="Stretch"
+            AlwaysShowHeader="True"
+            AutomationProperties.AutomationId="NavigationView"
+            Background="Transparent"
+            DisplayModeChanged="NavigationViewDisplayModeChanged"
+            FooterMenuItemsSource="{x:Bind ViewModel.CurrentMenu.FooterItems, Mode=OneWay}"
+            IsBackButtonVisible="Collapsed"
+            IsPaneToggleButtonVisible="False"
+            IsSettingsVisible="False"
+            IsTabStop="True"
+            IsTitleBarAutoPaddingEnabled="False"
+            ItemInvoked="NavigationViewItemInvoked"
+            MenuItemTemplateSelector="{StaticResource ShellMenuTemplateSelector}"
+            MenuItemsSource="{x:Bind ViewModel.CurrentMenu.Items, Mode=OneWay}"
+            OpenPaneLength="{x:Bind ViewModel.StatePersistenceService.OpenPaneLength, Mode=TwoWay}"
+            PaneClosing="NavigationPaneClosing"
+            PaneDisplayMode="Auto"
+            PaneOpening="NavigationPaneOpening"
+            ScrollViewer.VerticalScrollBarVisibility="Hidden"
+            SelectionChanged="MenuSelectionChanged"
+            Style="{StaticResource WinoAppShellNavigationViewStyle}">
+            <coreControls:WinoNavigationView.ContentTransitions>
+                <TransitionCollection>
+                    <AddDeleteThemeTransition />
+                </TransitionCollection>
+            </coreControls:WinoNavigationView.ContentTransitions>
+
+            <Grid>
+                <controls1:PropertySizer
+                    Width="1"
+                    HorizontalAlignment="Left"
+                    AutomationProperties.Name="{x:Bind domain:Translator.Accessibility_ResizeNavigationPane, Mode=OneTime}"
+                    Background="Transparent"
+                    Binding="{x:Bind ViewModel.StatePersistenceService.OpenPaneLength, Mode=TwoWay}"
+                    Canvas.ZIndex="20"
+                    Foreground="Transparent"
+                    IsHitTestVisible="{x:Bind navigationView.IsPaneOpen, Mode=OneWay}"
+                    IsTabStop="False"
+                    Maximum="1000"
+                    Minimum="160" />
+
+                <!--  Mode content. The shell never inspects what lands here.  -->
+                <Frame
+                    x:Name="InnerShellFrame"
+                    Padding="0,0,7,7"
+                    IsNavigationStackEnabled="True"
+                    Navigated="ShellFrameContentNavigated">
+                    <Frame.ContentTransitions>
+                        <TransitionCollection>
+                            <PopupThemeTransition />
+                        </TransitionCollection>
+                    </Frame.ContentTransitions>
+                </Frame>
+
+                <coreControls:WinoInfoBar
+                    x:Name="ShellInfoBar"
+                    MaxWidth="700"
+                    Margin="0,60,25,0"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    IsClosable="False"
+                    IsOpen="False" />
+
+                <muxc:TeachingTip
+                    x:Name="ShellTip"
+                    IsOpen="False"
+                    PreferredPlacement="Bottom"
+                    Target="{x:Bind ShellInfoBar}" />
+            </Grid>
+        </coreControls:WinoNavigationView>
+
+        <!--
+            The pane's open state is the user's saved preference, applied from code whenever the
+            pane is expanded. Width-driven visual states must not set IsPaneOpen; they override it.
+        -->
+
+        <!--  Floating update notice for Store and stable sideload builds. It never blocks the shell; closing it with the box checked turns the notice off.  -->
+        <Border
+            x:Name="StoreUpdateCard"
+            Width="400"
+            Margin="0,0,24,24"
+            Padding="16"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Bottom"
+            x:Load="{x:Bind ViewModel.IsStoreUpdateCardVisible, Mode=OneWay}"
+            AutomationProperties.AutomationId="StoreUpdateCard"
+            Background="{ThemeResource SolidBackgroundFillColorSecondaryBrush}"
+            BorderBrush="{ThemeResource SurfaceStrokeColorFlyoutBrush}"
+            BorderThickness="1"
+            Canvas.ZIndex="50"
+            CornerRadius="{ThemeResource OverlayCornerRadius}"
+            Translation="0,0,32">
+            <Border.Shadow>
+                <ThemeShadow />
+            </Border.Shadow>
+            <Border.Transitions>
+                <TransitionCollection>
+                    <PopupThemeTransition />
+                </TransitionCollection>
+            </Border.Transitions>
+            <Grid RowSpacing="12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <FontIcon
+                        VerticalAlignment="Top"
+                        FontSize="20"
+                        Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                        Glyph="&#xE946;" />
+
+                    <StackPanel Grid.Column="1" Spacing="2">
+                        <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="{x:Bind domain:Translator.Notifications_StoreUpdateAvailableTitle, Mode=OneTime}" />
+                        <TextBlock
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            Style="{StaticResource CaptionTextBlockStyle}"
+                            Text="{x:Bind ViewModel.StoreUpdateCardMessage, Mode=OneWay}"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <Button
+                        Grid.Column="2"
+                        Width="32"
+                        Height="32"
+                        Margin="0,-6,-6,0"
+                        Padding="0"
+                        VerticalAlignment="Top"
+                        AutomationProperties.AutomationId="StoreUpdateCardCloseButton"
+                        AutomationProperties.Name="{x:Bind domain:Translator.Buttons_Close, Mode=OneTime}"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Command="{x:Bind ViewModel.DismissStoreUpdateCardCommand}"
+                        ToolTipService.ToolTip="{x:Bind domain:Translator.Buttons_Close, Mode=OneTime}">
+                        <FontIcon FontSize="12" Glyph="&#xE711;" />
+                    </Button>
+                </Grid>
+
+                <Button
+                    Grid.Row="1"
+                    HorizontalAlignment="Stretch"
+                    AutomationProperties.AutomationId="StoreUpdateCardInstallButton"
+                    Command="{x:Bind ViewModel.InstallStoreUpdateCommand}"
+                    Content="{x:Bind domain:Translator.Buttons_UpdateAndRestart, Mode=OneTime}"
+                    Style="{StaticResource AccentButtonStyle}"
+                    Visibility="{x:Bind ViewModel.IsStoreUpdateIdle, Mode=OneWay}" />
+
+                <ProgressBar
+                    Grid.Row="1"
+                    AutomationProperties.AutomationId="StoreUpdateCardProgressBar"
+                    AutomationProperties.Name="{x:Bind ViewModel.StoreUpdateCardMessage, Mode=OneWay}"
+                    IsIndeterminate="{x:Bind ViewModel.IsStoreUpdateProgressIndeterminate, Mode=OneWay}"
+                    Maximum="100"
+                    Visibility="{x:Bind ViewModel.IsStoreUpdateInstalling, Mode=OneWay}"
+                    Value="{x:Bind ViewModel.StoreUpdateProgress, Mode=OneWay}" />
+
+                <CheckBox
+                    Grid.Row="2"
+                    MinWidth="0"
+                    AutomationProperties.AutomationId="StoreUpdateCardDontAskAgainCheckBox"
+                    Content="{x:Bind domain:Translator.Dialog_DontAskAgain, Mode=OneTime}"
+                    IsChecked="{x:Bind ViewModel.IsStoreUpdateDontAskAgainChecked, Mode=TwoWay}"
+                    Visibility="{x:Bind ViewModel.IsStoreUpdateIdle, Mode=OneWay}" />
+            </Grid>
+        </Border>
+    </Grid>
+</abstract:WinoAppShellAbstract>

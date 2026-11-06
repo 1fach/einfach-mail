@@ -1,0 +1,95 @@
+using UIKit;
+using Wino.Core.Domain;
+using Wino.Core.Domain.Enums;
+using Wino.Core.Domain.Interfaces;
+using Wino.Core.Domain.Models.Navigation;
+using Wino.Mail.ViewModels;
+using Wino.Presentation.UIKit;
+
+namespace Wino.Mail.UIKit.Views.Settings;
+
+/// <summary>
+/// Mail preferences: startup mailbox, sync interval, search mode, undo, mark as read and mail behaviour (Windows
+/// MailPreferencesPage, Mac MailPreferencesPageViewController). Pop-ups and steppers sit under the card text on phone width.
+/// </summary>
+public sealed class MailPreferencesPageViewController(MailPreferencesPageViewModel viewModel, IDispatcher dispatcher, IWinoLogger logger)
+    : SettingsPageViewController<MailPreferencesPageViewModel>(viewModel, dispatcher, logger)
+{
+    protected override void BuildPage()
+    {
+        var vm = ViewModel;
+        var p = vm.PreferencesService;
+
+        var startup = Bind.PopUp<MailPreferencesPageViewModel, IAccountProviderDetailViewModel>(vm,
+            s => s.StartupAccounts.ToList(), item => item.StartupEntityTitle,
+            nameof(vm.StartupAccount), s => s.StartupAccount, (s, v) => s.StartupAccount = v,
+            itemsCollection: vm.StartupAccounts);
+
+        AddGroup(null,
+            StackedCard(Translator.SettingsStartupItem_Title, Translator.IOS_SettingsHint_StartupItem, WinoIconGlyph.Home, startup),
+            vm.IsSyncIntervalAvailable ? StackedCard(Translator.SettingsAppPreferences_EmailSyncInterval_Title, Translator.IOS_SettingsHint_EmailSyncInterval, WinoIconGlyph.Sync,
+                Bind.Stepper(vm, nameof(vm.EmailSyncIntervalMinutes), s => s.EmailSyncIntervalMinutes, (s, v) => s.EmailSyncIntervalMinutes = v, 1, 1440,
+                    accessibilityLabel: Translator.SettingsAppPreferences_EmailSyncInterval_Title)) : null,
+            StackedCard(Translator.SettingsAppPreferences_SearchMode_Title, Translator.IOS_SettingsHint_SearchMode, WinoIconGlyph.Find,
+                Bind.PopUp<MailPreferencesPageViewModel, string>(vm, s => s.SearchModes, item => item,
+                    nameof(vm.SelectedDefaultSearchMode), s => s.SelectedDefaultSearchMode, (s, v) => s.SelectedDefaultSearchMode = v)));
+
+        // Undo: each switch row is followed by its delay row, which explains the delay and is dimmed while the switch is off.
+        var undoSend = Card(Translator.SettingsAppPreferences_UndoSendingDrafts_Title, null, WinoIconGlyph.Send,
+            Bind.Switch(p, nameof(p.IsUndoSendingDraftsEnabled), s => s.IsUndoSendingDraftsEnabled, (s, v) => s.IsUndoSendingDraftsEnabled = v, Translator.SettingsAppPreferences_UndoSendingDrafts_Title));
+        var undoSendDelay = Bind.Enabled(Card(Translator.Settings_SecondsToWait_Title, Translator.IOS_SettingsHint_UndoSendingDelay, WinoIconGlyph.None,
+            Bind.Stepper(vm, nameof(vm.UndoSendingDraftsIntervalInSeconds), s => s.UndoSendingDraftsIntervalInSeconds, (s, v) => s.UndoSendingDraftsIntervalInSeconds = v, 1, 10,
+                accessibilityLabel: Translator.SettingsAppPreferences_UndoSendingDrafts_Title)),
+            p, nameof(p.IsUndoSendingDraftsEnabled), s => s.IsUndoSendingDraftsEnabled);
+
+        var undoDelete = Card(Translator.SettingsAppPreferences_UndoDeletingMails_Title, null, WinoIconGlyph.Delete,
+            Bind.Switch(p, nameof(p.IsUndoDeletingMailsEnabled), s => s.IsUndoDeletingMailsEnabled, (s, v) => s.IsUndoDeletingMailsEnabled = v, Translator.SettingsAppPreferences_UndoDeletingMails_Title));
+        var undoDeleteDelay = Bind.Enabled(Card(Translator.Settings_SecondsToWait_Title, Translator.IOS_SettingsHint_UndoDeletingDelay, WinoIconGlyph.None,
+            Bind.Stepper(vm, nameof(vm.UndoDeletingMailsIntervalInSeconds), s => s.UndoDeletingMailsIntervalInSeconds, (s, v) => s.UndoDeletingMailsIntervalInSeconds = v, 1, 10,
+                accessibilityLabel: Translator.SettingsAppPreferences_UndoDeletingMails_Title)),
+            p, nameof(p.IsUndoDeletingMailsEnabled), s => s.IsUndoDeletingMailsEnabled);
+
+        // Mark as read: the Windows radio buttons become a pop-up; the delay applies to the timer option.
+        var markOptions = new[] { Translator.SettingsMarkAsRead_WhenSelected, Translator.SettingsMarkAsRead_DontChange, Translator.SettingsMarkAsRead_Timer };
+        var delay = Bind.Stepper(vm, nameof(vm.MarkAsDelay), s => s.MarkAsDelay, (s, v) => s.MarkAsDelay = v, 0, 120,
+            accessibilityLabel: Translator.Settings_SecondsToWait_Title);
+
+        AddGroup(null,
+            Expander(Translator.SettingsAppPreferences_UndoActions_Title, Translator.IOS_SettingsHint_UndoActions, WinoIconGlyph.ArrowUndo, null,
+                undoSend,
+                undoSendDelay,
+                undoDelete,
+                undoDeleteDelay),
+            Expander(Translator.SettingsMarkAsRead_Title, Translator.IOS_SettingsHint_MarkAsRead, WinoIconGlyph.MarkRead, null,
+                StackedCard(Translator.SettingsMarkAsRead_Title, Translator.IOS_SettingsHint_MarkAsRead, WinoIconGlyph.None,
+                    Bind.PopUp(vm, markOptions, nameof(vm.SelectedMarkAsOptionIndex), s => s.SelectedMarkAsOptionIndex, (s, v) => s.SelectedMarkAsOptionIndex = v)),
+                Bind.Enabled(Card(Translator.Settings_SecondsToWait_Title, Translator.IOS_SettingsHint_MarkAsReadDelay, WinoIconGlyph.None, delay),
+                    vm, nameof(vm.SelectedMarkAsOptionIndex), s => s.SelectedMarkAsOptionIndex == 2)));
+
+        AddGroup(null,
+            Card(Translator.SettingsAutoSelectNextItem_Title, Translator.IOS_SettingsHint_AutoSelectNextItem, WinoIconGlyph.List,
+                Bind.Switch(p, nameof(p.AutoSelectNextItem), s => s.AutoSelectNextItem, (s, v) => s.AutoSelectNextItem = v, Translator.SettingsAutoSelectNextItem_Title)),
+            Card(Translator.SettingsDeleteProtection_Title, Translator.IOS_SettingsHint_DeleteProtection, WinoIconGlyph.ShieldError,
+                Bind.Switch(p, nameof(p.IsHardDeleteProtectionEnabled), s => s.IsHardDeleteProtectionEnabled, (s, v) => s.IsHardDeleteProtectionEnabled = v, Translator.SettingsDeleteProtection_Title)),
+            Card(Translator.SettingsEmptyJunkFolderCommand_Title, Translator.IOS_SettingsHint_EmptyJunkFolderCommand, WinoIconGlyph.Delete,
+                Bind.Switch(p, nameof(p.IsShowEmptyJunkFolderEnabled), s => s.IsShowEmptyJunkFolderEnabled, (s, v) => s.IsShowEmptyJunkFolderEnabled = v, Translator.SettingsEmptyJunkFolderCommand_Title)));
+    }
+
+    protected override Task InitializeAsync(NavigationMode mode, object? parameter)
+        => ViewModel.InitializeNavigationAsync(mode, parameter);
+}
+
+/// <summary>Phone-width helpers for the settings pages' stacked cards.</summary>
+internal static class SettingsCardLayout
+{
+    /// <summary>
+    /// Keeps a fixed-width control (a stepper, a button row) at the leading edge of a card's bottom content, which
+    /// otherwise stretches it to the card's trailing edge.
+    /// </summary>
+    public static UIView Leading(UIView view)
+    {
+        var row = WinoLayout.HStack(0, view, WinoLayout.Spacer());
+        row.Alignment = UIStackViewAlignment.Center;
+        return row;
+    }
+}

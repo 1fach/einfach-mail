@@ -1,0 +1,120 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-macos</TargetFramework>
+    <SupportedOSPlatformVersion>14.0</SupportedOSPlatformVersion>
+    <WinoTargetPlatform>MacOS</WinoTargetPlatform>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationTitle>Wino Mail</ApplicationTitle>
+    <ApplicationId>com.winomail.macos</ApplicationId>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <CodesignEntitlements>Entitlements.plist</CodesignEntitlements>
+    <EnableCodeSigning>true</EnableCodeSigning>
+    <!-- Team 4VB7YWRAQ9 development identity and profile for com.winomail.macos. Pass -p:CodesignKey=- -p:CodesignProvision= to sign ad hoc. -->
+    <CodesignKey Condition="'$(CodesignKey)' == ''">Apple Development</CodesignKey>
+    <CodesignProvision Condition="'$(CodesignProvision)' == ''">Wino Mail macOS Development</CodesignProvision>
+    <PublishAot>false</PublishAot>
+  </PropertyGroup>
+  <!-- Every Mac build carries the Windows manifest version (2.2.0.0 becomes 2.2.0). The release
+       scripts pass their own ApplicationVersion (build number) and a version plist on top. -->
+  <PropertyGroup>
+    <WinoManifestVersion>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../Wino.Mail.WinUI/Package.appxmanifest')), '(?&lt;=&lt;Identity[^&gt;]*\sVersion=")\d+\.\d+\.\d+'))</WinoManifestVersion>
+    <ApplicationDisplayVersion Condition="'$(ApplicationDisplayVersion)' == ''">$(WinoManifestVersion)</ApplicationDisplayVersion>
+    <ApplicationVersion Condition="'$(ApplicationVersion)' == ''">$(WinoManifestVersion)</ApplicationVersion>
+  </PropertyGroup>
+  <!-- Mac App Store builds pass -p:WinoMacDistribution=AppStore; DMG builds leave it unset. -->
+  <PropertyGroup Condition="'$(WinoMacDistribution)' == 'AppStore'">
+    <DefineConstants>$(DefineConstants);WINO_APPSTORE</DefineConstants>
+    <CodesignEntitlements>Entitlements.AppStore.plist</CodesignEntitlements>
+  </PropertyGroup>
+  <!-- APNs for live notifications (WinoRelay). The entitlement is restricted: macOS refuses to launch a bundle that
+       carries it without a provisioning profile that includes Push Notifications. Debug builds signed with the
+       development profile get the development environment. The DMG script signs with the "Wino Mail macOS Developer ID"
+       profile and passes -p:WinoApsEnvironment=production. Ad hoc builds (-p:CodesignProvision=) leave it out, so APNs
+       registration fails and the device registers without a push token. App Store builds carry the production value in
+       Entitlements.AppStore.plist. -->
+  <PropertyGroup>
+    <WinoApsEnvironment Condition="'$(WinoApsEnvironment)' == ''">development</WinoApsEnvironment>
+  </PropertyGroup>
+  <!-- Sign in with Apple (Wino Accounts) is restricted the same way, and Apple does not grant it to Developer ID
+       profiles: development builds get it, the DMG script passes -p:WinoAppleSignIn=false (DMG users sign in with
+       Apple through the browser flow). App Store builds carry it in Entitlements.AppStore.plist. -->
+  <PropertyGroup>
+    <WinoAppleSignIn Condition="'$(WinoAppleSignIn)' == ''">true</WinoAppleSignIn>
+  </PropertyGroup>
+  <!-- WINO_APPLE_SIGNIN follows the entitlement exactly: Composition registers the native AuthenticationServices flow
+       only in builds that carry it (App Store, or a profile-signed build with WinoAppleSignIn); every other build
+       (DMG, unsigned local builds) signs in with Apple through the API browser flow in ASWebAuthenticationSession. -->
+  <PropertyGroup Condition="'$(WinoMacDistribution)' == 'AppStore' or ('$(CodesignProvision)' != '' and '$(WinoAppleSignIn)' == 'true')">
+    <DefineConstants>$(DefineConstants);WINO_APPLE_SIGNIN</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(WinoMacDistribution)' != 'AppStore' and '$(CodesignProvision)' != ''">
+    <CustomEntitlements Include="com.apple.developer.aps-environment" Type="String" Value="$(WinoApsEnvironment)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(WinoMacDistribution)' != 'AppStore' and '$(CodesignProvision)' != '' and '$(WinoAppleSignIn)' == 'true'">
+    <CustomEntitlements Include="com.apple.developer.applesignin" Type="StringArray" Value="Default" />
+  </ItemGroup>
+  <!-- Other builds update through Sparkle (Wino.Core.Apple.Bindings/Sparkle): its feed, key and installer settings. -->
+  <ItemGroup Condition="'$(WinoMacDistribution)' != 'AppStore'">
+    <PartialAppManifest Include="Sparkle.plist" />
+    <PartialAppManifest Include="Sparkle.Debug.plist" Condition="'$(Configuration)' == 'Debug'" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Wino.Mail.ViewModels/Wino.Mail.ViewModels.csproj" />
+    <ProjectReference Include="../Wino.Core/Wino.Core.csproj" />
+    <ProjectReference Include="../Wino.PushRelay.Socket/Wino.PushRelay.Socket.csproj" />
+    <ProjectReference Include="../Wino.Platform.Apple/Wino.Platform.Apple.csproj" />
+    <ProjectReference Include="../Wino.Platform.MacOS/Wino.Platform.MacOS.csproj" />
+    <ProjectReference Include="../Wino.Core.Apple.Bindings/Wino.Core.Apple.Bindings.csproj" />
+    <ProjectReference Include="../../controls/Wino.Presentation.AppKit/Wino.Presentation.AppKit.csproj" />
+    <ProjectReference Include="../../controls/Wino.Mail.Controls.AppKit/Wino.Mail.Controls.AppKit.csproj" />
+    <ProjectReference Include="../../controls/Wino.Editor.WebKit/Wino.Editor.WebKit.csproj" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Serilog.Extensions.Logging" />
+  </ItemGroup>
+  <!-- The Framework7 WinoIcons fonts (icons/README.md), bundled under the WinoIcons file names and registered
+       at startup (WinoIcons.Register). -->
+  <ItemGroup>
+    <BundleResource Include="../../icons/fonts/WinoIconsFramework7.ttf" LogicalName="Fonts/WinoIcons.ttf" />
+    <BundleResource Include="../../icons/fonts/WinoIconsFramework7Color-Light.ttf" LogicalName="Fonts/WinoIconsColor-Light.ttf" />
+    <BundleResource Include="../../icons/fonts/WinoIconsFramework7Color-Dark.ttf" LogicalName="Fonts/WinoIconsColor-Dark.ttf" />
+  </ItemGroup>
+  <!-- Predefined theme wallpapers and preview images, shared with Windows (BackgroundImages). -->
+  <ItemGroup>
+    <BundleResource Include="../Wino.Mail.WinUI/BackgroundImages/*.jpg" Exclude="../Wino.Mail.WinUI/BackgroundImages/Acrylic.jpg;../Wino.Mail.WinUI/BackgroundImages/Mica.jpg" LogicalName="Themes/%(Filename)%(Extension)" />
+  </ItemGroup>
+  <!-- What's New release notes and illustrations, shared with Windows. WhatsNewService reads them beside the assembly. -->
+  <ItemGroup>
+    <None Include="../Wino.Mail.WinUI/Assets/WhatsNew/*.json;../Wino.Mail.WinUI/Assets/WhatsNew/*.png" Link="Assets/WhatsNew/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- scripts/release/macos/build-macos-release.sh passes a generated plist with the release version, which
+       overrides the development values in Info.plist. Other builds do not set WinoVersionPlist. -->
+  <ItemGroup Condition="'$(WinoVersionPlist)' != ''">
+    <PartialAppManifest Include="$(WinoVersionPlist)" />
+  </ItemGroup>
+  <!-- The SDK signs Sparkle.framework and its Installer.xpc, but not Sparkle's Autoupdate tool and
+       Updater.app, which ship ad-hoc signed. Notarization needs every executable signed with the app's
+       identity, so they are signed here, before the SDK signs (and seals) the framework. They run outside
+       the sandbox and get no entitlements. Already-signed copies are left alone so the seal stays valid. -->
+  <Target Name="WinoSignSparkleHelpers" BeforeTargets="_CodesignAppBundle"
+          Condition="'$(WinoMacDistribution)' != 'AppStore' And '$(EnableCodeSigning)' != 'false' And '$(_CodeSigningKey)' != '' And '$(_CodeSigningKey)' != '-' And Exists('$(AppBundleDir)/Contents/Frameworks/Sparkle.framework')">
+    <PropertyGroup>
+      <_WinoSparkleSignOptions>--force --sign &quot;$(_CodeSigningKey)&quot; --entitlements &quot;$(MSBuildProjectDirectory)/Sparkle.Helpers.entitlements&quot;</_WinoSparkleSignOptions>
+      <_WinoSparkleSignOptions Condition="'$(UseHardenedRuntime)' == 'true'">$(_WinoSparkleSignOptions) --options runtime --timestamp</_WinoSparkleSignOptions>
+    </PropertyGroup>
+    <ItemGroup>
+      <_WinoSparkleHelper Include="$(AppBundleDir)/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate;$(AppBundleDir)/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" />
+    </ItemGroup>
+    <Exec Command="if /usr/bin/codesign -dv &quot;%(_WinoSparkleHelper.FullPath)&quot; 2&gt;&amp;1 | /usr/bin/grep -q 'Signature=adhoc'; then /usr/bin/codesign $(_WinoSparkleSignOptions) &quot;%(_WinoSparkleHelper.FullPath)&quot;; fi" />
+  </Target>
+  <!-- The shared model loader resolves assets beside its assembly in MonoBundle. -->
+  <Target Name="WinoBundleModelAssets" BeforeTargets="_ComputePublishLocation">
+    <ItemGroup>
+      <ResolvedFileToPublish Update="@(ResolvedFileToPublish)"
+                             Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').StartsWith('Models')) Or $([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').StartsWith('Assets'))">
+        <PublishFolderType>Assembly</PublishFolderType>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+</Project>
