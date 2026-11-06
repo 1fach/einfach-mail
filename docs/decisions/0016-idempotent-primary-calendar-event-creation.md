@@ -9,7 +9,7 @@ M3 reads a fixed week from the signed-in user's primary calendar through Graph's
 
 Microsoft Graph v1.0 creates an event in the primary calendar through `POST /me/calendar/events`. The least-privileged delegated permission for a user's calendar is `Calendars.ReadWrite`; this permission allows more calendar access than the single action this version exposes. A created event can include `transactionId`, which Graph documents for avoiding redundant POST operations after a client retry. The Graph `dateTimeTimeZone` type accepts Windows zones and additional calendar zones, but Microsoft warns that create and update methods may not support every time-zone ID.
 
-ADR 0012 requires a separate source local date-time and zone type for event creation and an explicit policy for unsupported zones and DST gaps or overlaps. The existing local calendar view uses Jiff at the Linux presentation boundary, while the provider and domain represent event times as UTC instants. The GPUI Kit date-and-time picker exposes Chrono's naive date-time value; this is a UI component boundary, not a domain or provider time model.
+The calendar workflow models Graph calendar-view results as timed UTC instants or half-open all-day date ranges. Event creation needs a separate source schedule containing local date-times and a zone identifier, with explicit handling for unsupported zones and DST gaps or folds. The Linux calendar view uses Jiff at the presentation boundary. The GPUI Kit date-and-time picker exposes Chrono's naive date-time value; this is a UI component boundary, not a domain or provider time model.
 
 ## Decision
 
@@ -37,7 +37,7 @@ This decision supersedes ADR 0014's read-only-only restriction for the single cr
 | Retry a POST automatically with a new request | Simplifies transport control flow. | A timeout after server creation can produce duplicate events. Graph's `transactionId` exists to let the client safely identify retries, so this client must keep and reuse it. |
 | Send arbitrary Linux IANA values to Graph | Preserves a named input zone in the remote event. | Microsoft's event documentation warns that create methods do not support every additional zone. UTC instants are unambiguous and already match the app's M3 response contract. |
 | Resolve event time with `chrono-tz` or a bundled timezone database | Can resolve IANA schedules without relying on host zoneinfo. | Adds a second date-time model and bundled timezone database when the Linux app already uses Jiff with the system zoneinfo database. That database would also need its own update policy. |
-| Use the `time` crate alone for local-zone resolution | Reuses a workspace crate for date-time values and parsing. | It does not provide the Linux system IANA database or gap/fold resolution required by ADR 0012. |
+| Use the `time` crate alone for local-zone resolution | Reuses a workspace crate for date-time values and parsing. | It does not provide the Linux system IANA database or the gap/fold resolution required by the event-creation policy. |
 
 ## Consequences
 
@@ -57,7 +57,6 @@ This decision supersedes ADR 0014's read-only-only restriction for the single cr
 - [Jiff time-zone disambiguation](https://docs.rs/jiff/0.2.38/jiff/tz/struct.TimeZone.html)
 - [Rust dependency review: calendar occurrence times and Linux display](../project/dependency-review.md#candidates)
 - [ADR 0006: Graph HTTP transport](0006-graph-http-transport.md)
-- [ADR 0012: Graph calendar occurrence times](0012-graph-calendar-occurrence-times.md)
 - [ADR 0014: Linux read-only primary calendar](0014-linux-read-only-calendar-workflow.md)
 - [ADR 0015: Message read-state updates](0015-idempotent-message-read-state-update.md)
 - [Issue #25: Create one-off timed events](https://github.com/1fach/einfach-mail/issues/25)
