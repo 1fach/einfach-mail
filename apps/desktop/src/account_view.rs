@@ -1643,7 +1643,7 @@ mod tests {
         assert!(message.contains("try again"));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
@@ -1709,7 +1709,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn failed_restore_removes_cache_before_the_verified_saved_credential(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
@@ -1760,7 +1760,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn failed_restore_without_verified_identity_preserves_credential(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
@@ -1808,7 +1808,7 @@ mod tests {
         assert!(!signed_out.load(Ordering::SeqCst));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn connect_mismatch_keeps_saved_sign_in_and_requires_restore(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
@@ -1840,7 +1840,7 @@ mod tests {
         assert!(context.debug_bounds("retry-account-restore").is_some());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
@@ -1941,7 +1941,7 @@ mod tests {
         assert!(!fallback_removals.load(Ordering::SeqCst));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn connection_cancel_resolves_before_and_during_credential_commit(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
@@ -2003,7 +2003,7 @@ mod tests {
         assert!(connected);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn permission_cancel_resolves_before_and_during_credential_commit(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
@@ -2080,7 +2080,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn mail_write_scope_requires_review_before_the_browser_flow(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let provider = TestProvider::default();
@@ -2161,7 +2161,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn missing_client_configuration_disables_account_actions(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let (view, context) = cx.add_window_view(|_, cx| {

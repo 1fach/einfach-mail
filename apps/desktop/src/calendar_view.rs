@@ -15,6 +15,8 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     scroll::ScrollableElement,
 };
+#[cfg(test)]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, IntoElement, KeyBinding,
     Render, Role, ScrollHandle, Subscription, Task, WeakEntity, Window, div, prelude::*,
@@ -865,7 +867,7 @@ where
         }
 
         let mut event_position = 0;
-        let mut event_list = div()
+        let event_list = div()
             .id("calendar-event-list")
             .debug_selector(|| "calendar-event-list".to_owned())
             .flex_1()
@@ -874,10 +876,13 @@ where
             .flex_col()
             .gap_2()
             .track_scroll(&self.agenda_scroll)
-            .track_focus(&self.event_list_focus)
             .key_context(CALENDAR_EVENT_LIST_CONTEXT)
             .role(Role::ListBox)
-            .aria_label("Events this week")
+            .aria_label("Events this week");
+        #[cfg(test)]
+        let event_list = event_list.test_support();
+        let mut event_list = event_list
+            .track_focus(&self.event_list_focus)
             .on_action(cx.listener(Self::on_select_previous_calendar_event))
             .on_action(cx.listener(Self::on_select_next_calendar_event))
             .on_action(cx.listener(Self::on_select_first_calendar_event))
@@ -1305,6 +1310,8 @@ where
     if let Some(location) = agenda_event.display.event.location() {
         card = card.child(render_event_location(location, colors, selected));
     }
+    #[cfg(test)]
+    let card = card.test_support();
     card.on_click(cx.listener(move |view, _, window, cx| {
         view.select_event_from_option(event_key.clone(), position.scroll_index, window, cx);
     }))
@@ -1457,6 +1464,7 @@ mod tests {
         PendingCalendarEventCreation,
     };
     use gpui_kit::component::WindowExt as _;
+    use gpui_kit::test::TestQueryExt as _;
     use gpui_kit::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, px, size};
     use jiff::{Span, civil, tz::TimeZone};
     use time::{Date, Month, OffsetDateTime};
@@ -2227,6 +2235,14 @@ mod tests {
     async fn calendar_agenda_navigates_events_with_one_focus_stop_and_keeps_selection_visible(
         cx: &mut TestAppContext,
     ) {
+        const AGENDA_EVENT_COUNT: usize = 20;
+        const FIRST_OPTION_LABEL: &str =
+            "Monday, January 7, 08:00 UTC–08:30 UTC, Synthetic overnight event";
+        const SECOND_OPTION_LABEL: &str =
+            "Monday, January 7, 08:05 UTC–08:35 UTC, Synthetic overnight event";
+        const LAST_OPTION_LABEL: &str =
+            "Monday, January 7, 09:35 UTC–10:05 UTC, Synthetic overnight event";
+
         cx.update(|cx| {
             gpui_kit::init(cx);
             super::bind_calendar_event_navigation_keys(cx);
@@ -2234,7 +2250,7 @@ mod tests {
         let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
         let workflow = Arc::new(CalendarWorkflow::new(
             TestProvider::default(),
-            TestCache::with_events(agenda_events(20)),
+            TestCache::with_events(agenda_events(AGENDA_EVENT_COUNT)),
         ));
         let mut calendar_view = None;
         let window = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
@@ -2269,6 +2285,7 @@ mod tests {
                 .timer(std::time::Duration::from_millis(10))
                 .await;
         }
+        assert_accessible_agenda(context, AGENDA_EVENT_COUNT);
         assert!(context.debug_bounds("calendar-event-list").is_some());
         assert!(
             context
@@ -2292,9 +2309,11 @@ mod tests {
             }
         }
         assert!(list_focused, "Tab reaches the calendar event list");
+        assert_eq!(accessible_agenda_list_focus(context), Some(true));
 
         context.simulate_keystrokes("up");
         assert_selected_event(context, &view, "synthetic-calendar-event-20");
+        assert_accessible_selection(context, LAST_OPTION_LABEL);
         let edit_bounds = context
             .debug_bounds("calendar-event-edit")
             .expect("selecting a timed event exposes its edit command");
@@ -2307,17 +2326,22 @@ mod tests {
         );
         context.simulate_keystrokes("down");
         assert_selected_event(context, &view, "synthetic-calendar-event-20");
+        assert_accessible_selection(context, LAST_OPTION_LABEL);
 
         context.simulate_keystrokes("home");
         assert_selected_event(context, &view, "synthetic-calendar-event-1");
+        assert_accessible_selection(context, FIRST_OPTION_LABEL);
         context.simulate_keystrokes("up");
         assert_selected_event(context, &view, "synthetic-calendar-event-1");
+        assert_accessible_selection(context, FIRST_OPTION_LABEL);
         context.simulate_keystrokes("down");
         assert_selected_event(context, &view, "synthetic-calendar-event-2");
+        assert_accessible_selection(context, SECOND_OPTION_LABEL);
         context.simulate_keystrokes("end");
         context.run_until_parked();
         draw_calendar_view(context);
         assert_selected_event(context, &view, "synthetic-calendar-event-20");
+        assert_accessible_selection(context, LAST_OPTION_LABEL);
 
         let list_bounds = context
             .debug_bounds("calendar-event-list")
@@ -2356,12 +2380,15 @@ mod tests {
             !context.update(|window, cx| view.read(cx).event_list_focus.is_focused(window)),
             "Tab leaves the event list as one focus stop"
         );
+        assert_eq!(accessible_agenda_list_focus(context), Some(false));
         let first_row = context
             .debug_bounds("calendar-event-row-2030-01-07-synthetic-calendar-event-1")
             .expect("the first event is visible after Home");
         context.simulate_click(first_row.center(), Modifiers::default());
         assert_selected_event(context, &view, "synthetic-calendar-event-1");
         assert!(context.update(|window, cx| view.read(cx).event_list_focus.is_focused(window)));
+        assert_eq!(accessible_agenda_list_focus(context), Some(true));
+        assert_accessible_selection(context, FIRST_OPTION_LABEL);
     }
 
     #[gpui_kit::test]
@@ -3493,6 +3520,50 @@ mod tests {
             1,
             "opening the editor after sync does not replay the update"
         );
+    }
+
+    fn assert_accessible_agenda(context: &mut VisualTestContext, expected_event_count: usize) {
+        let (lists, options) = context.update(|window, _| {
+            (
+                window.find_all_by_role(gpui_kit::Role::ListBox),
+                window.find_all_by_role(gpui_kit::Role::ListBoxOption),
+            )
+        });
+        assert_eq!(lists.len(), 1, "the agenda has one listbox");
+        assert_eq!(lists[0].label(), Some("Events this week"));
+        assert_eq!(options.len(), expected_event_count, "agenda option count");
+        assert!(
+            options.iter().all(|option| option
+                .label()
+                .is_some_and(|label| label.contains("Synthetic overnight event"))),
+            "every option exposes its event label"
+        );
+        assert!(
+            options
+                .iter()
+                .all(|option| option.selected() == Some(false))
+        );
+    }
+
+    fn accessible_agenda_list_focus(context: &mut VisualTestContext) -> Option<bool> {
+        let lists = context.update(|window, _| window.find_all_by_role(gpui_kit::Role::ListBox));
+        assert_eq!(lists.len(), 1, "the agenda has one listbox");
+        lists[0].focused()
+    }
+
+    fn assert_accessible_selection(context: &mut VisualTestContext, expected_label: &str) {
+        let options =
+            context.update(|window, _| window.find_all_by_role(gpui_kit::Role::ListBoxOption));
+        let selected_options: Vec<_> = options
+            .iter()
+            .filter(|option| option.selected() == Some(true))
+            .collect();
+        assert_eq!(
+            selected_options.len(),
+            1,
+            "exactly one calendar option is exposed as selected"
+        );
+        assert_eq!(selected_options[0].label(), Some(expected_label));
     }
 
     fn assert_selected_event<S>(

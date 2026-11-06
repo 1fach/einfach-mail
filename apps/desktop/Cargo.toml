@@ -23,7 +23,7 @@ tokio.workspace = true
 xdg.workspace = true
 
 [dev-dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false, features = ["test-support"] }
+gpui-kit = { workspace = true, features = ["test-support"] }
 tokio.workspace = true
 
 [lints]
