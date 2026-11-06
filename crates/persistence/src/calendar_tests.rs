@@ -381,6 +381,123 @@ fn confirmed_event_update_moves_the_cached_copy_between_overlapping_week_views()
 }
 
 #[test]
+fn confirmed_event_deletion_removes_every_cached_copy_and_preserves_view_cursors() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let cache = open_cache(&directory, account_id("synthetic-account")).await;
+        let source_view = week(7);
+        let overlapping_view = week(14);
+        let (start, end) = timed_range(13, 23, 14, 1);
+        let source_link = link("synthetic-source");
+        let overlapping_link = link("synthetic-overlap");
+        for (view, cursor) in [
+            (&source_view, &source_link),
+            (&overlapping_view, &overlapping_link),
+        ] {
+            cache
+                .commit_delta_page(
+                    view,
+                    CalendarDeltaPage::new(
+                        vec![CalendarDeltaChange::Upsert {
+                            id: event_id(),
+                            patch: timed_event_patch(start, end),
+                        }],
+                        CalendarDeltaProgress::Complete(cursor.clone()),
+                    ),
+                    UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                )
+                .await
+                .expect("overlapping view and event are cached");
+        }
+        let event = cache
+            .list_events(&source_view)
+            .await
+            .expect("source event is readable")
+            .into_iter()
+            .next()
+            .expect("source event exists");
+        let editable = EditableCalendarEvent::new(
+            event,
+            CalendarEventVersion::try_from("synthetic-version-1".to_owned())
+                .expect("synthetic event version is valid"),
+        )
+        .expect("synthetic event uses timed values");
+
+        cache
+            .commit_event_deletion(&editable)
+            .await
+            .expect("deletion removes every account view copy atomically");
+
+        for (view, cursor) in [
+            (&source_view, &source_link),
+            (&overlapping_view, &overlapping_link),
+        ] {
+            assert!(
+                cache
+                    .list_events(view)
+                    .await
+                    .expect("deleted event view remains readable")
+                    .is_empty()
+            );
+            assert_eq!(
+                cache
+                    .ensure_view(view)
+                    .await
+                    .expect("deletion preserves the view cursor")
+                    .delta_link(),
+                Some(cursor)
+            );
+        }
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn event_deletion_without_a_cached_source_view_leaves_other_rows_unchanged() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let cache = open_cache(&directory, account_id("synthetic-account")).await;
+        let source_view = week(7);
+        let other_view = week(14);
+        let (start, end) = timed_range(13, 23, 14, 1);
+        cache
+            .commit_delta_page(
+                &other_view,
+                CalendarDeltaPage::new(
+                    vec![CalendarDeltaChange::Upsert {
+                        id: event_id(),
+                        patch: timed_event_patch(start, end),
+                    }],
+                    CalendarDeltaProgress::Complete(link("synthetic-other")),
+                ),
+                UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+            )
+            .await
+            .expect("other view and event are cached");
+        let source_event = timed_event_patch(start, end)
+            .into_new(source_view.clone(), event_id())
+            .expect("synthetic source event is complete");
+        let editable = EditableCalendarEvent::new(
+            source_event,
+            CalendarEventVersion::try_from("synthetic-version-1".to_owned())
+                .expect("synthetic event version is valid"),
+        )
+        .expect("synthetic event uses timed values");
+        assert_eq!(
+            cache.commit_event_deletion(&editable).await,
+            Err(CalendarCacheError::InvalidData)
+        );
+        let other_events = cache
+            .list_events(&other_view)
+            .await
+            .expect("other event remains readable");
+        assert_eq!(other_events.len(), 1);
+        assert_eq!(other_events[0].id(), &event_id());
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
 fn invalid_event_update_leaves_all_cached_copies_unchanged() {
     smol::block_on(async {
         let directory = TempDir::new().expect("temporary directory is created");

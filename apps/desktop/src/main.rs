@@ -93,6 +93,7 @@ fn run_application() -> Result<(), std::io::Error> {
         init(cx);
         mail_view::bind_message_navigation_keys(cx);
         mail_composer::bind_mail_composer_keys(cx);
+        event_composer::bind_event_composer_keys(cx);
         let account_services = account_services_from_environment();
 
         let window_open_attempt = open_window(WindowOptions::default(), cx, |_, cx| {

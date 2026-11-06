@@ -5,6 +5,7 @@ use time::format_description::well_known::Rfc3339;
 use url::Url;
 
 use crate::error::GraphError;
+use einfach_mail_application::WellKnownMailFolder;
 use einfach_mail_domain::CalendarViewRange;
 
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
@@ -46,6 +47,23 @@ impl GraphAuthority {
             .base_url
             .join("me/mailFolders")
             .map_err(|_| GraphError::UnsafeLink)?;
+        url.query_pairs_mut().append_pair("$select", FOLDER_SELECT);
+        self.validated_url(url)
+    }
+
+    pub(super) fn well_known_folder_path(
+        &self,
+        folder: WellKnownMailFolder,
+    ) -> Result<GraphUrl, GraphError> {
+        let folder_name = match folder {
+            WellKnownMailFolder::Archive => "archive",
+            WellKnownMailFolder::DeletedItems => "deleteditems",
+        };
+        let mut url = self.base_url.clone();
+        url.path_segments_mut()
+            .map_err(|()| GraphError::UnsafeLink)?
+            .pop_if_empty()
+            .extend(["me", "mailFolders", folder_name]);
         url.query_pairs_mut().append_pair("$select", FOLDER_SELECT);
         self.validated_url(url)
     }
@@ -317,7 +335,7 @@ mod tests {
     use time::{Date, Month};
     use url::Url;
 
-    use super::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority, MESSAGE_SELECT};
+    use super::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority, MESSAGE_SELECT, WellKnownMailFolder};
     use crate::error::GraphError;
 
     fn authority() -> GraphAuthority {
@@ -485,6 +503,28 @@ mod tests {
             .expect("folder ID forms an encoded Graph path");
 
         assert!(url.as_str().contains("folder%2Fid%20with%20space"));
+    }
+
+    #[test]
+    fn well_known_paths_use_locale_independent_folder_names() {
+        for (folder, expected) in [
+            (
+                WellKnownMailFolder::Archive,
+                "https://graph.microsoft.com/v1.0/me/mailFolders/archive?%24select=id%2CdisplayName%2CisHidden",
+            ),
+            (
+                WellKnownMailFolder::DeletedItems,
+                "https://graph.microsoft.com/v1.0/me/mailFolders/deleteditems?%24select=id%2CdisplayName%2CisHidden",
+            ),
+        ] {
+            assert_eq!(
+                authority()
+                    .well_known_folder_path(folder)
+                    .expect("well-known folder endpoint is a valid Graph URL")
+                    .as_str(),
+                expected
+            );
+        }
     }
 
     #[test]

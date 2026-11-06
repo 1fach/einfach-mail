@@ -16,6 +16,8 @@ pub(super) enum GraphError {
     CalendarEventCreationRejected,
     CalendarEventCreationOutcomeUnknown,
     CalendarEventUpdateOutcomeUnknown,
+    CalendarEventDeletionRejected,
+    CalendarEventDeletionOutcomeUnknown,
     CalendarEventNotEditable,
     CalendarEventChanged,
     InvalidResponse,
