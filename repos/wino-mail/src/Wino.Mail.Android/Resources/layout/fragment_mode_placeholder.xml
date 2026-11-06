@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A mode before its pages are built, or the empty content pane: the navigation button in an empty pill with the docked
+     search bar's geometry (Views/Shell/DockedSearchBar), so the button stays put while a mode switch places its page,
+     then the mode glyph and title in one Wino zone. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+  <FrameLayout
+      android:id="@+id/mode_placeholder_bar"
+      android:layout_width="match_parent"
+      android:layout_height="56dp"
+      android:layout_marginStart="16dp"
+      android:layout_marginTop="12dp"
+      android:layout_marginEnd="16dp"
+      android:layout_marginBottom="8dp"
+      android:paddingStart="4dp"
+      android:paddingEnd="4dp">
+
+    <ImageButton
+        android:id="@+id/mode_placeholder_navigation"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:background="?attr/selectableItemBackgroundBorderless" />
+  </FrameLayout>
+
+  <com.winomail.presentation.WinoZoneLayout
+      android:layout_width="match_parent"
+      android:layout_height="match_parent"
+      android:layout_marginStart="@dimen/wino_zone_gutter"
+      android:layout_marginEnd="@dimen/wino_zone_gutter"
+      android:layout_marginBottom="@dimen/wino_zone_gutter">
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+      <com.winomail.presentation.WinoIconView
+          android:id="@+id/mode_placeholder_glyph"
+          android:layout_width="wrap_content"
+          android:layout_height="wrap_content"
+          android:importantForAccessibility="no"
+          android:textColor="@color/wino_text_tertiary" />
+
+      <TextView
+          android:id="@+id/mode_placeholder_title"
+          android:layout_width="wrap_content"
+          android:layout_height="wrap_content"
+          android:layout_marginTop="12dp"
+          android:accessibilityHeading="true"
+          android:textAppearance="@style/TextAppearance.Wino.RowTitle"
+          android:textSize="18sp" />
+
+      <TextView
+          android:id="@+id/mode_placeholder_message"
+          android:layout_width="wrap_content"
+          android:layout_height="wrap_content"
+          android:layout_marginTop="6dp"
+          android:gravity="center"
+          android:textAppearance="@style/TextAppearance.Wino.Caption" />
+    </LinearLayout>
+  </com.winomail.presentation.WinoZoneLayout>
+</LinearLayout>

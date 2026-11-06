@@ -1,0 +1,51 @@
+using System;
+using SQLite;
+
+namespace Wino.Core.Domain.Entities.Shared;
+
+public class WinoAccount
+{
+    public WinoAccount CloneForCredentialStorage() => (WinoAccount)MemberwiseClone();
+
+    [PrimaryKey]
+    public Guid Id { get; set; }
+
+    public string DisplayName { get; set; } = string.Empty;
+
+    public Guid? AvatarRevision { get; set; }
+
+    public string Email { get; set; } = string.Empty;
+
+    public string AccountStatus { get; set; } = string.Empty;
+
+    public bool HasPassword { get; set; }
+
+    public bool HasGoogleLogin { get; set; }
+
+    public bool HasFacebookLogin { get; set; }
+
+    public bool HasAppleLogin { get; set; }
+
+    public bool HasMicrosoftLogin { get; set; }
+
+    public bool IsUnlimitedAccountsEnabled { get; set; }
+
+    /// <summary>The highest app privacy policy version the account accepted on any device; null when none.</summary>
+    public int? AcceptedAppPolicyVersion { get; set; }
+
+    public string AccessToken { get; set; } = string.Empty;
+
+    public DateTime AccessTokenExpiresAtUtc { get; set; }
+
+    public string RefreshToken { get; set; } = string.Empty;
+
+    public DateTime RefreshTokenExpiresAtUtc { get; set; }
+
+    public DateTime LastAuthenticatedUtc { get; set; }
+
+    /// <summary>
+    /// When the API refused this account's refresh token for good. Authorized calls stop until the user signs in again,
+    /// which stores a new row without it.
+    /// </summary>
+    public DateTime? SessionInvalidatedUtc { get; set; }
+}

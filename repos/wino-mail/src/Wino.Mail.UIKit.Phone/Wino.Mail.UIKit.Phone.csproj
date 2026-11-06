@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The shell for iPhone and iPad: a tab bar with Mail, Calendar, Contacts and To Do as navigation stacks, the page
+       registry (pushes and sheets) and its shell host. On iPad a wide landscape window shows each tab's list beside
+       the item it opens (Shell/PadModeContainer). References Wino.Mail.UIKit. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-ios</TargetFramework>
+    <SupportedOSPlatformVersion>17.0</SupportedOSPlatformVersion>
+    <WinoTargetPlatform>iOS</WinoTargetPlatform>
+    <RootNamespace>Wino.Mail.UIKit.Phone</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Wino.Mail.UIKit/Wino.Mail.UIKit.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,75 @@
+using Microsoft.Extensions.DependencyInjection;
+using UIKit;
+using Wino.Mail.UIKit.Infrastructure;
+using Wino.Mail.UIKit.Views.Calendar;
+using Wino.Mail.UIKit.Views.Mail;
+
+namespace Wino.Mail.UIKit.Phone;
+
+/// <summary>The heights a phone sheet may take (UISheetPresentationController detents).</summary>
+public enum PhoneSheetSize
+{
+    /// <summary>Half height first, draggable to full (Move, the daily briefing).</summary>
+    MediumAndLarge,
+
+    /// <summary>Full height only (forms with a keyboard, such as the search filters).</summary>
+    Large
+}
+
+/// <summary>
+/// The iPhone presentation surface: the tab bar shell, rendering-frame and pushed pages on the selected tab's stack (the
+/// reader over the message list, with the reader toolbar attached and the tab bar hidden while it is on top), and page
+/// sheets, optionally with detents.
+/// </summary>
+public sealed class PhoneShellHost(IServiceProvider services) : UIKitShellHostBase
+{
+    public override UIKitShellViewController CreateShell() => services.GetRequiredService<PhoneShellViewController>();
+
+    public override bool ShowInRenderingFrame(UIKitShellViewController shell, UIViewController controller) => Push(shell, controller);
+
+    public override bool Push(UIKitShellViewController? shell, UIViewController controller)
+    {
+        // The shared reader: its own bottom toolbar replaces the tab bar while it is on top (Mail on iPhone).
+        if (OpenSheet is null && shell is PhoneShellViewController phone && controller is IMailReaderCommands reader)
+        {
+            controller.HidesBottomBarWhenPushed = true;
+            phone.AttachReaderToolbar(controller, reader);
+        }
+        // Lay the page out at the stack's size first, so the push never animates its first layout from a zero frame.
+        if ((OpenSheet ?? shell?.CurrentNavigationController) is { } stack)
+        {
+            PhoneShellViewController.PrepareForTransition(controller, stack);
+            // A calendar target (notification, quick action, search result) routes the same details twice: once through
+            // the details binding and once through its own navigation. The second one arrives while the first is still
+            // being pushed and is dropped.
+            if (controller is EventDetailsPageViewController && stack.TopViewController is EventDetailsPageViewController && stack.GetTransitionCoordinator() is not null)
+                return false;
+        }
+        return base.Push(shell, controller);
+    }
+
+    protected override UIModalPresentationStyle SheetStyle => UIModalPresentationStyle.PageSheet;
+
+    /// <summary>
+    /// iPad (owner, 27 Oct 2026): compose and the editors that are full-screen sheets on the iPhone are page sheets over the
+    /// list. Settings stays full screen.
+    /// </summary>
+    protected override UIModalPresentationStyle PresentationStyle(UIKitPageHost style, UIViewController controller)
+        => PhoneShellViewController.IsPad && style == UIKitPageHost.FullScreenSheet && controller.GetType().Namespace?.StartsWith("Wino.Mail.UIKit.Views.Settings", StringComparison.Ordinal) != true
+            ? UIModalPresentationStyle.PageSheet
+            : base.PresentationStyle(style, controller);
+
+    /// <summary>Presents <paramref name="controller"/> as a page sheet with the grabber and the given detents.</summary>
+    public UINavigationController PresentSheet(UIViewController controller, PhoneSheetSize size, Action dismissedByUser)
+    {
+        var sheet = PresentSheet(controller, UIKitPageHost.Sheet, dismissedByUser);
+        if (sheet.SheetPresentationController is { } presentation)
+        {
+            presentation.Detents = size == PhoneSheetSize.Large
+                ? [UISheetPresentationControllerDetent.CreateLargeDetent()]
+                : [UISheetPresentationControllerDetent.CreateMediumDetent(), UISheetPresentationControllerDetent.CreateLargeDetent()];
+            presentation.PrefersGrabberVisible = size == PhoneSheetSize.MediumAndLarge;
+        }
+        return sheet;
+    }
+}
