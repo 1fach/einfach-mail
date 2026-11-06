@@ -10,6 +10,15 @@ use thiserror::Error;
 
 use crate::AccountOperationError;
 
+/// Selects a well-known folder that has a native message action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WellKnownMailFolder {
+    /// The default folder used by Outlook's One_Click Archive action.
+    Archive,
+    /// The folder that holds messages deleted from ordinary folders.
+    DeletedItems,
+}
+
 /// A user-safe category for a mail operation failure.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -270,6 +279,22 @@ pub trait MailProvider: Send + Sync {
         message_id: &MessageId,
         destination_folder: &FolderReference,
     ) -> impl Future<Output = Result<(), MailOperationError>> + Send + '_;
+
+    /// Resolves a well-known folder for the signed-in account.
+    ///
+    /// Implementations use the provider's locale-independent folder identity and reject an
+    /// account that does not match the active session. The returned reference has the same
+    /// account ID as `account_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailOperationError::AccountMismatch`] when `account_id` is not the signed-in
+    /// account, or another provider error when the folder cannot be resolved.
+    fn well_known_folder(
+        &self,
+        account_id: &AccountId,
+        folder: WellKnownMailFolder,
+    ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_;
 
     /// Sends one plain-text message as the signed-in account.
     ///

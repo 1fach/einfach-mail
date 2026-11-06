@@ -66,6 +66,8 @@ pub enum AccountPermissionRequest {
     SendMail,
     /// Adds permission to create, read, update, and delete mail for the user.
     MailReadWrite,
+    /// Adds permission to create, read, update, and delete calendar events for the user.
+    CalendarReadWrite,
 }
 
 /// Signals cancellation for one account connection or permission renewal.
@@ -301,8 +303,8 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     ///
     /// The provider receives the active account ID and must verify that the
     /// browser flow returns the same identity before replacing credentials.
-    /// `request` selects the existing permission set or adds delegated
-    /// `Mail.Send` access.
+    /// `request` selects the existing permission set or adds delegated mail
+    /// read/write, calendar read/write, or mail send access.
     ///
     /// # Errors
     ///
