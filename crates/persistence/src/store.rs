@@ -3,12 +3,13 @@
 use std::{
     collections::HashSet,
     future::Future,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
 use std::sync::{
-    Arc, Mutex,
+    Mutex,
     atomic::{AtomicBool, Ordering},
 };
 

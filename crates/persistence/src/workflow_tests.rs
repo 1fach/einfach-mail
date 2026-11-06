@@ -26,7 +26,7 @@ use einfach_mail_domain::{
 use tempfile::TempDir;
 use time::{Date, Month};
 
-use crate::{security, store::SqliteMailCache};
+use crate::store::SqliteMailCache;
 
 const DATABASE_KEY_BYTE: u8 = 0x62;
 
@@ -3688,7 +3688,6 @@ fn stale_cache_handle_cannot_stage_a_send_after_account_cache_removal() {
         assert_eq!(send_calls.load(Ordering::Relaxed), 0);
 
         drop(workflow);
-        removal_cache.close_for_tests().await;
         stale_send_cache.close_for_tests().await;
     });
 }
