@@ -25,7 +25,7 @@ No dedicated Microsoft 365 test tenant is available. Local provider and workflow
 - Put the read-state action in the native message detail header. Show pending, confirmed, denied, offline, and failure feedback. Give a denied action a direct route back to Accounts, where the user can review permissions.
 - Use synthetic provider, workflow, persistence, and headless GPUI coverage. Keep live consent and write verification in [issue 24](https://github.com/1fach/einfach-mail/issues/24); do not use a personal mailbox or claim tenant behavior from fixtures.
 
-This decision supersedes the GET-only transport restriction in ADR 0006 only for the message `isRead` PATCH. It supersedes the `Mail.ReadWrite` prohibitions in ADRs 0003 and 0013 and the no-write permission rule in ADR 0014 only for this delegated read-state action. Initial sign-in remains read-only, calendar access remains read-only, and the app does not request `Mail.Send`.
+This decision supersedes the GET-only transport restriction in ADR 0006 only for the message `isRead` PATCH. It supersedes the `Mail.ReadWrite` prohibitions in ADRs 0003 and 0013 and the no-write permission rule in ADR 0014 only for this delegated read-state action. Initial sign-in remains read-only. This decision does not add calendar writes or send access; [ADR 0045](0045-incremental-graph-permissions.md) records the later feature-specific permission requests.
 
 ## Alternatives
 
@@ -40,7 +40,7 @@ This decision supersedes the GET-only transport restriction in ADR 0006 only for
 ## Consequences
 
 - The OAuth scope set replaces delegated `Mail.Read` with `Mail.ReadWrite` while retaining `User.Read`, `Calendars.Read`, and `offline_access`. Existing accounts can request the updated grant without clearing their cache.
-- The broader permission can create and delete mail even though this feature only changes read state. The account UI must disclose that capability accurately; the app still has no send permission.
+- `Mail.ReadWrite` can create and delete mail even though this feature only changes read state. The account UI must disclose that capability accurately. This feature does not request send permission; [ADR 0045](0045-incremental-graph-permissions.md) records the separate `Mail.Send` request.
 - A failed or ambiguous PATCH leaves cached state unchanged. Its durable marker blocks read-state and follow-up flag writes in the affected folder until a complete delta round commits.
 - A failed initial account sync keeps message-write controls unavailable until a later sync succeeds. Cached messages remain available for reading.
 - An account mismatch during permission renewal cannot replace the saved credential or active account.

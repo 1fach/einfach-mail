@@ -1,12 +1,12 @@
 # Microsoft identity research
 
-Research checked: 2026-11-01. Use Microsoft's Entra documentation as the source of truth. Verify tenant policy and sign-in behavior against a test tenant before claiming support.
+OAuth implementation research checked: 2026-11-01. Delegated permission policy checked: 2026-11-06. Use Microsoft's Entra documentation as the source of truth. Verify tenant policy and sign-in behavior against a test tenant before claiming support.
 
 ## Desktop app model
 
 - A desktop app is a public client. Do not embed a client secret.
 - Use authorization code with PKCE and open the sign-in page in the system browser. The first account profile comes from Graph `/me`; the provider does not request OIDC scopes or consume an ID token.
-- Microsoft identity platform v2 requests must explicitly include `offline_access` to receive refresh tokens. Replace a refresh token when the server returns a new one. The account provider requests `User.Read` and `offline_access` for profile lookup and refresh.
+- Microsoft identity platform v2 requests must explicitly include `offline_access` to receive refresh tokens. Initial connection requests `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access`. `User.Read` supports profile lookup, and `offline_access` supports refresh-token use. Replace a refresh token when the server returns a new one. See the [Graph permissions section](microsoft-graph.md#permissions) for later feature scopes.
 - Microsoft recommends a Microsoft authentication library. Its published MSAL library table does not include Rust.
 - Microsoft recommends the system browser when an app cannot use MSAL. Microsoft notes that some native-app capabilities, including proof that the app runs on a managed device, may be unavailable without MSAL.
 - Microsoft's desktop configuration guide shows `http://localhost` for system-browser sign-in. Its redirect URI guidance prefers `127.0.0.1` because `localhost` can resolve incorrectly on a misconfigured host. That page says Entra ignores the port only for `localhost`; other redirect hosts must match the registered port. It also says Entra does not support `[::1]` redirect URIs. The portal does not let users add an HTTP `127.0.0.1` redirect directly. Add it through the app registration manifest.
@@ -38,22 +38,28 @@ Wino places shared Microsoft authentication in `Wino.Authentication.OutlookAuthe
 
 Wino's inspected Windows host uses MSAL's Windows broker (WAM), attaches an MSAL Extensions cache, and supplies a parent window. The snapshot has no Linux desktop host, so it does not describe Linux system-browser sign-in or credential storage. The shared sign-out path removes the local cached MSAL account. It does not show that an Entra consent grant was revoked remotely. Issue #3 tracks these as separate lifecycle outcomes.
 
-After sign-in, Wino calls Graph `/me?$select=mail,userPrincipalName` to resolve the mailbox address when it differs from the sign-in UPN. That lookup uses delegated `User.Read`, the least-privileged permission for Graph `/me`. Wino's scope configuration also requests broad mail read, write, and send permissions, calendar read and write permissions, contacts, and tasks. M2 needs permission to read message bodies, which `Mail.ReadBasic` does not allow, so initial sign-in requests delegated `Mail.Read`. Under [ADR 0015](../decisions/0015-idempotent-message-read-state-update.md), an explicit read-state action denied by Microsoft can lead to a separate permission review requesting `Mail.ReadWrite` in place of `Mail.Read`. That permission also allows creating and deleting mail; the app does not request `Mail.Send`. See [ADR 0013](../decisions/0013-graph-account-identity.md). Wino's source provides implementation context, not tenant evidence for callback registration, MFA, Conditional Access, refresh, consent revocation, or sign-out.
+After sign-in, Wino calls Graph `/me?$select=mail,userPrincipalName` to resolve the mailbox address when it differs from the sign-in UPN. That lookup uses delegated `User.Read`, the least-privileged permission for Graph `/me`. Wino's scope configuration also requests broad mail read, write, and send permissions, calendar read and write permissions, contacts, and tasks.
+
+M2 needs permission to read message bodies, which `Mail.ReadBasic` does not allow. Einfach Mail therefore requests delegated `Mail.Read` on initial connection. It requests `Mail.ReadWrite`, `Calendars.ReadWrite`, or `Mail.Send` only through the matching user-reviewed permission flow. `Mail.ReadWrite` also permits creating and deleting mail, but does not permit sending. See [ADR 0013](../decisions/0013-graph-account-identity.md) and [ADR 0045](../decisions/0045-incremental-graph-permissions.md). Wino's source provides implementation context. It does not prove callback registration, MFA, Conditional Access, refresh, consent revocation, or sign-out behavior for Einfach Mail.
 
 ## Rust library review
 
-ADR 0003 selects Huskarl 0.11.10 for Linux authorization code with PKCE, state, loopback callback, exchange, and refresh. Initial sign-in requests delegated `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access` through the `organizations` authority; it does not request OIDC scopes or consume ID tokens. After an explicit read-state denial, ADR 0015 adds same-account permission renewal that requests `Mail.ReadWrite` in place of `Mail.Read` before replacing the saved refresh token. Reqwest rejects redirects for token and Graph requests. `webbrowser` 1.2.6 uses its `hardened` feature to launch the HTTPS authorization URL in the system browser. The new consent request and Graph write remain unverified against a dedicated tenant under issue #24.
+ADR 0003 selects Huskarl 0.11.10 for Linux authorization code with PKCE, state, loopback callback, exchange, and refresh. Initial sign-in requests delegated `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access` through the `organizations` authority. It does not request OIDC scopes or consume ID tokens. [ADR 0045](../decisions/0045-incremental-graph-permissions.md) records the separate same-account scope sets for mail changes, calendar changes, and sending. The provider verifies the Graph profile before replacing the saved refresh token.
+
+Reqwest rejects redirects for token and Graph requests. `webbrowser` 1.2.6 uses its `hardened` feature to launch the HTTPS authorization URL in the system browser. Tenant consent and Graph behavior remain unverified under issues #3, #24, #26, and #28.
 
 Axum 0.8.9 was evaluated as a loopback HTTP server candidate, but Huskarl accepts a caller-owned Tokio listener and owns callback parsing and cancellation cleanup. `loopauth` 0.5.1 uses Axum and `reqwest` 0.13, but its API targets CLI token acquisition, and its detached callback task has no caller cancellation handle. Its CI workflow runs on Ubuntu only. `oauthkit` targets CLI use and has no verified Windows build. `oauth-toolkit` 0.4.2 has a blocking, handwritten HTTP callback parser and a failing RustSec audit. OAuth2 and OpenID Connect protocol crates were considered; the selected flow does not need their added ID-token and discovery behavior. The production provider uses the system browser and Linux Secret Service. Synthetic tests do not establish callback registration, default-browser behavior, MFA, Conditional Access, refresh, consent revocation, or sign-out against Entra. See [ADR 0003](../decisions/0003-desktop-authentication.md) for the accepted scope and remaining checks.
 
 ## Sources
 
 - [Microsoft authorization code flow](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)
+- [Microsoft Entra guide to requesting permissions and consent](https://learn.microsoft.com/en-us/entra/identity-platform/consent-types-developer)
 - [Thunderbird OAuth implementation](../../repos/thunderbird/mailnews/base/src/OAuth2.sys.mjs)
 - [Thunderbird Microsoft OAuth provider configuration](../../repos/thunderbird/mailnews/base/src/OAuth2Providers.sys.mjs)
 - [Wino Mail shared Outlook authenticator](../../repos/wino-mail/src/Wino.Authentication/OutlookAuthenticator.cs)
 - [Wino Mail Windows MSAL host](../../repos/wino-mail/src/Wino.Platform.Windows/WindowsOutlookAuthenticationHost.cs)
 - [Microsoft identity platform scopes and OIDC](https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc)
+- [Microsoft Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference?view=graph-rest-1.0)
 - [Configure desktop apps that call web APIs](https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-app-configuration)
 - [Redirect URI best practices and limitations](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url)
 - [Add a redirect URI to an app registration](https://learn.microsoft.com/en-us/entra/identity-platform/how-to-add-redirect-uri)

@@ -30,7 +30,18 @@ Graph IDs are case-sensitive. Standard Outlook item IDs can change when an item 
 
 ### Permissions
 
-Use delegated permissions and ask only for scopes needed by the enabled workflow. Initial sign-in requests `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access`. If Microsoft denies an explicit read-state change, ADR 0015 allows a separate permission review that requests `Mail.ReadWrite` in place of `Mail.Read`. This scope permits creating, reading, updating, and deleting mail. Einfach Mail uses the resulting access for mail reading and read-state changes; this feature adds no create, delete, or send behavior. The app does not request `Mail.Send`. Future send or calendar-write actions need separate scope and behavior decisions. `Mail.Send` is a separate scope and does not require `Mail.ReadWrite` to send a message.
+Use delegated permissions and request only the scopes needed for the feature the user is connecting or reviewing. [ADR 0045](../decisions/0045-incremental-graph-permissions.md) records the policy and exact scope sets.
+
+| Request | Delegated scopes | Trigger |
+| --- | --- | --- |
+| Initial connection | `User.Read`, `Mail.Read`, `Calendars.Read`, `offline_access` | The user connects an account. |
+| Mail changes | `User.Read`, `Mail.ReadWrite`, `Calendars.Read`, `offline_access` | Microsoft denies a supported mail change, and the user chooses permission review. |
+| Calendar changes | `User.Read`, `Mail.Read`, `Calendars.ReadWrite`, `offline_access` | Microsoft denies a supported event change, and the user chooses permission review. |
+| Sending | `User.Read`, `Mail.Read`, `Calendars.Read`, `Mail.Send`, `offline_access` | Microsoft denies sending, and the user chooses permission review. |
+
+`Mail.ReadWrite` permits creating, reading, updating, and deleting mail. It does not grant send access. `Calendars.ReadWrite` permits creating, reading, updating, and deleting calendar events. `Mail.Send` permits sending mail as the signed-in user without `Mail.ReadWrite`. Einfach Mail discloses each permission's full Microsoft capability before opening the system browser. A tenant's consent policy can still require administrator approval.
+
+Microsoft grants an additional delegated permission alongside existing grants. Requesting a smaller scope set later does not revoke an earlier grant. Local sign-out also does not revoke consent at Microsoft.
 
 Do not request application permissions for this signed-in desktop client. They can grant access without a signed-in user and require broader administrative consent.
 
@@ -59,3 +70,4 @@ Use these trees only for source inspection. Do not add them as application depen
 - [Microsoft Graph dateTimeTimeZone resource and supported zones](https://learn.microsoft.com/en-us/graph/api/resources/datetimetimezone?view=graph-rest-1.0)
 - [Microsoft Graph throttling guidance](https://learn.microsoft.com/en-us/graph/throttling)
 - [Microsoft Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference?view=graph-rest-1.0)
+- [Microsoft Entra guide to requesting permissions and consent](https://learn.microsoft.com/en-us/entra/identity-platform/consent-types-developer)

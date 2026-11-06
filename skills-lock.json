@@ -25,6 +25,12 @@
       "skillPath": "skills/rust-best-practices/SKILL.md",
       "computedHash": "33e21c7a60ee545691185a3c499908dfc10205cde95c855e31975f3e4c264bee"
     },
+    "rust-comments-rules": {
+      "source": "./.agents/skills",
+      "sourceType": "local",
+      "computedHash": "45b097bb3700e630ed572c8c71b316bea54620a030e1e3d0bae9c4f103b4459b",
+      "installMode": "copy"
+    },
     "rust-port": {
       "source": "morganlinton/BeautifulRust",
       "sourceType": "github",
