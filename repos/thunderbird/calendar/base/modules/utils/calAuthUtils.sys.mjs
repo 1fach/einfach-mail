@@ -1,0 +1,640 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/**
+ * Authentication tools and prompts, mostly for providers
+ */
+
+// NOTE: This module should not be loaded directly, it is available when including
+// calUtils.sys.mjs under the cal.auth namespace.
+
+const lazy = {};
+ChromeUtils.defineLazyGetter(lazy, "log", () => {
+  return console.createInstance({
+    prefix: "calendar",
+    maxLogLevel: "Warn",
+    maxLogLevelPref: "calendar.loglevel",
+  });
+});
+
+ChromeUtils.defineESModuleGetters(lazy, {
+  MsgAuthPrompt: "resource:///modules/MsgAsyncPrompter.sys.mjs",
+  cal: "resource:///modules/calendar/calUtils.sys.mjs",
+  enforcePrimaryPassword: "resource:///modules/PrimaryPassword.sys.mjs",
+  setTimeout: "resource://gre/modules/Timer.sys.mjs",
+});
+ChromeUtils.defineLazyGetter(lazy, "l10n", () => new Localization(["calendar/calendar.ftl"], true));
+
+/**
+ * The userContextId of nsIHttpChannel is currently implemented as a uint32, so
+ * the ContainerMap defined below must not return Ids greater then the allowed
+ * range of a uint32.
+ */
+const MAX_CONTAINER_ID = Math.pow(2, 32) - 1;
+
+/**
+ * A map that handles userContextIds and usernames and provides unique Ids for
+ * different usernames.
+ */
+class ContainerMap extends Map {
+  /**
+   * Create a container map with a given range of userContextIds.
+   *
+   * @param {number} min - The lower range limit of userContextIds to be
+   *                            used.
+   * @param {number} max - The upper range limit of userContextIds to be
+   *                            used.
+   * @param {?object} iterable - Optional parameter which is passed to the
+   *                            constructor of Map. See definition of Map
+   *                            for more details.
+   */
+  constructor(min = 0, max = MAX_CONTAINER_ID, iterable) {
+    super(iterable);
+    this.order = [];
+    this.inverted = {};
+    this.min = min;
+    // The userConextId is a uint32, limit accordingly.
+    this.max = Math.max(max, MAX_CONTAINER_ID);
+    if (this.min > this.max) {
+      throw new RangeError(
+        "[ContainerMap] The provided min value " +
+          "(" +
+          this.min +
+          ") must not be greater than the provided " +
+          "max value (" +
+          this.max +
+          ")"
+      );
+    }
+  }
+
+  /**
+   * Check if the allowed userContextId range is fully used.
+   */
+  get full() {
+    return this.size > this.max - this.min;
+  }
+
+  /**
+   * Add a new username to the map.
+   *
+   * @param {string} username - The username to be added.
+   * @returns {number} The userContextId assigned to the given username.
+   */
+  _add(username) {
+    let nextUserContextId;
+    if (this.full) {
+      const oldestUsernameEntry = this.order.shift();
+      nextUserContextId = this.get(oldestUsernameEntry);
+      this.delete(oldestUsernameEntry);
+    } else {
+      nextUserContextId = this.min + this.size;
+    }
+
+    Services.clearData.deleteDataFromOriginAttributesPattern({ userContextId: nextUserContextId });
+    this.order.push(username);
+    this.set(username, nextUserContextId);
+    this.inverted[nextUserContextId] = username;
+    return nextUserContextId;
+  }
+
+  /**
+   * Look up the userContextId for the given username. Create a new one,
+   * if the username is not yet known.
+   *
+   * @param {string} username - The username for which the userContextId
+   *                                 is to be looked up.
+   * @returns {number} The userContextId which is assigned to
+   *                                 the provided username.
+   */
+  getUserContextIdForUsername(username) {
+    if (this.has(username)) {
+      return this.get(username);
+    }
+    return this._add(username);
+  }
+
+  /**
+   * Look up the username for the given userContextId. Return empty string
+   * if not found.
+   *
+   * @param {number} userContextId - The userContextId for which the
+   *                                      username is to be to looked up.
+   * @returns {string} The username mapped to the given
+   *                                      userContextId.
+   */
+  getUsernameForUserContextId(userContextId) {
+    if (this.inverted.hasOwnProperty(userContextId)) {
+      return this.inverted[userContextId];
+    }
+    return "";
+  }
+}
+
+export var auth = {
+  /**
+   * Calendar Auth prompt implementation. This instance of the auth prompt should
+   * be used by providers and other components that handle authentication using
+   * nsIAuthPrompt2 and friends.
+   *
+   * A saved login that the server rejects is dropped, so a wrong stored
+   * password cannot loop.
+   *
+   * There is one instance of that object per calendar provider.
+   */
+  Prompt: class {
+    QueryInterface = ChromeUtils.generateQI(["nsIAuthPrompt2"]);
+
+    /**
+     * @param {?calICalendar} provider - The calendar the credentials are for.
+     */
+    constructor(provider = null) {
+      this.mWindow = lazy.cal.window.getCalendarWindow();
+      this.mSuppliedPasswords = new WeakMap();
+      this.mProvider = provider;
+      this.mEnteredUsernames = new WeakMap();
+    }
+
+    /**
+     * Retrieve password information from the login manager.
+     *
+     * @param {nsIChannel} channel - The channel that requires authentication.
+     * @param {nsIAuthInformation} authInfo - Filled in with the username, and
+     *   with the password if a usable login was found.
+     * @returns {boolean} - If a usable login was found in the login manager.
+     */
+    async #getPasswordInfo(channel, authInfo) {
+      const prePath = channel.URI.prePath;
+      const realm = authInfo.realm;
+      // The container was built from the calendar's name when the request went
+      // out, so it is a snapshot. Ask the calendar, and fall back to the
+      // container only for providers that keep no name of their own.
+      let username;
+      if (this.#supportsUsername()) {
+        username = this.mProvider.getProperty("username") || "";
+      } else {
+        username = lazy.cal.auth.containerMap.getUsernameForUserContextId(
+          channel.loadInfo.originAttributes.userContextId
+        );
+      }
+
+      let password;
+      let found = false;
+
+      const logins = await Services.logins.searchLoginsAsync({
+        origin: prePath,
+        httpRealm: realm,
+      });
+      for (const login of logins) {
+        if (!username || username == login.username) {
+          username = login.username;
+          password = login.password;
+          found = true;
+          break;
+        }
+      }
+
+      authInfo.username = username;
+
+      if (!found) {
+        return false;
+      }
+
+      // Only drop what we handed out and the server then rejected. PREVIOUS_FAILED
+      // belongs to one request, so the record has to as well: a retry may run on a
+      // new channel, but it keeps the load info of the request it retries.
+      const request = channel.loadInfo;
+      const key = prePath + ":" + realm + ":" + username;
+      const supplied = this.mSuppliedPasswords.get(request);
+      if (
+        authInfo.flags & Ci.nsIAuthInformation.PREVIOUS_FAILED &&
+        supplied?.key === key &&
+        supplied.password === password
+      ) {
+        this.mSuppliedPasswords.delete(request);
+        if (username) {
+          lazy.log.warn(
+            "Credentials removed for: user=" + username + ", host=" + prePath + ", realm=" + realm
+          );
+          await auth.passwordManagerRemove(username, prePath, realm);
+        }
+        return false;
+      }
+
+      this.mSuppliedPasswords.set(request, { key, password });
+      authInfo.password = password;
+      return true;
+    }
+
+    /**
+     * @param {nsIChannel} aChannel
+     * @param {integer} aLevel
+     * @param {nsIAuthInformation} aAuthInfo
+     * @returns {boolean}
+     */
+    promptAuth(aChannel, aLevel, aAuthInfo) {
+      // The channel URI is the server, not the proxy, so everything below would
+      // pick the server's credentials.
+      // FIXME: Proxies that ask for Basic or Digest credentials can't be used
+      // for calendars. NTLM and Negotiate proxies are answered by necko with
+      // the system credentials and never get here.
+      if (aAuthInfo.flags & Ci.nsIAuthInformation.AUTH_PROXY) {
+        return false;
+      }
+      let finished = false;
+      let result = false;
+      this.#getPasswordInfo(aChannel, aAuthInfo)
+        .then(ok => (result = ok))
+        .finally(() => (finished = true));
+      Services.tm.spinEventLoopUntilOrQuit("calAuthUtils.sys.mjs:promptAuth", () => finished);
+
+      if (result) {
+        return true;
+      }
+      return this._promptAuthInternal(aChannel, aLevel, aAuthInfo);
+    }
+
+    _promptAuthInternal(aChannel, aLevel, aAuthInfo) {
+      let savePasswordLabel = null;
+      if (Services.prefs.getBoolPref("signon.rememberSignons", true)) {
+        savePasswordLabel = lazy.MsgAuthPrompt.l10n.formatValueSync(
+          "remember-password-checkbox-label"
+        );
+      }
+      const savePassword = {};
+      const returnValue = this._showAuthDialog(
+        aChannel,
+        aLevel,
+        aAuthInfo,
+        savePasswordLabel,
+        savePassword,
+        this.#dialogText(aChannel)
+      );
+      if (savePassword.value) {
+        auth.passwordManagerSave(
+          aAuthInfo.username,
+          aAuthInfo.password,
+          aChannel.URI.prePath,
+          aAuthInfo.realm
+        );
+      }
+      if (returnValue) {
+        this.#noteUsername(aChannel, aAuthInfo.username);
+      }
+      return returnValue;
+    }
+
+    /**
+     * Whether the calendar keeps a username of its own. Only CalDAV does.
+     *
+     * @returns {boolean}
+     */
+    #supportsUsername() {
+      return this.mProvider?.getProperty("capabilities.username.supported") === true;
+    }
+
+    /**
+     * Remembers a username from the dialog if it differs from the one the
+     * calendar carries - an empty one included, which is a field waiting to be
+     * filled in. saveUsername() stores it once the request it was entered for
+     * has gone through. A calendar can have several requests out at once, so
+     * the record belongs to one of them.
+     *
+     * @param {nsIChannel} channel - The channel that asked.
+     * @param {string} username - The username that was entered.
+     */
+    #noteUsername(channel, username) {
+      if (
+        !username ||
+        !this.#supportsUsername() ||
+        this.mProvider.getProperty("username") == username
+      ) {
+        return;
+      }
+      this.mEnteredUsernames.set(channel.loadInfo, username);
+    }
+
+    /**
+     * Stores the username from the dialog on the calendar. The login is saved
+     * under that name, and the next lookup searches for whatever the calendar
+     * says, so the two have to agree.
+     *
+     * Call this once the server has accepted the credentials, so a name that
+     * does not work is not stored.
+     *
+     * @param {nsIChannel} channel - The channel the server answered.
+     */
+    saveUsername(channel) {
+      const username = this.mEnteredUsernames.get(channel.loadInfo);
+      if (username) {
+        this.mProvider.setProperty("username", username);
+        this.mEnteredUsernames.delete(channel.loadInfo);
+      }
+    }
+
+    /**
+     * The text the dialog asks with. Null when we don't know which calendar the
+     * request belongs to, in which case the dialog names the server only.
+     *
+     * @param {nsIChannel} channel - The channel that requires authentication.
+     * @returns {?string}
+     */
+    #dialogText(channel) {
+      const name = this.mProvider?.name;
+      if (!name) {
+        return null;
+      }
+      return lazy.l10n.formatValueSync("calendar-auth-enter-user-password-for-calendar", {
+        calendarName: name,
+        location: channel.URI.prePath,
+      });
+    }
+
+    /**
+     * Asks the user for credentials.
+     *
+     * @see MsgAuthPrompt.promptAuth for the arguments.
+     * @returns {boolean} Whether the user confirmed the dialog.
+     */
+    _showAuthDialog(aChannel, aLevel, aAuthInfo, aSavePasswordLabel, aSavePassword, aText) {
+      return new lazy.MsgAuthPrompt().promptAuth(
+        aChannel,
+        aLevel,
+        aAuthInfo,
+        aSavePasswordLabel,
+        aSavePassword,
+        aText
+      );
+    }
+
+    /**
+     * @param {nsIChannel} aChannel
+     * @param {nsIAuthPromptCallback} aCallback
+     * @param {nsISupports} aContext
+     * @param {integer} aLevel
+     * @param {nsIAuthInformation} aAuthInfo
+     * @returns {nsICancelable} - not actually returned, bug 1965959.
+     */
+    asyncPromptAuth(aChannel, aCallback, aContext, aLevel, aAuthInfo) {
+      // See promptAuth.
+      if (aAuthInfo.flags & Ci.nsIAuthInformation.AUTH_PROXY) {
+        // This function must return before the callback is called.
+        Services.tm.dispatchToMainThread(() => aCallback.onAuthCancelled(aContext, true));
+        return;
+      }
+      this.#asyncPromptAuthInternal(aChannel, aCallback, aContext, aLevel, aAuthInfo);
+    }
+
+    async #asyncPromptAuthInternal(aChannel, aCallback, aContext, aLevel, aAuthInfo) {
+      if (await this.#getPasswordInfo(aChannel, aAuthInfo)) {
+        // This function must return before the callback is called.
+        Services.tm.dispatchToMainThread(() => aCallback.onAuthAvailable(aContext, aAuthInfo));
+        return;
+      }
+
+      const self = this;
+      const promptlistener = {
+        onPromptStartAsync(callback) {
+          callback.onAuthResult(this.onPromptStart());
+        },
+
+        onPromptStart() {
+          const res = self._promptAuthInternal(aChannel, aLevel, aAuthInfo);
+          if (res) {
+            gAuthCache.setAuthInfo(hostKey, aAuthInfo);
+            this.onPromptAuthAvailable();
+            return true;
+          }
+
+          this.onPromptCanceled();
+          return false;
+        },
+
+        onPromptAuthAvailable() {
+          const authInfo = gAuthCache.retrieveAuthInfo(hostKey);
+          if (authInfo) {
+            aAuthInfo.username = authInfo.username;
+            aAuthInfo.password = authInfo.password;
+          }
+          // Calendars sharing an account share one dialog, and only one of them
+          // ran it. Whoever gets the answer remembers the name that came with it.
+          self.#noteUsername(aChannel, aAuthInfo.username);
+          aCallback.onAuthAvailable(aContext, aAuthInfo);
+        },
+
+        onPromptCanceled() {
+          gAuthCache.retrieveAuthInfo(hostKey);
+          aCallback.onAuthCancelled(aContext, true);
+        },
+      };
+
+      const requestedUser = lazy.cal.auth.containerMap.getUsernameForUserContextId(
+        aChannel.loadInfo.originAttributes.userContextId
+      );
+      const hostKey = aChannel.URI.prePath + ":" + aAuthInfo.realm + ":" + requestedUser;
+      gAuthCache.planForAuthInfo(hostKey);
+
+      const queuePrompt = function () {
+        const asyncprompter = Cc["@mozilla.org/messenger/msgAsyncPrompter;1"].getService(
+          Ci.nsIMsgAsyncPrompter
+        );
+        asyncprompter.queueAsyncAuthPrompt(hostKey, false, promptlistener);
+      };
+
+      const finalSteps = function () {
+        // the prompt will fail if we are too early
+        if (self.mWindow.document.readyState == "complete") {
+          queuePrompt();
+        } else {
+          self.mWindow.addEventListener("load", queuePrompt, true);
+        }
+      };
+
+      const tryUntilReady = function () {
+        self.mWindow = lazy.cal.window.getCalendarWindow();
+        if (!self.mWindow) {
+          lazy.setTimeout(tryUntilReady, 1000);
+          return;
+        }
+
+        finalSteps();
+      };
+
+      // We might reach this code when cal.window.getCalendarWindow()
+      // returns null, which means the window obviously isn't yet
+      // in readyState complete, and we also cannot yet queue a prompt.
+      // It may happen if startup shows a blocking primary password
+      // prompt, which delays starting up the application windows.
+      // Use a timer to retry until we can access the calendar window.
+
+      tryUntilReady();
+    }
+  },
+
+  /**
+   * Helper to insert/update an entry to the password manager.
+   *
+   * @param {string} aUsername - The username to insert
+   * @param {string} aPassword - The corresponding password
+   * @param {string} aOrigin - The corresponding origin
+   * @param {string} aRealm - The password realm (unused on branch)
+   */
+  async passwordManagerSave(aUsername, aPassword, aOrigin, aRealm) {
+    if (!aUsername) {
+      throw new Error("username required");
+    }
+    if (!aPassword) {
+      throw new Error("password required");
+    }
+
+    if (!Services.logins.getLoginSavingEnabled(aOrigin)) {
+      throw new Components.Exception(
+        "Password saving is disabled for " + aOrigin,
+        Cr.NS_ERROR_NOT_AVAILABLE
+      );
+    }
+
+    try {
+      const logins = await Services.logins.searchLoginsAsync({
+        origin: aOrigin,
+        httpRealm: aRealm,
+      });
+
+      const newLoginInfo = Cc["@mozilla.org/login-manager/loginInfo;1"].createInstance(
+        Ci.nsILoginInfo
+      );
+      newLoginInfo.init(aOrigin, null, aRealm, aUsername, aPassword, "", "");
+      for (const login of logins) {
+        if (aUsername == login.username) {
+          await Services.logins.modifyLoginAsync(login, newLoginInfo);
+          return;
+        }
+      }
+      if (!lazy.enforcePrimaryPassword()) {
+        return;
+      }
+      await Services.logins.addLoginAsync(newLoginInfo);
+    } catch (e) {
+      // Only show the message if its not an abort, which can happen if
+      // the user canceled the primary password dialog
+      if (e.result != Cr.NS_ERROR_ABORT) {
+        lazy.log.error("Saving password FAILED", e);
+      }
+    }
+  },
+
+  /**
+   * Helper to retrieve an entry from the password manager.
+   *
+   * @param {string} aUsername - The username to search
+   * @param {string} aPassword - The corresponding password
+   * @param {string} aOrigin - The corresponding origin
+   * @param {string} aRealm - The password realm (unused on branch)
+   * @returns {boolean} True, if an entry exists in the password manager
+   */
+  async passwordManagerGet(aUsername, aPassword, aOrigin, aRealm) {
+    if (!aUsername) {
+      throw new Error("username required");
+    }
+
+    if (typeof aPassword != "object") {
+      throw new Components.Exception("", Cr.NS_ERROR_XPC_NEED_OUT_OBJECT);
+    }
+
+    try {
+      const logins = await Services.logins.searchLoginsAsync({
+        origin: aOrigin,
+      });
+      for (const loginInfo of logins) {
+        if (
+          loginInfo.username == aUsername &&
+          (loginInfo.httpRealm == aRealm || loginInfo.httpRealm.split(" ").includes(aRealm))
+        ) {
+          aPassword.value = loginInfo.password;
+          return true;
+        }
+      }
+    } catch (e) {
+      lazy.log.error("Get password FAILED", e);
+    }
+    return false;
+  },
+
+  /**
+   * Helper to remove an entry from the password manager
+   *
+   * @param {string} aUsername - The username to remove
+   * @param {string} aOrigin - The corresponding origin
+   * @param {string} aRealm - The password realm (unused on branch)
+   * @returns {boolean} Could the user be removed?
+   */
+  async passwordManagerRemove(aUsername, aOrigin, aRealm) {
+    if (!aUsername) {
+      throw new Error("username required");
+    }
+
+    try {
+      const logins = await Services.logins.searchLoginsAsync({
+        origin: aOrigin,
+        httpRealm: aRealm,
+      });
+      for (const loginInfo of logins) {
+        if (loginInfo.username == aUsername) {
+          await Services.logins.removeLoginAsync(loginInfo);
+          return true;
+        }
+      }
+    } catch (exc) {
+      // If no logins are found, fall through to the return statement below.
+    }
+    return false;
+  },
+
+  /**
+   * A map which maps usernames to userContextIds, reserving a range
+   * of 20000 - 29999 for userContextIds to be used within calendar.
+   *
+   * @param {number} min - The lower range limit of userContextIds to be
+   *                            used.
+   * @param {number} max - The upper range limit of userContextIds to be
+   *                            used.
+   */
+  containerMap: new ContainerMap(20000, 29999),
+};
+
+// Cache for authentication information since onAuthInformation in the prompt
+// listener is called without further information. If the password is not
+// saved, there is no way to retrieve it. We use ref counting to avoid keeping
+// the password in memory longer than needed.
+var gAuthCache = {
+  _authInfoCache: new Map(),
+  planForAuthInfo(hostKey) {
+    const authInfo = this._authInfoCache.get(hostKey);
+    if (authInfo) {
+      authInfo.refCnt++;
+    } else {
+      this._authInfoCache.set(hostKey, { refCnt: 1 });
+    }
+  },
+
+  setAuthInfo(hostKey, aAuthInfo) {
+    const authInfo = this._authInfoCache.get(hostKey);
+    if (authInfo) {
+      authInfo.username = aAuthInfo.username;
+      authInfo.password = aAuthInfo.password;
+    }
+  },
+
+  retrieveAuthInfo(hostKey) {
+    const authInfo = this._authInfoCache.get(hostKey);
+    if (authInfo) {
+      authInfo.refCnt--;
+
+      if (authInfo.refCnt == 0) {
+        this._authInfoCache.delete(hostKey);
+      }
+    }
+    return authInfo;
+  },
+};

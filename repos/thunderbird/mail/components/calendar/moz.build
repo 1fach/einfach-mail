@@ -1,0 +1,50 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+with Files("**"):
+    BUG_COMPONENT = ("Calendar", "Calendar Frontend")
+
+JAR_MANIFESTS += ["jar.mn"]
+
+XPCSHELL_TESTS_MANIFESTS += ["test/unit/xpcshell.toml"]
+
+EXTRA_JS_MODULES.calendar += [
+    "modules/JoinLinkParser.sys.mjs",
+]
+
+MOZ_SRC_FILES += [
+    "content/calendar-dialog-acceptance.mjs",
+    "content/calendar-dialog-attachment.mjs",
+    "content/calendar-dialog-attachments-list.mjs",
+    "content/calendar-dialog-attendee.mjs",
+    "content/calendar-dialog-attendees-row.mjs",
+    "content/calendar-dialog-categories.mjs",
+    "content/calendar-dialog-create-reminder-form.mjs",
+    "content/calendar-dialog-date-row.mjs",
+    "content/calendar-dialog-description-row.mjs",
+    "content/calendar-dialog-navigation-row.mjs",
+    "content/calendar-dialog-reminders-row.mjs",
+    "content/calendar-dialog-row.mjs",
+    "content/calendar-dialog-subview-manager.mjs",
+    "content/calendar-dialog-subview.mjs",
+    "content/calendar-dialog-toggleable-row.mjs",
+    "content/calendar-dialog.mjs",
+    "content/calendar-event-create-edit-dialog.mjs",
+    "content/calendar-event-dialog-route-controller.mjs",
+    "content/calendar-event-dialog-source-mixin.mjs",
+    "content/calendar-event-source-loader.mjs",
+    "content/dialog-position.mjs",
+    "content/dialogs/calendar-prompt.mjs",
+    "content/positioned-dialog.mjs",
+    "content/state/calendar-event-create-edit-selectors.mjs",
+    "content/state/calendar-event-source-state.mjs",
+    "content/state/calendarEventCreateEditSessionSlice.mjs",
+    "content/state/calendarEventDraftSlice.mjs",
+    "modules/CalendarAttachmentUtils.sys.mjs",
+]
+
+BROWSER_CHROME_MANIFESTS += [
+    "test/browser/browser.toml",
+    "test/browser/browser_disabled.toml",
+]

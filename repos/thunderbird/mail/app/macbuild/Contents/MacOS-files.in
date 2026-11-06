@@ -1,0 +1,19 @@
+#if 0
+; Specifies files that should be copied (preserving symlinks) from dist/bin
+; to the .app/Contents/MacOS directory.
+#endif
+#filter substitution
+/*.app/***
+/certutil
+#if defined(MOZ_CRASHREPORTER)
+/crashhelper
+#endif
+/pingsender
+/pk12util
+#ifdef NIGHTLY_BUILD
+/rnp-cli-experimental
+/rnpkeys-experimental
+#endif
+/ssltunnel
+/xpcshell
+/XUL

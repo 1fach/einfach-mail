@@ -1,0 +1,325 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/**
+ * This is a small wrapper around XMLHttpRequest, which solves various
+ * inadequacies of the API, e.g. error handling. It is entirely generic and
+ * can be used for purposes outside of even mail.
+ *
+ * It does not provide download progress, but assumes that the
+ * fetched resource is so small (<1 10 KB) that the roundtrip and
+ * response generation is far more significant than the
+ * download time of the response. In other words, it's fine for RPC,
+ * but not for bigger file downloads.
+ */
+
+import { AccountCreationUtils } from "resource:///modules/accountcreation/AccountCreationUtils.sys.mjs";
+
+const lazy = {};
+ChromeUtils.defineESModuleGetters(lazy, {
+  InputSanitizer: "resource:///modules/accountcreation/InputSanitizer.sys.mjs",
+  JXON: "resource:///modules/JXON.sys.mjs",
+  MailStringUtils: "resource:///modules/MailStringUtils.sys.mjs",
+});
+
+ChromeUtils.defineLazyGetter(
+  lazy,
+  "l10n",
+  () =>
+    new Localization(["messenger/accountcreation/accountCreation.ftl"], false)
+);
+
+const { gAccountSetupLogger, abortSignalTimeout } = AccountCreationUtils;
+
+/**
+ * Make a HTTP request. Wrapper similar to fetch, but not quite. Uses
+ * XMLHttpRequest, so redirects can be handled as errors.
+ *
+ * @param {string} url - URL of the server function. ATTENTION: The caller needs
+ *   to make sure that the URL is secure to call.
+ * @param {object} [args={}] - Additional parameters as properties, see below
+ * @param {object} [args.urlArgs={}] - Parameters to add to the end of the URL
+ *   as query string. E.g. { foo: "bla", bar: "blub blub" } will add
+ *   "?foo=bla&bar=blub%20blub" to the URL (unless the URL already has a "?",
+ *   then it adds "&foo..."). The values will be urlComponentEncoded, so pass
+ *   them unencoded.
+ * @param {object} [args.headers={}] - HTTP headers to be added to the HTTP
+ *   request. { foo: "blub blub" } will add HTTP header "Foo: Blub blub". The
+ *   values will be passed verbatim.
+ * @param {boolean} [args.post] - HTTP GET or POST Only influences the HTTP
+ *   request method, i.e. first line of the HTTP request, not the body or
+ *   parameters. Use POST when you modify server state, GET when you only
+ *   request information. Default is GET, but POST is automatically set when a
+ *   body is provided.
+ * @param {object|string} [args.uploadBody] - Arbitrary object or string,
+ *   which to use as body of the HTTP request. Will also set the mimetype
+ *   accordingly. Only supported object types, currently supported:
+ *    - JXON -> sending XML
+ *    - JS object -> sending JSON
+ *    - string -> sending text/plain
+ *   If you want to override the body mimetype, set header Content-Type below.
+ *   Usually, you have nothing to upload, so just leave it unset.
+ * @param {string} [args.username] - Default unset = no authentication.
+ * @param {string} [args.password] - Default unset = no authentication.
+ * @param {AbortSignal} [args.signal] - Optional abort signal to cancel the
+ *   request.
+ * @param {number} [args.timeout=5000] - The forced timeout for the request in
+ *   miliseconds.
+ * @param {boolean} [isRetry = false] - Internal parameter used to indicate if
+ *   this is a recursive call.
+ * @returns {string|object} The response body from the server. If it is JSON or
+ *   XML the data is parsed into object from (JXON for XML).
+ * @throws {ServerException} The ServerException's code is either the HTTP
+ *   status code, -4 if there was an error parsing the response body or -2 if
+ *   any other error occurred. Other error types might also be thrown, for
+ *   example if the abort signal is aborted before the request is even set up.
+ */
+export async function fetchHTTP(url, args = {}, isRetry = false) {
+  const urlObject = new URL(lazy.InputSanitizer.string(url));
+  args.urlArgs ??= {};
+  args.headers ??= {};
+
+  const fetchArgs = {
+    method: args.post || args.uploadBody ? "POST" : "GET",
+    body: args.uploadBody,
+    // Copy the headers, so that headers added below do not leak into other
+    // requests made with the same arguments.
+    headers: { ...args.headers },
+  };
+
+  for (const [name, value] of Object.entries(args.urlArgs)) {
+    urlObject.searchParams.append(name, value);
+  }
+
+  if (typeof args.uploadBody == "object" && "nodeType" in args.uploadBody) {
+    // XML
+    fetchArgs.headers["Content-Type"] ??= "text/xml; charset=UTF-8";
+    fetchArgs.body = new XMLSerializer().serializeToString(args.uploadBody);
+  } else if (typeof args.uploadBody == "object") {
+    // JSON
+    fetchArgs.headers["Content-Type"] ??= "text/json; charset=UTF-8";
+    fetchArgs.body = JSON.stringify(args.uploadBody);
+  } else if (typeof args.uploadBody == "string") {
+    // Plaintext
+    // You can override the mimetype with { headers: {"Content-Type" : "text/foo" } }
+    fetchArgs.headers["Content-Type"] ??= "text/plain; charset=UTF-8";
+  }
+
+  if (args.username && args.password) {
+    const authorization = btoa(
+      lazy.MailStringUtils.stringToByteString(
+        `${args.username}:${args.password}`
+      )
+    );
+    fetchArgs.headers.Authorization = `Basic ${authorization}`;
+  }
+
+  args.timeout = lazy.InputSanitizer.integer(args.timeout || 5000); // default 5 seconds
+
+  const timeoutAbort = abortSignalTimeout(args.timeout);
+  const signals = [timeoutAbort];
+  if (args.signal) {
+    args.signal.throwIfAborted();
+    signals.push(args.signal);
+  }
+  fetchArgs.signal = AbortSignal.any(signals);
+
+  gAccountSetupLogger.info("Requesting", urlObject);
+
+  let response;
+  try {
+    const request = new XMLHttpRequest();
+    response = request;
+    request.mozBackgroundRequest = true;
+    request.open(
+      fetchArgs.method,
+      urlObject.toString(),
+      true,
+      fetchArgs.headers.Authorization && args.username,
+      fetchArgs.headers.Authorization && args.password
+    );
+    request.channel.loadGroup = null;
+    request.timeout = args.timeout;
+    for (const [header, value] of Object.entries(fetchArgs.headers)) {
+      request.setRequestHeader(header, value);
+    }
+
+    await new Promise((resolve, reject) => {
+      request.onload = resolve;
+      request.onerror = reject;
+      request.ontimeout = reject;
+      fetchArgs.signal.addEventListener(
+        "abort",
+        () => {
+          request.abort();
+          reject(fetchArgs.signal.reason);
+        },
+        { once: true }
+      );
+      request.send(fetchArgs.body?.toString());
+    });
+  } catch (error) {
+    const message = await lazy.l10n.formatValue("cannot-contact-server-error");
+    throw new ServerException(
+      response.statusText || message,
+      response.status || -2,
+      response.responseURL || urlObject.toString(),
+      error
+    );
+  }
+
+  if (response.status >= 200 && response.status < 300) {
+    // If an authenticated HTTPS request got redirected to plain HTTP, the
+    // response can't be trusted to come from the server we authenticated to.
+    if (
+      fetchArgs.headers.Authorization &&
+      urlObject.protocol == "https:" &&
+      !response.responseURL.startsWith("https:")
+    ) {
+      throw new ServerException(
+        await lazy.l10n.formatValue("cannot-contact-server-error"),
+        -2,
+        response.responseURL
+      );
+    }
+    try {
+      const responseType = response.getResponseHeader("Content-Type");
+      if (
+        ["text/xml", "application/xml", "text/rdf"].some(mimetype =>
+          responseType?.startsWith(mimetype)
+        )
+      ) {
+        return lazy.JXON.build(response.responseXML);
+      } else if (
+        ["text/json", "application/json"].some(mimetype =>
+          responseType?.startsWith(mimetype)
+        )
+      ) {
+        const json = JSON.parse(response.responseText);
+        return json;
+      }
+      return response.responseText;
+    } catch (error) {
+      throw new ServerException(
+        await lazy.l10n.formatValue("bad-response-content-error"),
+        -4,
+        response.responseURL,
+        error
+      );
+    }
+  } else if (
+    fetchArgs.headers.Authorization &&
+    isRedirected(response, urlObject) &&
+    !isRetry
+  ) {
+    return retryRedirectWithAuth(response, urlObject, args);
+  } else {
+    let message = response.statusText;
+    if (!response.status) {
+      message = await lazy.l10n.formatValue("cannot-contact-server-error");
+    }
+    throw new ServerException(
+      message,
+      response.status || -2,
+      response.responseURL
+    );
+  }
+}
+
+/**
+ * Check whether a request ended up at a different HTTP(S) URL than requested.
+ *
+ * @param {XMLHttpRequest} request - The completed request.
+ * @param {URL} requestURL - The URL that was requested.
+ * @returns {boolean}
+ */
+function isRedirected(request, requestURL) {
+  return (
+    request.responseURL.replace(/\/\/.*@/, "//") != requestURL.toString() &&
+    request.responseURL.startsWith("http")
+  );
+}
+
+/**
+ * Check whether credentials meant for one URL may be sent to another URL
+ * without asking the user: the target must use HTTPS and belong to the same
+ * site.
+ *
+ * The server we redirect from already got the credentials, so this protects
+ * against misconfigured redirects, e.g. https://example.com/* redirecting to
+ * http://www.example.com/* (credentials sent in cleartext), or a parked domain
+ * redirecting to an unrelated site.
+ *
+ * @param {URL} fromURL - The URL the credentials were meant for.
+ * @param {URL} toURL - The URL the credentials would be sent to.
+ * @returns {boolean}
+ */
+function canForwardCredentials(fromURL, toURL) {
+  if (toURL.protocol != "https:") {
+    return false;
+  }
+  return (
+    Services.eTLD.getSchemelessSite(Services.io.newURI(fromURL.href)) ==
+    Services.eTLD.getSchemelessSite(Services.io.newURI(toURL.href))
+  );
+}
+
+/**
+ * Handle an authenticated request that was redirected and failed, most likely
+ * because the credentials were dropped on the way. Repeat the request with
+ * credentials if the redirect target is trusted. Otherwise reject, and if the
+ * target uses HTTPS, set it as the ServerException's redirectURL, so the caller
+ * can decide whether to send credentials there.
+ *
+ * @param {XMLHttpRequest} request - The completed request.
+ * @param {URL} requestURL - The URL that was requested.
+ * @param {object} args - The arguments of the original fetchHTTP call.
+ * @returns {Promise<string|object>} The response of the repeated request.
+ */
+async function retryRedirectWithAuth(request, requestURL, args) {
+  const redirectURL = new URL(request.responseURL);
+  if (!canForwardCredentials(requestURL, redirectURL)) {
+    gAccountSetupLogger.info(
+      "Call to ",
+      requestURL,
+      " was redirected to ",
+      request.responseURL,
+      ", which is not trusted with the credentials."
+    );
+    const exception = new ServerException(
+      request.statusText ||
+        (await lazy.l10n.formatValue("cannot-contact-server-error")),
+      request.status || -2,
+      request.responseURL
+    );
+    if (redirectURL.protocol == "https:") {
+      exception.redirectURL = request.responseURL;
+    }
+    throw exception;
+  }
+  gAccountSetupLogger.info(
+    "Call to ",
+    requestURL,
+    " was redirected to ",
+    request.responseURL,
+    ", and failed. Re-trying the new URL with authentication again."
+  );
+  return fetchHTTP(request.responseURL, { ...args, urlArgs: {} }, true);
+}
+
+class ServerException extends Error {
+  constructor(message, code, uri, cause) {
+    super(message, { cause });
+    this.code = code;
+    this.uri = uri;
+    this.url = uri;
+    /**
+     * Set if an authenticated request was redirected to an HTTPS URL that the
+     * credentials were not forwarded to.
+     *
+     * @type {?string}
+     */
+    this.redirectURL = null;
+  }
+}

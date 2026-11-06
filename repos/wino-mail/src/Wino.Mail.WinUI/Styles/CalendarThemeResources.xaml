@@ -1,0 +1,47 @@
+﻿<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <StaticResource x:Key="WinoCalendarViewTodayBackgroundBrush" ResourceKey="SystemControlBackgroundAccentBrush" />
+
+    <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+            <!--  CalendarControl  -->
+            <SolidColorBrush x:Key="CalendarSeperatorBrush">#b2bec3</SolidColorBrush>
+            <SolidColorBrush x:Key="CalendarFieldWorkingHoursBackgroundBrush">#dfe4ea</SolidColorBrush>
+            <SolidColorBrush x:Key="CalendarFieldSelectedBackgroundBrush">#2e86de</SolidColorBrush>
+
+            <!--  CalendarView  -->
+            <SolidColorBrush x:Key="WinoCalendarViewBorderBrush">#2e86de</SolidColorBrush>
+            <SolidColorBrush x:Key="WinoCalendarViewVisibleDayBackgroundBrush">#dfe4ea</SolidColorBrush>
+
+            <!--  Calendar Item Control  -->
+            <SolidColorBrush x:Key="CalendarItemSelectedBorderBrush" Color="{ThemeResource SystemAccentColorDark1}" />
+            <SolidColorBrush x:Key="CalendarItemDraggingBorderBrush" Color="{ThemeResource SystemAccentColorDark1}" />
+        </ResourceDictionary>
+
+        <ResourceDictionary x:Key="Dark">
+
+            <!--  CalendarControl  -->
+            <SolidColorBrush x:Key="CalendarSeperatorBrush">#525252</SolidColorBrush>
+            <SolidColorBrush x:Key="CalendarFieldWorkingHoursBackgroundBrush">#262626</SolidColorBrush>
+            <SolidColorBrush x:Key="CalendarFieldSelectedBackgroundBrush">#121212</SolidColorBrush>
+
+            <!--  CalendarView  -->
+            <SolidColorBrush x:Key="WinoCalendarViewBorderBrush">#3d3d3d</SolidColorBrush>
+            <SolidColorBrush x:Key="WinoCalendarViewVisibleDayBackgroundBrush">#4b4b4b</SolidColorBrush>
+
+            <!--  Calendar Item Control  -->
+            <SolidColorBrush x:Key="CalendarItemSelectedBorderBrush" Color="{ThemeResource SystemAccentColorLight2}" />
+            <SolidColorBrush x:Key="CalendarItemDraggingBorderBrush" Color="{ThemeResource SystemAccentColorLight2}" />
+        </ResourceDictionary>
+
+        <ResourceDictionary x:Key="HighContrast">
+            <StaticResource x:Key="CalendarSeperatorBrush" ResourceKey="SystemColorWindowTextColorBrush" />
+            <StaticResource x:Key="CalendarFieldWorkingHoursBackgroundBrush" ResourceKey="SystemColorWindowColorBrush" />
+            <StaticResource x:Key="CalendarFieldSelectedBackgroundBrush" ResourceKey="SystemColorHighlightColorBrush" />
+            <StaticResource x:Key="WinoCalendarViewBorderBrush" ResourceKey="SystemColorWindowTextColorBrush" />
+            <StaticResource x:Key="WinoCalendarViewVisibleDayBackgroundBrush" ResourceKey="SystemColorWindowColorBrush" />
+            <StaticResource x:Key="CalendarItemSelectedBorderBrush" ResourceKey="SystemColorHighlightColorBrush" />
+            <StaticResource x:Key="CalendarItemDraggingBorderBrush" ResourceKey="SystemColorHighlightColorBrush" />
+        </ResourceDictionary>
+    </ResourceDictionary.ThemeDictionaries>
+</ResourceDictionary>

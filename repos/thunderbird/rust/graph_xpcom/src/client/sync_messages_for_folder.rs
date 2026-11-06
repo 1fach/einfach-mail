@@ -1,0 +1,319 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+use std::{collections::HashMap, sync::Arc};
+
+use ms_graph_tb::{
+    Select, define_svlep,
+    extended_properties::{SingleValueExtendedPropertiesOp, SingleValueExtendedPropertiesType},
+    pagination::{DeltaItem, DeltaResponse},
+    paths::me::mail_folders::mail_folder_id::messages,
+    types::{
+        followup_flag::FollowupFlag,
+        followup_flag_status::FollowupFlagStatus,
+        internet_message_header::InternetMessageHeader,
+        message::{Message, MessageSelection},
+        recipient::Recipient,
+    },
+};
+use protocol_shared::{
+    EXCHANGE_MAX_PAGE_SIZE, ServerType,
+    client::DoOperation,
+    headerblock_xpcom::{HeaderBlock, rfc5322_header},
+    headers::Mailbox,
+    safe_xpcom::SafeExchangeMessageSyncListener,
+};
+use time::{
+    OffsetDateTime,
+    format_description::well_known::{Iso8601, Rfc2822},
+};
+use xpcom::{RefPtr, interfaces::IHeaderBlock};
+
+use crate::{
+    client::{Required, XpComGraphClient},
+    error::XpComGraphError,
+};
+
+define_svlep!(PID_TAG_MESSAGE_SIZE, Integer, 0x0E08);
+
+struct DoSyncMessagesForFolder<'a> {
+    pub listener: &'a SafeExchangeMessageSyncListener,
+    pub folder_id: String,
+    pub sync_state_token: Option<String>,
+}
+
+impl<ServerT: ServerType> DoOperation<XpComGraphClient<ServerT>, XpComGraphError>
+    for DoSyncMessagesForFolder<'_>
+{
+    const NAME: &'static str = "sync messages for folder";
+    type Okay = ();
+    type Listener = SafeExchangeMessageSyncListener;
+
+    async fn do_operation(
+        &mut self,
+        client: &XpComGraphClient<ServerT>,
+    ) -> Result<Self::Okay, XpComGraphError> {
+        let mut response = match self.sync_state_token {
+            Some(ref token) => {
+                let mut request = messages::delta::GetDelta::try_from(token.as_str())?;
+                request.set_max_page_size(EXCHANGE_MAX_PAGE_SIZE);
+                client
+                    .send_request_json_response(request, Default::default())
+                    .await?
+            }
+            None => {
+                let select_properties = vec![
+                    MessageSelection::BccRecipients,
+                    MessageSelection::BodyPreview,
+                    MessageSelection::CcRecipients,
+                    MessageSelection::From,
+                    MessageSelection::Flag,
+                    MessageSelection::Importance,
+                    MessageSelection::InternetMessageHeaders,
+                    MessageSelection::InternetMessageId,
+                    MessageSelection::IsDraft,
+                    MessageSelection::IsRead,
+                    MessageSelection::ParentFolderId,
+                    MessageSelection::ReceivedDateTime,
+                    MessageSelection::ReplyTo,
+                    MessageSelection::Sender,
+                    MessageSelection::SentDateTime,
+                    MessageSelection::Subject,
+                    MessageSelection::ToRecipients,
+                ];
+
+                let base_url = client.base_api_url()?.to_string();
+                let folder_id = self.folder_id.clone();
+                let mut request = messages::delta::Get::new(base_url, folder_id);
+                request.set_max_page_size(EXCHANGE_MAX_PAGE_SIZE);
+                request.select(select_properties);
+                request.expand_typed_svlep([PID_TAG_MESSAGE_SIZE]);
+                client
+                    .send_request_json_response(request, Default::default())
+                    .await?
+            }
+        };
+
+        loop {
+            let messages = response.extract_response();
+
+            for message in messages {
+                match message {
+                    DeltaItem::Present(message) => {
+                        let header_block =
+                            headers_for_message(&message).ok_or(XpComGraphError::Processing {
+                                message: "Failed to get message headers.".to_string(),
+                            })?;
+                        let message_size = message
+                            .typed_svlep(PID_TAG_MESSAGE_SIZE)?
+                            .and_then(|message_size| message_size.try_into().ok())
+                            .unwrap_or(0);
+                        let message_id = message.outlook_item.entity.id.required("message id")?;
+                        let is_read = message.is_read.required("message is_read")?;
+                        let is_flagged = matches!(
+                            message.flag,
+                            Some(FollowupFlag {
+                                flag_status: Some(FollowupFlagStatus::Flagged),
+                                ..
+                            })
+                        );
+                        let preview_text = message
+                            .body_preview
+                            .as_ref()
+                            .and_then(Option::as_deref)
+                            .unwrap_or("");
+
+                        log::debug!("Found message in response with ID {message_id}");
+
+                        // Graph doesn't provide a way to consistently
+                        // distinguish new and updated objects, so it's tracked
+                        // here by attempting to modify the folders and falling
+                        // back to creating them.
+                        let result = self.listener.on_message_updated(
+                            message_id.clone(),
+                            header_block.clone(),
+                            message_size,
+                            is_read,
+                            is_flagged,
+                            preview_text,
+                        );
+
+                        if let Err(nserror::NS_MSG_MESSAGE_NOT_FOUND) = result {
+                            log::debug!("Creating message {message_id}");
+
+                            self.listener.on_message_created(
+                                message_id,
+                                header_block,
+                                message_size,
+                                is_read,
+                                is_flagged,
+                                preview_text,
+                            )?;
+                        } else {
+                            result?;
+                            log::debug!("Updated message {message_id}");
+                        }
+                    }
+                    DeltaItem::Removed(message) => {
+                        let message_id = message.id().to_string();
+                        log::debug!("Deleting message with id {message_id}");
+                        self.listener.on_message_deleted(message_id)?;
+                    }
+                }
+            }
+
+            match response {
+                DeltaResponse::NextLink { mut next_page, .. } => {
+                    next_page.set_max_page_size(EXCHANGE_MAX_PAGE_SIZE);
+                    response = client
+                        .send_request_json_response(next_page, Default::default())
+                        .await?;
+                }
+                DeltaResponse::DeltaLink { delta_link, .. } => {
+                    self.listener.on_sync_state_token_changed(&delta_link)?;
+                    self.sync_state_token = Some(delta_link);
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn into_success_arg(self, _ok: Self::Okay) {}
+
+    fn into_failure_arg(self) {}
+}
+
+impl<ServerT: ServerType> XpComGraphClient<ServerT> {
+    pub(crate) async fn sync_messages_for_folder(
+        self: Arc<XpComGraphClient<ServerT>>,
+        listener: SafeExchangeMessageSyncListener,
+        folder_id: String,
+        sync_state_token: Option<String>,
+    ) {
+        let operation = DoSyncMessagesForFolder {
+            listener: &listener,
+            folder_id,
+            sync_state_token,
+        };
+        operation.handle_operation(&self, &listener).await;
+    }
+}
+
+fn headers_for_message(message: &Message) -> Option<RefPtr<IHeaderBlock>> {
+    let mut header_fields = HashMap::new();
+
+    // Date
+    if let Some(date_time) = message.sent_date_time.as_ref().and_then(Option::as_deref) {
+        let rfc2822_date_time = iso8601_date_time_to_rfc2822(date_time)?;
+        header_fields.insert(rfc5322_header::DATE.to_string(), rfc2822_date_time);
+    }
+
+    // Message id
+    if let Some(message_id) = message
+        .internet_message_id
+        .as_ref()
+        .and_then(Option::as_deref)
+    {
+        header_fields.insert(
+            rfc5322_header::MESSAGE_ID.to_string(),
+            message_id.to_string(),
+        );
+    }
+
+    // From
+    if let Some(from_recipient) = message.from.as_ref()
+        && let Some(value) = recipient_to_string(from_recipient)
+    {
+        header_fields.insert(rfc5322_header::FROM.to_string(), value);
+    }
+
+    // Sender
+    if let Some(sender) = message.sender.as_ref()
+        && let Some(value) = recipient_to_string(sender)
+    {
+        header_fields.insert(rfc5322_header::SENDER.to_string(), value);
+    }
+
+    // Reply to
+    if let Some(reply_tos) = message.reply_to.as_ref() {
+        let value = flatten_recipients(reply_tos);
+        header_fields.insert(rfc5322_header::REPLY_TO.to_string(), value);
+    }
+
+    // To
+    if let Some(to_recipients) = message.to_recipients.as_ref() {
+        let value = flatten_recipients(to_recipients);
+        header_fields.insert(rfc5322_header::TO.to_string(), value);
+    }
+
+    // CC
+    if let Some(cc_recipients) = message.cc_recipients.as_ref() {
+        let value = flatten_recipients(cc_recipients);
+        header_fields.insert(rfc5322_header::CC.to_string(), value);
+    }
+
+    // BCC
+    if let Some(bcc_recipients) = message.bcc_recipients.as_ref() {
+        let value = flatten_recipients(bcc_recipients);
+        header_fields.insert(rfc5322_header::BCC.to_string(), value);
+    }
+
+    // Subject
+    if let Some(subject) = message.subject.as_ref().and_then(Option::as_deref) {
+        header_fields.insert(rfc5322_header::SUBJECT.to_string(), subject.to_string());
+    }
+
+    // Priority
+    if let Some(importance) = message.importance.as_ref() {
+        header_fields.insert(rfc5322_header::PRIORITY.to_string(), importance.to_string());
+    }
+
+    if let Some(internet_message_headers) = message.internet_message_headers.as_ref() {
+        overlay_internet_message_headers(&mut header_fields, internet_message_headers);
+    }
+
+    HeaderBlock::new(header_fields.into_iter().collect()).query_interface::<IHeaderBlock>()
+}
+
+fn overlay_internet_message_headers(
+    headers: &mut HashMap<String, String>,
+    internet_message_headers: &Vec<InternetMessageHeader>,
+) {
+    for header in internet_message_headers {
+        if let Some(key) = header.name.as_ref().and_then(Option::as_ref)
+            && let Some(value) = header.value.as_ref().and_then(Option::as_ref)
+            && !headers.contains_key(key)
+        {
+            headers.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn flatten_recipients(recipients: &[Recipient]) -> String {
+    recipients
+        .iter()
+        .filter_map(recipient_to_string)
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+fn iso8601_date_time_to_rfc2822(iso8601_date_time: &str) -> Option<String> {
+    let parsed = OffsetDateTime::parse(iso8601_date_time, &Iso8601::DEFAULT).ok()?;
+    parsed.format(&Rfc2822).ok()
+}
+
+fn recipient_to_string(recipient: &Recipient) -> Option<String> {
+    let email_address_info = recipient.email_address.as_ref()?;
+    let name = email_address_info.name.as_ref()?;
+    let email_address = email_address_info.address.as_ref()?;
+
+    let mailbox = Mailbox {
+        name: name.as_deref(),
+        email_address: email_address.as_deref(),
+    };
+
+    Some(mailbox.to_string())
+}

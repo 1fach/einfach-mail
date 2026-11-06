@@ -1,0 +1,267 @@
+/*
+* Character Set Handling
+* (C) 1999-2007,2021 Jack Lloyd
+*
+* Botan is released under the Simplified BSD License (see license.txt)
+*/
+
+#include <botan/internal/charset.h>
+
+#include <botan/exceptn.h>
+#include <botan/internal/loadstor.h>
+
+namespace Botan {
+
+namespace {
+
+void append_utf8_for(std::string& s, uint32_t c) {
+   if(c >= 0xD800 && c < 0xE000) {
+      throw Decoding_Error("Invalid Unicode character");
+   }
+
+   if(c <= 0x7F) {
+      const uint8_t b0 = static_cast<uint8_t>(c);
+      s.push_back(static_cast<char>(b0));
+   } else if(c <= 0x7FF) {
+      const uint8_t b0 = 0xC0 | static_cast<uint8_t>(c >> 6);
+      const uint8_t b1 = 0x80 | static_cast<uint8_t>(c & 0x3F);
+      s.push_back(static_cast<char>(b0));
+      s.push_back(static_cast<char>(b1));
+   } else if(c <= 0xFFFF) {
+      const uint8_t b0 = 0xE0 | static_cast<uint8_t>(c >> 12);
+      const uint8_t b1 = 0x80 | static_cast<uint8_t>((c >> 6) & 0x3F);
+      const uint8_t b2 = 0x80 | static_cast<uint8_t>(c & 0x3F);
+      s.push_back(static_cast<char>(b0));
+      s.push_back(static_cast<char>(b1));
+      s.push_back(static_cast<char>(b2));
+   } else if(c <= 0x10FFFF) {
+      const uint8_t b0 = 0xF0 | static_cast<uint8_t>(c >> 18);
+      const uint8_t b1 = 0x80 | static_cast<uint8_t>((c >> 12) & 0x3F);
+      const uint8_t b2 = 0x80 | static_cast<uint8_t>((c >> 6) & 0x3F);
+      const uint8_t b3 = 0x80 | static_cast<uint8_t>(c & 0x3F);
+      s.push_back(static_cast<char>(b0));
+      s.push_back(static_cast<char>(b1));
+      s.push_back(static_cast<char>(b2));
+      s.push_back(static_cast<char>(b3));
+   } else {
+      throw Decoding_Error("Invalid Unicode character");
+   }
+}
+
+}  // namespace
+
+uint32_t next_utf8_codepoint(std::string_view utf8, size_t& pos) {
+   auto read_continuation = [&]() -> uint32_t {
+      if(pos >= utf8.size()) {
+         throw Decoding_Error("Invalid UTF-8 sequence");
+      }
+      const uint8_t b = static_cast<uint8_t>(utf8[pos++]);
+      if((b & 0xC0) != 0x80) {
+         throw Decoding_Error("Invalid UTF-8 sequence");
+      }
+      return b & 0x3F;
+   };
+
+   if(pos >= utf8.size()) {
+      throw Decoding_Error("Invalid UTF-8 sequence");
+   }
+   const uint8_t lead = static_cast<uint8_t>(utf8[pos++]);
+   uint32_t c = 0;
+
+   if(lead <= 0x7F) {
+      c = lead;
+   } else if((lead & 0xE0) == 0xC0) {
+      c = (lead & 0x1F) << 6;
+      c |= read_continuation();
+      if(c < 0x80) {
+         throw Decoding_Error("Overlong UTF-8 sequence");
+      }
+   } else if((lead & 0xF0) == 0xE0) {
+      c = (lead & 0x0F) << 12;
+      c |= read_continuation() << 6;
+      c |= read_continuation();
+      if(c < 0x800) {
+         throw Decoding_Error("Overlong UTF-8 sequence");
+      }
+   } else if((lead & 0xF8) == 0xF0) {
+      c = (lead & 0x07) << 18;
+      c |= read_continuation() << 12;
+      c |= read_continuation() << 6;
+      c |= read_continuation();
+      if(c < 0x10000) {
+         throw Decoding_Error("Overlong UTF-8 sequence");
+      }
+   } else {
+      throw Decoding_Error("Invalid UTF-8 sequence");
+   }
+
+   if(c > 0x10FFFF) {
+      throw Decoding_Error("UTF-8 sequence encodes value outside Unicode range");
+   }
+   if(c >= 0xD800 && c < 0xE000) {
+      throw Decoding_Error("UTF-8 sequence encodes surrogate code point");
+   }
+
+   return c;
+}
+
+bool is_valid_utf8(std::string_view utf8) {
+   try {
+      size_t pos = 0;
+      while(pos < utf8.size()) {
+         const uint32_t c = next_utf8_codepoint(utf8, pos);
+         BOTAN_UNUSED(c);
+      }
+   } catch(Decoding_Error&) {
+      return false;
+   }
+   return true;
+}
+
+std::string ucs2_to_utf8(std::span<const uint8_t> ucs2) {
+   if(ucs2.size() % 2 != 0) {
+      throw Decoding_Error("Invalid length for UCS-2 string");
+   }
+
+   const size_t chars = ucs2.size() / 2;
+
+   std::string s;
+   for(size_t i = 0; i != chars; ++i) {
+      const uint32_t c = load_be<uint16_t>(ucs2.data(), i);
+      append_utf8_for(s, c);
+   }
+
+   return s;
+}
+
+std::vector<uint8_t> utf8_to_ucs2(std::string_view utf8) {
+   std::vector<uint8_t> out;
+   out.reserve(utf8.size() * 2);
+
+   size_t pos = 0;
+   while(pos < utf8.size()) {
+      const uint32_t c = next_utf8_codepoint(utf8, pos);
+      if(c > 0xFFFF) {
+         throw Decoding_Error("Cannot encode character in UCS-2");
+      }
+      const uint16_t val = static_cast<uint16_t>(c);
+      out.push_back(get_byte<0>(val));
+      out.push_back(get_byte<1>(val));
+   }
+
+   return out;
+}
+
+std::string ucs4_to_utf8(std::span<const uint8_t> ucs4) {
+   if(ucs4.size() % 4 != 0) {
+      throw Decoding_Error("Invalid length for UCS-4 string");
+   }
+
+   const size_t chars = ucs4.size() / 4;
+
+   std::string s;
+   for(size_t i = 0; i != chars; ++i) {
+      const uint32_t c = load_be<uint32_t>(ucs4.data(), i);
+      append_utf8_for(s, c);
+   }
+
+   return s;
+}
+
+std::vector<uint8_t> utf8_to_ucs4(std::string_view utf8) {
+   std::vector<uint8_t> out;
+   out.reserve(utf8.size() * 4);
+
+   size_t pos = 0;
+   while(pos < utf8.size()) {
+      const uint32_t val = next_utf8_codepoint(utf8, pos);
+      out.push_back(get_byte<0>(val));
+      out.push_back(get_byte<1>(val));
+      out.push_back(get_byte<2>(val));
+      out.push_back(get_byte<3>(val));
+   }
+
+   return out;
+}
+
+/*
+* Convert from ISO 8859-1 to UTF-8
+*/
+std::string latin1_to_utf8(std::span<const uint8_t> chars) {
+   std::string s;
+   for(const uint8_t b : chars) {
+      append_utf8_for(s, static_cast<uint32_t>(b));
+   }
+   return s;
+}
+
+bool is_ascii_control_char(char c) {
+   const uint8_t b = static_cast<uint8_t>(c);
+   return b < 0x20 || b == 0x7F;
+}
+
+bool is_unicode_control_char(uint32_t cp) {
+   return cp < 0x20 || (cp >= 0x7F && cp <= 0x9F);
+}
+
+std::string escape_control_chars(std::string_view utf8) {
+   std::string out;
+   out.reserve(utf8.size());
+
+   const auto append_hex_escape = [&](uint8_t b) {
+      out += "\\x";
+      out += nibble_to_hex(b >> 4);
+      out += nibble_to_hex(b);
+   };
+
+   size_t pos = 0;
+   while(pos < utf8.size()) {
+      const size_t start = pos;
+
+      uint32_t cp = 0;
+      try {
+         cp = next_utf8_codepoint(utf8, pos);
+      } catch(const Decoding_Error&) {
+         // Not valid UTF-8: escape the offending byte and resume
+         append_hex_escape(static_cast<uint8_t>(utf8[start]));
+         pos = start + 1;
+         continue;
+      }
+
+      if(is_unicode_control_char(cp)) {
+         for(size_t i = start; i < pos; ++i) {
+            append_hex_escape(static_cast<uint8_t>(utf8[i]));
+         }
+      } else {
+         out.append(utf8.substr(start, pos - start));
+      }
+   }
+
+   return out;
+}
+
+std::string format_char_for_display(char c) {
+   std::string out;
+   out += '\'';
+
+   if(c == '\t') {
+      out += "\\t";
+   } else if(c == '\n') {
+      out += "\\n";
+   } else if(c == '\r') {
+      out += "\\r";
+   } else if(is_ascii_control_char(c) || static_cast<uint8_t>(c) >= 0x80) {
+      const auto b = static_cast<uint8_t>(c);
+      out += "\\x";
+      out += nibble_to_hex(b >> 4);
+      out += nibble_to_hex(b);
+   } else {
+      out += c;
+   }
+
+   out += '\'';
+
+   return out;
+}
+
+}  // namespace Botan

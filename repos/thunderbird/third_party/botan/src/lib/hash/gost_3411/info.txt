@@ -1,0 +1,12 @@
+<defines>
+GOST_34_11 -> 20131128
+</defines>
+
+<module_info>
+name -> "GOST 34.11"
+lifecycle -> "Deprecated"
+</module_info>
+
+<requires>
+gost_28147
+</requires>

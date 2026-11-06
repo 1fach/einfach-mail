@@ -1,0 +1,983 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, you can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * globals createCalendar, createEvent, openEvent, cal, CalendarTestUtils,
+ * checkTolerance
+ */
+
+"use strict";
+
+const { CalendarDialog } = ChromeUtils.importESModule(
+  "moz-src:///comm/mail/components/calendar/content/calendar-dialog.mjs",
+  { global: "current" }
+);
+
+const { MockExternalProtocolService } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/MockExternalProtocolService.sys.mjs"
+);
+
+const { sinon } = ChromeUtils.importESModule(
+  "resource://testing-common/Sinon.sys.mjs"
+);
+
+const tabmail = document.getElementById("tabmail");
+let calendar;
+
+add_setup(() => {
+  MockExternalProtocolService.init();
+  calendar = createCalendar({
+    name: "TB CAL TEST",
+    color: "rgb(255, 187, 255)",
+  });
+
+  registerCleanupFunction(() => {
+    CalendarTestUtils.removeCalendar(calendar);
+    tabmail.closeOtherTabs(0);
+    MockExternalProtocolService.cleanup();
+  });
+});
+
+/**
+ * Clean up the state of the calendar tab by closing the dialog and removing the
+ * event used for the test.
+ *
+ * @param {CalendarDialog} dialog - The calendar dialog that was opened in the
+ *  test.
+ * @param {Element} eventBox - The event box holding the event the dialog was
+ *  opened for. Usually this was resolved to by |openAndShowEvent|.
+ */
+async function cleanUp(dialog, eventBox) {
+  EventUtils.synthesizeMouseAtCenter(
+    dialog.querySelector(".close-button"),
+    {},
+    window
+  );
+
+  await calendar.deleteItem(eventBox.occurrence);
+}
+
+/**
+ * Get the week view column of the day after the given date, wrapping from
+ * Saturday to Sunday.
+ *
+ * @param {Date} date
+ * @returns {number}
+ */
+function nextDayColumn(date) {
+  return ((date.getDay() + 1) % 7) + 1;
+}
+
+add_task(async function test_calendarDialogOpenAndClose() {
+  let dialog = document.querySelector('[is="calendar-dialog"]');
+
+  if (dialog) {
+    dialog.remove();
+  }
+
+  let dialogs = [...document.querySelectorAll("dialog")].filter(
+    _dialog => _dialog instanceof CalendarDialog
+  );
+  dialog = dialogs[0];
+
+  Assert.equal(
+    dialogs.length,
+    0,
+    "calendar dialog does not exist until opened"
+  );
+
+  await createEvent({ calendar });
+  const eventBox = await openAndShowEvent();
+
+  dialogs = [...document.querySelectorAll("dialog")].filter(
+    _dialog => _dialog instanceof CalendarDialog
+  );
+  dialog = dialogs[0];
+
+  Assert.equal(dialogs.length, 1, "calendar dialog exists after opening");
+
+  Assert.ok(dialog.open, "dialog is open");
+
+  EventUtils.synthesizeMouseAtCenter(
+    dialog.querySelector(".close-button"),
+    {},
+    window
+  );
+
+  Assert.ok(!dialog.open, "dialog is hidden");
+
+  await openEvent({ eventBox });
+
+  dialogs = [...document.querySelectorAll("dialog")].filter(
+    _dialog => _dialog instanceof CalendarDialog
+  );
+  const newDialog = dialogs[0];
+
+  Assert.equal(dialogs.length, 1, "1 calendar dialog exists");
+  Assert.ok(newDialog.open, "dialog is visible");
+  Assert.equal(
+    newDialog,
+    dialog,
+    "New dialog and old dialog are the same element"
+  );
+
+  await cleanUp(dialog, eventBox);
+});
+
+add_task(async function test_respondToRecurringInvitation() {
+  const calendarUser = "mailto:receiver@example.com";
+  const organizerId = "mailto:sender@example.com";
+  calendar.setProperty("organizerId", calendarUser);
+
+  let invitation = await createEvent({
+    calendar,
+    repeats: true,
+    attendees: [
+      {
+        commonName: "Receiver",
+        id: calendarUser,
+        role: "REQ-PARTICIPANT",
+        participationStatus: "NEEDS-ACTION",
+      },
+      {
+        commonName: "Other",
+        id: "mailto:other@example.com",
+        role: "REQ-PARTICIPANT",
+        participationStatus: "ACCEPTED",
+      },
+    ],
+  });
+  const updatedInvitation = invitation.clone();
+  const organizer = new CalAttendee();
+  organizer.id = organizerId;
+  organizer.commonName = "Sender";
+  organizer.participationStatus = "ACCEPTED";
+  organizer.isOrganizer = true;
+  updatedInvitation.organizer = organizer;
+  invitation = await calendar.modifyItem(updatedInvitation, invitation);
+
+  const eventBox = await openAndShowEvent();
+  const occurrence = eventBox.occurrence;
+  Assert.ok(occurrence.recurrenceId, "opened a recurring event occurrence");
+
+  const dialog = document.querySelector('[is="calendar-dialog"]');
+  const acceptanceWidget = dialog.querySelector("calendar-dialog-acceptance");
+  Assert.equal(
+    acceptanceWidget.getAttribute("status"),
+    "NEEDS-ACTION",
+    "the RSVP control shows the initial status when the dialog opens"
+  );
+
+  const sentItems = [];
+  const getImipTransport = cal.itip.getImipTransport;
+  cal.itip.getImipTransport = () => ({
+    scheme: "mailto",
+    type: "email",
+    sendItems(recipients, itipItem, fromAttendee) {
+      sentItems.push({ recipients, itipItem, fromAttendee });
+      return true;
+    },
+  });
+
+  const responseEvent = BrowserTestUtils.waitForEvent(
+    acceptanceWidget,
+    "setEventResponse"
+  );
+  await new Promise(resolve => setTimeout(resolve));
+  EventUtils.synthesizeMouseAtCenter(
+    acceptanceWidget.shadowRoot.querySelector('label[for="maybe"]'),
+    {},
+    window
+  );
+  Assert.equal(
+    (await responseEvent).detail.status,
+    "TENTATIVE",
+    "the RSVP control sends the selected response"
+  );
+
+  let storedEvent;
+  await TestUtils.waitForCondition(async () => {
+    storedEvent = await calendar.getItem(invitation.id);
+    const exception = storedEvent.recurrenceInfo.getExceptionFor(
+      occurrence.recurrenceId
+    );
+    return (
+      exception?.getAttendeeById(calendarUser).participationStatus ==
+      "TENTATIVE"
+    );
+  }, "waiting for the RSVP response to be saved");
+  await TestUtils.waitForCondition(
+    () => sentItems.length == 1,
+    "waiting for the RSVP response to be sent"
+  );
+
+  const exception = storedEvent.recurrenceInfo.getExceptionFor(
+    occurrence.recurrenceId
+  );
+  Assert.equal(
+    exception.getAttendeeById(calendarUser).participationStatus,
+    "TENTATIVE",
+    "the selected occurrence has the new RSVP status"
+  );
+  Assert.equal(
+    storedEvent.getAttendeeById(calendarUser).participationStatus,
+    "NEEDS-ACTION",
+    "the recurring parent keeps its RSVP status"
+  );
+
+  Assert.equal(
+    sentItems[0].recipients.length,
+    1,
+    "the reply has one recipient"
+  );
+  Assert.equal(
+    sentItems[0].recipients[0].id,
+    organizerId,
+    "the reply is sent to the organizer"
+  );
+  Assert.equal(
+    sentItems[0].fromAttendee.participationStatus,
+    "TENTATIVE",
+    "the reply has the new RSVP status"
+  );
+
+  Assert.equal(
+    acceptanceWidget.getAttribute("status"),
+    "TENTATIVE",
+    "the RSVP control shows the new status"
+  );
+  const attendee = await TestUtils.waitForCondition(
+    () =>
+      Array.from(
+        dialog.querySelectorAll("calendar-dialog-attendees-row:not([type]) li")
+      ).find(element => element.attendee.id == calendarUser),
+    "waiting for the invited attendee to render after the RSVP response"
+  );
+  Assert.equal(
+    attendee.attendee.participationStatus,
+    "TENTATIVE",
+    "the attendee list shows the new RSVP status"
+  );
+
+  cal.itip.getImipTransport = getImipTransport;
+  await calendar.deleteItem(invitation.parentItem);
+  calendar.setProperty("organizerId", "mailto:organizer@example.com");
+  dialog.close();
+});
+
+add_task(async function test_calendarDialogColors() {
+  const category = "TEST";
+  const formattedCategoryName = cal.view.formatStringForCSSRule(category);
+  await SpecialPowers.pushPrefEnv({
+    set: [[`calendar.category.color.${formattedCategoryName}`, "#0000ff"]],
+  });
+  const dialog = document.getElementById("calendarDialog");
+
+  await createEvent({ calendar, categories: [category] });
+  const eventBox = await openAndShowEvent();
+
+  await BrowserTestUtils.waitForMutationCondition(
+    dialog,
+    {
+      attributes: true,
+      attributeFilter: ["style"],
+    },
+    () => dialog.style.getPropertyValue("--calendar-bar-color")
+  );
+
+  const calendarBarStyles = window.getComputedStyle(
+    dialog.querySelector(".titlebar"),
+    "::before"
+  );
+  Assert.equal(
+    calendarBarStyles.backgroundColor,
+    calendar.getProperty("color"),
+    "Should apply the calendar color to the top bar"
+  );
+
+  const categoryItemStyles = window.getComputedStyle(
+    dialog
+      .querySelector("calendar-dialog-categories")
+      .shadowRoot.querySelector(".categories-list li")
+  );
+  Assert.equal(
+    categoryItemStyles.backgroundColor,
+    "rgb(0, 0, 255)",
+    "Should apply the category color the the background of the item"
+  );
+
+  await cleanUp(dialog, eventBox);
+});
+
+add_task(async function test_maxSize() {
+  const style = document.createElement("style");
+  style.textContent = `[is="calendar-dialog"] { height: 2000px; }`;
+  document.head.appendChild(style);
+
+  await createEvent({ calendar });
+  const eventBox = await openAndShowEvent();
+
+  const dialog = document.querySelector(`[is="calendar-dialog"]`);
+
+  const dialogBox = dialog.getBoundingClientRect();
+  const container = document.getElementById("calendarDisplayBox");
+  const containerBox = container.getBoundingClientRect();
+
+  Assert.lessOrEqual(
+    Math.floor(dialogBox.height),
+    Math.floor(containerBox.height - DEFAULT_DIALOG_MARGIN * 2),
+    "The dialog height is restricted by the container"
+  );
+
+  await cleanUp(dialog, eventBox);
+  style.remove();
+});
+
+add_task(async function test_resizeWindow() {
+  const fixedDate = new Date(2025, 3, 6, 12, 0, 0, 0);
+
+  const style = document.createElement("style");
+  style.textContent = `[is="calendar-dialog"] { height: 2000px; }`;
+  document.head.appendChild(style);
+
+  await createEvent({ calendar, baseDate: fixedDate });
+  const eventBox = await openAndShowEvent({ baseDate: fixedDate });
+
+  const dialog = document.querySelector(`[is="calendar-dialog"]`);
+  const container = document.getElementById("calendarDisplayBox");
+  let dialogBox = dialog.getBoundingClientRect();
+  let containerBox = container.getBoundingClientRect();
+
+  Assert.lessOrEqual(
+    Math.round(dialogBox.height),
+    Math.round(containerBox.height - DEFAULT_DIALOG_MARGIN * 2),
+    "The dialog height should be restricted by the container initially"
+  );
+
+  checkTolerance(eventBox, `Dialog has correct initial position`);
+
+  await resizeWindow({ y: window.outerHeight - 100 });
+
+  await TestUtils.waitForCondition(() => {
+    dialogBox = dialog.getBoundingClientRect();
+    containerBox = container.getBoundingClientRect();
+
+    return (
+      Math.round(dialogBox.height) <=
+      Math.round(containerBox.height - DEFAULT_DIALOG_MARGIN * 2)
+    );
+  }, "Waiting for dialog to resize");
+
+  Assert.lessOrEqual(
+    Math.round(dialogBox.height),
+    Math.round(containerBox.height - DEFAULT_DIALOG_MARGIN * 2),
+    "The dialog height should be restricted by the container"
+  );
+
+  checkTolerance(eventBox, `Dialog should have correct final position`);
+
+  await cleanUp(dialog, eventBox);
+  style.remove();
+});
+
+add_task(async function test_attachmentLinkClick() {
+  await createEvent({ calendar, attachments: ["https://example.com/"] });
+  const eventBox = await openAndShowEvent();
+
+  const dialog = document.getElementById("calendarDialog");
+  await BrowserTestUtils.waitForAttributeRemoval(
+    "hidden",
+    dialog.querySelector("#attachmentsRow")
+  );
+
+  info("Open attachments subbiew...");
+  EventUtils.synthesizeMouseAtCenter(
+    dialog.querySelector("#expandAttachments"),
+    {}
+  );
+  await BrowserTestUtils.waitForAttributeRemoval(
+    "hidden",
+    dialog.querySelector("#calendarAttachmentsSubview")
+  );
+
+  info("Clicking link...");
+  const openPromise = MockExternalProtocolService.promiseLoad();
+  EventUtils.synthesizeMouseAtCenter(
+    dialog.querySelector('li[is="calendar-dialog-attachment"] a'),
+    {}
+  );
+  Assert.equal(
+    await openPromise,
+    "https://example.com/",
+    "Should try to open attachment URL"
+  );
+
+  await cleanUp(dialog, eventBox);
+  MockExternalProtocolService.reset();
+});
+
+add_task(async function test_dialogDeleteMenuItem() {
+  await createEvent({ calendar });
+  const testDate = new Date();
+  const eventBox = await openAndShowEvent({ baseDate: testDate });
+
+  const dialog = document.getElementById("calendarDialog");
+  const menu = dialog.querySelector("menupopup");
+
+  const menuShownPromise = BrowserTestUtils.waitForPopupEvent(menu, "shown");
+  EventUtils.synthesizeMouseAtCenter(dialog.querySelector(".menu-button"), {});
+  await menuShownPromise;
+
+  Assert.ok(
+    BrowserTestUtils.isVisible(menu),
+    "The menupopup should visible after clicking menu button"
+  );
+
+  const deleteEventPromise = BrowserTestUtils.waitForEvent(
+    dialog,
+    "command",
+    true
+  );
+  const deletePromptPromise = BrowserTestUtils.promiseAlertDialogOpen(
+    "cancel",
+    "chrome://messenger/content/calendarPrompt.xhtml"
+  );
+
+  menu.activateItem(menu.querySelector("#deleteEvent"));
+
+  await deleteEventPromise;
+  await deletePromptPromise;
+
+  await cleanUp(dialog, eventBox);
+});
+
+add_task(async function test_dialogDeleteMenuSingleEvent() {
+  await createEvent({ calendar });
+  const testDate = new Date();
+  await openAndShowEvent({ baseDate: testDate });
+
+  const dialog = document.getElementById("calendarDialog");
+  const eventId = dialog.getAttribute("event-id");
+
+  const deletePromptPromise = BrowserTestUtils.promiseAlertDialogOpen(
+    "delete",
+    "chrome://messenger/content/calendarPrompt.xhtml"
+  );
+  await subtestDeleteEventPrompt(deletePromptPromise, testDate.getDay() + 1);
+
+  const event = await calendar.getItem(eventId);
+  Assert.ok(!event, "The event in the calendar should have been deleted");
+
+  EventUtils.synthesizeMouseAtCenter(
+    dialog.querySelector(".close-button"),
+    {},
+    window
+  );
+});
+
+add_task(async function test_dialogDeleteMenuRecurringEventsNoPromptPref() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["calendar.item.promptDelete", false]],
+  });
+
+  try {
+    // The following day's occurrence has to be in the displayed week.
+    const testDate = new Date(todayDate);
+    if (testDate.getDay() == 6) {
+      testDate.setDate(testDate.getDate() - 1);
+    }
+    await createEvent({ calendar, repeats: true, baseDate: testDate });
+    await openAndShowEvent({ baseDate: testDate });
+
+    const dialog = document.getElementById("calendarDialog");
+    const eventId = dialog.getAttribute("event-id");
+    Assert.ok(
+      weekView.getEventBoxAt(window, nextDayColumn(testDate), 1),
+      "The following day calendar event box should exist"
+    );
+
+    // Even with the prompt pref set to false, we should still see the prompt.
+    const deleteAllEventsPromise = BrowserTestUtils.promiseAlertDialogOpen(
+      null,
+      "chrome://messenger/content/calendarPrompt.xhtml",
+      {
+        async callback(win) {
+          const promptDialog = win.document.querySelector("dialog");
+          const allEventsRadioOption = promptDialog.querySelector(
+            "#allEventsRadioOption"
+          );
+          const deleteButton = promptDialog.querySelector("#delete");
+          EventUtils.synthesizeMouseAtCenter(allEventsRadioOption, {}, win);
+          EventUtils.synthesizeMouseAtCenter(deleteButton, {}, win);
+        },
+      }
+    );
+    await subtestDeleteEventPrompt(
+      deleteAllEventsPromise,
+      testDate.getDay() + 1
+    );
+
+    Assert.ok(
+      !weekView.getEventBoxAt(window, nextDayColumn(testDate), 1),
+      "The following day calendar event box should be removed"
+    );
+
+    const event = await calendar.getItem(eventId);
+    Assert.ok(!event, "The event in the calendar should have been deleted");
+
+    EventUtils.synthesizeMouseAtCenter(
+      dialog.querySelector(".close-button"),
+      {},
+      window
+    );
+  } finally {
+    await SpecialPowers.popPrefEnv();
+  }
+});
+
+add_task(async function test_dialogDeleteMenuSingleOccurence() {
+  await createEvent({ calendar, repeats: true });
+  const testDate = new Date();
+  await openAndShowEvent({ baseDate: testDate, offset: 1 });
+
+  const dialog = document.getElementById("calendarDialog");
+  const eventId = dialog.getAttribute("event-id");
+
+  const deletePromptPromise = BrowserTestUtils.promiseAlertDialogOpen(
+    "delete",
+    "chrome://messenger/content/calendarPrompt.xhtml"
+  );
+
+  await subtestDeleteEventPrompt(deletePromptPromise, nextDayColumn(testDate));
+
+  const event = await calendar.getItem(eventId);
+  Assert.ok(event, "The event in the calendar should still exist");
+
+  EventUtils.synthesizeMouseAtCenter(
+    dialog.querySelector(".close-button"),
+    {},
+    window
+  );
+
+  await calendar.deleteItem(event);
+});
+
+add_task(async function test_dialogDeleteMenuSingleOccurrenceOfInfinite() {
+  const testDate = new Date();
+  await createEvent({
+    calendar,
+    repeats: true,
+    rrule: "RRULE:FREQ=DAILY",
+    baseDate: testDate,
+  });
+  await openAndShowEvent({ baseDate: testDate, offset: 1 });
+
+  const dialog = document.getElementById("calendarDialog");
+  const eventId = dialog.getAttribute("event-id");
+
+  const deletePromptPromise = BrowserTestUtils.promiseAlertDialogOpen(
+    null,
+    "chrome://messenger/content/calendarPrompt.xhtml",
+    {
+      async callback(win) {
+        const promptDialog = win.document.querySelector("dialog");
+        Assert.ok(
+          BrowserTestUtils.isVisible(
+            promptDialog.querySelector("#calendarPromptRadioOptions")
+          ),
+          "The prompt should offer to delete one or all occurrences"
+        );
+        EventUtils.synthesizeMouseAtCenter(
+          promptDialog.querySelector("#delete"),
+          {},
+          win
+        );
+      },
+    }
+  );
+
+  await subtestDeleteEventPrompt(deletePromptPromise, nextDayColumn(testDate));
+
+  const event = await calendar.getItem(eventId);
+  Assert.ok(event, "The infinite event in the calendar should still exist");
+
+  EventUtils.synthesizeMouseAtCenter(
+    dialog.querySelector(".close-button"),
+    {},
+    window
+  );
+
+  await calendar.deleteItem(event);
+});
+
+add_task(async function test_dialogDeleteMenuSingleEventNoPrompt() {
+  await SpecialPowers.pushPrefEnv({
+    set: [["calendar.item.promptDelete", false]],
+  });
+
+  try {
+    await createEvent({ calendar });
+    const testDate = new Date();
+    await openAndShowEvent({ baseDate: testDate });
+
+    const dialog = document.getElementById("calendarDialog");
+    const eventId = dialog.getAttribute("event-id");
+    const menu = dialog.querySelector("menupopup");
+
+    const menuShownPromise = BrowserTestUtils.waitForPopupEvent(menu, "shown");
+    EventUtils.synthesizeMouseAtCenter(
+      dialog.querySelector(".menu-button"),
+      {}
+    );
+    await menuShownPromise;
+
+    Assert.ok(
+      BrowserTestUtils.isVisible(menu),
+      "The menupopup should visible after clicking menu button"
+    );
+
+    const deleteEventPromise = BrowserTestUtils.waitForEvent(
+      dialog,
+      "command",
+      true
+    );
+
+    const eventBoxRemovalPromise = BrowserTestUtils.waitForMutationCondition(
+      weekView.getColumnContainer(window, testDate.getDay() + 1),
+      { childList: true, subtree: true },
+      () => !weekView.getEventBoxAt(window, testDate.getDay() + 1, 1),
+      "Calendar event box should be removed"
+    );
+
+    menu.activateItem(menu.querySelector("#deleteEvent"));
+    await deleteEventPromise;
+    await eventBoxRemovalPromise;
+
+    const event = await calendar.getItem(eventId);
+    Assert.ok(!event, "The event in the calendar should be gone");
+  } finally {
+    await SpecialPowers.popPrefEnv();
+  }
+});
+
+add_task(async function test_closeDialogOnTabSwitch() {
+  await createEvent({ calendar });
+  const eventBox = await openAndShowEvent();
+
+  const dialog = document.querySelector(`[is="calendar-dialog"]`);
+
+  Assert.ok(dialog.open, "Dialog should be open");
+
+  const dialogClose = BrowserTestUtils.waitForEvent(dialog, "close");
+  tabmail.switchToTab(0);
+  await dialogClose;
+
+  Assert.ok(!dialog.open, "Dialog should report it is closed");
+  Assert.ok(BrowserTestUtils.isHidden(dialog), "Dialog should not be visible");
+
+  await CalendarTestUtils.openCalendarTab(window);
+
+  Assert.ok(
+    !dialog.open,
+    "Dialog should stay closed after switching back to calendar tab"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(dialog),
+    "Dialog should still not be visible"
+  );
+
+  await calendar.deleteItem(eventBox.occurrence);
+});
+
+add_task(async function test_editButtonDisabledState() {
+  // Create stubs for cal.acl functions.
+  const isCalendarWritableStub = sinon.stub(cal.acl, "isCalendarWritable");
+  const userCanModifyItemStub = sinon.stub(cal.acl, "userCanModifyItem");
+
+  const originalCapability = calendar.getProperty(
+    "capabilities.events.supported"
+  );
+
+  const editButtonCases = [
+    {
+      writable: true,
+      canModify: true,
+      supported: true,
+      expectedHidden: false,
+      message: "Edit button should be visible",
+    },
+    {
+      writable: false,
+      canModify: true,
+      supported: true,
+      expectedHidden: true,
+      message: "Non writable edit button should be hidden",
+    },
+    {
+      writable: true,
+      canModify: false,
+      supported: true,
+      expectedHidden: true,
+      message: "Non modifiable edit button should be hidden",
+    },
+    {
+      writable: true,
+      canModify: true,
+      supported: false,
+      expectedHidden: true,
+      message: "Non supported edit button should be hidden",
+    },
+  ];
+
+  // Loop through each test case to test the hidden state of edit button.
+  for (const testCase of editButtonCases) {
+    isCalendarWritableStub.returns(testCase.writable);
+    userCanModifyItemStub.returns(testCase.canModify);
+
+    calendar.setProperty("capabilities.events.supported", testCase.supported);
+
+    await createEvent({ calendar });
+    const eventBox = await openAndShowEvent();
+    const dialog = document.getElementById("calendarDialog");
+    const editButton = dialog.querySelector("#edit");
+
+    const editButtonVisibilityTest = testCase.expectedHidden
+      ? BrowserTestUtils.isHidden(editButton)
+      : BrowserTestUtils.isVisible(editButton);
+
+    Assert.ok(editButtonVisibilityTest, testCase.message);
+
+    await cleanUp(dialog, eventBox);
+  }
+
+  // Clean up.
+  isCalendarWritableStub.restore();
+  userCanModifyItemStub.restore();
+
+  if (originalCapability === null) {
+    calendar.deleteProperty("capabilities.events.supported");
+  } else {
+    calendar.setProperty("capabilities.events.supported", originalCapability);
+  }
+});
+
+add_task(async function test_editButtonDisabledStateForInvitedEvent() {
+  const calendarUser = "mailto:receiver@example.com";
+  const organizerId = "mailto:sender@example.com";
+
+  // Create event user is invited to.
+  let event = await createEvent({
+    calendar,
+    attendees: [
+      {
+        id: calendarUser,
+        role: "REQ-PARTICIPANT",
+        participationStatus: "NEEDS-ACTION",
+      },
+    ],
+  });
+
+  calendar.setProperty("organizerId", calendarUser);
+
+  const updatedEvent = event.clone();
+  const organizer = new CalAttendee();
+  organizer.id = organizerId;
+  organizer.isOrganizer = true;
+  updatedEvent.organizer = organizer;
+
+  event = await calendar.modifyItem(updatedEvent, event);
+
+  const eventBox = await openAndShowEvent();
+  const dialog = document.getElementById("calendarDialog");
+  const editButton = dialog.querySelector("#edit");
+
+  Assert.ok(
+    BrowserTestUtils.isHidden(editButton),
+    "The edit button should be hidden when viewing event user is invited to"
+  );
+
+  // Clean up.
+  await cleanUp(dialog, eventBox);
+  calendar.setProperty("organizerId", "mailto:organizer@example.com");
+});
+
+/**
+ * Click a link in the description and wait for the global launchBrowser
+ * function to be called.
+ *
+ * @param {string} expectedUrl - The url that launchBrowser should have been
+ * called with.
+ */
+async function waitForLaunchBrowser(expectedUrl) {
+  const { promise, resolve } = Promise.withResolvers();
+
+  window.launchBrowser = (url, event) => {
+    event.stopPropagation();
+    event.preventDefault();
+
+    Assert.equal(url, expectedUrl, "Should launch the correct url");
+
+    resolve();
+  };
+
+  const expandedDescription = document.querySelector("#expandedDescription");
+  const richDescription =
+    expandedDescription.querySelector(".rich-description");
+
+  EventUtils.synthesizeMouseAtCenter(
+    document.querySelector("#expandDescription"),
+    {},
+    window
+  );
+
+  await TestUtils.waitForCondition(
+    () => BrowserTestUtils.isVisible(richDescription.contentDocument.body),
+    "wait for description document to be visible"
+  );
+
+  EventUtils.synthesizeMouseAtCenter(
+    richDescription.contentDocument.querySelector("a"),
+    {},
+    richDescription.contentWindow
+  );
+
+  await promise;
+
+  window.launchBrowser = () => {};
+}
+
+/**
+ * Create an event with a given description and open the dialog to make sure
+ * the plain text and rich description are properly set and displayed.
+ *
+ * @param {object} options - An options object for checking the description.
+ * @param {string} options.description - The description to create the event with.
+ * @param {string} options.descriptionHTML - A HTML string to pass to the event creation.
+ * @param {string} options.resultHTML - A HTML string of the displayed DOM.
+ * @param {string} options.launch - A URL to pass to waitForLaunchBrowser.
+ */
+async function checkDescription({
+  description,
+  descriptionHTML,
+  resultHTML,
+  launch,
+}) {
+  await createEvent({
+    calendar,
+    description,
+    descriptionHTML,
+  });
+  const eventBox = await openAndShowEvent();
+
+  const expandedDescription = document.querySelector("#expandedDescription");
+  const richDescription =
+    expandedDescription.querySelector(".rich-description");
+
+  const plainText = expandedDescription.querySelector(
+    ".plain-text-description"
+  );
+
+  await TestUtils.waitForCondition(
+    () => plainText.textContent == description,
+    "Waiting for description to update"
+  );
+
+  Assert.equal(
+    plainText.textContent,
+    description,
+    "Should display correct description in plain text"
+  );
+  Assert.equal(
+    richDescription.contentDocument.body.innerHTML.trim(),
+    resultHTML,
+    "Should display correct description in browser body"
+  );
+
+  if (launch) {
+    await waitForLaunchBrowser(launch);
+  }
+
+  await calendar.deleteItem(eventBox.occurrence);
+}
+
+add_task(async function test_setFullDescription() {
+  const originalLaunchBrowser = window.launchBrowser;
+  window.launchBrowser = () => {};
+  const beforeUnloadGuard = () => {
+    info("Unloading!");
+    Assert.ok(false, "Should never call beforeunload");
+  };
+
+  const expandedDescription = document.querySelector("#expandedDescription");
+  const richDescription =
+    expandedDescription.querySelector(".rich-description");
+  richDescription.contentWindow.addEventListener(
+    "beforeunload",
+    beforeUnloadGuard
+  );
+
+  await checkDescription({ description: "foo", resultHTML: "foo" });
+  await checkDescription({
+    description: "foo 2\nTest",
+    descriptionHTML: "<p>foo 2</p><button>Test</button>",
+    resultHTML: "<p>foo 2</p>",
+  });
+  await checkDescription({
+    description: "Link",
+    descriptionHTML: `<a href="https://example.com/">Link</a>`,
+    resultHTML: `<a href="https://example.com/">Link</a>`,
+    launch: "https://example.com/",
+  });
+  await checkDescription({
+    description: "Link",
+    descriptionHTML: `<a href="mailto:thunderbird@example.com">Link</a>`,
+    resultHTML: `<a href="mailto:thunderbird@example.com">Link</a>`,
+    launch: "mailto:thunderbird@example.com",
+  });
+
+  richDescription.contentWindow.removeEventListener(
+    "beforeunload",
+    beforeUnloadGuard
+  );
+  window.launchBrowser = originalLaunchBrowser;
+});
+
+/**
+ * Open the menu in the dialog and select "Delete Event", and use the
+ * promptPromise to interact with the calendar modal to delete an event.
+ *
+ * @param {Promise} promptPromise - The promise for the prompt to delete an event.
+ * @param {number} eventBoxDay - The day number in the week that is used to
+ * find the event box.
+ */
+async function subtestDeleteEventPrompt(promptPromise, eventBoxDay) {
+  const dialog = document.getElementById("calendarDialog");
+  const menu = dialog.querySelector("menupopup");
+
+  const menuShownPromise = BrowserTestUtils.waitForPopupEvent(menu, "shown");
+  EventUtils.synthesizeMouseAtCenter(dialog.querySelector(".menu-button"), {});
+  await menuShownPromise;
+
+  Assert.ok(
+    BrowserTestUtils.isVisible(menu),
+    "The menupopup should visible after clicking menu button"
+  );
+
+  const deleteEventPromise = BrowserTestUtils.waitForEvent(
+    dialog,
+    "command",
+    true
+  );
+
+  const eventBoxRemovalPromise = BrowserTestUtils.waitForMutationCondition(
+    weekView.getColumnContainer(window, eventBoxDay),
+    { childList: true, subtree: true },
+    () => !weekView.getEventBoxAt(window, eventBoxDay, 1),
+    "Calendar event box should be removed"
+  );
+
+  menu.activateItem(menu.querySelector("#deleteEvent"));
+  await deleteEventPromise;
+  await promptPromise;
+  await eventBoxRemovalPromise;
+}

@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The folder's message list (canvas Mail inbox redesign; Windows MailListPage): the docked search bar over the
+     wallpaper (menu, "Search in <folder>", filter, overflow; Views/Shell/DockedSearchBar), the search chip row while
+     searching, then one Wino zone with the 40 dp header row only when it has something to show (compact Focused/Other,
+     the dismissible active-filter chip, the search status, Empty folder, and the filter button whenever Focused/Other
+     shows), the Windows info bars, the list with pull to refresh (the only
+     way to synchronize), the empty and loading states, the floating selection toolbar, the snackbar host and Try online
+     search. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/mail_list_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+  <com.google.android.material.appbar.MaterialToolbar
+      android:id="@+id/mail_list_toolbar"
+      style="@style/Widget.WinoKit.TopAppBar" />
+
+  <LinearLayout
+      android:id="@+id/mail_search_panel"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:orientation="vertical"
+      android:visibility="gone">
+
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/wino_m3_chip_row_height"
+        android:scrollbars="none">
+
+      <com.google.android.material.chip.ChipGroup
+          android:id="@+id/mail_search_chips"
+          style="@style/Widget.Wino.Mail.SearchChips"
+          android:layout_width="wrap_content"
+          android:layout_height="match_parent"
+          app:singleLine="true" />
+    </HorizontalScrollView>
+  </LinearLayout>
+
+  <com.winomail.presentation.WinoZoneLayout
+      android:id="@+id/mail_list_zone"
+      style="@style/Widget.Wino.Mail.Zone"
+      android:layout_width="match_parent"
+      android:layout_height="0dp"
+      android:layout_weight="1">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+      <LinearLayout
+          android:id="@+id/mail_list_header"
+          style="@style/Widget.Wino.Mail.ChipRow"
+          android:layout_height="wrap_content"
+          android:minHeight="@dimen/wino_mail_header_height">
+
+        <com.google.android.material.chip.Chip
+            android:id="@+id/mail_filter_chip"
+            style="@style/Widget.Wino.Mail.FilterChip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            app:ensureMinTouchTargetSize="false"
+            android:layout_marginEnd="@dimen/wino_space_s"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButtonToggleGroup
+            android:id="@+id/mail_pivots"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            app:selectionRequired="true"
+            app:singleSelection="true" />
+
+        <TextView
+            android:id="@+id/mail_search_status"
+            style="@style/Widget.Wino.Mail.ChipRowStatus"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:visibility="gone" />
+
+        <Space
+            android:id="@+id/mail_header_space"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <com.winomail.presentation.WinoIconView
+            android:id="@+id/mail_empty_folder"
+            style="@style/Widget.Wino.Mail.HeaderButton"
+            android:visibility="gone" />
+
+        <!-- The filter, next to Focused / Other; the search bar shows it instead when the folder has no pivots. -->
+        <com.winomail.presentation.WinoIconView
+            android:id="@+id/mail_filter_button"
+            style="@style/Widget.Wino.Mail.HeaderButton"
+            android:visibility="gone" />
+
+      </LinearLayout>
+
+      <com.winomail.controls.WinoInfoBar
+          android:id="@+id/mail_sync_bar"
+          style="@style/Widget.Wino.Mail.InfoBar"
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:visibility="gone" />
+
+      <TextView
+          android:id="@+id/mail_other_inbox"
+          style="@style/Widget.Wino.Mail.OtherInboxLink"
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:visibility="gone" />
+
+      <FrameLayout
+          android:layout_width="match_parent"
+          android:layout_height="0dp"
+          android:layout_weight="1">
+
+        <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+            android:id="@+id/mail_refresh"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+          <androidx.recyclerview.widget.RecyclerView
+              android:id="@+id/mail_list"
+              style="@style/Widget.Wino.Mail.List"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent" />
+        </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+
+        <LinearLayout
+            android:id="@+id/mail_empty"
+            style="@style/Widget.Wino.Mail.Empty"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:visibility="gone">
+
+          <com.winomail.presentation.WinoIconView
+              android:id="@+id/mail_empty_glyph"
+              android:layout_width="wrap_content"
+              android:layout_height="wrap_content"
+              android:importantForAccessibility="no"
+              android:textColor="@color/wino_text_tertiary" />
+
+          <TextView
+              android:id="@+id/mail_empty_title"
+              style="@style/Widget.Wino.Mail.EmptyTitle"
+              android:layout_width="wrap_content"
+              android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <com.google.android.material.progressindicator.CircularProgressIndicator
+            android:id="@+id/mail_loading"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:indeterminate="true"
+            android:visibility="gone" />
+
+        <!-- Snackbars (undo, status) attach here so they stay inside the list pane. -->
+        <androidx.coordinatorlayout.widget.CoordinatorLayout
+            android:id="@+id/mail_snackbar_host"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+      </FrameLayout>
+
+      <com.google.android.material.button.MaterialButton
+          android:id="@+id/mail_online_search"
+          style="@style/Widget.Wino.Mail.OnlineSearch"
+          android:layout_width="match_parent"
+          android:layout_height="wrap_content"
+          android:visibility="gone" />
+    </LinearLayout>
+  </com.winomail.presentation.WinoZoneLayout>
+</LinearLayout>

@@ -1,0 +1,143 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#ifndef COMM_MAILNEWS_EXTENSIONS_SMIME_NSCMS_H_
+#define COMM_MAILNEWS_EXTENSIONS_SMIME_NSCMS_H_
+
+#include "cms.h"
+#include "mozilla/Maybe.h"
+#include "mozpkix/Result.h"
+#include "nsCOMPtr.h"
+#include "nsICMSDecoder.h"
+#include "nsICMSDecoderJS.h"
+#include "nsICMSEncoder.h"
+#include "nsICMSMessage.h"
+#include "nsIInterfaceRequestor.h"
+#include "nsISupports.h"
+#include "sechash.h"
+
+class nsCMSMessage : public nsICMSMessage {
+ public:
+  NS_DECL_THREADSAFE_ISUPPORTS
+  NS_DECL_NSICMSMESSAGE
+
+  nsCMSMessage();
+  explicit nsCMSMessage(NSSCMSMessage* aCMSMsg);
+  nsresult Init();
+
+  void referenceContext(nsIInterfaceRequestor* aContext) { m_ctx = aContext; }
+  NSSCMSMessage* getCMS() { return m_cmsMsg; }
+
+  struct SignatureVerificationResult {
+    nsresult rv;
+    mozilla::Maybe<mozilla::pkix::Result> reason;
+  };
+
+ private:
+  virtual ~nsCMSMessage();
+  nsCOMPtr<nsIInterfaceRequestor> m_ctx;
+  NSSCMSMessage* m_cmsMsg;
+  NSSCMSSignerInfo* GetTopLevelSignerInfo();
+  NSSCMSContentInfo* GetEncryptionContentInfo();
+  NSSCMSRecipientInfo** GetEnvelopedRecipientInfos();
+
+  SignatureVerificationResult CommonVerifySignature(
+      int32_t verifyFlags, const nsTArray<uint8_t>& aDigestData,
+      int16_t aDigestType);
+
+  nsresult CommonAsyncVerifySignature(int32_t verifyFlags,
+                                      nsISMimeVerificationListener* aListener,
+                                      const nsTArray<uint8_t>& aDigestData,
+                                      int16_t aDigestType);
+  bool IsAllowedHash(const int16_t aCryptoHashInt);
+};
+
+// ===============================================
+// nsCMSDecoder - implementation of nsICMSDecoder
+// ===============================================
+
+class nsCMSDecoder : public nsICMSDecoder {
+ public:
+  NS_DECL_THREADSAFE_ISUPPORTS
+  NS_DECL_NSICMSDECODER
+
+  nsCMSDecoder();
+  nsresult Init();
+
+ private:
+  virtual ~nsCMSDecoder();
+  static void ContentCallback(void* aArg, const char* aBuf, unsigned long aLen);
+  nsCOMPtr<nsIInterfaceRequestor> m_ctx;
+  NSSCMSDecoderContext* m_dcx;
+  NSSCMSContentCallback mCallback;
+  void* mCallbackArg;
+  // True while NSS_CMSDecoder_Update is on the stack. NSS may spin a nested
+  // event loop (e.g. for a token password prompt) during which the consumer
+  // can finish or drop the decoder.
+  bool mUpdating;
+  // Set when Finish() was called during Update(); the NSS decoder is then
+  // cancelled once Update() unwinds.
+  bool mAborted;
+  // Set once Finish() has been called; it must only be called once.
+  bool mFinished;
+};
+
+class nsCMSDecoderJS : public nsICMSDecoderJS {
+ public:
+  NS_DECL_THREADSAFE_ISUPPORTS
+  NS_DECL_NSICMSDECODERJS
+
+  nsCMSDecoderJS();
+  nsresult Init();
+
+ private:
+  virtual ~nsCMSDecoderJS();
+  nsCOMPtr<nsIInterfaceRequestor> m_ctx;
+  NSSCMSDecoderContext* m_dcx;
+
+  nsTArray<uint8_t> mDecryptedData;
+  nsCOMPtr<nsICMSMessage> mCMSMessage;
+
+  static void content_callback(void* arg, const char* input,
+                               unsigned long length);
+};
+
+// ===============================================
+// nsCMSEncoder - implementation of nsICMSEncoder
+// ===============================================
+
+class nsCMSEncoder : public nsICMSEncoder {
+ public:
+  NS_DECL_THREADSAFE_ISUPPORTS
+  NS_DECL_NSICMSENCODER
+
+  nsCMSEncoder();
+  nsresult Init();
+
+ private:
+  virtual ~nsCMSEncoder();
+  nsCOMPtr<nsIInterfaceRequestor> m_ctx;
+  NSSCMSEncoderContext* m_ecx;
+};
+
+/**
+ * Reason for S/MIME verification failure.
+ */
+class nsSMimeVerificationFailure : public nsISMimeVerificationFailure {
+ public:
+  NS_DECL_THREADSAFE_ISUPPORTS
+  NS_DECL_NSISMIMEVERIFICATIONFAILURE
+
+  /**
+   * Construct from the given `mozilla::pkix::Result`.
+   */
+  explicit nsSMimeVerificationFailure(mozilla::pkix::Result result);
+
+ private:
+  virtual ~nsSMimeVerificationFailure();
+
+  mozilla::pkix::Result mResult;
+};
+
+#endif  // COMM_MAILNEWS_EXTENSIONS_SMIME_NSCMS_H_

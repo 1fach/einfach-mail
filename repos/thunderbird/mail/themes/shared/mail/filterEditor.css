@@ -1,0 +1,31 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#filterNameBox {
+  min-block-size: 30px;
+}
+
+#searchTermListBox {
+  flex: 1 1 auto;
+  min-block-size: 100px;
+  block-size: 150px;
+}
+
+#searchTermBox {
+  min-block-size: 0;
+}
+
+#filterActionsBox {
+  flex: 1 1 auto;
+  min-block-size: 150px;
+  block-size: 150px;
+}
+
+/* stylelint-disable-next-line media-query-no-invalid */
+@media (not -moz-pref("mail.filters.forward.enabled")) {
+  .forward-message-action,
+  .forward-reply-leading-separator:has(+ .forward-message-action + .reply-message-action[hidden]) {
+    display: none !important;
+  }
+}

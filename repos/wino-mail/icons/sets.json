@@ -1,0 +1,1168 @@
+{
+  "$comment": "Platform icon sets for WinoIcons: Framework7 for macOS and iOS, Material Rounded for Android (Windows keeps the Classic manifest set). Maps each Wino icon name to a glyph in each source library. Edit, then run import_icon_sets.py and build_fonts.py. See icons/README.md.",
+  "sources": {
+    "material": {
+      "package": "@material-symbols/svg-400",
+      "version": "0.47.6",
+      "license": "Apache-2.0",
+      "integrity": "sha512-lXYsZWNXXu6gTVTAS/aRtOuKrjYhbyl1Y/t1JELXku3GZe0DLPfQ8O8UcbHGs1H22s32kGJVilkTKO2OkGzPXA=="
+    },
+    "framework7": {
+      "package": "framework7-icons",
+      "version": "5.0.5",
+      "license": "MIT",
+      "integrity": "sha512-bvHMLyujV9TFuudehd3ORZ/EvNp19Ir3ckVzYAOf3MkLymHba/9oHLsgopCh0x5UsrYZUpkrE+fd7ggj5y4wRw=="
+    }
+  },
+  "sets": {
+    "MaterialRounded": {
+      "source": "material",
+      "style": "rounded",
+      "platforms": [
+        "Android"
+      ]
+    },
+    "Framework7": {
+      "source": "framework7",
+      "platforms": [
+        "macOS",
+        "iOS"
+      ]
+    }
+  },
+  "icons": {
+    "NewMail": {
+      "material": "edit_square",
+      "framework7": "square_pencil"
+    },
+    "Mail": {
+      "material": "mail",
+      "framework7": "envelope"
+    },
+    "MailFilled": {
+      "material": "mail",
+      "framework7": "envelope",
+      "filled": true
+    },
+    "Inbox": {
+      "material": "inbox",
+      "framework7": "tray"
+    },
+    "Reply": {
+      "material": "reply",
+      "framework7": "arrowshape_turn_up_left"
+    },
+    "ReplyAll": {
+      "material": "reply_all",
+      "framework7": "arrowshape_turn_up_left_2"
+    },
+    "Forward": {
+      "material": "forward",
+      "framework7": "arrowshape_turn_up_right"
+    },
+    "Send": {
+      "material": "send",
+      "framework7": "paperplane"
+    },
+    "SendNew": {
+      "material": "send",
+      "framework7": "paperplane",
+      "filled": true
+    },
+    "Archive": {
+      "material": "archive",
+      "framework7": "archivebox"
+    },
+    "UnArchive": {
+      "material": "unarchive",
+      "framework7": "arrow_up_bin"
+    },
+    "Delete": {
+      "material": "delete",
+      "framework7": "trash"
+    },
+    "Move": {
+      "material": "drive_file_move",
+      "framework7": "folder"
+    },
+    "Draft": {
+      "material": "draft",
+      "framework7": "doc"
+    },
+    "MarkRead": {
+      "material": "drafts",
+      "framework7": "envelope_open"
+    },
+    "MarkUnread": {
+      "material": "mark_email_unread",
+      "framework7": "envelope_badge"
+    },
+    "Flag": {
+      "material": "flag",
+      "framework7": "flag"
+    },
+    "ClearFlag": {
+      "material": "flag_check",
+      "framework7": "flag_slash"
+    },
+    "Pin": {
+      "material": "keep",
+      "framework7": "pin"
+    },
+    "UnPin": {
+      "material": "keep_off",
+      "framework7": "pin_slash"
+    },
+    "Star": {
+      "material": "star",
+      "framework7": "star"
+    },
+    "StarFilled": {
+      "material": "star",
+      "framework7": "star",
+      "filled": true
+    },
+    "Ignore": {
+      "material": "person_cancel",
+      "framework7": "person_crop_circle_badge_xmark"
+    },
+    "Attachment": {
+      "material": "attach_file",
+      "framework7": "paperclip"
+    },
+    "AttachmentNew": {
+      "material": "attach_file_add",
+      "framework7": "paperclip"
+    },
+    "MailBlocked": {
+      "material": "unsubscribe",
+      "framework7": "nosign"
+    },
+    "MailArrowUp": {
+      "material": "outgoing_mail",
+      "framework7": "arrow_up_circle"
+    },
+    "MailCheckmark": {
+      "material": "mark_email_read",
+      "framework7": "checkmark_circle"
+    },
+    "MailInboxCheckmark": {
+      "material": "inbox_customize",
+      "framework7": "tray_full"
+    },
+    "ViewMessageSource": {
+      "material": "code",
+      "framework7": "chevron_left_slash_chevron_right"
+    },
+    "Print": {
+      "material": "print",
+      "framework7": "printer"
+    },
+    "Save": {
+      "material": "save",
+      "framework7": "floppy_disk"
+    },
+    "Sync": {
+      "material": "sync",
+      "framework7": "arrow_2_circlepath"
+    },
+    "DontSync": {
+      "material": "sync_disabled",
+      "framework7": "slash_circle"
+    },
+    "MultiSelect": {
+      "material": "checklist",
+      "framework7": "checkmark_circle"
+    },
+    "Zoom": {
+      "material": "zoom_in",
+      "framework7": "zoom_in"
+    },
+    "Find": {
+      "material": "search",
+      "framework7": "search"
+    },
+    "More": {
+      "material": "more_horiz",
+      "framework7": "ellipsis"
+    },
+    "Filter": {
+      "material": "filter_list",
+      "framework7": "line_horizontal_3_decrease"
+    },
+    "SortTextDesc": {
+      "material": "sort_by_alpha",
+      "framework7": "textformat_abc"
+    },
+    "SortLinesDesc": {
+      "material": "sort",
+      "framework7": "arrow_down_to_line"
+    },
+    "ArrowSort": {
+      "material": "swap_vert",
+      "framework7": "arrow_up_arrow_down"
+    },
+    "OpenInNewWindow": {
+      "material": "open_in_new",
+      "framework7": "arrow_up_right_square"
+    },
+    "Rename": {
+      "material": "drive_file_rename",
+      "framework7": "pencil"
+    },
+    "Edit": {
+      "material": "edit",
+      "framework7": "pencil"
+    },
+    "Add": {
+      "material": "add",
+      "framework7": "plus"
+    },
+    "New": {
+      "material": "add_circle",
+      "framework7": "plus_circle"
+    },
+    "Dismiss": {
+      "material": "close",
+      "framework7": "xmark"
+    },
+    "Folder": {
+      "material": "folder",
+      "framework7": "folder"
+    },
+    "CreateFolder": {
+      "material": "create_new_folder",
+      "framework7": "folder_badge_plus"
+    },
+    "EmptyFolder": {
+      "material": "delete_sweep",
+      "framework7": "trash_slash"
+    },
+    "FolderSync": {
+      "material": "folder_managed",
+      "framework7": "arrow_2_squarepath"
+    },
+    "FolderArrowUp": {
+      "material": "drive_folder_upload",
+      "framework7": "arrow_up_doc"
+    },
+    "SpecialFolderInbox": {
+      "material": "inbox",
+      "framework7": "tray"
+    },
+    "SpecialFolderSent": {
+      "material": "send",
+      "framework7": "paperplane"
+    },
+    "SpecialFolderDraft": {
+      "material": "draft",
+      "framework7": "doc"
+    },
+    "SpecialFolderArchive": {
+      "material": "archive",
+      "framework7": "archivebox"
+    },
+    "SpecialFolderDeleted": {
+      "material": "delete",
+      "framework7": "trash"
+    },
+    "SpecialFolderJunk": {
+      "material": "report",
+      "framework7": "bin_xmark"
+    },
+    "SpecialFolderUnread": {
+      "material": "mark_email_unread",
+      "framework7": "envelope_badge"
+    },
+    "SpecialFolderStarred": {
+      "material": "star",
+      "framework7": "star"
+    },
+    "SpecialFolderImportant": {
+      "material": "label_important",
+      "framework7": "exclamationmark_bubble"
+    },
+    "SpecialFolderChat": {
+      "material": "chat",
+      "framework7": "bubble_left_bubble_right"
+    },
+    "SpecialFolderCategory": {
+      "material": "category",
+      "framework7": "square_grid_2x2"
+    },
+    "SpecialFolderForums": {
+      "material": "forum",
+      "framework7": "person_3"
+    },
+    "SpecialFolderUpdated": {
+      "material": "newspaper",
+      "framework7": "doc_richtext"
+    },
+    "SpecialFolderPersonal": {
+      "material": "person",
+      "framework7": "person_crop_square"
+    },
+    "SpecialFolderPromotions": {
+      "material": "sell",
+      "framework7": "tag"
+    },
+    "SpecialFolderSocial": {
+      "material": "group",
+      "framework7": "person_2"
+    },
+    "SpecialFolderMore": {
+      "material": "expand_circle_down",
+      "framework7": "ellipsis_circle"
+    },
+    "SpecialFolderOther": {
+      "material": "folder",
+      "framework7": "folder"
+    },
+    "Calendar": {
+      "material": "calendar_month",
+      "framework7": "calendar"
+    },
+    "CalendarFilled": {
+      "material": "calendar_month",
+      "framework7": "calendar",
+      "filled": true
+    },
+    "CalendarToday": {
+      "material": "today",
+      "framework7": "calendar_today"
+    },
+    "CalendarDay": {
+      "material": "view_day",
+      "framework7": "rectangle"
+    },
+    "CalendarWeek": {
+      "material": "view_week",
+      "framework7": "rectangle_split_3x1"
+    },
+    "CalendarWorkWeek": {
+      "material": "date_range",
+      "framework7": "rectangle_split_3x1"
+    },
+    "CalendarMonth": {
+      "material": "calendar_view_month",
+      "framework7": "square_grid_3x2"
+    },
+    "CalendarYear": {
+      "material": "grid_view",
+      "framework7": "square_grid_4x3_fill"
+    },
+    "CalendarAgenda": {
+      "material": "view_agenda",
+      "framework7": "list_bullet_below_rectangle"
+    },
+    "CalendarEventRepeat": {
+      "material": "repeat",
+      "framework7": "repeat"
+    },
+    "CalendarEventMuiltiDay": {
+      "material": "date_range",
+      "framework7": "arrow_left_right_square"
+    },
+    "CalendarError": {
+      "material": "event_busy",
+      "framework7": "calendar_badge_minus"
+    },
+    "CalendarCancel": {
+      "material": "event_busy",
+      "framework7": "calendar_badge_minus"
+    },
+    "CalendarSync": {
+      "material": "event_repeat",
+      "framework7": "arrow_2_circlepath_circle"
+    },
+    "CalendarSettings": {
+      "material": "edit_calendar",
+      "framework7": "slider_horizontal_3"
+    },
+    "CalendarShowAs": {
+      "material": "event_available",
+      "framework7": "circle_lefthalf_fill"
+    },
+    "CalendarAttendee": {
+      "material": "person",
+      "framework7": "person_crop_circle"
+    },
+    "CalendarAttendees": {
+      "material": "groups",
+      "framework7": "person_3"
+    },
+    "Reminder": {
+      "material": "alarm",
+      "framework7": "alarm"
+    },
+    "EventRespond": {
+      "material": "reply",
+      "framework7": "arrowshape_turn_up_left_circle"
+    },
+    "EventAccept": {
+      "material": "check_circle",
+      "framework7": "checkmark_circle"
+    },
+    "EventTentative": {
+      "material": "help",
+      "framework7": "question_circle"
+    },
+    "EventDecline": {
+      "material": "cancel",
+      "framework7": "xmark_circle"
+    },
+    "EventReminder": {
+      "material": "notifications",
+      "framework7": "bell"
+    },
+    "EventEditSeries": {
+      "material": "edit_calendar",
+      "framework7": "calendar_badge_plus"
+    },
+    "EventJoinOnline": {
+      "material": "videocam",
+      "framework7": "videocam"
+    },
+    "WeatherSunny": {
+      "material": "sunny",
+      "framework7": "sun_max"
+    },
+    "WeatherSunnyHigh": {
+      "material": "wb_sunny",
+      "framework7": "sun_max"
+    },
+    "WeatherSunnyLow": {
+      "material": "brightness_5",
+      "framework7": "sun_min"
+    },
+    "WeatherPartlyCloudy": {
+      "material": "partly_cloudy_day",
+      "framework7": "cloud_sun"
+    },
+    "WeatherCloudy": {
+      "material": "cloud",
+      "framework7": "cloud"
+    },
+    "WeatherCloudyNight": {
+      "material": "partly_cloudy_night",
+      "framework7": "cloud_moon"
+    },
+    "WeatherRainy": {
+      "material": "rainy",
+      "framework7": "cloud_rain"
+    },
+    "WeatherRainSnow": {
+      "material": "weather_mix",
+      "framework7": "cloud_sleet"
+    },
+    "WeatherSnowy": {
+      "material": "weather_snowy",
+      "framework7": "cloud_snow"
+    },
+    "WeatherSnowflake": {
+      "material": "ac_unit",
+      "framework7": "snow"
+    },
+    "WeatherSnowShowerAtNight": {
+      "material": "weather_snowy",
+      "framework7": "cloud_moon_rain"
+    },
+    "WeatherSnowShowerNight": {
+      "material": "weather_snowy",
+      "framework7": "cloud_moon_rain"
+    },
+    "WeatherThunderstorm": {
+      "material": "thunderstorm",
+      "framework7": "cloud_bolt_rain"
+    },
+    "WeatherBlow": {
+      "material": "air",
+      "framework7": "wind"
+    },
+    "People": {
+      "material": "group",
+      "framework7": "person_2"
+    },
+    "PeopleFilled": {
+      "material": "group",
+      "framework7": "person_2",
+      "filled": true
+    },
+    "Person": {
+      "material": "person",
+      "framework7": "person"
+    },
+    "PersonAdd": {
+      "material": "person_add",
+      "framework7": "person_badge_plus"
+    },
+    "PersonDelete": {
+      "material": "person_remove",
+      "framework7": "person_badge_minus"
+    },
+    "PersonCall": {
+      "material": "contact_phone",
+      "framework7": "phone"
+    },
+    "PersonLock": {
+      "material": "lock_person",
+      "framework7": "lock"
+    },
+    "PersonSwap": {
+      "material": "switch_account",
+      "framework7": "arrow_right_arrow_left_circle"
+    },
+    "PersonSquare": {
+      "material": "account_box",
+      "framework7": "person_crop_square"
+    },
+    "PersonTag": {
+      "material": "assignment_ind",
+      "framework7": "person_crop_rectangle"
+    },
+    "PersonAccounts": {
+      "material": "account_circle",
+      "framework7": "person_2_square_stack"
+    },
+    "PeopleTeam": {
+      "material": "groups",
+      "framework7": "person_3"
+    },
+    "PeopleCommunity": {
+      "material": "diversity_3",
+      "framework7": "person_3"
+    },
+    "PeopleLink": {
+      "material": "group_add",
+      "framework7": "person_2"
+    },
+    "ContactCard": {
+      "material": "badge",
+      "framework7": "person_crop_rectangle"
+    },
+    "ManageAccounts": {
+      "material": "manage_accounts",
+      "framework7": "person_crop_circle_badge_checkmark"
+    },
+    "Info": {
+      "material": "info",
+      "framework7": "info_circle"
+    },
+    "Warning": {
+      "material": "warning",
+      "framework7": "exclamationmark_triangle"
+    },
+    "AlertCircle": {
+      "material": "error",
+      "framework7": "exclamationmark_circle"
+    },
+    "Important": {
+      "material": "priority_high",
+      "framework7": "exclamationmark"
+    },
+    "QuestionCircle": {
+      "material": "help",
+      "framework7": "question_circle"
+    },
+    "Checkmark": {
+      "material": "check",
+      "framework7": "checkmark"
+    },
+    "CheckmarkCircle": {
+      "material": "check_circle",
+      "framework7": "checkmark_circle"
+    },
+    "CheckmarkCircleFilled": {
+      "material": "check_circle",
+      "framework7": "checkmark_circle",
+      "filled": true
+    },
+    "DismissCircle": {
+      "material": "cancel",
+      "framework7": "xmark_circle"
+    },
+    "SubtractCircle": {
+      "material": "do_not_disturb_on",
+      "framework7": "minus_circle"
+    },
+    "Blocked": {
+      "material": "block",
+      "framework7": "nosign"
+    },
+    "Circle": {
+      "material": "radio_button_unchecked",
+      "framework7": "circle"
+    },
+    "Dot": {
+      "material": "fiber_manual_record",
+      "framework7": "circle_fill",
+      "filled": true
+    },
+    "Alert": {
+      "material": "notifications",
+      "framework7": "bell"
+    },
+    "AlertBadge": {
+      "material": "notifications_unread",
+      "framework7": "bell_circle"
+    },
+    "AlertOff": {
+      "material": "notifications_off",
+      "framework7": "bell_slash"
+    },
+    "TurnOfNotifications": {
+      "material": "notifications_paused",
+      "framework7": "moon_zzz"
+    },
+    "Shield": {
+      "material": "shield",
+      "framework7": "shield"
+    },
+    "ShieldError": {
+      "material": "gpp_maybe",
+      "framework7": "exclamationmark_shield"
+    },
+    "LockClosed": {
+      "material": "lock",
+      "framework7": "lock"
+    },
+    "Key": {
+      "material": "key",
+      "framework7": "lock"
+    },
+    "Certificate": {
+      "material": "license",
+      "framework7": "checkmark_seal"
+    },
+    "DocumentLock": {
+      "material": "encrypted",
+      "framework7": "lock_circle"
+    },
+    "Eye": {
+      "material": "visibility",
+      "framework7": "eye"
+    },
+    "EyeOff": {
+      "material": "visibility_off",
+      "framework7": "eye_slash"
+    },
+    "TextBold": {
+      "material": "format_bold",
+      "framework7": "bold"
+    },
+    "TextItalic": {
+      "material": "format_italic",
+      "framework7": "italic"
+    },
+    "TextUnderline": {
+      "material": "format_underlined",
+      "framework7": "underline"
+    },
+    "TextStrikethrough": {
+      "material": "format_strikethrough",
+      "framework7": "strikethrough"
+    },
+    "TextFont": {
+      "material": "text_fields",
+      "framework7": "textformat"
+    },
+    "TextColor": {
+      "material": "format_color_text",
+      "framework7": "textformat"
+    },
+    "Highlight": {
+      "material": "ink_highlighter",
+      "framework7": "pencil_outline"
+    },
+    "TextClearFormatting": {
+      "material": "format_clear",
+      "framework7": "clear"
+    },
+    "TextBulletList": {
+      "material": "format_list_bulleted",
+      "framework7": "list_bullet"
+    },
+    "TextNumberList": {
+      "material": "format_list_numbered",
+      "framework7": "list_number"
+    },
+    "TextBulletListTree": {
+      "material": "segment",
+      "framework7": "list_bullet_indent"
+    },
+    "TextIndentDecrease": {
+      "material": "format_indent_decrease",
+      "framework7": "decrease_indent"
+    },
+    "TextIndentIncrease": {
+      "material": "format_indent_increase",
+      "framework7": "increase_indent"
+    },
+    "TextAlignLeft": {
+      "material": "format_align_left",
+      "framework7": "text_alignleft"
+    },
+    "TextAlignCenter": {
+      "material": "format_align_center",
+      "framework7": "text_aligncenter"
+    },
+    "TextAlignRight": {
+      "material": "format_align_right",
+      "framework7": "text_alignright"
+    },
+    "TextAlignJustify": {
+      "material": "format_align_justify",
+      "framework7": "text_justify"
+    },
+    "TextLineSpacing": {
+      "material": "format_line_spacing",
+      "framework7": "arrow_up_arrow_down"
+    },
+    "TextParagraphDirection": {
+      "material": "format_textdirection_l_to_r",
+      "framework7": "paragraph"
+    },
+    "TextProofingTools": {
+      "material": "spellcheck",
+      "framework7": "textformat_abc_dottedunderline"
+    },
+    "TextDescription": {
+      "material": "notes",
+      "framework7": "text_justifyleft"
+    },
+    "Copy": {
+      "material": "content_copy",
+      "framework7": "doc_on_doc"
+    },
+    "Link": {
+      "material": "link",
+      "framework7": "link"
+    },
+    "LinkDismiss": {
+      "material": "link_off",
+      "framework7": "xmark_circle"
+    },
+    "Image": {
+      "material": "image",
+      "framework7": "photo"
+    },
+    "ImageAdd": {
+      "material": "add_photo_alternate",
+      "framework7": "photo"
+    },
+    "Emoji": {
+      "material": "mood",
+      "framework7": "face_smiling"
+    },
+    "Table": {
+      "material": "table",
+      "framework7": "table"
+    },
+    "CalligraphyPen": {
+      "material": "ink_pen",
+      "framework7": "pencil"
+    },
+    "Signature": {
+      "material": "signature",
+      "framework7": "signature"
+    },
+    "ArrowUndo": {
+      "material": "undo",
+      "framework7": "arrow_uturn_left"
+    },
+    "ArrowRedo": {
+      "material": "redo",
+      "framework7": "arrow_uturn_right"
+    },
+    "SelectAll": {
+      "material": "select_all",
+      "framework7": "selection_pin_in_out"
+    },
+    "LightEditor": {
+      "material": "light_mode",
+      "framework7": "sun_max"
+    },
+    "DarkEditor": {
+      "material": "dark_mode",
+      "framework7": "moon"
+    },
+    "ArrowLeft": {
+      "material": "arrow_back",
+      "framework7": "arrow_left"
+    },
+    "ArrowRight": {
+      "material": "arrow_forward",
+      "framework7": "arrow_right"
+    },
+    "ArrowDown": {
+      "material": "arrow_downward",
+      "framework7": "arrow_down"
+    },
+    "ChevronLeft": {
+      "material": "chevron_left",
+      "framework7": "chevron_left"
+    },
+    "ChevronRight": {
+      "material": "chevron_right",
+      "framework7": "chevron_right"
+    },
+    "ChevronUp": {
+      "material": "keyboard_arrow_up",
+      "framework7": "chevron_up"
+    },
+    "ChevronDown": {
+      "material": "keyboard_arrow_down",
+      "framework7": "chevron_down"
+    },
+    "Hamburger": {
+      "material": "menu",
+      "framework7": "bars"
+    },
+    "ReOrderDotsVertical": {
+      "material": "drag_indicator",
+      "framework7": "line_horizontal_3"
+    },
+    "PanelLeft": {
+      "material": "side_navigation",
+      "framework7": "sidebar_left"
+    },
+    "PanelLeftExpand": {
+      "material": "left_panel_open",
+      "framework7": "sidebar_left"
+    },
+    "PanelLeftContract": {
+      "material": "left_panel_close",
+      "framework7": "sidebar_left"
+    },
+    "Home": {
+      "material": "home",
+      "framework7": "house"
+    },
+    "Grid": {
+      "material": "grid_view",
+      "framework7": "square_grid_2x2"
+    },
+    "List": {
+      "material": "list",
+      "framework7": "list_bullet"
+    },
+    "GroupList": {
+      "material": "view_list",
+      "framework7": "list_bullet_below_rectangle"
+    },
+    "TaskList": {
+      "material": "checklist",
+      "framework7": "checkmark_square"
+    },
+    "Open": {
+      "material": "open_in_new",
+      "framework7": "arrow_up_right_square"
+    },
+    "Window": {
+      "material": "web_asset",
+      "framework7": "macwindow"
+    },
+    "ArrowDownload": {
+      "material": "download",
+      "framework7": "arrow_down_circle"
+    },
+    "ArrowUpload": {
+      "material": "upload",
+      "framework7": "arrow_up_circle"
+    },
+    "ArrowSyncCircle": {
+      "material": "autorenew",
+      "framework7": "arrow_2_circlepath_circle"
+    },
+    "ArrowClockwise": {
+      "material": "refresh",
+      "framework7": "arrow_clockwise"
+    },
+    "ArrowSwap": {
+      "material": "swap_horiz",
+      "framework7": "arrow_right_arrow_left"
+    },
+    "ArrowReset": {
+      "material": "restart_alt",
+      "framework7": "arrow_counterclockwise"
+    },
+    "ArrowRepeatAll": {
+      "material": "repeat",
+      "framework7": "repeat"
+    },
+    "SignOut": {
+      "material": "logout",
+      "framework7": "square_arrow_right"
+    },
+    "Power": {
+      "material": "power_settings_new",
+      "framework7": "power"
+    },
+    "Settings": {
+      "material": "settings",
+      "framework7": "gear"
+    },
+    "SettingsFilled": {
+      "material": "settings",
+      "framework7": "gear",
+      "filled": true
+    },
+    "SettingsNew": {
+      "material": "settings",
+      "framework7": "gear",
+      "filled": true
+    },
+    "IconStyle": {
+      "material": "interests",
+      "framework7": "square_on_circle"
+    },
+    "Color": {
+      "material": "palette",
+      "framework7": "paintbrush"
+    },
+    "PaintBrush": {
+      "material": "brush",
+      "framework7": "paintbrush"
+    },
+    "DarkTheme": {
+      "material": "contrast",
+      "framework7": "circle_lefthalf_fill"
+    },
+    "Blur": {
+      "material": "blur_on",
+      "framework7": "circle_grid_hex"
+    },
+    "Translate": {
+      "material": "translate",
+      "framework7": "globe"
+    },
+    "Keyboard": {
+      "material": "keyboard",
+      "framework7": "keyboard"
+    },
+    "Storage": {
+      "material": "database",
+      "framework7": "tray_2"
+    },
+    "Desktop": {
+      "material": "desktop_windows",
+      "framework7": "desktopcomputer"
+    },
+    "Laptop": {
+      "material": "laptop_windows",
+      "framework7": "device_laptop"
+    },
+    "Phone": {
+      "material": "mobile",
+      "framework7": "device_phone_portrait"
+    },
+    "Devices": {
+      "material": "devices",
+      "framework7": "device_laptop"
+    },
+    "Cloud": {
+      "material": "cloud",
+      "framework7": "cloud"
+    },
+    "Globe": {
+      "material": "language",
+      "framework7": "globe"
+    },
+    "GlobeDesktop": {
+      "material": "web",
+      "framework7": "desktopcomputer"
+    },
+    "GlobeSearch": {
+      "material": "travel_explore",
+      "framework7": "search_circle"
+    },
+    "Wrench": {
+      "material": "build",
+      "framework7": "wrench"
+    },
+    "Bug": {
+      "material": "bug_report",
+      "framework7": "ant"
+    },
+    "Pulse": {
+      "material": "ecg_heart",
+      "framework7": "waveform_path_ecg"
+    },
+    "CursorHover": {
+      "material": "arrow_selector_tool",
+      "framework7": "cursor_rays"
+    },
+    "TapSingle": {
+      "material": "touch_app",
+      "framework7": "hand_point_left"
+    },
+    "ToggleLeft": {
+      "material": "toggle_off",
+      "framework7": "slider_horizontal_below_rectangle"
+    },
+    "Lightbulb": {
+      "material": "lightbulb",
+      "framework7": "lightbulb"
+    },
+    "Sparkle": {
+      "material": "star_shine",
+      "framework7": "sparkles"
+    },
+    "Speaker": {
+      "material": "volume_up",
+      "framework7": "speaker_2"
+    },
+    "Document": {
+      "material": "description",
+      "framework7": "doc_text"
+    },
+    "DocumentAdd": {
+      "material": "note_add",
+      "framework7": "doc_append"
+    },
+    "DocumentPdf": {
+      "material": "picture_as_pdf",
+      "framework7": "doc_richtext"
+    },
+    "Note": {
+      "material": "sticky_note_2",
+      "framework7": "doc_plaintext"
+    },
+    "NoteEdit": {
+      "material": "edit_note",
+      "framework7": "square_pencil"
+    },
+    "Library": {
+      "material": "library_books",
+      "framework7": "book"
+    },
+    "Board": {
+      "material": "dashboard",
+      "framework7": "rectangle_3_offgrid"
+    },
+    "Tag": {
+      "material": "label",
+      "framework7": "tag"
+    },
+    "News": {
+      "material": "newspaper",
+      "framework7": "doc_richtext"
+    },
+    "Announcement": {
+      "material": "campaign",
+      "framework7": "speaker_3"
+    },
+    "Message": {
+      "material": "chat",
+      "framework7": "bubble_left"
+    },
+    "Camera": {
+      "material": "photo_camera",
+      "framework7": "camera"
+    },
+    "Location": {
+      "material": "location_on",
+      "framework7": "placemark"
+    },
+    "Clock": {
+      "material": "schedule",
+      "framework7": "clock"
+    },
+    "History": {
+      "material": "history",
+      "framework7": "arrow_counterclockwise"
+    },
+    "Briefcase": {
+      "material": "work",
+      "framework7": "briefcase"
+    },
+    "Heart": {
+      "material": "favorite",
+      "framework7": "heart"
+    },
+    "Play": {
+      "material": "play_arrow",
+      "framework7": "play"
+    },
+    "Stop": {
+      "material": "stop",
+      "framework7": "stop"
+    },
+    "Flash": {
+      "material": "bolt",
+      "framework7": "bolt"
+    },
+    "Airplane": {
+      "material": "flight",
+      "framework7": "airplane"
+    },
+    "Cart": {
+      "material": "shopping_cart",
+      "framework7": "cart"
+    },
+    "Payment": {
+      "material": "credit_card",
+      "framework7": "creditcard"
+    },
+    "Package": {
+      "material": "package_2",
+      "framework7": "shippingbox"
+    },
+    "MicrosoftStore": {
+      "material": "storefront",
+      "framework7": "bag"
+    },
+    "CustomServer": {
+      "material": "dns",
+      "framework7": "rectangle_stack"
+    },
+    "IMAP": {
+      "material": "alternate_email",
+      "framework7": "at"
+    },
+    "ProviderCatalog": {
+      "material": "apps",
+      "framework7": "square_grid_3x2"
+    },
+    "AppModeMail": {
+      "material": "mail",
+      "framework7": "envelope"
+    },
+    "AppModeCalendar": {
+      "material": "calendar_month",
+      "framework7": "calendar"
+    },
+    "AppModeContacts": {
+      "material": "contacts",
+      "framework7": "person_2"
+    },
+    "AppModeToDo": {
+      "material": "task_alt",
+      "framework7": "checkmark_square"
+    },
+    "WinoIntelligence": {
+      "material": "star_shine",
+      "framework7": "sparkles"
+    },
+    "DailyBriefing": {
+      "material": "summarize",
+      "framework7": "doc_text"
+    },
+    "Companion": {
+      "material": "dock_to_left",
+      "framework7": "sidebar_right"
+    },
+    "BenefitDeviceTransfer": {
+      "material": "devices",
+      "framework7": "arrow_right_arrow_left_square"
+    },
+    "BenefitEntitlements": {
+      "material": "verified_user",
+      "framework7": "checkmark_shield"
+    },
+    "BenefitUnlimitedAccounts": {
+      "material": "group_add",
+      "framework7": "person_3"
+    }
+  }
+}

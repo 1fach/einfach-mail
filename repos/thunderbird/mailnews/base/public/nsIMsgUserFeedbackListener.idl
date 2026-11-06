@@ -1,0 +1,44 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "nsISupports.idl"
+
+interface nsIMsgWindow;
+interface nsITransportSecurityInfo;
+interface nsIURI;
+
+/**
+ * Implement this interface to subscribe to errors and warnings passed out via
+ * nsIMsgMailSession.
+ */
+[scriptable, uuid(5e909ffa-77fe-4ce3-bf3c-06c54596d03d)]
+interface nsIMsgUserFeedbackListener : nsISupports {
+  /**
+   * Called when an alert from a protocol level implementation is generated.
+   *
+   * @param message - The localized message string to alert.
+   * @param serverKey - The key of the server to with this error.
+   * @param silent - If true, this method will notify listeners (so they can
+   *   e.g. store the alert in the activity manager) but will not result in a
+   *   visible alert to the user. This can be needed for background operations
+   *   where we don't want to notify the user in the same way as "normal"
+   *   operations.
+   * @returns True if the alert was serviced and it does not need to be
+   *   prompted to the user separately.
+   */
+  boolean onAlert(in AString message, in ACString serverKey, in boolean silent);
+
+  /**
+   * Call to inform the listeners of a certificate error. The listener should
+   * alert the user about the error and (if appropriate) allow the user to add
+   * a certificate override.
+   *
+   * @param securityInfo - The security information about the operation.
+   * @param uri - URI which is relevant to the operation.
+   * @param serverKey - The key of the server to with this error.
+   */
+  void onCertError(in nsITransportSecurityInfo securityInfo,
+                   in nsIURI url,
+                   in ACString serverKey);
+};

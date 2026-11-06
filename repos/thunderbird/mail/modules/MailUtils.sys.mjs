@@ -1,0 +1,1751 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+const lazy = {};
+ChromeUtils.defineESModuleGetters(lazy, {
+  cal: "resource:///modules/calendar/calUtils.sys.mjs",
+  MailConsts: "resource:///modules/MailConsts.sys.mjs",
+  MailServices: "resource:///modules/MailServices.sys.mjs",
+  MimeParser: "resource:///modules/mimeParser.sys.mjs",
+  NetUtil: "resource://gre/modules/NetUtil.sys.mjs",
+  NntpUtils: "resource:///modules/NntpUtils.sys.mjs",
+  OAuth2Providers: "resource:///modules/OAuth2Providers.sys.mjs",
+  openLinkExternally: "resource:///modules/LinkHelper.sys.mjs",
+  PlacesUtils: "resource://gre/modules/PlacesUtils.sys.mjs",
+});
+ChromeUtils.defineLazyGetter(lazy, "l10n", () => {
+  return new Localization(
+    ["messenger/messenger.ftl", "messenger/news.ftl"],
+    true
+  );
+});
+
+const FILE_SIZE_UNITS = [
+  "byte",
+  "kilobyte",
+  "megabyte",
+  "gigabyte",
+  "terabyte",
+  "petabyte",
+];
+
+const fileSizeFormatters = new Map();
+
+/**
+ * @param {string} unit - One of FILE_SIZE_UNITS.
+ * @param {integer} fractionDigits - The number of fraction digits to show.
+ * @returns {Intl.NumberFormat}
+ */
+function getFileSizeFormatter(unit, fractionDigits) {
+  // Pass the locale explicitly, and key the cache on it, so that a locale
+  // change isn't ignored by already cached formatters.
+  const locale = Services.locale.regionalPrefsLocales[0];
+  const key = `${locale}:${unit}:${fractionDigits}`;
+  let formatter = fileSizeFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(locale, {
+      style: "unit",
+      unit,
+      unitDisplay: "short",
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits,
+    });
+    fileSizeFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+
+/**
+ * This module has several utility functions for use by both core and
+ * third-party code. Some functions are aimed at code that doesn't have a
+ * window context, while others can be used anywhere.
+ */
+export var MailUtils = {
+  /**
+   * Restarts the application, keeping it in
+   * safe mode if it is already in safe mode.
+   */
+  restartApplication() {
+    const cancelQuit = Cc["@mozilla.org/supports-PRBool;1"].createInstance(
+      Ci.nsISupportsPRBool
+    );
+    Services.obs.notifyObservers(
+      cancelQuit,
+      "quit-application-requested",
+      "restart"
+    );
+    if (cancelQuit.data) {
+      return;
+    }
+    // If already in safe mode restart in safe mode.
+    if (Services.appinfo.inSafeMode) {
+      Services.startup.restartInSafeMode(
+        Ci.nsIAppStartup.eAttemptQuit | Ci.nsIAppStartup.eRestart
+      );
+      return;
+    }
+    Services.startup.quit(
+      Ci.nsIAppStartup.eAttemptQuit | Ci.nsIAppStartup.eRestart
+    );
+  },
+
+  /**
+   * Discover all folders. This is useful during startup, when you have code
+   * that deals with folders and that executes before the main 3pane window is
+   * open (the folder tree wouldn't have been initialized yet).
+   */
+  discoverFolders() {
+    for (const server of lazy.MailServices.accounts.allServers) {
+      // Bug 466311 Sometimes this can throw file not found, we're unsure
+      // why, but catch it and log the fact.
+      try {
+        server.rootFolder.subFolders;
+      } catch (ex) {
+        Services.console.logStringMessage(
+          "Discovering folders for account failed with exception: " + ex
+        );
+      }
+    }
+  },
+
+  /**
+   * Get the nsIMsgFolder corresponding to this file. This just looks at all
+   * folders and does a direct match.
+   *
+   * One of the places this is used is desktop search integration -- to open
+   * the search result corresponding to a mozeml/wdseml file, we need to figure
+   * out the folder using the file's path.
+   *
+   * @param {nsIFile} aFile - The nsIFile to convert to a folder.
+   * @returns {?nsIMsgFolder} the nsIMsgFolder corresponding to aFile, or null
+   *   if the folder isn't found.
+   */
+  getFolderForFileInProfile(aFile) {
+    for (const folder of lazy.MailServices.accounts.allFolders) {
+      if (folder.filePath.equals(aFile)) {
+        return folder;
+      }
+    }
+    return null;
+  },
+
+  /**
+   * Get the nsIMsgFolder corresponding to this URI.
+   *
+   * @param {string} aFolderURI - The URI of the target folder
+   * @returns {?nsIMsgFolder} Folder corresponding to this URI, or null if
+   *          the folder doesn't already exist.
+   */
+  getExistingFolder(aFolderURI) {
+    const fls = Cc["@mozilla.org/mail/folder-lookup;1"].getService(
+      Ci.nsIFolderLookupService
+    );
+    return fls.getFolderForURL(aFolderURI);
+  },
+
+  /**
+   * Get the nsIMsgFolder corresponding to this URI, or create a detached
+   * folder if it doesn't already exist.
+   *
+   * @param {string} aFolderURI - The URI of the target folder
+   * @returns {?nsIMsgFolder} Folder corresponding to this URI. Will return null
+   *   if aUrl is not a folder url.
+   */
+  getOrCreateFolder(aFolderURI) {
+    const fls = Cc["@mozilla.org/mail/folder-lookup;1"].getService(
+      Ci.nsIFolderLookupService
+    );
+    return fls.getOrCreateFolderForURL(aFolderURI);
+  },
+
+  /**
+   * Display this message header in a new tab, a new window or an existing
+   * window, depending on the preference and whether a 3pane or standalone
+   * window is already open. This function should be called when you'd like to
+   * display a message to the user according to the pref set.
+   *
+   * Note: Do not use this if you want to open multiple messages at once. Use
+   *  |displayMessages| instead.
+   *
+   * @param {nsIMsgDBHdr} aMsgHdr - The message header to display.
+   * @param {DBViewWrapper} [aViewWrapperToClone] - A view wrapper to clone.
+   *   If null or not given, the message header's folder's default view will
+   *   be used.
+   * @param {Element} [aTabmail] - A tabmail element to use in case we need to
+   *   open tabs. If null or not given:
+   *    - if one or more 3pane windows are open, the most recent one's tabmail
+   *      is used, and the window is brought to the front
+   *    - if no 3pane windows are open, a standalone window is opened instead
+   *      of a tab
+   */
+  displayMessage(aMsgHdr, aViewWrapperToClone, aTabmail) {
+    this.displayMessages([aMsgHdr], aViewWrapperToClone, aTabmail);
+  },
+
+  /**
+   * Display these message headers in new tabs, new windows or existing
+   * windows, depending on the preference, the number of messages, and whether
+   * a 3pane or standalone window is already open. This function should be
+   * called when you'd like to display multiple messages to the user according
+   * to the pref set.
+   *
+   * @param {nsIMsgHdr[]} aMsgHdrs - An array containing the message headers to
+   *   display. The array should contain at least one message header.
+   * @param {DBViewWrapper} [aViewWrapperToClone] - A DB view wrapper to clone
+   *   for each of the tabs or windows.
+   * @param {Element} [aTabmail] - A tabmail element to use in case we need to
+   *   open tabs. If given, the window containing the tabmail is assumed to be
+   *   in front. If null or not given:
+   *    - if one or more 3pane windows are open, the most recent one's tabmail
+   *      is used, and the window is brought to the front
+   *    - if no 3pane windows are open, a standalone window is opened instead
+   *      of a tab
+   * @param {boolean} [forceTab] - Boolean that let us know when the middle
+   *   click button triggered the event. We then proceed to open the message in
+   *   a new tab.
+   * @param {boolean} [shiftPressed] - We take into account if the user pressed
+   *   the shift key to know how to open a message in a new tab.
+   */
+  displayMessages(
+    aMsgHdrs,
+    aViewWrapperToClone,
+    aTabmail,
+    forceTab = false,
+    shiftPressed
+  ) {
+    const openMessageBehavior = Services.prefs.getIntPref(
+      "mail.openMessageBehavior"
+    );
+
+    if (forceTab) {
+      this.openMessageInNewTab(
+        aMsgHdrs,
+        aViewWrapperToClone,
+        aTabmail,
+        shiftPressed,
+        forceTab
+      );
+      return;
+    }
+
+    const behaviorEnum = lazy.MailConsts.OpenMessageBehavior;
+    switch (openMessageBehavior) {
+      case behaviorEnum.NEW_WINDOW:
+        this.openMessagesInNewWindows(aMsgHdrs, aViewWrapperToClone);
+        break;
+      case behaviorEnum.EXISTING_WINDOW:
+        // Try reusing an existing window. If we can't, fall back to opening
+        // new windows.
+        if (
+          aMsgHdrs.length > 1 ||
+          !this.openMessageInExistingWindow(aMsgHdrs[0])
+        ) {
+          this.openMessagesInNewWindows(aMsgHdrs, aViewWrapperToClone);
+        }
+        break;
+      case behaviorEnum.NEW_TAB:
+        this.openMessageInNewTab(
+          aMsgHdrs,
+          aViewWrapperToClone,
+          aTabmail,
+          shiftPressed,
+          forceTab
+        );
+        break;
+    }
+  },
+
+  /**
+   * Open the messages in a Tab.
+   *
+   * @param {nsIMsgHdr[]} aMsgHdrs - An array containing the message headers to
+   *   display. The array should contain at least one message header.
+   * @param {DBViewWrapper} [aViewWrapperToClone] - A DB view wrapper to clone
+   *   for each of the tabs or windows.
+   * @param {Element} [aTabmail] - A tabmail element to use in case we need to
+   *   open tabs. If given, the window containing the tabmail is assumed to be
+   *   in front. If null or not given:
+   *    - if one or more 3pane windows are open, the most recent one's tabmail
+   *      is used, and the window is brought to the front
+   *    - if no 3pane windows are open, a standalone window is opened instead
+   *      of a tab
+   * @param {boolean} [shiftPressed] - We take into account if the user pressed
+   *   the shift key to know how to open a message in a new tab. We only look at
+   *   the loadInBackground preferefence if this value is provided.
+   * @param {boolean} [backgroundCmd] - We take into account whether we are
+   *   opening a tab from middle click, in which case the tab should only
+   *   open in the background.
+   */
+  openMessageInNewTab(
+    aMsgHdrs,
+    aViewWrapperToClone,
+    aTabmail,
+    shiftPressed,
+    backgroundCmd
+  ) {
+    let mail3PaneWindow = null;
+    if (!aTabmail) {
+      // Try opening new tabs in a 3pane window.
+      mail3PaneWindow = Services.wm.getMostRecentWindow("mail:3pane");
+      if (mail3PaneWindow) {
+        aTabmail = mail3PaneWindow.document.getElementById("tabmail");
+      }
+    }
+
+    if (!aTabmail) {
+      // We still haven't found a tabmail, so we'll need to open new windows.
+      this.openMessagesInNewWindows(aMsgHdrs, aViewWrapperToClone);
+      return;
+    }
+
+    if (
+      aMsgHdrs.length > Services.prefs.getIntPref("mailnews.open_tab_warning")
+    ) {
+      const [title, message] = lazy.l10n.formatValuesSync([
+        "open-tabs-warning-confirmation-title",
+        {
+          id: "open-tabs-warning-confirmation",
+          args: { count: aMsgHdrs.length },
+        },
+      ]);
+      if (!Services.prompt.confirm(null, title, message)) {
+        return;
+      }
+    }
+
+    const loadInBgPref =
+      backgroundCmd || Services.prefs.getBoolPref("mail.tabs.loadInBackground");
+
+    // If shiftPressed is not specified the message should ignore the
+    // loadInBackground preference.
+    const loadInBackground =
+      shiftPressed !== undefined && loadInBgPref !== shiftPressed;
+
+    // Open all the tabs in the background, except for the last one.
+    for (const [i, msgHdr] of aMsgHdrs.entries()) {
+      aTabmail.openTab("mailMessageTab", {
+        messageURI: msgHdr.folder.getUriForMsg(msgHdr),
+        viewWrapper: aViewWrapperToClone,
+        background: i < aMsgHdrs.length - 1 || loadInBackground,
+        disregardOpener: aMsgHdrs.length > 1,
+      });
+    }
+
+    mail3PaneWindow?.focus();
+  },
+
+  /**
+   * Show this message in an existing window.
+   *
+   * @param {nsIMsgDBHdr} aMsgHdr - The message header to display.
+   * @param {DBViewWrapper} [aViewWrapperToClone] - A DB view wrapper to clone
+   *   for the message window.
+   * @returns {boolean} true if an existing window was found and the message
+   *   header was displayed, false otherwise.
+   */
+  openMessageInExistingWindow(aMsgHdr, aViewWrapperToClone) {
+    const messageWindow = Services.wm.getMostRecentWindow("mail:messageWindow");
+    if (messageWindow) {
+      messageWindow.displayMessage(aMsgHdr, aViewWrapperToClone);
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * Open a new standalone message window with this header.
+   *
+   * @param {nsIMsgDBHdr} aMsgHdr the message header to display
+   * @param {DBViewWrapper} [aViewWrapperToClone] - A DB view wrapper to clone
+   *   for the message window.
+   * @returns {DOMWindow} the opened window
+   */
+  openMessageInNewWindow(aMsgHdr, aViewWrapperToClone) {
+    // It sucks that we have to go through XPCOM for this.
+    const args = { msgHdr: aMsgHdr, viewWrapperToClone: aViewWrapperToClone };
+    args.wrappedJSObject = args;
+
+    return Services.ww.openWindow(
+      null,
+      "chrome://messenger/content/messageWindow.xhtml",
+      "",
+      "all,chrome,dialog=no,status,toolbar",
+      args
+    );
+  },
+
+  /**
+   * Open new standalone message windows for these headers. This will prompt
+   * for confirmation if the number of windows to be opened is greater than the
+   * value of the mailnews.open_window_warning preference.
+   *
+   * @param {nsIMsgHdr[]} aMsgHdrs - An array containing the message headers
+   *   to display.
+   * @param {DBViewWrapper} [aViewWrapperToClone] - A DB view wrapper to clone
+   *   for each message window.
+   */
+  openMessagesInNewWindows(aMsgHdrs, aViewWrapperToClone) {
+    if (
+      aMsgHdrs.length >
+      Services.prefs.getIntPref("mailnews.open_window_warning")
+    ) {
+      const [title, message] = lazy.l10n.formatValuesSync([
+        "open-windows-warning-confirmation-title",
+        {
+          id: "open-windows-warning-confirmation",
+          args: { count: aMsgHdrs.length },
+        },
+      ]);
+      if (!Services.prompt.confirm(null, title, message)) {
+        return;
+      }
+    }
+
+    for (const msgHdr of aMsgHdrs) {
+      this.openMessageInNewWindow(msgHdr, aViewWrapperToClone);
+    }
+  },
+
+  /**
+   * Display the given folder in the 3pane of the most recent 3pane window.
+   *
+   * @param {string} folderURI - The URI of the folder to display
+   */
+  displayFolderIn3Pane(folderURI) {
+    // Try opening new tabs in a 3pane window
+    const win = Services.wm.getMostRecentWindow("mail:3pane");
+    const tabmail = win.document.getElementById("tabmail");
+    if (!tabmail.currentAbout3Pane) {
+      tabmail.switchToTab(tabmail.tabInfo[0]);
+      tabmail.updateCurrentTab();
+    }
+    tabmail.currentAbout3Pane.displayFolder(folderURI);
+    win.focus();
+  },
+
+  /**
+   * Display this message header in a folder tab in a 3pane window. This is
+   * useful when the message needs to be displayed in the context of its folder
+   * or thread.
+   *
+   * @param {nsIMsgDBHdr} msgHdr - The message header to display.
+   * @param {boolean} [openIfMessagePaneHidden] - If true, and the folder tab's
+   *   message pane is hidden, opens the message in a new tab or window.
+   *   Otherwise uses the folder tab.
+   */
+  displayMessageInFolderTab(msgHdr, openIfMessagePaneHidden) {
+    // Try opening new tabs in a 3pane window
+    const mail3PaneWindow = Services.wm.getMostRecentWindow("mail:3pane");
+    if (mail3PaneWindow) {
+      if (openIfMessagePaneHidden) {
+        const tab =
+          mail3PaneWindow.document.getElementById("tabmail").tabInfo[0];
+        if (!tab.chromeBrowser.contentWindow.paneLayout.messagePaneVisible) {
+          this.displayMessage(msgHdr);
+          return;
+        }
+      }
+
+      mail3PaneWindow.MsgDisplayMessageInFolderTab(msgHdr);
+
+      if (Ci.nsIMessengerWindowsIntegration) {
+        Cc["@mozilla.org/messenger/osintegration;1"]
+          .getService(Ci.nsIMessengerWindowsIntegration)
+          .showWindow(mail3PaneWindow);
+      }
+      mail3PaneWindow.focus();
+      return;
+    }
+
+    const args = { msgHdr };
+    args.wrappedJSObject = args;
+    Services.ww.openWindow(
+      null,
+      "chrome://messenger/content/messenger.xhtml",
+      "",
+      "all,chrome,dialog=no,status,toolbar",
+      args
+    );
+  },
+
+  /**
+   * Open the given .eml file.
+   *
+   * @param {DOMWindow} win - The window which the file is being opened within.
+   * @param {nsIFile} aFile - The file being opened.
+   * @param {nsIURL} aURL - The full file URL.
+   */
+  openEMLFile(win, aFile, aURL) {
+    const url = aURL
+      .mutate()
+      .setQuery("type=application/x-message-display")
+      .finalize();
+
+    let fstream = null;
+    let headers = new Map();
+    // Read this eml and extract its headers to check for X-Unsent.
+    try {
+      fstream = Cc["@mozilla.org/network/file-input-stream;1"].createInstance(
+        Ci.nsIFileInputStream
+      );
+      fstream.init(aFile, -1, 0, 0);
+      const data = lazy.NetUtil.readInputStreamToString(
+        fstream,
+        fstream.available()
+      );
+      headers = lazy.MimeParser.extractHeaders(data);
+    } catch (e) {
+      // Ignore errors on reading the eml or extracting its headers. The test for
+      // the X-Unsent header below will fail and the message window will take care
+      // of any error handling.
+    } finally {
+      if (fstream) {
+        fstream.close();
+      }
+    }
+
+    if (headers.get("X-Unsent") == "1") {
+      const msgWindow = Cc["@mozilla.org/messenger/msgwindow;1"].createInstance(
+        Ci.nsIMsgWindow
+      );
+      lazy.MailServices.compose.OpenComposeWindow(
+        null,
+        {},
+        url.spec,
+        Ci.nsIMsgCompType.Draft,
+        Ci.nsIMsgCompFormat.Default,
+        null,
+        null,
+        msgWindow
+      );
+    } else if (
+      Services.prefs.getIntPref("mail.openMessageBehavior") ==
+        lazy.MailConsts.OpenMessageBehavior.NEW_TAB &&
+      win.document.getElementById("tabmail")
+    ) {
+      win.document
+        .getElementById("tabmail")
+        .openTab("mailMessageTab", { messageURI: url.spec });
+    } else {
+      win.openDialog(
+        "chrome://messenger/content/messageWindow.xhtml",
+        "_blank",
+        "all,chrome,dialog=no,status,toolbar",
+        url
+      );
+    }
+  },
+
+  /**
+   * The number of milliseconds to wait between loading of folders in
+   * |takeActionOnFolderAndDescendents|.  We wait at all because
+   * opening msf databases is a potentially expensive synchronous operation that
+   * can approach the order of a second in pathological cases like gmail's
+   * all mail folder.
+   *
+   * If we did not use a timer or otherwise spin the event loop we would
+   * completely lock up the UI.  In theory we would still maintain some degree
+   * of UI responsiveness if we just used postMessage to break up our work so
+   * that the event loop still got a chance to run between our folder openings.
+   * The use of any delay between processing folders is to try and avoid causing
+   * system-wide interactivity problems from dominating the system's available
+   * disk seeks to such an extent that other applications start experiencing
+   * non-trivial I/O waits.
+   *
+   * The specific choice of delay remains an arbitrary one to maintain app
+   * and system responsiveness per the above while also processing as many
+   * folders as quickly as possible.
+   *
+   * This is exposed primarily to allow unit tests to set this to 0 to minimize
+   * throttling.
+   */
+  INTER_FOLDER_PROCESSING_DELAY_MS: 10,
+
+  /**
+   * Set a string property on a folder and all of its descendents, taking care
+   * to avoid locking up the main thread and to avoid leaving folder databases
+   * open.  To avoid locking up the main thread we operate in an asynchronous
+   * fashion; we invoke a callback when we have completed our work.
+   *
+   * Using this function will write the value into the folder cache
+   * as well as the folder itself.  Hopefully you want this; if
+   * you do not, keep in mind that the only way to avoid that is to retrieve
+   * the nsIMsgDatabase and then the nsIDbFolderInfo.  You would want to avoid
+   * that as much as possible because once those are exposed to you, XPConnect
+   * is going to hold onto them creating a situation where you are going to be
+   * in severe danger of extreme memory bloat unless you force garbage
+   * collections after every time you close a database.
+   *
+   * @param {nsIMsgFolder} parentFolder - The parent folder; we take action on it and all
+   *     of its descendents.
+   * @param {Function} action - the function to call on each folder.
+   */
+  async takeActionOnFolderAndDescendents(parentFolder, action) {
+    // We need to add the base folder as it is not included by .descendants.
+    const allFolders = [parentFolder, ...parentFolder.descendants];
+
+    // - worker function
+    function* folderWorker() {
+      for (const folder of allFolders) {
+        try {
+          action(folder);
+        } catch (ex) {
+          console.warn(`Folder action failed for ${folder.URI}`, ex);
+        }
+        yield undefined;
+      }
+    }
+    const worker = folderWorker();
+
+    return new Promise(resolve => {
+      // - driver logic
+      const timer = Cc["@mozilla.org/timer;1"].createInstance(Ci.nsITimer);
+      function folderDriver() {
+        if (worker.next().done) {
+          timer.cancel();
+          resolve();
+        }
+      }
+      // make sure there is at least 100 ms of not us between doing things.
+      timer.initWithCallback(
+        folderDriver,
+        this.INTER_FOLDER_PROCESSING_DELAY_MS,
+        Ci.nsITimer.TYPE_REPEATING_SLACK
+      );
+    });
+  },
+
+  /**
+   * Get the identity that most likely is the best one to use, given the hint.
+   *
+   * @param {nsIMsgIdentity[]} identities - The candidates to pick from.
+   * @param {string} [optionalHint] - String containing comma separated mailboxes.
+   * @param {boolean} useDefault - If true, use the default identity of the
+   *   account as last choice. This is useful when all default account as last
+   *   choice. This is useful when all identities are passed in. Otherwise, use
+   *   the first entity in the list.
+   * @returns {Array} - An array of two elements, [identity, matchingHint].
+   *   identity is an nsIMsgIdentity and matchingHint is a string.
+   */
+  getBestIdentity(identities, optionalHint, useDefault = false) {
+    const identityCount = identities.length;
+    if (identityCount < 1) {
+      return [null, null];
+    }
+
+    // If we have a hint to help us pick one identity, search for a match.
+    // Even if we only have one identity, check which hint might match.
+    if (optionalHint) {
+      const hints =
+        lazy.MailServices.headerParser.makeFromDisplayAddress(optionalHint);
+
+      for (const hint of hints) {
+        for (const identity of identities.filter(i => i.email)) {
+          if (hint.email.toLowerCase() == identity.email.toLowerCase()) {
+            return [identity, hint];
+          }
+        }
+      }
+
+      // Lets search again, this time for a match from catchAll.
+      for (const hint of hints) {
+        for (const identity of identities.filter(
+          i => i.email && i.catchAll && i.catchAllHint
+        )) {
+          for (let caHint of identity.catchAllHint.toLowerCase().split(",")) {
+            // If the hint started with *@, it applies to the whole domain. In
+            // this case return the hint so it can be used for replying.
+            // If the hint was for a more specific hint, don't return a hint
+            // so that the normal from address for the identity is used.
+            const wholeDomain = caHint.trim().startsWith("*@");
+            caHint = caHint.trim().replace(/^\*/, ""); // Remove initial star.
+            if (hint.email.toLowerCase().includes(caHint)) {
+              return wholeDomain ? [identity, hint] : [identity, null];
+            }
+          }
+        }
+      }
+    }
+
+    // Still no matches? Give up and pick the default or the first one.
+    if (useDefault) {
+      const defaultAccount = lazy.MailServices.accounts.defaultAccount;
+      if (defaultAccount && defaultAccount.defaultIdentity) {
+        return [defaultAccount.defaultIdentity, null];
+      }
+    }
+
+    return [identities[0], null];
+  },
+
+  getIdentityForServer(server, optionalHint) {
+    const identities =
+      lazy.MailServices.accounts.getIdentitiesForServer(server);
+    return this.getBestIdentity(identities, optionalHint);
+  },
+
+  /**
+   * Get the identity for the given header.
+   *
+   * @param {nsIMsgDBHdr} hdr - Message header.
+   * @param {nsIMsgCompType} type - Compose type the identity is used for.
+   * @returns {Array} - An array of two elements, [identity, matchingHint].
+   *   identity is an nsIMsgIdentity and matchingHint is a string.
+   */
+  getIdentityForHeader(hdr, type, hint = "") {
+    let server = null;
+    let identity = null;
+    let matchingHint = null;
+    const folder = hdr.folder;
+    if (folder) {
+      server = folder.server;
+      identity = folder.customIdentity;
+      if (identity) {
+        return [identity, null];
+      }
+    }
+
+    if (!server) {
+      const accountKey = hdr.accountKey;
+      if (accountKey) {
+        const account = lazy.MailServices.accounts.getAccount(accountKey);
+        if (account) {
+          server = account.incomingServer;
+        }
+      }
+    }
+
+    let hintForIdentity = "";
+    if (type == Ci.nsIMsgCompType.ReplyToList) {
+      hintForIdentity = hint;
+    } else if (
+      type == Ci.nsIMsgCompType.Template ||
+      type == Ci.nsIMsgCompType.EditTemplate ||
+      type == Ci.nsIMsgCompType.EditAsNew
+    ) {
+      hintForIdentity = hdr.author;
+    } else {
+      hintForIdentity = hdr.recipients + "," + hdr.ccList + "," + hint;
+    }
+
+    if (server) {
+      [identity, matchingHint] = this.getIdentityForServer(
+        server,
+        hintForIdentity
+      );
+    }
+
+    if (!identity) {
+      [identity, matchingHint] = this.getBestIdentity(
+        lazy.MailServices.accounts.allIdentities,
+        hintForIdentity,
+        true
+      );
+    }
+    return [identity, matchingHint];
+  },
+
+  getInboxFolder(server) {
+    try {
+      var rootMsgFolder = server.rootMsgFolder;
+
+      // Now find the Inbox.
+      return rootMsgFolder.getFolderWithFlags(Ci.nsMsgFolderFlags.Inbox);
+    } catch (ex) {
+      dump(ex + "\n");
+    }
+    return null;
+  },
+
+  /**
+   * Finds a mailing list anywhere in the address books.
+   *
+   * @param {string} entryName - Value against which dirName is checked.
+   * @returns {nsIAbDirectory|null} - Found list or null.
+   */
+  findListInAddressBooks(entryName) {
+    for (const abDir of lazy.MailServices.ab.directories) {
+      if (abDir.supportsMailingLists) {
+        for (const dir of abDir.childNodes) {
+          if (dir.isMailList && dir.dirName == entryName) {
+            return dir;
+          }
+        }
+      }
+    }
+    return null;
+  },
+
+  /**
+   * Recursively search for message id in a given folder and its subfolders,
+   * return the first one found.
+   *
+   * @param {string} msgId - The message id to find.
+   * @param {nsIMsgFolder} folder - The folder to check.
+   * @param {boolean} [recursively=true] - Whether to search the folder recursively.
+   * @returns {nsIMsgDBHdr}
+   */
+  findMsgIdInFolder(msgId, folder, recursively = true) {
+    let msgHdr;
+
+    // Search in folder.
+    if (!folder.isServer) {
+      try {
+        const weOpenedDB = !folder.databaseOpen;
+        msgHdr = folder.msgDatabase.getMsgHdrForMessageID(msgId);
+        if (msgHdr) {
+          return msgHdr;
+        }
+        if (weOpenedDB) {
+          folder.msgDatabase.forceClosed();
+          folder.msgDatabase = null;
+        }
+      } catch (ex) {
+        console.error(`Database for ${folder.URI} not accessible`);
+      }
+    }
+
+    if (recursively) {
+      // Search subfolders recursively.
+      for (const currentFolder of folder.subFolders) {
+        msgHdr = this.findMsgIdInFolder(msgId, currentFolder, recursively);
+        if (msgHdr) {
+          return msgHdr;
+        }
+      }
+    }
+
+    return null;
+  },
+
+  /**
+   * Recursively search for message id in all msg folders, return the first one
+   * found.
+   *
+   * @param {string} msgId - The message id to search for.
+   * @param {nsIMsgIncomingServer} [startServer] - The server to check first.
+   * @returns {nsIMsgDBHdr}
+   */
+  getMsgHdrForMsgId(msgId, startServer) {
+    let allServers = lazy.MailServices.accounts.allServers;
+    if (startServer) {
+      allServers = [startServer].concat(
+        allServers.filter(s => s.key != startServer.key)
+      );
+    }
+    for (const server of allServers) {
+      if (server && server.canSearchMessages && !server.isDeferredTo) {
+        const msgHdr = this.findMsgIdInFolder(msgId, server.rootFolder);
+        if (msgHdr) {
+          return msgHdr;
+        }
+      }
+    }
+    return null;
+  },
+
+  /**
+   * Recursively search for message id in all msg folders and open the first
+   * matching message found.
+   *
+   * @param {string} msgId - The message id string without the brackets.
+   * @param {nsIMsgIncomingServer} [startServer] - The server to check first.
+   * @param {DOMWindow} [window] - The message window to load the message into.
+   * @param {boolean} [silent=false] - Suppress the message-not-found alert.
+   * @returns {boolean} Whether the message was found and opened.
+   */
+  openMessageForMessageId(msgId, startServer, window, silent = false) {
+    window?.setCursor("wait");
+    const msgHdr = this.getMsgHdrForMsgId(msgId, startServer);
+    window?.setCursor("auto");
+
+    // If message was found open corresponding message.
+    if (msgHdr) {
+      if (window) {
+        if (window.parent.location == "about:3pane") {
+          // Message in 3pane.
+          window.parent.selectMessage(msgHdr);
+        } else {
+          // Message in tab, standalone message window.
+          const uri = msgHdr.folder.getUriForMsg(msgHdr);
+          window.displayMessage(uri);
+        }
+      } else {
+        this.displayMessage(msgHdr);
+      }
+      return true;
+    }
+    if (silent) {
+      return false;
+    }
+    const bundle = Services.strings.createBundle(
+      "chrome://messenger/locale/messenger.properties"
+    );
+    Services.prompt.alert(
+      window,
+      bundle.GetStringFromName("errorOpenMessageForMessageIdTitle"),
+      bundle.formatStringFromName("errorOpenMessageForMessageIdMessage", [
+        `<${msgId}>`,
+      ])
+    );
+    return false;
+  },
+
+  /**
+   * Open a message identified by a 'mid:' URI. Prefer the decoded Message-ID,
+   * then try the original suffix for compatibility with legacy raw links.
+   * Use the original suffix if percent-decoding fails or produces a NUL.
+   *
+   * @param {string} uri - The 'mid:' URI to open.
+   * @throws {Error} If the URI does not use the 'mid:' scheme.
+   */
+  openMidUri(uri) {
+    if (URL.parse(uri)?.protocol != "mid:") {
+      throw new Error("Expected a mid: URI");
+    }
+    const rawId = uri.slice(uri.indexOf(":") + 1);
+    let decodedId;
+    try {
+      decodedId = decodeURIComponent(rawId);
+    } catch (ex) {
+      if (!(ex instanceof URIError)) {
+        throw ex;
+      }
+      decodedId = rawId;
+    }
+
+    if (
+      decodedId != rawId &&
+      !decodedId.includes("\0") &&
+      this.openMessageForMessageId(decodedId, null, null, true)
+    ) {
+      return;
+    }
+    this.openMessageForMessageId(rawId);
+  },
+
+  /**
+   * Take the message id from the messageIdNode and use the url defined in the
+   * hidden pref "mailnews.messageid_browser.url" to open it in a browser window
+   * (%mid is replaced by the message id).
+   *
+   * @param {string} messageId - The message id to open.
+   */
+  openBrowserWithMessageId(messageId) {
+    let browserURL = Services.prefs.getStringPref(
+      "mailnews.messageid_browser.url"
+    );
+    browserURL = browserURL.replace(/%mid/, encodeURIComponent(messageId));
+    lazy.openLinkExternally(browserURL, { addToHistory: false });
+  },
+
+  /**
+   * If the 'news' URI contains a message-id, retrieve the corresponding
+   * message from the server, save it in a temporary EML file, and display it
+   * in a new tab or message window.
+   * For URIs that identify a newsgroup, ask to subscribe, if necessary, and
+   * open the group in the folder pane.
+   * For 'nntp' URIs that identify an article by newsgroup and article number,
+   * ask to subscribe to the newsgroup, if necessary, and display the article.
+   * If no host is specified in the URI, the server of the first NNTP account
+   * is used.
+   *
+   * @param {string} uri - The 'news' or 'nntp' URI to open.
+   * @param {DOMWindow} win - The window which the URI is being opened within.
+   */
+  handleNewsUri(uri, win) {
+    // @see {@link https://datatracker.ietf.org/doc/html/rfc5538#section-2.2}
+    if (!URL.canParse(uri)) {
+      console.warn(`Malformed news URI: ${uri}`);
+      return;
+    }
+    const url = new URL(uri);
+    if (url.pathname.length <= 1) {
+      return;
+    }
+
+    // Deprecated 'snews' URIs are 'news' URIs using NNTP over TLS. Configured
+    // servers use their own security settings, so this only matters when
+    // connecting to an unknown server.
+    // @see {@link https://datatracker.ietf.org/doc/html/rfc5538#section-8.1}
+    const secure = ["snews:", "nntps:"].includes(url.protocol);
+    // 'nntp' URIs identify a newsgroup, or an article by newsgroup and
+    // article number. 'nntps' is the same using NNTP over TLS.
+    // @see {@link https://datatracker.ietf.org/doc/html/rfc5538#section-3}
+    const isNntp = ["nntp:", "nntps:"].includes(url.protocol);
+    url.protocol = "news:";
+
+    const firstNntpServer = lazy.MailServices.accounts.accounts.find(
+      account => account.incomingServer.type == "nntp"
+    )?.incomingServer;
+
+    // 'news' URIs identifying a newsgroup.
+
+    let identifier = decodeURIComponent(url.pathname.slice(1));
+    let articleNumber;
+    if (isNntp) {
+      [identifier, articleNumber] = identifier.split("/");
+      if (
+        !identifier ||
+        identifier.includes("@") ||
+        (articleNumber && !lazy.NntpUtils.isValidArticleNumber(articleNumber))
+      ) {
+        console.warn(`Unsupported nntp URI: ${uri}`);
+        return;
+      }
+    }
+    if (!identifier.includes("@")) {
+      if (identifier.includes("*")) {
+        console.warn(`Unsupported news URI: ${url}`);
+        return;
+      }
+
+      const server = url.hostname
+        ? lazy.MailServices.accounts.findServer("", url.hostname, "nntp")
+        : firstNntpServer;
+      if (!server) {
+        console.warn(`Unknown news server: ${url.hostname}`);
+        return;
+      }
+
+      if (
+        !server
+          .QueryInterface(Ci.nsINntpIncomingServer)
+          .containsNewsgroup(identifier)
+      ) {
+        const result = Services.prompt.confirm(
+          win,
+          null,
+          lazy.l10n.formatValueSync("auto-subscribe-text", {
+            newsgroup: identifier,
+          })
+        );
+        if (!result) {
+          return;
+        }
+        server.subscribeToNewsgroup(identifier);
+      }
+      const folder = server.findGroup(identifier);
+      if (!articleNumber) {
+        this.displayFolderIn3Pane(folder.URI);
+        return;
+      }
+
+      const msgHdr = folder.getMsgHdr(articleNumber);
+      if (msgHdr) {
+        this.displayMessage(msgHdr);
+        return;
+      }
+      url.hostname = server.hostname;
+      url.port = server.port;
+      url.pathname = "/";
+      url.search = new URLSearchParams({
+        group: identifier,
+        key: articleNumber,
+      });
+      this._openNewsArticle(url.href, win);
+      return;
+    }
+
+    // URIs that contain a message-ID.
+
+    const server = url.hostname
+      ? lazy.MailServices.accounts.findServer(
+          "",
+          url.hostname,
+          "nntp",
+          Number(url.port) || 0
+        )
+      : firstNntpServer;
+    if (server) {
+      url.hostname = server.hostname;
+      url.port = server.port;
+    } else if (!url.hostname) {
+      console.warn("No news server set up.");
+      return;
+    } else {
+      // This URL is for a server that we don't know. Prompt the user for
+      // confirmation before sending any traffic to it, and set the port to the
+      // default (based on whether we were given a 'news:' or an 'snews:' URI)
+      // if it's missing.
+      if (secure) {
+        url.protocol = "snews:";
+      }
+      if (!url.port) {
+        url.port = secure
+          ? Ci.nsINntpIncomingServer.DEFAULT_NNTPS_PORT
+          : Ci.nsINntpIncomingServer.DEFAULT_NNTP_PORT;
+      }
+      if (!Services.io.allowPort(Number(url.port), url.protocol.slice(0, -1))) {
+        console.warn(`Port not allowed for news URI: ${url.host}`);
+        return;
+      }
+      const result = Services.prompt.confirm(
+        win,
+        null,
+        lazy.l10n.formatValueSync("unknown-news-server-text", {
+          server: url.host,
+        })
+      );
+      if (!result) {
+        return;
+      }
+    }
+
+    this._openNewsArticle(url.href, win);
+  },
+
+  /**
+   * Retrieve a news article from the server, save it in a temporary EML file,
+   * and display it in a new tab or message window.
+   *
+   * @param {string} uri - The 'news' URI of the article.
+   * @param {DOMWindow} win - The window which the URI is being opened within.
+   */
+  _openNewsArticle(uri, win) {
+    const tempFile = Services.dirsvc.get("TmpD", Ci.nsIFile);
+    tempFile.append("newsuri.eml");
+    tempFile.createUnique(Ci.nsIFile.NORMAL_FILE_TYPE, 0o600);
+    const extAppLauncher = Cc[
+      "@mozilla.org/uriloader/external-helper-app-service;1"
+    ].getService(Ci.nsPIExternalAppLauncher);
+    extAppLauncher.deleteTemporaryFileOnExit(tempFile);
+
+    const messageService = Cc[
+      "@mozilla.org/messenger/messageservice;1?type=news"
+    ].getService(Ci.nsIMsgMessageService);
+    const urlListener = {
+      OnStopRunningUrl(emlUrl, exitCode) {
+        if (!Components.isSuccessCode(exitCode) || tempFile.fileSize <= 0) {
+          console.warn(`Could not open URI ${emlUrl.asciiSpec}`);
+          return;
+        }
+        MailUtils.openEMLFile(win, tempFile, Services.io.newFileURI(tempFile));
+      },
+    };
+    messageService.saveMessageToDisk(uri, tempFile, urlListener, true, null);
+  },
+
+  /**
+   * Construct a 'mid:' URI spec for a plain Message-ID.
+   *
+   * @param {string} messageId - The Message-ID without brackets.
+   * @returns {string} The 'mid:' URI spec, or an empty string for no ID.
+   */
+  constructMidUriSpec(messageId) {
+    if (!messageId) {
+      return "";
+    }
+    return `mid:${encodeURIComponent(messageId).replaceAll("%40", "@")}`;
+  },
+
+  /**
+   * Construct a 'news:' URI spec for a specific message or newsgroup.
+   *
+   * @param {string} identifier - The unencoded Message-ID (without angle
+   *   brackets) or unencoded newsgroup name identified by this URI spec.
+   * @param {nsIMsgIncomingServer} [server] - If provided, the hostname and
+   *   port (if non-standard) of this server will be included in the URI spec.
+   * @returns {string} - The 'news:' URI spec.
+   */
+  constructNewsUriSpec(identifier, server = null) {
+    if (!identifier) {
+      return "";
+    }
+    let spec = "news:";
+    if (server) {
+      spec += `//${server.hostname}`;
+      if (server.port != Ci.nsINntpIncomingServer.DEFAULT_NNTP_PORT) {
+        spec += `:${server.port}`;
+      }
+      spec += "/";
+    }
+    try {
+      spec += encodeURIComponent(identifier).replaceAll("%40", "@");
+      return Services.io.newURI(spec).spec;
+    } catch (e) {
+      console.error("Invalid URI: " + spec);
+    }
+    return "";
+  },
+
+  /**
+   * Display the appropriate warning to inform in which way messages will be
+   * deleted.
+   *
+   * @param {boolean} deleteStorage - If the messages are about to be deleted
+   *   permanently.
+   * @param {nsIMsgDBView} dbView - The view displaying the messages.
+   * @param {nsIMsgFolder} [folder] - Defaults to the folder of the first
+   *   selected message.
+   * @returns {boolean} - True, if the user confirms the deletion.
+   */
+  confirmDelete(deleteStorage, dbView, folder = null) {
+    if (!folder && dbView.numSelected >= 1) {
+      folder = dbView.hdrForFirstSelectedMessage?.folder;
+    }
+    const trashFolder = folder?.isSpecialFolder(
+      Ci.nsMsgFolderFlags.Trash,
+      true
+    );
+
+    let activePref = "";
+    let warningName = "";
+    const warnTrashDelPref = "mail.warn_on_delete_from_trash";
+    const warnShiftDelPref = "mail.warn_on_shift_delete";
+    const warnCollapsedPref = "mail.warn_on_collapsed_thread_operation";
+    const warnNewsPref = "news.warn_on_delete";
+
+    if (trashFolder && Services.prefs.getBoolPref(warnTrashDelPref, true)) {
+      activePref = warnTrashDelPref;
+      warningName = "confirmMsgDelete.deleteFromTrash.desc";
+    }
+    if (
+      !activePref &&
+      dbView.selection.count != dbView.numSelected &&
+      Services.prefs.getBoolPref(warnCollapsedPref, true)
+    ) {
+      activePref = warnCollapsedPref;
+      warningName = "confirmMsgDelete.collapsed.desc";
+    }
+    if (
+      !activePref &&
+      deleteStorage &&
+      !trashFolder &&
+      Services.prefs.getBoolPref(warnShiftDelPref, true)
+    ) {
+      activePref = warnShiftDelPref;
+      warningName = "confirmMsgDelete.deleteNoTrash.desc";
+    }
+    if (
+      !activePref &&
+      folder?.isSpecialFolder(Ci.nsMsgFolderFlags.Newsgroup, true) &&
+      Services.prefs.getBoolPref(warnNewsPref, true)
+    ) {
+      activePref = warnNewsPref;
+      warningName = "confirmMsgDelete.deleteNoTrash.desc";
+    }
+    if (!activePref) {
+      return true;
+    }
+
+    const messengerBundle = Services.strings.createBundle(
+      "chrome://messenger/locale/messenger.properties"
+    );
+    const dontAsk = { value: false };
+    if (
+      Services.prompt.confirmEx(
+        Services.wm.getMostRecentWindow(null),
+        messengerBundle.GetStringFromName("confirmMsgDelete.title"),
+        messengerBundle.GetStringFromName(warningName),
+        Services.prompt.BUTTON_TITLE_IS_STRING * Services.prompt.BUTTON_POS_0 +
+          Services.prompt.BUTTON_TITLE_CANCEL * Services.prompt.BUTTON_POS_1,
+        messengerBundle.GetStringFromName("confirmMsgDelete.delete.label"),
+        "",
+        "",
+        messengerBundle.GetStringFromName("confirmMsgDelete.dontAsk.label"),
+        dontAsk
+      ) != 0
+    ) {
+      return false;
+    }
+
+    if (dontAsk.value) {
+      Services.prefs.setBoolPref(activePref, false);
+    }
+    return true;
+  },
+
+  /**
+   * Set the favicon for the currently visited http(s) page in the favicons db.
+   *
+   * @param {nsIURI} pageURI
+   * @param {nsIURI} iconURI
+   */
+  async setFaviconForPage(pageURI, iconURI) {
+    if (!pageURI.schemeIs("http") && !pageURI.schemeIs("https")) {
+      // Don't try to store favion if this isn't a http(s) page.
+      return;
+    }
+    try {
+      // If the given faviconURI is data URL, set it as is.
+      if (iconURI.schemeIs("data")) {
+        await lazy.PlacesUtils.favicons.setFaviconForPage(
+          pageURI,
+          iconURI,
+          iconURI
+        );
+        return;
+      }
+
+      // Try to find the favicon data from DB.
+      const favicon = await lazy.PlacesUtils.favicons.getFaviconForPage(
+        pageURI,
+        96
+      );
+      if (favicon) {
+        // As valid favicon data is already stored for the page,
+        // we don't have to update.
+        return;
+      }
+
+      // Otherwise, fetch from network.
+      const dataURL = await this.getFaviconDataURLFromNetwork(iconURI);
+      await lazy.PlacesUtils.favicons.setFaviconForPage(
+        pageURI,
+        iconURI,
+        dataURL
+      );
+    } catch (ex) {
+      console.error(`Set favicon for page ${pageURI.spec} FAILED`, ex);
+    }
+  },
+
+  /**
+   * Get favicon data for given URL from network.
+   * ~ copied from browser/components/topsites/TopSites.sys.mjs
+   *
+   * @param {nsIURI} faviconURI - nsIURI for the favicon.
+   * @returns {nsIURI} data URL
+   */
+  async getFaviconDataURLFromNetwork(faviconURI) {
+    const channel = lazy.NetUtil.newChannel({
+      uri: faviconURI,
+      loadingPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+      securityFlags:
+        Ci.nsILoadInfo.SEC_REQUIRE_CORS_INHERITS_SEC_CONTEXT |
+        Ci.nsILoadInfo.SEC_ALLOW_CHROME |
+        Ci.nsILoadInfo.SEC_DISALLOW_SCRIPT,
+      contentPolicyType: Ci.nsIContentPolicy.TYPE_INTERNAL_IMAGE_FAVICON,
+    });
+
+    const resolver = Promise.withResolvers();
+
+    lazy.NetUtil.asyncFetch(channel, async (input, status, request) => {
+      if (!Components.isSuccessCode(status)) {
+        resolver.reject(new Error(`Fetching ${faviconURI.spec} FAILED!`));
+        return;
+      }
+
+      try {
+        const data = lazy.NetUtil.readInputStream(input, input.available());
+        const { contentType } = request.QueryInterface(Ci.nsIChannel);
+        input.close();
+
+        const buffer = new Uint8ClampedArray(data);
+        const blob = new Blob([buffer], { type: contentType });
+        const dataURL = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.addEventListener("load", () => resolve(reader.result));
+          reader.addEventListener("error", reject);
+          reader.readAsDataURL(blob);
+        });
+        resolver.resolve(Services.io.newURI(dataURL));
+      } catch (e) {
+        resolver.reject(e);
+      }
+    });
+
+    return resolver.promise;
+  },
+
+  /**
+   * Copy a file message into a message folder and mark it read.
+   *
+   * @param {nsIFile} msgFile - The .eml file to copy..
+   * @param {nsIMsgFolder} targetFolder - The message to replace.
+   * @param {nsIMsgWindow} msgWindow - The msg window to be used.
+   */
+  async copyFileMessageAsync(msgFile, targetFolder, msgWindow) {
+    const { promise, resolve, reject } = Promise.withResolvers();
+    /** @implements {nsIMsgCopyServiceListener} */
+    const copyServiceListener = {
+      onStartCopy() {},
+      onProgress() {},
+      setMessageKey() {},
+      getMessageId() {
+        return null;
+      },
+      onStopCopy(statusCode) {
+        if (!Components.isSuccessCode(statusCode)) {
+          reject(
+            new Error(
+              `Copy file message failed with error 0x${statusCode.toString(16)}`
+            )
+          );
+          return;
+        }
+        resolve();
+      },
+    };
+
+    lazy.MailServices.copy.copyFileMessage(
+      msgFile,
+      targetFolder,
+      null,
+      false,
+      Ci.nsMsgMessageFlags.Read,
+      "",
+      copyServiceListener,
+      msgWindow
+    );
+    await promise;
+  },
+
+  /**
+   * Update an imap folder for recent changes.
+   *
+   * @param {nsIMsgFolder} folder - Folder to update.
+   */
+  async updateFolderAsync(folder) {
+    if (!(folder instanceof Ci.nsIMsgImapMailFolder)) {
+      return;
+    }
+    const { promise, resolve, reject } = Promise.withResolvers();
+    /**  @implements {nsIUrlListener} */
+    const urlListener = {
+      OnStartRunningUrl() {},
+      OnStopRunningUrl(_url, statusCode) {
+        if (!Components.isSuccessCode(statusCode)) {
+          reject(
+            new Error(
+              `Update folder failed with error 0x${statusCode.toString(16)}`
+            )
+          );
+          return;
+        }
+        resolve();
+      },
+    };
+    folder.updateFolderWithListener(null, urlListener);
+    await promise;
+  },
+
+  /**
+   * @typedef {object} RelatedItems
+   * @property {Map<string, Set<any>>} logins - Login GUIDs and the items
+   *   they are associated with. The login should not be removed unless all
+   *   items in the set are also to be removed.
+   * @property {Iterable<nsIMsgOutgoingServer>} outgoingServers
+   * @property {Iterable<nsIAbDirectory>} addressBooks
+   * @property {Iterable<calICalendar>} calendars
+   */
+
+  /**
+   * Finds account-ish objects that are related to the given mail account.
+   * This is used for offering to clean up the objects when the account is
+   * removed.
+   *
+   * Outgoing servers, address books, and calendars are returned, along with
+   * saved logins for those items.
+   *
+   * @param {nsIMsgAccount} account - The account to check.
+   * @returns {RelatedItems} An object containing arrays of related objects.
+   */
+  async findRelatedItems(account) {
+    const server = account.incomingServer;
+    const { username, hostname, type, authMethod } = server;
+
+    const site = Services.eTLD.getSchemelessSiteFromHost(hostname);
+    const oauthIssuer =
+      authMethod == Ci.nsMsgAuthMethod.OAuth2
+        ? lazy.OAuth2Providers.getHostnameDetails(hostname, type)?.issuer
+        : null;
+    const isSameSite = h => Services.eTLD.getSchemelessSiteFromHost(h) == site;
+    const isSameOAuth = (h, t) =>
+      oauthIssuer &&
+      h &&
+      lazy.OAuth2Providers.getHostnameDetails(h, t)?.issuer == oauthIssuer;
+
+    // Gather logins and the items tied to them.
+
+    const logins = new Map();
+    const allLogins = await Services.logins.getAllLogins();
+    function addLogins(loginOrigin, tiedTo) {
+      for (const login of allLogins) {
+        if (login.origin != loginOrigin || login.username != username) {
+          continue;
+        }
+        if (!logins.has(login.guid)) {
+          logins.set(login.guid, new Set());
+        }
+        logins.get(login.guid).add(tiedTo);
+      }
+    }
+
+    // Find all outgoing servers used by this account, and all those used by
+    // other accounts. Only those used exclusively by this account are returned.
+
+    const thisAccountServerKeys = new Set();
+    const otherAccountServerKeys = new Set();
+    for (const identity of lazy.MailServices.accounts.allIdentities) {
+      if (account.identities.includes(identity)) {
+        thisAccountServerKeys.add(identity.smtpServerKey);
+      } else {
+        otherAccountServerKeys.add(identity.smtpServerKey);
+      }
+    }
+
+    const outgoingServers = new Set();
+    for (const outgoing of lazy.MailServices.outgoingServer.servers) {
+      if (
+        !thisAccountServerKeys.has(outgoing.key) ||
+        otherAccountServerKeys.has(outgoing.key)
+      ) {
+        continue;
+      }
+      outgoingServers.add(outgoing);
+      if (outgoing.type == "smtp") {
+        outgoing.QueryInterface(Ci.nsISmtpServer);
+        if (outgoing.authMethod == Ci.nsMsgAuthMethod.OAuth2) {
+          if (isSameOAuth(outgoing.hostname, "smtp")) {
+            addLogins(`oauth://${oauthIssuer}`, outgoing);
+          }
+        } else {
+          addLogins(`smtp://${outgoing.hostname}`, outgoing);
+        }
+      } else if (["ews", "graph"].includes(outgoing.type)) {
+        addLogins(`https://${server.hostname}`, outgoing);
+      }
+    }
+
+    // Find related address books. An address book is considered related if it
+    // has the same username and is on the same site or same OAuth provider as
+    // the incoming server.
+
+    const addressBooks = new Set();
+    for (const book of lazy.MailServices.ab.directories) {
+      if (
+        book.dirType != Ci.nsIAbManager.CARDDAV_DIRECTORY_TYPE ||
+        book.getStringValue("carddav.username", "") != username
+      ) {
+        continue;
+      }
+      const url = URL.parse(book.getStringValue("carddav.url", ""));
+      if (oauthIssuer) {
+        if (isSameOAuth(url.host, "carddav")) {
+          addressBooks.add(book);
+          addLogins(`oauth://${oauthIssuer}`, book);
+        }
+      } else if (isSameSite(url?.host)) {
+        addressBooks.add(book);
+        addLogins(url.origin, book);
+      }
+    }
+
+    // Find related calendars. A calendar is considered related if it has the
+    // same username and is on the same site or same OAuth provider as the
+    // incoming server.
+
+    const calendars = new Set();
+    for (const calendar of lazy.cal.manager.getCalendars()) {
+      if (
+        calendar.type != "caldav" ||
+        calendar.getProperty("username") != username
+      ) {
+        continue;
+      }
+      if (oauthIssuer) {
+        if (isSameOAuth(calendar.uri.host, "caldav")) {
+          calendars.add(calendar);
+          addLogins(`oauth://${oauthIssuer}`, calendar);
+        }
+      } else if (isSameSite(calendar.uri.host)) {
+        calendars.add(calendar);
+        addLogins(calendar.uri.prePath, calendar);
+      }
+    }
+
+    // Find logins for the incoming server.
+
+    if (oauthIssuer) {
+      addLogins(`oauth://${oauthIssuer}`, account);
+    } else if (server.type == "imap") {
+      addLogins(`imap://${server.hostname}`, account);
+    } else if (server.type == "pop3") {
+      addLogins(`mailbox://${server.hostname}`, account);
+    } else if (["ews", "graph"].includes(server.type)) {
+      addLogins(`https://${server.hostname}`, account);
+    }
+
+    return { logins, outgoingServers, addressBooks, calendars };
+  },
+
+  /**
+   * Format a size in bytes for display, e.g. "1.5 MB".
+   *
+   * @param {number} bytes - The size in bytes.
+   * @param {boolean} [useKB=false] - If true, never use a unit smaller than
+   *   kilobytes.
+   * @returns {string} The localized size.
+   */
+  formatFileSize(bytes, useKB = false) {
+    let size = Math.max(bytes, 0);
+    let unitIndex = 0;
+    if (useKB) {
+      size /= 1024;
+      if (size != 0 && size < 0.1) {
+        size = 0.1;
+      }
+      unitIndex++;
+    }
+    // Move to the next unit if this one would need 4 digits after rounding.
+    while (size >= 999.5 && unitIndex < FILE_SIZE_UNITS.length - 1) {
+      size /= 1024;
+      unitIndex++;
+    }
+    const fractionDigits = unitIndex != 0 && size != 0 && size < 99.95 ? 1 : 0;
+    return getFileSizeFormatter(
+      FILE_SIZE_UNITS[unitIndex],
+      fractionDigits
+    ).format(size);
+  },
+
+  /**
+   * Apply portable filename rules, including Windows device names, trailing
+   * dots, and readable substitutions for unsupported characters.
+   *
+   * Replace spaces with underscores when the
+   * `mail.save_msg_filename_underscores_for_space` preference is enabled.
+   *
+   * @param {string} filename - Unsanitized leaf name.
+   * @returns {string} The sanitized name, without applying length limits.
+   */
+  sanitizeFileName(filename) {
+    let sanitized = filename
+      // eslint-disable-next-line no-control-regex
+      .replace(/[%"<>\x00-\x1f:/\\|?*]/g, character => {
+        return { '"': "'", "<": "(", ">": ")" }[character] ?? "_";
+      })
+      .trim()
+      .replace(/[. ]+$/g, "");
+    if (hasReservedFilenameStem(sanitized)) {
+      sanitized = "_" + sanitized;
+    }
+    return Services.prefs.getBoolPref(
+      "mail.save_msg_filename_underscores_for_space"
+    )
+      ? sanitized.replaceAll(" ", "_")
+      : sanitized;
+  },
+
+  /**
+   * Generate the unsanitized base of an EML filename from a message header.
+   * The compact form contains only the subject and is suitable for drag and
+   * drop. The extended form also contains the author and date and is suitable
+   * for Save As.
+   *
+   * @param {nsIMsgDBHdr} msgHdr - The message header.
+   * @param {object} [options]
+   * @param {string} [options.fallbackName] - Subject to use when the message
+   *   has no subject. Defaults to the localized filename base for the compact
+   *   form and an empty string for the extended form.
+   * @param {boolean} [options.includeAuthorAndDate=false] - Whether to append
+   *   the author and date to the subject.
+   * @returns {string} An unsanitized filename without an extension.
+   */
+  getEmlFilenameBase(
+    msgHdr,
+    { fallbackName, includeAuthorAndDate = false } = {}
+  ) {
+    let subject = msgHdr.mime2DecodedSubject || (fallbackName ?? "");
+    if (!subject && !includeAuthorAndDate && fallbackName == null) {
+      const filename = lazy.l10n.formatValueSync(
+        "messenger-default-save-message-file-name"
+      );
+      subject = filename.endsWith(".eml") ? filename.slice(0, -4) : filename;
+    }
+    if (msgHdr.flags & Ci.nsMsgMessageFlags.HasRe) {
+      subject = "Re: " + subject;
+    }
+
+    if (!includeAuthorAndDate) {
+      return subject;
+    }
+
+    const dateString = new Date(msgHdr.date / 1000)
+      .toTemporalInstant()
+      .toZonedDateTimeISO(Temporal.Now.timeZoneId())
+      .toPlainDateTime()
+      .toString({ smallestUnit: "minute" })
+      .replace("T", " ")
+      .replace(":", "");
+
+    return subject + " - " + msgHdr.mime2DecodedAuthor + " - " + dateString;
+  },
+
+  /**
+   * Sanitize and shorten filenames, preserving their final extension and
+   * adding counters on case-insensitive batch collisions.
+   *
+   * @param {string[]} filenames - Unsanitized filenames, including extensions.
+   * @returns {string[]} One unique name per filename. Treats a leading dot as
+   *   part of the base name rather than an extension separator.
+   */
+  generateUniqueFilenames(filenames) {
+    const occupied = new Set();
+    const nextCounters = new Map();
+
+    function shorten(base, ending) {
+      const tailCount = Math.max(0, 22 - [...ending].length);
+      return (
+        base.replace(
+          new RegExp(`^(.{60}).{4,}(.{${tailCount}})$`, "su"),
+          (_match, prefix, tail) => {
+            // Shortening must not turn a safe base into a device name like CON...
+            if (hasReservedFilenameStem(prefix)) {
+              prefix = prefix.trimEnd().slice(0, -1);
+            }
+            return prefix + "..." + tail;
+          }
+        ) + ending
+      );
+    }
+
+    return filenames.map(name => {
+      const filename = this.sanitizeFileName(name) || "_";
+      const dot = filename.lastIndexOf(".");
+      const base = dot > 0 ? filename.slice(0, dot) : filename;
+      const extension = dot > 0 ? filename.slice(dot) : "";
+      const unnumbered = shorten(base, extension);
+      if (!occupied.has(unnumbered.toLowerCase())) {
+        occupied.add(unnumbered.toLowerCase());
+        return unnumbered;
+      }
+
+      // Names with the same shortened base share counters. Each digit width
+      // needs its own base because longer counters can shorten it further.
+      for (let digits = 1; ; digits++) {
+        const first = Math.max(2, 10 ** (digits - 1));
+        const last = 10 ** digits - 1;
+        const ending = `-${first}${extension}`;
+        const shortenedBase = shorten(base, ending).slice(0, -ending.length);
+        const counterKey = JSON.stringify([
+          shortenedBase.toLowerCase(),
+          extension.toLowerCase(),
+          digits,
+        ]);
+        for (
+          let number = nextCounters.get(counterKey) ?? first;
+          number <= last;
+          number++
+        ) {
+          const candidate = `${shortenedBase}-${number}${extension}`;
+          const key = candidate.toLowerCase();
+          nextCounters.set(counterKey, number + 1);
+          if (!occupied.has(key)) {
+            occupied.add(key);
+            return candidate;
+          }
+        }
+      }
+    });
+  },
+};
+
+function hasReservedFilenameStem(name) {
+  return /^ *(?:CON|CONIN\$|CONOUT\$|PRN|AUX|NUL|(?:COM|LPT)[1-9¹²³]) *$/i.test(
+    name.split(".", 1)[0]
+  );
+}

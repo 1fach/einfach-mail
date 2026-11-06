@@ -1,0 +1,1540 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+
+"use strict";
+
+const { AccountConfig } = ChromeUtils.importESModule(
+  "resource:///modules/accountcreation/AccountConfig.sys.mjs"
+);
+
+const { MockExternalProtocolService } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/MockExternalProtocolService.sys.mjs"
+);
+
+const tabmail = document.getElementById("tabmail");
+let browser;
+let subview;
+let advancedConfigButton;
+
+add_setup(async function () {
+  const tab = tabmail.openTab("contentTab", {
+    url: "chrome://mochitests/content/browser/comm/mail/components/accountcreation/test/browser/files/accountHubEmailManualConfigForm.xhtml",
+  });
+
+  await BrowserTestUtils.browserLoaded(tab.browser);
+  tab.browser.focus();
+  browser = tab.browser;
+  subview = tab.browser.contentWindow.document.querySelector(
+    "email-manual-config-form"
+  );
+  EventUtils.synthesizeMouseAtCenter(subview, {}, browser.contentWindow);
+
+  advancedConfigButton = subview.querySelector("#advancedConfigurationManual");
+
+  MockExternalProtocolService.init();
+  registerCleanupFunction(() => {
+    MockExternalProtocolService.cleanup();
+    tabmail.closeOtherTabs(tabmail.tabInfo[0]);
+  });
+});
+
+add_task(function test_setState() {
+  const state = createFilledAccountConfig();
+
+  subview.setState(state);
+
+  // The current state of the form should be updated.
+  Assert.deepEqual(
+    subview.captureState(),
+    state,
+    "The current state should have been updated"
+  );
+
+  // The form inputs should have the correct values.
+
+  const incomingInputs = {
+    type: "imap",
+    hostname: subview.querySelector("#manualIncomingHostname").value,
+    port: subview.querySelector("#manualIncomingPort").valueAsNumber,
+    socketType: subview.querySelector("#manualIncomingConnectionSecurity")
+      .value,
+    auth: subview.querySelector("#manualIncomingAuthMethod").value,
+    username: subview.querySelector("#manualIncomingUsername").value,
+  };
+  const outgoingInputs = {
+    type: "smtp",
+    hostname: subview.querySelector("#manualOutgoingHostname").value,
+    port: subview.querySelector("#manualOutgoingPort").valueAsNumber,
+    socketType: subview.querySelector("#manualOutgoingConnectionSecurity")
+      .value,
+    auth: subview.querySelector("#manualOutgoingAuthMethod").value,
+    username: subview.querySelector("#manualOutgoingUsername").value,
+  };
+
+  Assert.deepEqual(
+    state.incoming,
+    incomingInputs,
+    "The form incoming input values should be set correctly in setState"
+  );
+
+  Assert.deepEqual(
+    state.outgoing,
+    outgoingInputs,
+    "The form outgoing input values should be set correctly in setState"
+  );
+
+  // The usernames are the same so the same username checkbox should be checked
+  // and the outgoing username should be hidden.
+  Assert.ok(
+    subview.querySelector("#sameUsername").checked,
+    "The same username checkbox should be checked"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(subview.querySelector("#manualOutgoingUsername")),
+    "Outgoing username input should be hidden"
+  );
+
+  // If we change the outgoing username, setting the state should show the
+  // outgoing username and the same username checkbox should not be checked.
+  state.outgoing.username = "new username";
+  subview.setState(state);
+  Assert.ok(
+    !subview.querySelector("#sameUsername").checked,
+    "The same username checkbox should not be checked"
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(
+      subview.querySelector("#manualOutgoingUsername")
+    ),
+    "Outgoing username input should be visible"
+  );
+
+  subview.resetState();
+});
+
+add_task(async function test_showHideOutgoingUsername() {
+  const sameUsernameCheckbox = subview.querySelector("#sameUsername");
+  const outgoingUsername = subview.querySelector("#manualOutgoingUsername");
+  sameUsernameCheckbox.scrollIntoView({ block: "start", behavior: "instant" });
+
+  Assert.ok(
+    BrowserTestUtils.isVisible(outgoingUsername),
+    "The outgoing username should be visible"
+  );
+
+  // The outgoing username should be hidden and not required if the checkbox is
+  // checked.
+  let changeEvent = BrowserTestUtils.waitForEvent(
+    sameUsernameCheckbox,
+    "change"
+  );
+  let hiddenPromise = BrowserTestUtils.waitForAttribute(
+    "hidden",
+    outgoingUsername
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    sameUsernameCheckbox.querySelector("input"),
+    {},
+    browser.contentWindow
+  );
+  await changeEvent;
+  await hiddenPromise;
+
+  Assert.ok(
+    BrowserTestUtils.isHidden(outgoingUsername),
+    "The outgoing username should be hidden"
+  );
+  Assert.ok(
+    !outgoingUsername.required,
+    "The outgoing username should not longer be required"
+  );
+
+  // The outgoing username should be visible and required if the checkbox isn't
+  // checked.
+  changeEvent = BrowserTestUtils.waitForEvent(sameUsernameCheckbox, "change");
+  hiddenPromise = BrowserTestUtils.waitForAttributeRemoval(
+    "hidden",
+    outgoingUsername
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    sameUsernameCheckbox.querySelector("input"),
+    {},
+    browser.contentWindow
+  );
+  await changeEvent;
+  await hiddenPromise;
+
+  Assert.ok(
+    BrowserTestUtils.isVisible(outgoingUsername),
+    "The outgoing username should be visible"
+  );
+  Assert.ok(
+    outgoingUsername.required,
+    "The outgoing username should be required"
+  );
+
+  subview.resetState();
+});
+
+add_task(function test_resetState() {
+  const state = createFilledAccountConfig();
+  subview.setState(state);
+
+  // The set state would check the checkbox, hide the outgoing username
+  // and fill the form fields. Reset state should reset everything.
+
+  subview.resetState();
+  Assert.ok(
+    !subview.querySelector("#sameUsername").checked,
+    "The same username checkbox should not be checked"
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(
+      subview.querySelector("#manualOutgoingUsername")
+    ),
+    "Outgoing username input should be visible"
+  );
+  Assert.equal(
+    subview.querySelector("#manualIncomingUsername").value,
+    "",
+    "The incoming username value should be empty"
+  );
+  Assert.ok(
+    subview.querySelector("#manualOutgoingUsername").required,
+    "Outgoing username input should be required"
+  );
+});
+
+add_task(function test_setStateImapTitle() {
+  const state = createFilledAccountConfig();
+  subview.setState(state);
+
+  Assert.equal(
+    subview.getAttribute("title-id"),
+    "account-hub-manual-config-imap-title",
+    "IMAP config should set the correct title"
+  );
+
+  const title = subview.shadowRoot.querySelector("#title");
+  Assert.equal(
+    document.l10n.getAttributes(title).id,
+    "account-hub-manual-config-imap-title",
+    "Header title l10n id should match"
+  );
+
+  subview.resetState();
+});
+
+add_task(function test_setStateSetsPop3Title() {
+  const state = createFilledAccountConfig();
+  state.incoming.type = "pop3";
+  subview.setState(state);
+
+  Assert.equal(
+    subview.getAttribute("title-id"),
+    "account-hub-manual-config-pop3-title",
+    "POP3 config should set the correct title"
+  );
+
+  const title = subview.shadowRoot.querySelector("#title");
+  Assert.equal(
+    document.l10n.getAttributes(title).id,
+    "account-hub-manual-config-pop3-title",
+    "Header title l10n id should match"
+  );
+  subview.resetState();
+});
+
+add_task(function test_setStateShowsAutomaticChangeIndicators() {
+  const previousConfig = createFilledAccountConfig();
+  previousConfig.incoming.socketType = Ci.nsMsgSocketType.SSL;
+  previousConfig.incoming.port = 993;
+  previousConfig.outgoing.username = "smtp-user";
+  previousConfig.outgoing.socketType = Ci.nsMsgSocketType.SSL;
+  previousConfig.outgoing.port = 465;
+
+  const updatedConfig = previousConfig.copy();
+  updatedConfig.incoming.socketType = Ci.nsMsgSocketType.alwaysSTARTTLS;
+  updatedConfig.incoming.port = 143;
+  updatedConfig.outgoing.port = 587;
+
+  subview.setState(updatedConfig, { previousConfig });
+
+  const incomingSecurity = subview.querySelector(
+    "#manualIncomingConnectionSecurity"
+  );
+  const incomingSecurityHelp = incomingSecurity.shadowRoot.querySelector(
+    ".account-hub-form-small-comment"
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(incomingSecurityHelp),
+    "Incoming security should show an automatic change indicator"
+  );
+  Assert.deepEqual(
+    document.l10n.getAttributes(incomingSecurityHelp),
+    {
+      id: "account-hub-manual-config-security-changed",
+      args: {
+        oldValue: "SSL/TLS",
+        newValue: "STARTTLS",
+      },
+    },
+    "Incoming security should describe the detected change"
+  );
+
+  const incomingPort = subview.querySelector("#manualIncomingPort");
+  const incomingPortHelp = incomingPort.querySelector(
+    ".account-hub-form-small-comment"
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(incomingPortHelp),
+    "Incoming port should show an automatic change indicator"
+  );
+  Assert.deepEqual(
+    document.l10n.getAttributes(incomingPortHelp),
+    {
+      id: "account-hub-manual-config-port-changed",
+      args: {
+        oldValue: 993,
+        newValue: 143,
+      },
+    },
+    "Incoming port should describe the detected change"
+  );
+  Assert.equal(
+    incomingPort.querySelector("input").getAttribute("aria-describedby"),
+    incomingPortHelp.id,
+    "Incoming port should be described by the automatic change indicator"
+  );
+
+  const outgoingPortHelp = subview
+    .querySelector("#manualOutgoingPort")
+    .querySelector(".account-hub-form-small-comment");
+  Assert.deepEqual(
+    document.l10n.getAttributes(outgoingPortHelp),
+    {
+      id: "account-hub-manual-config-port-changed",
+      args: {
+        oldValue: 465,
+        newValue: 587,
+      },
+    },
+    "Outgoing port should describe the detected change"
+  );
+
+  Assert.ok(
+    BrowserTestUtils.isHidden(
+      subview
+        .querySelector("#manualIncomingHostname")
+        .querySelector(".account-hub-form-small-comment")
+    ),
+    "Unchanged fields should not show automatic change indicators"
+  );
+
+  incomingPort.dispatchEvent(
+    new browser.contentWindow.Event("input", { bubbles: true })
+  );
+
+  Assert.ok(
+    BrowserTestUtils.isHidden(incomingSecurityHelp),
+    "Editing the form should clear automatic change indicators"
+  );
+  Assert.ok(
+    !incomingPortHelp.classList.contains("config-change-comment"),
+    "Editing the form should clear input automatic change indicators"
+  );
+
+  subview.resetState();
+});
+
+add_task(async function test_setStateKeepsInvalidFieldsNeutralUntilTouched() {
+  const state = createFilledAccountConfig();
+  state.incoming.hostname = "bad host";
+  state.incoming.username = "";
+  state.incoming.port = 70000;
+  subview.setState(state);
+
+  await new Promise(browser.contentWindow.requestAnimationFrame);
+
+  const incomingHostname = subview.querySelector("#manualIncomingHostname");
+  const incomingUsername = subview.querySelector("#manualIncomingUsername");
+  const incomingPort = subview.querySelector("#manualIncomingPort");
+  const outgoingHostname = subview.querySelector("#manualOutgoingHostname");
+
+  Assert.ok(
+    BrowserTestUtils.isVisible(
+      outgoingHostname.querySelector(".input-success")
+    ),
+    "A valid loaded field should show its success checkmark"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(incomingHostname.querySelector(".input-success")),
+    "A custom-invalid loaded field should not show a success checkmark"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(incomingHostname.querySelector(".input-warning")),
+    "A custom-invalid loaded field should not show an error before interaction"
+  );
+  Assert.equal(
+    incomingHostname.querySelector("input").getAttribute("aria-invalid"),
+    "false",
+    "A custom-invalid loaded field should not expose an error before interaction"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(incomingUsername.querySelector(".input-warning")),
+    "An empty loaded field should not show an error before interaction"
+  );
+  Assert.equal(
+    incomingUsername.querySelector("input").getAttribute("aria-invalid"),
+    "false",
+    "An empty loaded field should not expose an error before interaction"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(incomingPort.querySelector(".input-warning")),
+    "An out-of-range loaded field should not show an error before interaction"
+  );
+  Assert.equal(
+    incomingPort.querySelector("input").getAttribute("aria-invalid"),
+    "false",
+    "An out-of-range loaded field should not expose an error before interaction"
+  );
+
+  const configUpdatedEventPromise = BrowserTestUtils.waitForEvent(
+    subview,
+    "config-updated"
+  );
+  incomingHostname.dispatchEvent(
+    new browser.contentWindow.Event("input", { bubbles: true })
+  );
+  const { detail } = await configUpdatedEventPromise;
+
+  Assert.ok(
+    !detail.completed,
+    "A touched invalid field should mark the form incomplete"
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(
+      incomingHostname.querySelector(".input-warning")
+    ),
+    "A touched invalid field should show an error"
+  );
+  Assert.equal(
+    incomingHostname.querySelector("input").getAttribute("aria-invalid"),
+    "true",
+    "A touched invalid field should expose its error"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(incomingUsername.querySelector(".input-warning")),
+    "Untouched invalid fields should stay neutral when another field is touched"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(incomingPort.querySelector(".input-warning")),
+    "Untouched invalid native fields should stay neutral when another field is touched"
+  );
+
+  subview.resetState();
+});
+
+add_task(function test_setStateClearsTitleForUnknownIncomingType() {
+  const state = new AccountConfig();
+  state.incoming.type = "exchange";
+  subview.setState(state);
+
+  Assert.ok(
+    !subview.hasAttribute("title-id"),
+    "Unknown incoming type should clear the title-id attribute"
+  );
+
+  const title = subview.shadowRoot.querySelector("#title");
+  Assert.equal(
+    document.l10n.getAttributes(title).id,
+    null,
+    "Unknown incoming type should clear the header title l10n id"
+  );
+  subview.resetState();
+});
+
+add_task(async function test_captureStateUsesCurrentValues() {
+  const state = createFilledAccountConfig();
+  // Use password auth to avoid "Unsupported OAuth" form validation.
+  state.incoming.auth = Ci.nsMsgAuthMethod.passwordCleartext;
+  state.outgoing.auth = Ci.nsMsgAuthMethod.passwordCleartext;
+  state.outgoing.username = "smtp-user";
+  subview.setState(state);
+
+  subview.querySelector("#manualIncomingHostname").value = "IMAP.EXAMPLE.COM";
+  subview.querySelector("#manualIncomingUsername").value = "incoming-user";
+  subview.querySelector("#manualIncomingPort").value = "993";
+  subview.querySelector("#manualOutgoingHostname").value = "SMTP.EXAMPLE.COM";
+  subview.querySelector("#manualOutgoingUsername").value = "outgoing-user";
+  subview.querySelector("#manualOutgoingPort").value = "465";
+
+  const isValid = await subview.validate();
+  Assert.ok(isValid, "The edited config should be valid");
+
+  const config = subview.captureState();
+  Assert.equal(
+    config.incoming.hostname,
+    "imap.example.com",
+    "Incoming hostname should be captured and sanitized"
+  );
+  Assert.equal(
+    config.incoming.username,
+    "incoming-user",
+    "Incoming username should be captured"
+  );
+  Assert.equal(config.incoming.port, 993, "Incoming port should be captured");
+  Assert.equal(
+    config.outgoing.hostname,
+    "smtp.example.com",
+    "Outgoing hostname should be captured and sanitized"
+  );
+  Assert.equal(
+    config.outgoing.username,
+    "outgoing-user",
+    "Outgoing username should be captured"
+  );
+  Assert.equal(config.outgoing.port, 465, "Outgoing port should be captured");
+
+  subview.resetState();
+});
+
+add_task(async function test_validateShowsClickableErrorSummary() {
+  const state = createFilledAccountConfig();
+  subview.setState(state);
+
+  const incomingHostname = subview.querySelector("#manualIncomingHostname");
+  const incomingUsername = subview.querySelector("#manualIncomingUsername");
+  const incomingPort = subview.querySelector("#manualIncomingPort");
+  incomingHostname.value = "";
+  incomingUsername.value = "";
+  incomingPort.value = "0";
+
+  const isValid = await subview.validate();
+  Assert.ok(
+    !isValid,
+    "The form should be invalid with missing incoming details"
+  );
+
+  const header =
+    subview.shadowRoot.querySelector("account-hub-header").shadowRoot;
+  const notification = header.querySelector("#emailFormNotification");
+  Assert.ok(!notification.hidden, "The error notification should be visible");
+  Assert.ok(notification.open, "The error notification should be expanded");
+  Assert.equal(
+    document.l10n.getAttributes(
+      header.querySelector("#emailFormNotificationTitle .localized-title")
+    ).id,
+    "account-hub-manual-config-error-summary",
+    "The error notification should use the manual config error title"
+  );
+  Assert.equal(
+    header
+      .querySelector("#emailFormNotificationSummary")
+      .getAttribute("aria-describedby"),
+    "emailFormNotificationText",
+    "The alert summary should describe the error list"
+  );
+
+  const errorLinks = Array.from(
+    header.querySelectorAll(".manual-config-error-list a")
+  );
+  Assert.deepEqual(
+    errorLinks.map(link => link.textContent),
+    ["Hostname", "Username", "Port"],
+    "The error summary should list the invalid fields"
+  );
+
+  const hostnameInput = incomingHostname.querySelector("input");
+  Assert.equal(
+    hostnameInput.getAttribute("aria-invalid"),
+    "true",
+    "The invalid input should be marked invalid"
+  );
+  Assert.equal(
+    hostnameInput.getAttribute("aria-describedby"),
+    "manualIncomingHostnameInputErrorMessage",
+    "The invalid input should be described by its error message"
+  );
+
+  errorLinks[0].click();
+  await TestUtils.waitForCondition(
+    () => browser.contentWindow.document.activeElement == hostnameInput,
+    "The invalid field should be focused"
+  );
+  Assert.equal(
+    browser.contentWindow.document.activeElement,
+    hostnameInput,
+    "Clicking the error summary link should focus the invalid field"
+  );
+
+  let configUpdatedCount = 0;
+  const countConfigUpdated = () => {
+    configUpdatedCount++;
+  };
+  subview.addEventListener("config-updated", countConfigUpdated);
+
+  try {
+    const errorSummary = header.querySelector(".manual-config-error-list");
+    const configUpdated = BrowserTestUtils.waitForEvent(
+      subview,
+      "config-updated"
+    );
+    for (const value of ["bad_h", "bad_ho", "bad_host"]) {
+      incomingHostname.value = value;
+      incomingHostname.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    Assert.equal(
+      configUpdatedCount,
+      0,
+      "Input should wait for the debounce before updating the config"
+    );
+    await configUpdated;
+    Assert.equal(
+      configUpdatedCount,
+      1,
+      "Multiple input events should be coalesced into one config update"
+    );
+    // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
+    await new Promise(resolve => setTimeout(resolve, 150));
+    Assert.equal(
+      configUpdatedCount,
+      1,
+      "No additional config updates should fire after the debounce settles"
+    );
+    Assert.equal(
+      header.querySelector(".manual-config-error-list"),
+      errorSummary,
+      "The error summary should not be re-rendered when the invalid field list is unchanged"
+    );
+  } finally {
+    subview.removeEventListener("config-updated", countConfigUpdated);
+    subview.resetState();
+  }
+});
+
+add_task(async function test_adjustSSLToPort() {
+  const incomingPort = subview.querySelector("#manualIncomingPort");
+  const incomingConnectionSecurity = subview.querySelector(
+    "#manualIncomingConnectionSecurity"
+  );
+  const outgoingPort = subview.querySelector("#manualOutgoingPort");
+  const outgoingConnectionSecurity = subview.querySelector(
+    "#manualOutgoingConnectionSecurity"
+  );
+
+  const config = new AccountConfig();
+
+  // IMAP Testing.
+  config.incoming.type = "imap";
+  subview.setState(config);
+
+  Assert.notEqual(
+    incomingConnectionSecurity.value,
+    Ci.nsMsgSocketType.SSL,
+    "Incoming socket should not be SSL when the state is set"
+  );
+
+  await fireInputEvent(incomingPort, "input", 993);
+  Assert.equal(
+    incomingConnectionSecurity.value,
+    Ci.nsMsgSocketType.SSL,
+    "Incoming socket should be SSL"
+  );
+
+  await fireInputEvent(incomingPort, "input", 143);
+  Assert.equal(
+    incomingConnectionSecurity.value,
+    Ci.nsMsgSocketType.alwaysSTARTTLS,
+    "Incoming socket be STARTTLS"
+  );
+
+  // POP3 Testing.
+  config.incoming.type = "pop3";
+  subview.setState(config);
+
+  await fireInputEvent(incomingPort, "input", 995);
+  Assert.equal(
+    incomingConnectionSecurity.value,
+    Ci.nsMsgSocketType.SSL,
+    "Incoming socket should be SSL"
+  );
+
+  await fireInputEvent(incomingPort, "input", 110);
+  Assert.equal(
+    incomingConnectionSecurity.value,
+    Ci.nsMsgSocketType.alwaysSTARTTLS,
+    "Incoming socket should be STARTTLS"
+  );
+
+  // Outgoing testing.
+  Assert.notEqual(
+    incomingConnectionSecurity.value,
+    Ci.nsMsgSocketType.SSL,
+    "Outgoing socket should not be SSL when the state is set"
+  );
+
+  await fireInputEvent(outgoingPort, "input", 465);
+  Assert.equal(
+    outgoingConnectionSecurity.value,
+    Ci.nsMsgSocketType.SSL,
+    "Outgoing socket should be SSL"
+  );
+
+  await fireInputEvent(outgoingPort, "input", 587);
+  Assert.equal(
+    outgoingConnectionSecurity.value,
+    Ci.nsMsgSocketType.alwaysSTARTTLS,
+    "Outgoing socket should be STARTTLS"
+  );
+
+  subview.resetState();
+});
+
+add_task(async function test_adjustPortToSSLAndProtocol() {
+  const incomingPort = subview.querySelector("#manualIncomingPort");
+  const incomingConnectionSecurity = subview.querySelector(
+    "#manualIncomingConnectionSecurity"
+  );
+  const outgoingPort = subview.querySelector("#manualOutgoingPort");
+  const outgoingConnectionSecurity = subview.querySelector(
+    "#manualOutgoingConnectionSecurity"
+  );
+
+  const config = new AccountConfig();
+  config.incoming.type = "imap";
+  subview.setState(config);
+
+  await fireInputEvent(
+    incomingConnectionSecurity,
+    "change",
+    Ci.nsMsgSocketType.SSL
+  );
+  Assert.equal(
+    incomingPort.value,
+    993,
+    "Incoming port value should match SSL connection security"
+  );
+
+  await fireInputEvent(
+    incomingConnectionSecurity,
+    "change",
+    Ci.nsMsgSocketType.alwaysSTARTTLS
+  );
+  Assert.equal(
+    incomingPort.value,
+    143,
+    "Incoming port value should match STARTTLS connection security"
+  );
+
+  config.incoming.type = "pop3";
+  subview.setState(config);
+
+  await fireInputEvent(
+    incomingConnectionSecurity,
+    "change",
+    Ci.nsMsgSocketType.SSL
+  );
+  Assert.equal(
+    incomingPort.value,
+    995,
+    "Incoming port value should match SSL connection security"
+  );
+
+  await fireInputEvent(
+    incomingConnectionSecurity,
+    "change",
+    Ci.nsMsgSocketType.alwaysSTARTTLS
+  );
+  Assert.equal(
+    incomingPort.value,
+    110,
+    "Incoming port value should match STARTTLS connection security"
+  );
+
+  await fireInputEvent(incomingConnectionSecurity, "change", -1);
+  Assert.equal(
+    incomingPort.valueAsNumber,
+    110,
+    "Incoming port value should stay the same for autodetect"
+  );
+
+  await fireInputEvent(
+    incomingConnectionSecurity,
+    "change",
+    Ci.nsMsgSocketType.SSL
+  );
+  await fireInputEvent(incomingPort, "input", "");
+  Assert.equal(incomingPort.value, "", "Should clear incoming port value");
+
+  await fireInputEvent(incomingConnectionSecurity, "change", -1);
+  Assert.equal(
+    incomingPort.value,
+    "",
+    "Incoming port should stay empty for autodetect"
+  );
+
+  await fireInputEvent(
+    outgoingConnectionSecurity,
+    "change",
+    Ci.nsMsgSocketType.SSL
+  );
+  Assert.equal(
+    outgoingPort.value,
+    465,
+    "Outgoing port value should match SSL connection security"
+  );
+
+  await fireInputEvent(
+    outgoingConnectionSecurity,
+    "change",
+    Ci.nsMsgSocketType.alwaysSTARTTLS
+  );
+  Assert.equal(
+    outgoingPort.value,
+    587,
+    "Outgoing port value should match SSL connection security"
+  );
+
+  await fireInputEvent(outgoingConnectionSecurity, "change", -1);
+  Assert.equal(
+    outgoingPort.valueAsNumber,
+    587,
+    "Outgoing port value should stay the same for autodetect"
+  );
+
+  await fireInputEvent(
+    outgoingConnectionSecurity,
+    "change",
+    Ci.nsMsgSocketType.SSL
+  );
+  await fireInputEvent(outgoingPort, "input", "");
+  Assert.equal(outgoingPort.value, "", "Should clear outgoing port value");
+
+  await fireInputEvent(outgoingConnectionSecurity, "change", -1);
+  Assert.equal(
+    outgoingPort.value,
+    "",
+    "Outgoing port should stay empty for autodetect"
+  );
+
+  subview.resetState();
+});
+
+add_task(async function test_showPlainSecurityError() {
+  const incomingConnectionSecurity = subview.querySelector(
+    "#manualIncomingConnectionSecurity"
+  );
+  const outgoingConnectionSecurity = subview.querySelector(
+    "#manualOutgoingConnectionSecurity"
+  );
+
+  const config = new AccountConfig();
+  subview.setState(config);
+
+  await fireInputEvent(
+    incomingConnectionSecurity,
+    "change",
+    Ci.nsMsgSocketType.plain
+  );
+
+  await fireInputEvent(
+    outgoingConnectionSecurity,
+    "change",
+    Ci.nsMsgSocketType.plain
+  );
+
+  Assert.ok(
+    incomingConnectionSecurity.hasAttribute("warning"),
+    "Incoming socket should have warning label"
+  );
+  Assert.ok(
+    outgoingConnectionSecurity.hasAttribute("warning"),
+    "Outgoing socket should have warning label"
+  );
+
+  // Test the FAQ link in the warning message.
+  const incomingWarningLink =
+    incomingConnectionSecurity.shadowRoot.querySelector("a");
+
+  let loadPromise = MockExternalProtocolService.promiseLoad();
+  let helpLinkClickedPromise = BrowserTestUtils.waitForEvent(
+    incomingConnectionSecurity,
+    "helpLinkClick"
+  );
+  incomingConnectionSecurity.scrollIntoView({
+    block: "start",
+    behavior: "instant",
+  });
+
+  EventUtils.synthesizeMouseAtCenter(
+    incomingWarningLink,
+    {},
+    browser.contentWindow
+  );
+
+  await helpLinkClickedPromise;
+  Assert.equal(
+    await loadPromise,
+    "http://127.0.0.1:8888/support-dummy/",
+    "Should load FAQ link"
+  );
+
+  loadPromise = MockExternalProtocolService.promiseLoad();
+  helpLinkClickedPromise = BrowserTestUtils.waitForEvent(
+    outgoingConnectionSecurity,
+    "helpLinkClick"
+  );
+  outgoingConnectionSecurity.scrollIntoView({
+    block: "start",
+    behavior: "instant",
+  });
+  const outgoingWarningLink =
+    outgoingConnectionSecurity.shadowRoot.querySelector("a");
+  EventUtils.synthesizeMouseAtCenter(
+    outgoingWarningLink,
+    {},
+    browser.contentWindow
+  );
+  await helpLinkClickedPromise;
+  Assert.equal(
+    await loadPromise,
+    "http://127.0.0.1:8888/support-dummy/",
+    "Should load FAQ link"
+  );
+
+  subview.resetState();
+});
+
+add_task(async function test_adjustIncomingOAuthToHostname() {
+  const hostname = subview.querySelector("#manualIncomingHostname");
+  const authMethod = subview.querySelector("#manualIncomingAuthMethod");
+
+  const config = new AccountConfig();
+
+  const incomingTypes = ["imap", "pop3"];
+
+  for (const type of incomingTypes) {
+    // Protocol type testing.
+    config.incoming.type = type;
+    subview.setState(config);
+
+    Assert.ok(
+      !subview.querySelector("#manualIncomingAuthMethodOAuth2").hidden,
+      "The incoming OAuth authentication method option should be available"
+    );
+
+    // Add a hostname that supports OAuth.
+    await fireInputEvent(hostname, "input", `${type}.gmail.com`);
+    Assert.ok(
+      !subview.querySelector("#manualIncomingAuthMethodOAuth2").hidden,
+      "The incoming OAuth authentication method option should stay available"
+    );
+    Assert.ok(
+      !subview.querySelector("#manualOutgoingAuthMethodOAuth2").hidden,
+      "The outgoing OAuth authentication method option should stay available"
+    );
+
+    info("Select OAuth");
+    authMethod.scrollIntoView({ block: "start", behavior: "instant" });
+    await SimpleTest.promiseFocus(browser.contentWindow);
+
+    let configUpdatedEventPromise = BrowserTestUtils.waitForEvent(
+      subview,
+      "config-updated"
+    );
+    const authSelectorMethodPromise =
+      BrowserTestUtils.waitForSelectPopupShown(window);
+    EventUtils.synthesizeMouseAtCenter(authMethod, {}, browser.contentWindow);
+
+    const authMethodSelectorPopup = await authSelectorMethodPromise;
+    const authMethodSelectorItems =
+      authMethodSelectorPopup.querySelectorAll("menuitem");
+
+    // #incomingAuthMethodOAuth2.
+    authMethodSelectorPopup.activateItem(authMethodSelectorItems[5]);
+    await BrowserTestUtils.waitForPopupEvent(authMethodSelectorPopup, "hidden");
+    await configUpdatedEventPromise;
+    Assert.equal(
+      authMethod.value,
+      Ci.nsMsgAuthMethod.OAuth2,
+      "The auth method should be set as OAuth2"
+    );
+
+    // Change the hostname so OAuth isn't supported, and check that the
+    // authentication method stays selected with a warning.
+    configUpdatedEventPromise = BrowserTestUtils.waitForEvent(
+      subview,
+      "config-updated"
+    );
+    await fireInputEvent(hostname, "input", "example.com");
+    await configUpdatedEventPromise;
+    Assert.equal(
+      authMethod.value,
+      Ci.nsMsgAuthMethod.OAuth2,
+      "The auth method should stay set as OAuth2"
+    );
+    Assert.ok(
+      !subview.querySelector("#manualIncomingAuthMethodOAuth2").hidden,
+      "The incoming OAuth authentication method option should stay available"
+    );
+    Assert.ok(
+      BrowserTestUtils.isVisible(getIncomingOAuthUnsupportedBanner()),
+      "The 'Unsupported OAuth' banner should be visible"
+    );
+
+    subview.resetState();
+  }
+});
+
+add_task(async function test_adjustOutgoingOAuthToHostname() {
+  const hostname = subview.querySelector("#manualOutgoingHostname");
+  const authMethod = subview.querySelector("#manualOutgoingAuthMethod");
+
+  const config = new AccountConfig();
+
+  // SMTP Testing.
+  config.outgoing.type = "smtp";
+  subview.setState(config);
+
+  Assert.ok(
+    !subview.querySelector("#manualOutgoingAuthMethodOAuth2").hidden,
+    "The outgoing OAuth authentication method option should be available"
+  );
+
+  // Add a hostname with known OAuth support.
+  await fireInputEvent(hostname, "input", "smtp.gmail.com");
+  Assert.ok(
+    !subview.querySelector("#manualOutgoingAuthMethodOAuth2").hidden,
+    "The outgoing OAuth authentication method option should stay available"
+  );
+  Assert.ok(
+    !subview.querySelector("#manualIncomingAuthMethodOAuth2").hidden,
+    "The incoming OAuth authentication method option should stay available"
+  );
+
+  info("Select OAuth");
+  authMethod.scrollIntoView({
+    block: "start",
+    behavior: "instant",
+  });
+
+  let configUpdatedEventPromise = BrowserTestUtils.waitForEvent(
+    subview,
+    "config-updated"
+  );
+  await SimpleTest.promiseFocus(browser.contentWindow);
+
+  const authSelectorMethodPromise =
+    BrowserTestUtils.waitForSelectPopupShown(window);
+  EventUtils.synthesizeMouseAtCenter(authMethod, {}, browser.contentWindow);
+
+  const authMethodSelectorPopup = await authSelectorMethodPromise;
+  const authMethodSelectorItems =
+    authMethodSelectorPopup.querySelectorAll("menuitem");
+
+  // #outgoingAuthMethodOAuth2.
+  authMethodSelectorPopup.activateItem(authMethodSelectorItems[6]);
+  await BrowserTestUtils.waitForPopupEvent(authMethodSelectorPopup, "hidden");
+  await configUpdatedEventPromise;
+
+  Assert.equal(
+    authMethod.value,
+    Ci.nsMsgAuthMethod.OAuth2,
+    "The auth method should be set as OAuth2"
+  );
+
+  // Change the hostname so OAuth isn't supported, and check that the
+  // authentication method stays selected and a warning is shown.
+  configUpdatedEventPromise = BrowserTestUtils.waitForEvent(
+    subview,
+    "config-updated"
+  );
+  await fireInputEvent(hostname, "input", "example.com");
+  await configUpdatedEventPromise;
+  Assert.equal(
+    authMethod.value,
+    Ci.nsMsgAuthMethod.OAuth2,
+    "The auth method should stay set as OAuth2"
+  );
+  Assert.ok(
+    !subview.querySelector("#manualOutgoingAuthMethodOAuth2").hidden,
+    "The outgoing OAuth authentication method option should stay available"
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(getOutgoingOAuthUnsupportedBanner()),
+    "The 'Unsupported OAuth' banner should be visible"
+  );
+
+  subview.resetState();
+});
+
+add_task(async function test_unsupportedOAuthBannerDefaultHidden() {
+  const state = createFilledAccountConfig();
+  state.incoming.hostname = "example.com";
+  state.incoming.auth = Ci.nsMsgAuthMethod.passwordCleartext;
+  state.outgoing.hostname = "example.com";
+  state.outgoing.auth = Ci.nsMsgAuthMethod.passwordCleartext;
+  subview.setState(state);
+
+  Assert.ok(
+    BrowserTestUtils.isHidden(getIncomingOAuthUnsupportedBanner()),
+    "The incoming 'Unsupported OAuth' banner should be hidden by default"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(getOutgoingOAuthUnsupportedBanner()),
+    "The outgoing 'Unsupported OAuth' banner should be hidden by default"
+  );
+
+  subview.resetState();
+});
+
+add_task(
+  async function test_incomingUnsupportedOAuthBannerForUnknownHostname() {
+    const state = createFilledAccountConfig();
+    state.incoming.hostname = "example.com";
+    state.incoming.auth = Ci.nsMsgAuthMethod.passwordCleartext;
+    subview.setState(state);
+
+    const incomingAuthMethod = subview.querySelector(
+      "#manualIncomingAuthMethod"
+    );
+    await fireInputEvent(
+      incomingAuthMethod,
+      "change",
+      Ci.nsMsgAuthMethod.OAuth2
+    );
+
+    const banner = getIncomingOAuthUnsupportedBanner();
+    Assert.ok(
+      BrowserTestUtils.isVisible(banner),
+      "The 'Unsupported OAuth' banner should be visible for an unknown hostname"
+    );
+    Assert.equal(
+      banner.getAttribute("role"),
+      "alert",
+      "The 'Unsupported OAuth' banner should have role='alert' so screen readers announce it"
+    );
+    Assert.equal(
+      document.l10n.getAttributes(banner.querySelector("[slot='title']")).id,
+      "account-hub-oauth-unsupported-title",
+      "The 'Unsupported OAuth' banner should use the correct title l10n id"
+    );
+    Assert.equal(
+      document.l10n.getAttributes(banner.querySelector("[slot='description']"))
+        .id,
+      "account-hub-oauth-unsupported-description",
+      "The 'Unsupported OAuth' banner should use the correct description l10n id"
+    );
+
+    const supportLink = banner.querySelector(
+      "[slot='description'] a[data-l10n-name='oauth-support-link']"
+    );
+    Assert.ok(
+      supportLink,
+      "The 'Unsupported OAuth' description should include a support link"
+    );
+    Assert.equal(
+      supportLink.href,
+      "https://support.thunderbird.net/kb/tb-custom-oauth",
+      "The 'Unsupported OAuth' support link should use the custom OAuth support URL"
+    );
+
+    await fireInputEvent(
+      incomingAuthMethod,
+      "change",
+      Ci.nsMsgAuthMethod.passwordCleartext
+    );
+    Assert.ok(
+      BrowserTestUtils.isHidden(banner),
+      "The 'Unsupported OAuth' banner should hide after selecting another auth method"
+    );
+
+    subview.resetState();
+  }
+);
+
+add_task(
+  async function test_outgoingUnsupportedOAuthBannerForUnknownHostname() {
+    const state = createFilledAccountConfig();
+    state.outgoing.hostname = "example.com";
+    state.outgoing.auth = Ci.nsMsgAuthMethod.passwordCleartext;
+    subview.setState(state);
+
+    const outgoingAuthMethod = subview.querySelector(
+      "#manualOutgoingAuthMethod"
+    );
+    await fireInputEvent(
+      outgoingAuthMethod,
+      "change",
+      Ci.nsMsgAuthMethod.OAuth2
+    );
+
+    const banner = getOutgoingOAuthUnsupportedBanner();
+    Assert.ok(
+      BrowserTestUtils.isVisible(banner),
+      "The outgoing 'Unsupported OAuth' banner should be visible for an unknown hostname"
+    );
+    Assert.equal(
+      banner.getAttribute("role"),
+      "alert",
+      "The outgoing 'Unsupported OAuth' banner should have role='alert' so screen readers announce it"
+    );
+    Assert.equal(
+      document.l10n.getAttributes(banner.querySelector("[slot='title']")).id,
+      "account-hub-oauth-unsupported-title",
+      "The outgoing 'Unsupported OAuth' banner should use the correct title l10n id"
+    );
+    Assert.equal(
+      document.l10n.getAttributes(banner.querySelector("[slot='description']"))
+        .id,
+      "account-hub-oauth-unsupported-description",
+      "The outgoing 'Unsupported OAuth' banner should use the correct description l10n id"
+    );
+
+    const supportLink = banner.querySelector(
+      "[slot='description'] a[data-l10n-name='oauth-support-link']"
+    );
+    Assert.ok(
+      supportLink,
+      "The outgoing 'Unsupported OAuth' description should include a support link"
+    );
+    Assert.equal(
+      supportLink.href,
+      "https://support.thunderbird.net/kb/tb-custom-oauth",
+      "The outgoing 'Unsupported OAuth' support link should use the custom OAuth support URL"
+    );
+
+    await fireInputEvent(
+      outgoingAuthMethod,
+      "change",
+      Ci.nsMsgAuthMethod.passwordCleartext
+    );
+    Assert.ok(
+      BrowserTestUtils.isHidden(banner),
+      "The outgoing 'Unsupported OAuth' banner should hide after changing auth method"
+    );
+
+    subview.resetState();
+  }
+);
+
+add_task(async function test_unsupportedOAuthBannersAreIndependent() {
+  const state = createFilledAccountConfig();
+  state.incoming.hostname = "example.com";
+  state.incoming.auth = Ci.nsMsgAuthMethod.OAuth2;
+  state.outgoing.hostname = "example.com";
+  state.outgoing.auth = Ci.nsMsgAuthMethod.OAuth2;
+  subview.setState(state);
+
+  const incomingBanner = getIncomingOAuthUnsupportedBanner();
+  const outgoingBanner = getOutgoingOAuthUnsupportedBanner();
+  Assert.ok(
+    BrowserTestUtils.isVisible(incomingBanner),
+    "The incoming 'Unsupported OAuth' banner should be visible"
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(outgoingBanner),
+    "The outgoing 'Unsupported OAuth' banner should be visible"
+  );
+
+  await fireInputEvent(
+    subview.querySelector("#manualOutgoingAuthMethod"),
+    "change",
+    Ci.nsMsgAuthMethod.passwordCleartext
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(incomingBanner),
+    "The incoming 'Unsupported OAuth' banner should remain visible after outgoing auth changes"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(outgoingBanner),
+    "The outgoing 'Unsupported OAuth' banner should hide after outgoing auth changes"
+  );
+
+  await fireInputEvent(
+    subview.querySelector("#manualIncomingAuthMethod"),
+    "change",
+    Ci.nsMsgAuthMethod.passwordCleartext
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(incomingBanner),
+    "The incoming 'Unsupported OAuth' banner should hide after incoming auth changes"
+  );
+  Assert.ok(
+    BrowserTestUtils.isHidden(outgoingBanner),
+    "The outgoing 'Unsupported OAuth' banner should remain hidden"
+  );
+
+  subview.resetState();
+});
+
+add_task(async function test_validateBlocksIncomingUnsupportedOAuth() {
+  const state = createFilledAccountConfig();
+  state.incoming.hostname = "example.com";
+  state.incoming.auth = Ci.nsMsgAuthMethod.OAuth2;
+  state.outgoing.auth = Ci.nsMsgAuthMethod.passwordCleartext;
+  subview.setState(state);
+
+  const configUpdatedEvent = BrowserTestUtils.waitForEvent(
+    subview,
+    "config-updated"
+  );
+  subview
+    .querySelector("#manualIncomingAuthMethod")
+    .dispatchEvent(new Event("change", { bubbles: true }));
+  Assert.ok(
+    !(await configUpdatedEvent).detail.completed,
+    "The form should report incomplete when OAuth is selected for an unknown hostname"
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(getIncomingOAuthUnsupportedBanner()),
+    "The 'Unsupported OAuth' banner should be visible"
+  );
+  const isValid = await subview.validate();
+  Assert.ok(
+    !isValid,
+    "The form should fail validation when OAuth is selected for an unknown hostname"
+  );
+
+  const advancedConfigEvent = BrowserTestUtils.waitForEvent(
+    subview,
+    "advanced-config"
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    advancedConfigButton,
+    {},
+    browser.contentWindow
+  );
+
+  const event = await advancedConfigEvent;
+  Assert.equal(
+    event.target,
+    subview,
+    "Advanced configuration should still be available with 'Unsupported OAuth'"
+  );
+
+  subview.resetState();
+});
+
+add_task(async function test_validateBlocksOutgoingUnsupportedOAuth() {
+  const state = createFilledAccountConfig();
+  state.incoming.auth = Ci.nsMsgAuthMethod.passwordCleartext;
+  state.outgoing.hostname = "example.com";
+  state.outgoing.auth = Ci.nsMsgAuthMethod.OAuth2;
+  subview.setState(state);
+
+  const configUpdatedEvent = BrowserTestUtils.waitForEvent(
+    subview,
+    "config-updated"
+  );
+  subview
+    .querySelector("#manualOutgoingAuthMethod")
+    .dispatchEvent(new Event("change", { bubbles: true }));
+  Assert.ok(
+    !(await configUpdatedEvent).detail.completed,
+    "The form should report incomplete when outgoing OAuth is selected for an unknown hostname"
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(getOutgoingOAuthUnsupportedBanner()),
+    "The outgoing 'Unsupported OAuth' banner should be visible"
+  );
+  const isValid = await subview.validate();
+  Assert.ok(
+    !isValid,
+    "The form should fail validation when OAuth is selected for an unknown hostname"
+  );
+
+  const advancedConfigEvent = BrowserTestUtils.waitForEvent(
+    subview,
+    "advanced-config"
+  );
+  EventUtils.synthesizeMouseAtCenter(
+    advancedConfigButton,
+    {},
+    browser.contentWindow
+  );
+
+  const event = await advancedConfigEvent;
+  Assert.equal(
+    event.target,
+    subview,
+    "Advanced configuration should still be available with outgoing 'Unsupported OAuth'"
+  );
+
+  subview.resetState();
+});
+
+add_task(
+  async function test_unsupportedOAuthBannerHidesWhenHostnameBecomesValid() {
+    const hostname = subview.querySelector("#manualIncomingHostname");
+    const incomingAuthMethod = subview.querySelector(
+      "#manualIncomingAuthMethod"
+    );
+
+    const state = createFilledAccountConfig();
+    state.incoming.type = "imap";
+    state.incoming.hostname = "example.com";
+    state.incoming.auth = Ci.nsMsgAuthMethod.OAuth2;
+    // Keep the outgoing server valid so only the incoming hostname drives the
+    // unsupported OAuth result.
+    state.outgoing.hostname = "smtp.gmail.com";
+    state.outgoing.auth = Ci.nsMsgAuthMethod.passwordCleartext;
+    subview.setState(state);
+
+    const banner = getIncomingOAuthUnsupportedBanner();
+    Assert.ok(
+      BrowserTestUtils.isVisible(banner),
+      "The 'Unsupported OAuth' banner should be visible for an unknown hostname"
+    );
+    let isValid = await subview.validate();
+    Assert.ok(
+      !isValid,
+      "Test Configuration should be blocked while OAuth is selected for an unknown hostname"
+    );
+
+    // Change the hostname to a known OAuth host while OAuth2 stays selected.
+    const configUpdatedEventPromise = BrowserTestUtils.waitForEvent(
+      subview,
+      "config-updated"
+    );
+    await fireInputEvent(hostname, "input", "imap.gmail.com");
+    const configUpdatedEvent = await configUpdatedEventPromise;
+
+    Assert.equal(
+      incomingAuthMethod.value,
+      Ci.nsMsgAuthMethod.OAuth2,
+      "The auth method should stay set as OAuth2"
+    );
+    Assert.ok(
+      BrowserTestUtils.isHidden(banner),
+      "The 'Unsupported OAuth' banner should hide once the hostname is a known OAuth host"
+    );
+    Assert.ok(
+      configUpdatedEvent.detail.completed,
+      "The form should report complete once the hostname is a known OAuth host"
+    );
+    isValid = await subview.validate();
+    Assert.ok(
+      isValid,
+      "Test Configuration should be unblocked once the hostname is a known OAuth host"
+    );
+
+    subview.resetState();
+  }
+);
+
+add_task(async function test_emptyPortsAreCapturedAsUnknown() {
+  const config = new AccountConfig();
+  subview.setState(config);
+
+  info("Validating so capture state isn't stale...");
+  await subview.validate();
+  const state = subview.captureState();
+
+  Assert.equal(
+    state.incoming.port,
+    -1,
+    "Should report incoming port as unknown"
+  );
+  Assert.equal(
+    state.outgoing.port,
+    -1,
+    "Should report outgoing port as unknown"
+  );
+});
+
+/**
+ * Sets value of input and fires event supplied in parameter.
+ *
+ * @param {HTMLInputElement} input - The input to be updated.
+ * @param {string} eventName - Type of event to be fired.
+ * @param {number|string} value - Value to be applied to input.
+ */
+async function fireInputEvent(input, eventName, value) {
+  const didConfigChange = BrowserTestUtils.waitForEvent(
+    input.closest("email-manual-config-form"),
+    "config-updated"
+  );
+  input.value = value;
+  input.dispatchEvent(new Event(eventName, { bubbles: true }));
+
+  // Need to wait because there is a debounce on the config change
+  // when typing.
+  await didConfigChange;
+}
+
+/**
+ * Get the incoming 'Unsupported OAuth' banner.
+ *
+ * @returns {HTMLElement}
+ */
+function getIncomingOAuthUnsupportedBanner() {
+  const banner = subview.querySelector("#manualIncomingUnsupportedOAuthBanner");
+  Assert.ok(banner, "The incoming 'Unsupported OAuth' banner should exist");
+  return banner;
+}
+
+/**
+ * Get the outgoing 'Unsupported OAuth' banner.
+ *
+ * @returns {HTMLElement}
+ */
+function getOutgoingOAuthUnsupportedBanner() {
+  const banner = subview.querySelector("#manualOutgoingUnsupportedOAuthBanner");
+  Assert.ok(banner, "The outgoing 'Unsupported OAuth' banner should exist");
+  return banner;
+}
+
+add_task(async function test_advancedConfigurationDispatchesEvent() {
+  const state = createFilledAccountConfig();
+  subview.setState(state);
+
+  const advancedConfigEvent = BrowserTestUtils.waitForEvent(
+    subview,
+    "advanced-config"
+  );
+
+  EventUtils.synthesizeMouseAtCenter(
+    advancedConfigButton,
+    {},
+    browser.contentWindow
+  );
+
+  const event = await advancedConfigEvent;
+  Assert.equal(
+    event.target,
+    subview,
+    "Advanced configuration should be requested from the Manual Config subview"
+  );
+
+  subview.resetState();
+});
+
+/**
+ * Returns a filled imap AccountConfig object.
+ *
+ * @returns {AccountConfig}
+ */
+function createFilledAccountConfig() {
+  const config = new AccountConfig();
+  config.incoming = {
+    type: "imap",
+    hostname: "test.test",
+    port: 143,
+    socketType: Ci.nsMsgSocketType.plain,
+    auth: Ci.nsMsgAuthMethod.OAuth2,
+    username: "user",
+  };
+  config.outgoing = {
+    type: "smtp",
+    hostname: "test.test",
+    port: 587,
+    socketType: Ci.nsMsgSocketType.plain,
+    auth: Ci.nsMsgAuthMethod.OAuth2,
+    username: "user",
+  };
+
+  return config;
+}

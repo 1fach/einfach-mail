@@ -1,0 +1,7 @@
+<defines>
+BLOWFISH -> 20260704
+</defines>
+
+<module_info>
+name -> "Blowfish"
+</module_info>

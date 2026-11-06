@@ -1,0 +1,70 @@
+using Android.OS;
+using Android.Views;
+using Android.Widget;
+using Microsoft.Extensions.DependencyInjection;
+using Wino.Core.Domain;
+using Wino.Core.Domain.Enums;
+using Wino.Mail.Android.Infrastructure;
+using Wino.Presentation.Android;
+using Wino.Presentation.Controls;
+
+namespace Wino.Mail.Android.Views.Shell;
+
+/// <summary>
+/// A mode's content before its pages are built (Calendar, Contacts and To Do until T10), and the empty list pane while a
+/// mode has no content page: the mode glyph and title in a Wino zone (the iOS ModePlaceholderViewController).
+/// </summary>
+public sealed class ModePlaceholderFragment : WinoFragment
+{
+    protected override int LayoutResource => Resource.Layout.fragment_mode_placeholder;
+
+    // Shown with or without a routed entry (the shell's empty pane has none).
+    public override void OnViewCreated(View view, Bundle? savedInstanceState)
+    {
+        base.OnViewCreated(view, savedInstanceState);
+        if (Entry is null) Fill(view);
+    }
+
+    protected override void OnBind(View view) => Fill(view);
+
+    private static void Fill(View view)
+    {
+        var shell = MainApplication.Services?.GetService<AndroidNavigationService>()?.Shell;
+        var mode = shell?.ActiveMode ?? WinoApplicationMode.Mail;
+        var segment = WinoModeSegments.AppModes.FirstOrDefault(candidate => candidate.Mode == mode);
+        if (view.FindViewById<WinoIconView>(Resource.Id.mode_placeholder_glyph) is { } glyph)
+        {
+            glyph.GlyphSize = 48;
+            glyph.Icon = segment?.Regular ?? WinoIconGlyph.Mail;
+        }
+        if (view.FindViewById<TextView>(Resource.Id.mode_placeholder_title) is { } title) title.Text = segment?.Title ?? string.Empty;
+        if (view.FindViewById<TextView>(Resource.Id.mode_placeholder_message) is { } message)
+        {
+            message.Text = mode == WinoApplicationMode.Mail ? Translator.Android_Shell_NoFolderSelected : Translator.Info_UnsupportedFunctionalityDescription;
+            message.Visibility = ViewStates.Visible;
+        }
+        if (view.FindViewById(Resource.Id.mode_placeholder_bar) is { } bar)
+        {
+            var context = view.RequireContext();
+            float radius = WinoUnits.Dp(context, 28);
+            var pill = new Google.Android.Material.Shape.MaterialShapeDrawable(Google.Android.Material.Shape.ShapeAppearanceModel.InvokeBuilder().SetAllCornerSizes(radius).Build())
+            {
+                FillColor = global::Android.Content.Res.ColorStateList.ValueOf(WinoColors.ZoneFill(context))
+            };
+            pill.SetStroke(Math.Max(1, WinoUnits.Dp(context, 1)), WinoColors.ZoneStroke(context));
+            bar.Background = pill;
+        }
+        bool pinned = FindChrome(view)?.NavigationPinned == true;
+        // The pinned pane needs no menu button; the empty bar keeps its place so the zone does not move when the page comes.
+        if (pinned && view.FindViewById(Resource.Id.mode_placeholder_bar) is { } emptyBar) emptyBar.Visibility = ViewStates.Invisible;
+        if (!pinned && view.FindViewById<ImageButton>(Resource.Id.mode_placeholder_navigation) is { } navigation)
+        {
+            navigation.SetImageResource(Resource.Drawable.wino_ic_menu);
+            navigation.ContentDescription = Translator.Android_Shell_OpenNavigation;
+            navigation.Click += (_, _) => (FindChrome(view))?.ToggleNavigation();
+        }
+    }
+
+    private static IShellChrome? FindChrome(View view)
+        => (AndroidX.Fragment.App.FragmentManager.FindFragment(view) as AndroidX.Fragment.App.Fragment)?.ParentFragment as IShellChrome;
+}

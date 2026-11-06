@@ -1,0 +1,1240 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+"use strict";
+
+var { CommonUtils } = ChromeUtils.importESModule(
+  "resource://services-common/utils.sys.mjs"
+);
+var { EnigmailFuncs } = ChromeUtils.importESModule(
+  "chrome://openpgp/content/modules/funcs.sys.mjs"
+);
+var { EnigmailKey } = ChromeUtils.importESModule(
+  "chrome://openpgp/content/modules/key.sys.mjs"
+);
+var { EnigmailKeyRing } = ChromeUtils.importESModule(
+  "chrome://openpgp/content/modules/keyRing.sys.mjs"
+);
+var { PgpSqliteDb2 } = ChromeUtils.importESModule(
+  "chrome://openpgp/content/modules/sqliteDb.sys.mjs"
+);
+var { KeyLookupHelper } = ChromeUtils.importESModule(
+  "chrome://openpgp/content/modules/keyLookupHelper.sys.mjs"
+);
+var { RNP, RnpPrivateKeyUnlockTracker } = ChromeUtils.importESModule(
+  "chrome://openpgp/content/modules/RNP.sys.mjs"
+);
+
+ChromeUtils.defineESModuleGetters(this, {
+  LoginHelper: "resource://gre/modules/LoginHelper.sys.mjs",
+});
+
+var l10n = new Localization(["messenger/openpgp/openpgp.ftl"], true);
+
+var gModePersonal = false;
+
+// This is the ID that was given to us as a parameter.
+// Note that it might be the ID of a subkey.
+var gKeyId = null;
+
+var gUserId = null;
+var gKeyList = null;
+var gSigTree = null;
+
+var gAllEmails = [];
+var gOriginalAcceptedEmails = null;
+var gAcceptedEmails = null;
+
+var gHaveUnacceptedEmails = false;
+var gFingerprint = "";
+var gHasMissingSecret = false;
+
+var gAcceptanceRadio = null;
+var gPersonalRadio = null;
+
+var gOriginalAcceptance;
+var gOriginalPersonal;
+var gUpdateAllowed = false;
+
+const gAllEmailCheckboxes = [];
+let gOkButton;
+
+let gPrivateKeyTrackers = [];
+
+// One of "unprotected", "primary-password", "user-passphrase", as
+// detected by loadPassphraseProtection().
+let gProtectionMode;
+
+// The pref only controls whether we offer to set a separate passphrase.
+// A key may already be protected by one even when the pref is disabled.
+let gAllowSetPassphrase = false;
+
+// True if this dialog offers the passphrase tab, which means it keeps
+// gPrivateKeyTrackers for the primary key and all subkeys.
+let gShowPassphraseTab = false;
+
+// True if the key is eligible for adding a PQC encryption subkey.
+let gCanAddPQCSubkey = false;
+
+window.addEventListener("DOMContentLoaded", onLoad);
+window.addEventListener("unload", onUnload);
+
+function onUnload() {
+  releasePrivateKeys();
+}
+
+function releasePrivateKeys() {
+  for (const tracker of gPrivateKeyTrackers) {
+    tracker.release();
+  }
+  gPrivateKeyTrackers = [];
+}
+
+async function onLoad() {
+  if (window.arguments[1]) {
+    window.arguments[1].refresh = false;
+  }
+
+  gAcceptanceRadio = document.getElementById("acceptanceRadio");
+  gPersonalRadio = document.getElementById("personalRadio");
+
+  gKeyId = window.arguments[0].keyId;
+
+  gOkButton = document.querySelector("dialog").getButton("accept");
+  gOkButton.focus();
+
+  await reloadData(true);
+
+  gAllowSetPassphrase = Services.prefs.getBoolPref(
+    "mail.openpgp.passphrases.enabled"
+  );
+
+  if (gModePersonal) {
+    await loadPassphraseProtection();
+  }
+
+  // Offer the passphrase tab if the user has opted in to separate
+  // passphrases, or if this key is already protected by one. The latter
+  // is possible even with the pref disabled, because the pref doesn't
+  // change how already existing secret keys are protected. Without
+  // this, such a key couldn't be unlocked using this dialog, and the
+  // user would have no way to return it to automatic protection.
+  gShowPassphraseTab =
+    gModePersonal &&
+    (gAllowSetPassphrase || gProtectionMode == "user-passphrase");
+
+  document.getElementById("passphraseTab").hidden = !gShowPassphraseTab;
+  document.getElementById("passphrasePanel").hidden = !gShowPassphraseTab;
+
+  if (!gShowPassphraseTab) {
+    // Don't keep the secret keys unlocked for the lifetime of a dialog
+    // that doesn't offer any passphrase management.
+    releasePrivateKeys();
+  }
+
+  // The tabpanels element fires "select" when the active tab changes.
+  document.getElementById("mainTabPanel").addEventListener("select", event => {
+    if (event.target.id == "mainTabPanel") {
+      updatePQCSubkeyButton();
+    }
+  });
+
+  onAcceptanceChanged();
+}
+
+/**
+ * Show the button to add a PQC subkey only while the structure tab, which
+ * lists the key's subkeys, is the active tab.
+ */
+function updatePQCSubkeyButton() {
+  document.getElementById("addPQCSubkeyButton").hidden =
+    !gCanAddPQCSubkey ||
+    document.getElementById("mainTabs").selectedTab?.id != "structureTab";
+}
+
+async function changeExpiry() {
+  const keyObj = EnigmailKeyRing.getKeyById(gKeyId);
+  if (!keyObj || !keyObj.secretAvailable) {
+    return;
+  }
+
+  const args = {
+    keyId: keyObj.keyId,
+    modified: onDataModified,
+  };
+
+  // The keyDetailsDlg can be opened from different locations, some of which
+  // don't belong to the Account Settings, therefore they won't have access to
+  // the gSubDialog object.
+  if (parent.gSubDialog) {
+    parent.gSubDialog.open(
+      "chrome://openpgp/content/ui/changeExpiryDlg.xhtml",
+      undefined,
+      args
+    );
+    return;
+  }
+
+  window.openDialog(
+    "chrome://openpgp/content/ui/changeExpiryDlg.xhtml",
+    "",
+    "dialog,modal,centerscreen,resizable",
+    args
+  );
+}
+
+/**
+ * Determine the expiration date to use for a newly added encryption
+ * subkey: the latest expiration date among the existing usable
+ * encryption subkeys, or the primary key's expiration if there is none.
+ *
+ * @param {object} keyObj - The primary key.
+ * @returns {integer} - Seconds until expiration, 0 for no expiration.
+ */
+function newEncryptionSubkeyExpirySeconds(keyObj) {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  let reference = 0;
+
+  for (const subkey of keyObj.subKeys) {
+    // Ignore subkeys that cannot be used to encrypt new messages.
+    // If a subkey has expired, the user is expected to extend its
+    // expiration date first.
+    if (
+      !/e/.test(subkey.keyUseFor) ||
+      /r/i.test(subkey.keyTrust) ||
+      (subkey.expiryTime && subkey.expiryTime <= nowSeconds)
+    ) {
+      continue;
+    }
+    if (!subkey.expiryTime) {
+      // Never expires, we can stop comparing.
+      return 0;
+    }
+    reference = Math.max(reference, subkey.expiryTime);
+  }
+
+  if (!reference) {
+    if (!keyObj.expiryTime) {
+      return 0;
+    }
+    reference = keyObj.expiryTime;
+  }
+
+  // The caller has verified that the primary key hasn't expired, and
+  // expired subkeys were skipped, so this cannot be negative.
+  return reference - nowSeconds;
+}
+
+async function addPQCSubkey() {
+  const keyObj = EnigmailKeyRing.getKeyById(gKeyId);
+  if (!keyObj) {
+    return;
+  }
+
+  const button = document.getElementById("addPQCSubkeyButton");
+  if (
+    !Services.prompt.confirm(
+      window,
+      null,
+      l10n.formatValueSync("openpgp-pqc-confirm-generate")
+    )
+  ) {
+    return;
+  }
+
+  button.disabled = true;
+  let added = false;
+  try {
+    added = await RNP.addV4PQCEncryptionSubkey(
+      keyObj.fpr,
+      newEncryptionSubkeyExpirySeconds(keyObj)
+    );
+  } catch (e) {
+    console.warn("Generating a PQC encryption subkey FAILED!", e);
+    Services.prompt.alert(
+      window,
+      null,
+      l10n.formatValueSync("openpgp-pqc-generate-failed")
+    );
+    button.disabled = false;
+    return;
+  }
+
+  button.disabled = false;
+  if (!added) {
+    return;
+  }
+
+  if (gShowPassphraseTab) {
+    // Pick up the new subkey, so that a later passphrase change covers
+    // it too, instead of leaving it on the current passphrase.
+    releasePrivateKeys();
+    await loadPassphraseProtection();
+  }
+
+  // The key now has a PQC subkey, so the button must disappear.
+  onDataModified();
+}
+
+async function refreshOnline() {
+  const keyObj = EnigmailKeyRing.getKeyById(gKeyId);
+  if (!keyObj) {
+    return;
+  }
+
+  const imported = await KeyLookupHelper.downloadDirectlyByFingerprint(
+    "interactive-import",
+    window,
+    keyObj.fpr,
+    true
+  );
+  if (imported) {
+    onDataModified();
+  }
+}
+
+async function loadPassphraseProtection() {
+  const keyObj = EnigmailKeyRing.getKeyById(gKeyId);
+  if (!keyObj || !keyObj.secretAvailable) {
+    return;
+  }
+
+  const primaryKey = RnpPrivateKeyUnlockTracker.constructFromFingerprint(
+    keyObj.fpr
+  );
+  primaryKey.setAllowPromptingUserForPassword(false);
+  primaryKey.setAllowAutoUnlockWithCachedPasswords(false);
+  const isSecretForPrimaryAvailable = primaryKey.available();
+  let canUnlockSecretForPrimary = false;
+  if (isSecretForPrimaryAvailable) {
+    await primaryKey.unlock();
+    canUnlockSecretForPrimary = primaryKey.isUnlocked();
+    gPrivateKeyTrackers.push(primaryKey);
+  } else {
+    // Not tracked, so release the key handle immediately.
+    primaryKey.release();
+  }
+
+  let countSubkeysWithSecretAvailable = 0;
+  let countSubkeysCanAutoUnlock = 0;
+
+  for (let i = 0; i < keyObj.subKeys.length; i++) {
+    const subKey = RnpPrivateKeyUnlockTracker.constructFromFingerprint(
+      keyObj.subKeys[i].fpr
+    );
+    subKey.setAllowPromptingUserForPassword(false);
+    subKey.setAllowAutoUnlockWithCachedPasswords(false);
+    if (subKey.available()) {
+      ++countSubkeysWithSecretAvailable;
+      await subKey.unlock();
+      if (subKey.isUnlocked()) {
+        countSubkeysCanAutoUnlock++;
+      }
+      gPrivateKeyTrackers.push(subKey);
+    } else {
+      // Not tracked, so release the key handle immediately.
+      subKey.release();
+    }
+  }
+
+  const userPassphraseMode = "user-passphrase";
+  const usingPP = LoginHelper.isPrimaryPasswordSet();
+
+  // Could we use the automatic passphrase to unlock all secret keys for
+  // which the key material is available?
+
+  if (
+    (!isSecretForPrimaryAvailable || canUnlockSecretForPrimary) &&
+    countSubkeysWithSecretAvailable == countSubkeysCanAutoUnlock
+  ) {
+    gProtectionMode = usingPP ? "primary-password" : "unprotected";
+  } else {
+    gProtectionMode = userPassphraseMode;
+  }
+
+  // With the pref disabled we offer neither unlocking nor setting a
+  // passphrase. The only action we offer for a key that already uses a
+  // passphrase is to remove it and return it to the default protection,
+  // and that action unlocks the key on demand.
+  const offerRemovalOnly =
+    !gAllowSetPassphrase && gProtectionMode == userPassphraseMode;
+
+  // Strings used here:
+  //   openpgp-passphrase-status-unprotected
+  //   openpgp-passphrase-status-primary-password
+  //   openpgp-passphrase-status-user-passphrase
+  document.l10n.setAttributes(
+    document.getElementById("passphraseStatus"),
+    `openpgp-passphrase-status-${gProtectionMode}`
+  );
+
+  if (!offerRemovalOnly) {
+    // Strings used here:
+    //   openpgp-passphrase-instruction-unprotected
+    //   openpgp-passphrase-instruction-primary-password
+    //   openpgp-passphrase-instruction-user-passphrase
+    document.l10n.setAttributes(
+      document.getElementById("passphraseInstruction"),
+      `openpgp-passphrase-instruction-${gProtectionMode}`
+    );
+  }
+
+  // All remaining instructions explain how to set a passphrase, which
+  // we don't offer with the pref disabled. The status line above is
+  // sufficient in that case.
+  document.getElementById("passphraseInstruction").hidden =
+    !gAllowSetPassphrase || offerRemovalOnly;
+
+  document.getElementById("unlockBox").hidden =
+    !gAllowSetPassphrase || gProtectionMode != userPassphraseMode;
+  document.getElementById("lockBox").hidden =
+    !gAllowSetPassphrase || gProtectionMode == userPassphraseMode;
+  document.getElementById("usePrimaryPassword").hidden =
+    !offerRemovalOnly || !usingPP;
+  document.getElementById("removeProtection").hidden =
+    !offerRemovalOnly || usingPP;
+
+  document.l10n.setAttributes(
+    document.getElementById("setPassphrase"),
+    gProtectionMode == userPassphraseMode
+      ? "openpgp-passphrase-change"
+      : "openpgp-passphrase-set"
+  );
+
+  document.getElementById("passwordInput").value = "";
+  document.getElementById("passwordConfirm").value = "";
+}
+
+/**
+ * Unlock the primary key and all subkeys that this dialog tracks,
+ * prompting the user for a passphrase if necessary. Already unlocked
+ * keys are skipped.
+ *
+ * @returns {Promise<boolean>} - true if all tracked keys are unlocked
+ */
+async function unlockAllPrivateKeys() {
+  const pwCache = {
+    passwords: [],
+  };
+
+  for (const tracker of gPrivateKeyTrackers) {
+    tracker.setAllowPromptingUserForPassword(true);
+    tracker.setAllowAutoUnlockWithCachedPasswords(true);
+    tracker.setPasswordCache(pwCache);
+    await tracker.unlock();
+    if (!tracker.isUnlocked()) {
+      // Either the user cancelled, or a key requires a passphrase that
+      // we couldn't obtain. Report it, because earlier keys of this key
+      // pair may have been unlocked successfully, and the user would
+      // otherwise assume that unlocking had worked.
+      document.getElementById("passphraseInstruction").hidden = false;
+      document.l10n.setAttributes(
+        document.getElementById("passphraseInstruction"),
+        "openpgp-passphrase-unlock-failed"
+      );
+      return false;
+    }
+  }
+  return true;
+}
+
+async function unlock() {
+  if (!(await unlockAllPrivateKeys())) {
+    return;
+  }
+
+  document.l10n.setAttributes(
+    document.getElementById("passphraseInstruction"),
+    "openpgp-passphrase-unlocked"
+  );
+  document.getElementById("unlockBox").hidden = true;
+  document.getElementById("lockBox").hidden = !gAllowSetPassphrase;
+  document.getElementById("passwordInput").value = "";
+  document.getElementById("passwordConfirm").value = "";
+
+  document.getElementById(
+    LoginHelper.isPrimaryPasswordSet()
+      ? "usePrimaryPassword"
+      : "removeProtection"
+  ).hidden = false;
+
+  // Necessary to set the disabled status of the button
+  onPasswordInput();
+}
+
+function onPasswordInput() {
+  const pw1 = document.getElementById("passwordInput").value;
+  const pw2 = document.getElementById("passwordConfirm").value;
+
+  // Disable the button if the two passwords don't match, and enable it
+  // if the passwords do match.
+  const disabled = pw1 != pw2 || !pw1.length;
+
+  document.getElementById("setPassphrase").disabled = disabled;
+}
+
+async function setPassphrase() {
+  const pw = document.getElementById("passwordInput").value;
+
+  for (const tracker of gPrivateKeyTrackers) {
+    tracker.setPassphrase(pw);
+  }
+  await RNP.saveKeyRings();
+
+  releasePrivateKeys();
+  await loadPassphraseProtection();
+}
+
+async function useAutoPassphrase() {
+  // Unlock all keys before changing the protection of any of them.
+  // Otherwise a cancelled passphrase prompt could leave this key pair
+  // with a mixture of the old passphrase and the automatic passphrase.
+  if (!(await unlockAllPrivateKeys())) {
+    return;
+  }
+
+  for (const tracker of gPrivateKeyTrackers) {
+    await tracker.setAutoPassphrase();
+  }
+  await RNP.saveKeyRings();
+
+  releasePrivateKeys();
+  await loadPassphraseProtection();
+}
+
+function onAcceptanceChanged() {
+  // The check for gAcceptedEmails.size is to handle an edge case.
+  // If a key was previously accepted, for an email address that is
+  // now revoked, and another email address has been added,
+  // then the key can be marked as accepted without any accepted
+  // email address.
+  // In this scenario, we must allow the user to edit the accepted
+  // email addresses, even if there's just one email address available.
+  // Another scenario is a data inconsistency, with accepted key,
+  // but no accepted email.
+
+  const originalAccepted = isAccepted(gOriginalAcceptance);
+  const wantAccepted = isAccepted(gAcceptanceRadio.value);
+
+  const disableEmailsTab =
+    (wantAccepted &&
+      gAllEmails.length < 2 &&
+      gAcceptedEmails.size != 0 &&
+      (!originalAccepted || !gHaveUnacceptedEmails)) ||
+    !wantAccepted;
+
+  document.getElementById("emailAddressesTab").disabled = disableEmailsTab;
+  document.getElementById("emailAddressesPanel").disabled = disableEmailsTab;
+
+  setOkButtonState();
+}
+
+function onDataModified() {
+  EnigmailKeyRing.clearCache();
+  enableRefresh();
+  reloadData(false);
+}
+
+function isAccepted(value) {
+  return value == "unverified" || value == "verified";
+}
+
+async function reloadData(firstLoad) {
+  gUserId = null;
+  gCanAddPQCSubkey = false;
+
+  var treeChildren = document.getElementById("keyListChildren");
+
+  // clean lists
+  while (treeChildren.firstChild) {
+    treeChildren.firstChild.remove();
+  }
+
+  const keyObj = EnigmailKeyRing.getKeyById(gKeyId);
+  if (!keyObj) {
+    return;
+  }
+
+  if (keyObj.fpr) {
+    gFingerprint = keyObj.fpr;
+    document.getElementById("fingerprint").value = EnigmailKey.formatFpr(
+      keyObj.fpr
+    );
+  }
+
+  gSigTree = document.getElementById("signatures_tree");
+  const signatures = await RNP.getKeyObjSignatures(keyObj, false);
+  gSigTree.view = new SigListView(signatures);
+
+  document.getElementById("subkeyList").view = new SubkeyListView(keyObj);
+
+  gUserId = keyObj.userId;
+
+  document.getElementById("keyId").value = keyObj.keyId;
+  document.getElementById("keyCreated").value = keyObj.created;
+
+  const keyIsExpired =
+    keyObj.effectiveExpiryTime &&
+    keyObj.effectiveExpiryTime < Math.floor(Date.now() / 1000);
+
+  let expiryInfo;
+  if (keyObj.keyTrust == "r") {
+    expiryInfo = l10n.formatValueSync("key-revoked-simple");
+  } else if (keyObj.keyTrust == "e" || keyIsExpired) {
+    expiryInfo = l10n.formatValueSync("key-expired-date", {
+      keyExpiry: keyObj.effectiveExpiry,
+    });
+  } else if (keyObj.effectiveExpiry.length === 0) {
+    expiryInfo = l10n.formatValueSync("key-does-not-expire");
+  } else {
+    expiryInfo = keyObj.effectiveExpiry;
+  }
+  document.getElementById("keyExpiry").value = expiryInfo;
+
+  gModePersonal = keyObj.secretAvailable;
+
+  document.getElementById("revocationReasonCode").hidden =
+    keyObj.keyTrust != "r";
+  document.getElementById("revocationReasonReason").hidden =
+    keyObj.keyTrust != "r";
+
+  document.getElementById("acceptanceSelection").hidden =
+    keyObj.keyTrust == "r";
+
+  document.getElementById("keyType").value = l10n.formatValueSync(
+    gModePersonal ? "key-type-pair" : "key-type-public"
+  );
+  gPersonalRadio.hidden = !gModePersonal;
+
+  if (keyObj.keyTrust == "r") {
+    document.l10n.setAttributes(
+      document.getElementById("acceptanceIntro"),
+      "key-revoked-simple"
+    );
+    try {
+      const { code, reason } = RNP.getKeyRevocationReasonByKeyId(
+        `0x${keyObj.keyId}`
+      );
+      // key-revoked-revocation-code-superseded
+      // key-revoked-revocation-code-compromised
+      // key-revoked-revocation-code-retired
+      if (code && code != "no") {
+        document.l10n.setAttributes(
+          document.getElementById("revocationReasonCode"),
+          `key-revoked-revocation-code-${code}`,
+          { code }
+        );
+      }
+
+      document.getElementById("revocationReasonReason").hidden = !reason;
+      if (reason) {
+        document.l10n.setAttributes(
+          document.getElementById("revocationReasonReason"),
+          `key-revoked-revocation-reason`,
+          { reason }
+        );
+      }
+    } catch (e) {
+      console.warn("Getting revocation reason FAILED!", e);
+    }
+  }
+
+  if (gModePersonal) {
+    gAcceptanceRadio.hidden = true;
+    gUpdateAllowed = true;
+    if (firstLoad) {
+      gOriginalPersonal = await PgpSqliteDb2.isAcceptedAsPersonalKey(
+        keyObj.fpr
+      );
+      gPersonalRadio.value = gOriginalPersonal ? "personal" : "not_personal";
+    }
+
+    if (keyObj.keyTrust != "r") {
+      document.l10n.setAttributes(
+        document.getElementById("acceptanceIntro"),
+        "key-accept-personal"
+      );
+      // Changing an expiration date requires a new signature by the
+      // primary key, which is impossible without its key material.
+      const expiryButton = document.getElementById("changeExpiryButton");
+      expiryButton.hidden = false;
+      expiryButton.disabled = !keyObj.secretMaterial;
+
+      gCanAddPQCSubkey = RNP.canGenerateV4PQCEncryptionSubkeyByFpr(keyObj.fpr);
+    }
+  } else {
+    const isStillValid = !(
+      keyObj.keyTrust == "r" ||
+      keyObj.keyTrust == "e" ||
+      keyIsExpired
+    );
+    if (!isStillValid) {
+      gAcceptanceRadio.hidden = true;
+      if (keyObj.keyTrust == "e" || keyIsExpired) {
+        document.l10n.setAttributes(
+          document.getElementById("acceptanceIntro"),
+          "key-expired-simple"
+        );
+      }
+    } else {
+      gAcceptanceRadio.hidden = false;
+      document.l10n.setAttributes(
+        document.getElementById("acceptanceIntro"),
+        "key-do-you-accept"
+      );
+      document.l10n.setAttributes(
+        document.getElementById("acceptanceVerification"),
+        "key-verification",
+        {
+          addr: EnigmailFuncs.getEmailFromUserID(gUserId).toLowerCase(),
+        }
+      );
+      gUpdateAllowed = true;
+
+      const acceptanceResult = await PgpSqliteDb2.getFingerprintAcceptance(
+        null,
+        keyObj.fpr
+      );
+
+      if (firstLoad) {
+        if (!acceptanceResult) {
+          gOriginalAcceptance = "undecided";
+        } else {
+          gOriginalAcceptance = acceptanceResult;
+        }
+        gAcceptanceRadio.value = gOriginalAcceptance;
+      }
+    }
+
+    if (firstLoad) {
+      gAcceptedEmails = new Set();
+
+      for (let i = 0; i < keyObj.userIds.length; i++) {
+        if (keyObj.userIds[i].type === "uid") {
+          const uidEmail = EnigmailFuncs.getEmailFromUserID(
+            keyObj.userIds[i].userId
+          );
+          if (uidEmail) {
+            gAllEmails.push(uidEmail);
+
+            if (isAccepted(gOriginalAcceptance)) {
+              const rv = {};
+              await PgpSqliteDb2.getAcceptance(keyObj.fpr, uidEmail, rv);
+              if (rv.emailDecided) {
+                gAcceptedEmails.add(uidEmail);
+              } else {
+                gHaveUnacceptedEmails = true;
+              }
+            } else {
+              // For not-yet-accepted keys, our default is to accept
+              // all shown email addresses.
+              gAcceptedEmails.add(uidEmail);
+            }
+          }
+        }
+      }
+
+      // clone
+      gOriginalAcceptedEmails = new Set(gAcceptedEmails);
+    }
+  }
+
+  await createUidData(keyObj);
+
+  document.getElementById("key-detail-has-insecure").hidden =
+    !keyObj.hasIgnoredAttributes;
+
+  updatePQCSubkeyButton();
+}
+
+function setOkButtonState() {
+  const atLeastOneChecked = gAllEmailCheckboxes.some(c => c.checked);
+  gOkButton.disabled = !atLeastOneChecked && isAccepted(gAcceptanceRadio.value);
+}
+
+async function createUidData(keyDetails) {
+  var uidList = document.getElementById("userIds");
+  while (uidList.firstChild) {
+    uidList.firstChild.remove();
+  }
+
+  let primaryIdIndex = 0;
+
+  for (let i = 0; i < keyDetails.userIds.length; i++) {
+    if (keyDetails.userIds[i].type === "uid") {
+      if (keyDetails.userIds[i].userId == keyDetails.userId) {
+        primaryIdIndex = i;
+        break;
+      }
+    }
+  }
+
+  for (let i = -1; i < keyDetails.userIds.length; i++) {
+    // Handle entry primaryIdIndex first.
+
+    let indexToUse;
+    if (i == -1) {
+      indexToUse = primaryIdIndex;
+    } else if (i == primaryIdIndex) {
+      // already handled when i was -1
+      continue;
+    } else {
+      indexToUse = i;
+    }
+
+    if (keyDetails.userIds[indexToUse].type === "uid") {
+      const uidStr = keyDetails.userIds[indexToUse].userId;
+
+      /* - attempted code with <ul id="userIds">, doesn't work yet
+      let item = document.createElement("li");
+
+      let text = document.createElement("div");
+      text.textContent = uidStr;
+      item.append(text);
+
+      let lf = document.createElement("br");
+      item.append(lf);
+      uidList.appendChild(item);
+      */
+
+      uidList.appendItem(uidStr);
+    }
+  }
+
+  if (gModePersonal) {
+    document.getElementById("emailAddressesTab").hidden = true;
+  } else {
+    const emailList = document.getElementById("addressesList");
+
+    let atLeastOneChecked = false;
+    const gUniqueEmails = new Set();
+
+    for (let i = 0; i < gAllEmails.length; i++) {
+      const email = gAllEmails[i];
+      if (gUniqueEmails.has(email)) {
+        continue;
+      }
+      gUniqueEmails.add(email);
+
+      const checkbox = document.createXULElement("checkbox");
+
+      checkbox.value = email;
+      checkbox.setAttribute("label", email);
+
+      checkbox.checked = gAcceptedEmails.has(email);
+      if (checkbox.checked) {
+        atLeastOneChecked = true;
+      }
+
+      checkbox.disabled = !gUpdateAllowed;
+      checkbox.addEventListener("command", () => {
+        setOkButtonState();
+      });
+
+      emailList.appendChild(checkbox);
+      gAllEmailCheckboxes.push(checkbox);
+    }
+
+    // Usually, if we have only one email address available,
+    // we want to hide the tab.
+    // There are edge cases - if we have a data inconsistency
+    // (key accepted, but no email accepted), then we must show,
+    // to allow the user to repair.
+
+    document.getElementById("emailAddressesTab").hidden =
+      gUniqueEmails.size < 2 && atLeastOneChecked;
+  }
+}
+
+function setAttr(attribute, value) {
+  var elem = document.getElementById(attribute);
+  if (elem) {
+    elem.value = value;
+  }
+}
+
+function enableRefresh() {
+  if (window.arguments[1]) {
+    window.arguments[1].refresh = true;
+  }
+
+  window.arguments[0].modified();
+}
+
+// ------------------ onCommand Functions  -----------------
+
+/**
+ * @param {object[]} signatures - list of signature objects
+ * @param {string} signatures[].userId  - User ID.
+ * @param {string} signatures.uidLabel - UID label.
+ * @param {string} signatures.created - Creation date as printable string.
+ * @param {string} signatures.fpr - Fingerprint.
+ * @param {object[]} signatures.sigList - Objects.
+ * @param {string} signatures[].sigList[].userId
+ * @param {string} signatures[].sigList[].created
+ * @param {string} signatures[].sigList[].signerKeyId
+ * @param {string} signatures[].sigList[].sigType
+ * @param {boolean} signatures[].sigList[].sigKnown
+ */
+function SigListView(signatures) {
+  this.keyObj = [];
+
+  for (const sig of signatures) {
+    const k = {
+      uid: sig.userId,
+      keyId: sig.keyId,
+      created: sig.created,
+      expanded: true,
+      sigList: [],
+    };
+
+    for (const s of sig.sigList) {
+      k.sigList.push({
+        uid: s.userId,
+        created: s.created,
+        keyId: s.signerKeyId,
+        sigType: s.sigType,
+      });
+    }
+    this.keyObj.push(k);
+  }
+
+  this.prevKeyObj = null;
+  this.prevRow = -1;
+
+  this.updateRowCount();
+}
+
+/**
+ * @implements {nsITreeView}
+ */
+SigListView.prototype = {
+  updateRowCount() {
+    let rc = 0;
+
+    for (const i in this.keyObj) {
+      rc += this.keyObj[i].expanded ? this.keyObj[i].sigList.length + 1 : 1;
+    }
+
+    this.rowCount = rc;
+  },
+
+  setLastKeyObj(keyObj, row) {
+    this.prevKeyObj = keyObj;
+    this.prevRow = row;
+    return keyObj;
+  },
+
+  getSigAtIndex(row) {
+    if (this.lastIndex == row) {
+      return this.lastKeyObj;
+    }
+
+    let j = 0,
+      l = 0;
+
+    for (const i in this.keyObj) {
+      if (j === row) {
+        return this.setLastKeyObj(this.keyObj[i], row);
+      }
+      j++;
+
+      if (this.keyObj[i].expanded) {
+        l = this.keyObj[i].sigList.length;
+
+        if (j + l >= row && row - j < l) {
+          return this.setLastKeyObj(this.keyObj[i].sigList[row - j], row);
+        }
+        j += l;
+      }
+    }
+
+    return null;
+  },
+
+  getCellText(row, column) {
+    const s = this.getSigAtIndex(row);
+
+    if (s) {
+      switch (column.id) {
+        case "sig_uid_col":
+          return s.uid;
+        case "sig_keyid_col":
+          return "0x" + s.keyId;
+        case "sig_created_col":
+          return s.created;
+      }
+    }
+
+    return "";
+  },
+
+  setTree(treebox) {
+    this.treebox = treebox;
+  },
+
+  isContainer(row) {
+    const s = this.getSigAtIndex(row);
+    return "sigList" in s;
+  },
+
+  isSeparator() {
+    return false;
+  },
+
+  isSorted() {
+    return false;
+  },
+
+  getLevel(row) {
+    const s = this.getSigAtIndex(row);
+    return "sigList" in s ? 0 : 1;
+  },
+
+  cycleHeader() {},
+
+  getImageSrc() {
+    return null;
+  },
+
+  getRowProperties() {},
+
+  getCellProperties() {
+    return "";
+  },
+
+  canDrop() {
+    return false;
+  },
+
+  getColumnProperties() {},
+
+  isContainerEmpty() {
+    return false;
+  },
+
+  getParentIndex() {
+    return -1;
+  },
+
+  getProgressMode() {},
+
+  isContainerOpen(row) {
+    const s = this.getSigAtIndex(row);
+    return s.expanded;
+  },
+
+  isSelectable() {
+    return true;
+  },
+
+  toggleOpenState(row) {
+    const s = this.getSigAtIndex(row);
+    s.expanded = !s.expanded;
+    const r = this.rowCount;
+    this.updateRowCount();
+    gSigTree.rowCountChanged(row, this.rowCount - r);
+  },
+};
+
+function createSubkeyItem(mainKeyIsSecret, subkey, usagetext) {
+  // Get expiry state of this subkey
+  let expire;
+  if (subkey.keyTrust === "r") {
+    expire = l10n.formatValueSync("key-valid-revoked");
+  } else if (subkey.expiryTime === 0) {
+    expire = l10n.formatValueSync("key-expiry-never");
+  } else {
+    expire = subkey.expiry;
+  }
+
+  let subkeyType = "";
+
+  if (mainKeyIsSecret && (!subkey.secretAvailable || !subkey.secretMaterial)) {
+    subkeyType = "(!) ";
+    gHasMissingSecret = true;
+  }
+  if (subkey.type === "pub") {
+    subkeyType += l10n.formatValueSync("key-type-primary");
+  } else {
+    subkeyType += l10n.formatValueSync("key-type-subkey");
+  }
+
+  const keyObj = {
+    keyType: subkeyType,
+    keyId: "0x" + subkey.keyId,
+    version: subkey.version,
+    algo: subkey.algoSym,
+    size: subkey.keySize,
+    creationDate: subkey.created,
+    expiry: expire,
+    usage: usagetext,
+  };
+
+  return keyObj;
+}
+
+function SubkeyListView(keyObj) {
+  gHasMissingSecret = false;
+
+  this.subkeys = [];
+  this.rowCount = keyObj.subKeys.length + 1;
+
+  this.subkeys.push(
+    createSubkeyItem(
+      keyObj.secretAvailable,
+      keyObj,
+      keyObj.getUsageText(keyObj.keyUseFor)
+    )
+  );
+
+  for (let i = 0; i < keyObj.subKeys.length; i++) {
+    this.subkeys.push(
+      createSubkeyItem(
+        keyObj.secretAvailable,
+        keyObj.subKeys[i],
+        keyObj.getUsageText(keyObj.subKeys[i].keyUseFor)
+      )
+    );
+  }
+
+  document.getElementById("legendMissingSecret").hidden = !gHasMissingSecret;
+}
+
+// implements nsITreeView
+SubkeyListView.prototype = {
+  getCellText(row, column) {
+    const s = this.subkeys[row];
+
+    if (s) {
+      switch (column.id) {
+        case "keyTypeCol":
+          return s.keyType;
+        case "keyIdCol":
+          return s.keyId;
+        case "versionCol":
+          return s.version;
+        case "algoCol":
+          return s.algo;
+        case "sizeCol":
+          return s.size;
+        case "createdCol":
+          return s.creationDate;
+        case "expiryCol":
+          return s.expiry;
+        case "keyUsageCol":
+          return s.usage;
+      }
+    }
+
+    return "";
+  },
+
+  setTree(treebox) {
+    this.treebox = treebox;
+  },
+
+  isContainer() {
+    return false;
+  },
+
+  isSeparator() {
+    return false;
+  },
+
+  isSorted() {
+    return false;
+  },
+
+  getLevel() {
+    return 0;
+  },
+
+  cycleHeader() {},
+
+  getImageSrc() {
+    return null;
+  },
+
+  getRowProperties() {},
+
+  getCellProperties() {
+    return "";
+  },
+
+  canDrop() {
+    return false;
+  },
+
+  getColumnProperties() {},
+
+  isContainerEmpty() {
+    return false;
+  },
+
+  getParentIndex() {
+    return -1;
+  },
+
+  getProgressMode() {},
+
+  isContainerOpen() {
+    return false;
+  },
+
+  isSelectable() {
+    return true;
+  },
+
+  toggleOpenState() {},
+};
+
+function sigHandleDblClick() {}
+
+document.addEventListener("dialogaccept", async function (event) {
+  // Prevent the closing of the dialog to wait until all the SQLite operations
+  // have properly been executed.
+  event.preventDefault();
+
+  // The user's personal OpenPGP key acceptance was edited.
+  if (gModePersonal) {
+    if (gUpdateAllowed && gPersonalRadio.value != gOriginalPersonal) {
+      if (gPersonalRadio.value == "personal") {
+        await PgpSqliteDb2.acceptAsPersonalKey(gFingerprint);
+      } else {
+        await PgpSqliteDb2.deletePersonalKeyAcceptance(gFingerprint);
+      }
+
+      enableRefresh();
+    }
+    window.close();
+    return;
+  }
+
+  // If the recipient's key hasn't been revoked or invalidated, and the
+  // signature acceptance was edited.
+  if (gUpdateAllowed) {
+    const selectedEmails = new Set();
+    for (const checkbox of gAllEmailCheckboxes) {
+      if (checkbox.checked) {
+        selectedEmails.add(checkbox.value);
+      }
+    }
+
+    if (
+      gAcceptanceRadio.value != gOriginalAcceptance ||
+      !CommonUtils.setEqual(gAcceptedEmails, selectedEmails)
+    ) {
+      await PgpSqliteDb2.updateAcceptance(
+        gFingerprint,
+        [...selectedEmails],
+        gAcceptanceRadio.value
+      );
+
+      enableRefresh();
+    }
+  }
+
+  window.close();
+});

@@ -36,6 +36,20 @@ When a need comes up, first look for a maintained Rust library that fits it. For
 - Consult `rust-comments-rules` before deciding whether to add a Rust comment and whenever writing or editing one, including inline comments and Rustdoc.
 - Before GPUI framework, lifecycle, state, or component work, read `.agents/skills/gpui-kit/SKILL.md` and the relevant coding-guide sections. Before designing or changing visible UI, read `.agents/skills/gpui-kit-design-guides/SKILL.md` and its required design-guide sections.
 
+## Use upstream source references
+
+- `repos/thunderbird/` contains the pinned, squashed snapshot of the [official Thunderbird desktop repository](https://github.com/thunderbird/thunderbird-desktop). Use it to inspect mail and calendar behavior. The identity research records its upstream commit.
+- `repos/wino-mail/` contains a pinned snapshot of [Wino Mail](https://github.com/bkaankose/Wino-Mail). It is GPL-3.0 licensed and exists for source inspection only.
+- `repos/msgraph-sdk-go/` contains the pinned [Microsoft Graph Go SDK](https://github.com/microsoftgraph/msgraph-sdk-go) snapshot.
+- `repos/io-msgraph/` contains the pinned [io-msgraph Rust client](https://github.com/pimalaya/io-msgraph) snapshot.
+- Treat all four trees as read-only references. Do not build against them or copy their source code into Einfach Mail. Check each upstream file's license and notices before using other material. Keep the product brief, architecture, security requirements, Microsoft documentation, and GPUI decisions authoritative.
+- Thunderbird has no root license file, and GitHub does not identify one SPDX license for the repository. Preserve its nested license files and notices.
+- Refresh a snapshot only after reviewing upstream changes. Keep the subtree merge history and use `--squash`:
+  - `git subtree pull --prefix=repos/thunderbird https://github.com/thunderbird/thunderbird-desktop.git main --squash`
+  - `git subtree pull --prefix=repos/wino-mail https://github.com/bkaankose/Wino-Mail.git main --squash`
+  - `git subtree pull --prefix=repos/msgraph-sdk-go https://github.com/microsoftgraph/msgraph-sdk-go.git main --squash`
+  - `git subtree pull --prefix=repos/io-msgraph https://github.com/pimalaya/io-msgraph.git master --squash`
+
 ## Work in small, reviewable changes
 
 1. Identify the user outcome and acceptance criteria before editing.

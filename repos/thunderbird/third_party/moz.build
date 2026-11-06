@@ -1,0 +1,138 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+DIRS += [
+    "asn1js",
+    "sax-js",
+]
+
+EXTRA_JS_MODULES += [
+    "qrcode/qrcode.mjs",
+]
+
+if CONFIG["TB_LIBOTR_PREBUILT"]:
+    DEFINES["TB_LIBOTR_PREBUILT"] = CONFIG["TB_LIBOTR_PREBUILT"]
+
+    if CONFIG["HAVE_64BIT_BUILD"]:
+        DEFINES["HAVE_64BIT_BUILD"] = True
+
+if CONFIG["MZLA_LIBRNP"]:
+    DIRS += [
+        "bzip2",
+        "json-c",
+        "rnp",
+        "zlib",
+    ]
+    if CONFIG["NIGHTLY_BUILD"]:
+        DIRS += ["rnp_experimental"]
+    if CONFIG["MZLA_LIBRNP_BACKEND"] == "botan":
+        DIRS += ["botan"]
+
+MOZ_SRC_FILES += [
+    "redux/immer/immer.mjs",
+    "redux/redux-thunk/redux-thunk.mjs",
+    "redux/redux-toolkit/redux-toolkit.mjs",
+    "redux/redux/redux.mjs",
+    "redux/reselect/reselect.mjs",
+]
+
+TESTING_JS_MODULES.mail += [
+    "axe-core/axe.min.js",
+]
+
+LICENSES += ["jitterentropy"]
+LICENSES["jitterentropy"].title = "Jitterentropy License"
+LICENSES["jitterentropy"].text = "LICENSE-NOTICE-jitterentropy.txt"
+LICENSES["jitterentropy"].spdx = "BSD-3-Clause"
+LICENSES["jitterentropy"].notice = """
+<p>This license applies to the following files:</p>
+<p>(plus common Libgcrypt copyright holders apply for random/rndjent.c)</p>
+"""
+
+LICENSES += ["xlicense"]
+LICENSES["xlicense"].title = "X License"
+LICENSES["xlicense"].text = "LICENSE-NOTICE-xlicense.txt"
+LICENSES["xlicense"].spdx = "MIT"
+LICENSES["xlicense"].notice = """
+<p>This license applies to the following files:</p>
+"""
+
+LICENSES += ["publicdomain"]
+LICENSES["publicdomain"].title = "Public domain"
+LICENSES["publicdomain"].text = "LICENSE-NOTICE-publicdomain.txt"
+LICENSES["publicdomain"].notice = """
+<p>This license applies to the following files:</p>
+"""
+
+LICENSES += ["ocblicense"]
+LICENSES["ocblicense"].title = "OCB license 1"
+LICENSES["ocblicense"].text = "LICENSE-NOTICE-ocblicense1.txt"
+LICENSES["ocblicense"].notice = """
+<p>This license applies to the following files:</p>
+"""
+
+LICENSES += ["getopt"]
+LICENSES["getopt"].title = "getopt.c License"
+LICENSES["getopt"].text = "LICENSE-NOTICE-getopt.txt"
+LICENSES["getopt"].notice = """
+<p>This license applies to the following files:</p>
+"""
+
+LICENSED_UNDER += [
+    "bsd2clause",
+    "bsd3clause",
+    "getopt",
+    "jitterentropy",
+    "lgpl",
+    "mit",
+    "ocblicense",
+    "publicdomain",
+    "redux",
+    "xlicense",
+]
+LICENSED_UNDER["bsd3clause"].paths = [
+    "libgcrypt/cipher/sha256-avx-amd64.S",
+    "libgcrypt/cipher/sha256-avx2-bmi2-amd64.S",
+    "libgcrypt/cipher/sha256-ssse3-amd64.S",
+    "libgcrypt/cipher/sha512-avx-amd64.S",
+    "libgcrypt/cipher/sha512-avx2-bmi2-amd64.S",
+    "libgcrypt/cipher/sha512-ssse3-amd64.S",
+]
+LICENSED_UNDER["jitterentropy"].paths = [
+    "libgcrypt/random/jitterentropy-base.c",
+    "libgcrypt/random/jitterentropy.h",
+    "libgcrypt/random/rndjent.c",
+]
+LICENSED_UNDER["xlicense"].paths = [
+    "libgcrypt/install.sh",
+]
+LICENSED_UNDER["publicdomain"].paths = [
+    "libgcrypt/cipher/arcfour-amd64.S",
+]
+LICENSED_UNDER["ocblicense"].paths = [
+    "libgcrypt/cipher/cipher-ocb.c",
+]
+LICENSED_UNDER["mit"].paths = [
+    "niwcompat/dirent.h",
+    "rust/quick-xml",
+    "redux/immer",
+    "redux/redux-toolkit",
+    "redux/reselect",
+]
+LICENSED_UNDER["getopt"].paths = [
+    "niwcompat/getopt.c",
+    "niwcompat/getopt.h",
+]
+LICENSED_UNDER["lgpl"].paths = [
+    "libgcrypt",
+    "libgpg-error",
+    "libotr",
+]
+LICENSED_UNDER["bsd2clause"].paths = [
+    "qrcode",
+]
+LICENSED_UNDER["redux"].paths = [
+    "redux/redux",
+    "redux/redux-thunk",
+]

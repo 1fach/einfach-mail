@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <!-- AppleKeychainStore uses the app's default group (the first entry); MSAL keeps its token cache in
+       com.microsoft.adalcache (IOSOutlookAuthenticationHost.WithIosKeychainSecurityGroup). -->
+  <key>keychain-access-groups</key>
+  <array>
+    <string>$(AppIdentifierPrefix)com.winomail.macos</string>
+    <string>$(AppIdentifierPrefix)com.microsoft.adalcache</string>
+  </array>
+  <!-- App Store builds (-p:WinoIOSDistribution=AppStore) register for production push. -->
+  <key>aps-environment</key><string>production</string>
+  <!-- App Attest (relay device credential); TestFlight and App Store builds always attest against production. -->
+  <key>com.apple.developer.devicecheck.appattest-environment</key><string>production</string>
+  <!-- Sign in with Apple (Wino Accounts). Restricted: the provisioning profile must include the capability. -->
+  <key>com.apple.developer.applesignin</key>
+  <array><string>Default</string></array>
+  <!-- Shared container with the Notification Service Extension: contact pictures for enriched relay alerts. The
+       identifier is spelled exactly as the App Group was created in the developer portal. -->
+  <key>com.apple.security.application-groups</key>
+  <array><string>group.com.winomail.macos</string></array>
+</dict></plist>

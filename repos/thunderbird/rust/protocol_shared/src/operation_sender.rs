@@ -1,0 +1,774 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+use std::{
+    cell::{Cell, RefCell},
+    ffi::CString,
+    ops::ControlFlow,
+    sync::Arc,
+    time::Duration,
+};
+
+use async_lock::Mutex;
+use http::Request;
+use mailnews_ui_glue::{
+    AuthErrorOutcome, ErrorBehavior, handle_auth_failure, handle_transport_sec_failure,
+    maybe_handle_connection_error, report_connection_success,
+};
+use moz_http::{Response, StatusCode};
+use operation_queue::line_token::{AcquireOutcome, Line, LineStatus};
+use url::Url;
+use uuid::Uuid;
+use xpcom::{
+    RefCounted, RefPtr, components,
+    interfaces::{nsIObserver, nsIObserverService},
+};
+
+use crate::{
+    ServerType,
+    authentication::authentication_provider::PasswordLocationForCache,
+    error::ProtocolError,
+    observers::{
+        HttpAuthObserver, OBSERVER_TOPIC_CACHED_PASSWORD_CHANGED, OBSERVER_TOPIC_PASSWORDMGR,
+        UrlPrefObserver,
+    },
+    operation_sender::{
+        pref_based_server::ServerProperty,
+        send_request::{OperationRequest, send_request},
+    },
+};
+
+pub mod pref_based_server;
+pub(crate) mod send_request;
+
+/// A [`ResponseProcessor`] processes protocol-specific parts of the response.
+///
+/// It's in charge of propagating errors located in the response to the
+/// [`OperationSender`], as well as letting it know if the request is being
+/// throttled.
+///
+/// A new [`ResponseProcessor`] instance is provided to the [`OperationSender`]
+/// for each request, so it can be correctly parameterized on the response type.
+pub trait ResponseProcessor {
+    /// The success value returned in a [`ControlFlow::Break`] by
+    /// [`check_response_for_error`].
+    ///
+    /// [`check_response_for_error`]:
+    ///     ResponseProcessor::check_response_for_error
+    type ReturnValue;
+
+    /// The error value returned by [`check_response_for_error`].
+    ///
+    /// [`check_response_for_error`]:
+    ///     ResponseProcessor::check_response_for_error
+    type Error: From<ProtocolError>;
+
+    /// Whether the [`ResponseProcessor`] should handle responses with the given
+    /// error status code.
+    ///
+    /// Whenever this function returns `false`, the [`OperationSender`] will
+    /// return the error before [`check_response_for_error`] can be called.
+    ///
+    /// Note that successes (i.e. 2XX responses) will always result in
+    /// `check_response_for_error` being called.
+    ///
+    /// [`check_response_for_error`]:
+    ///     ResponseProcessor::check_response_for_error
+    fn handles_error_status(&self, status: StatusCode) -> bool;
+
+    /// Checks a raw [`Response`] for errors.
+    ///
+    /// If the response does not contain any error, the implementation is free
+    /// to return the parsed response, the raw [`Response`] itself, or anything
+    /// else the consumer requires, wrapped in a [`ControlFlow::Break`].
+    ///
+    /// If the response indicates requests are being throttled/rate-limited, the
+    /// implementation is expected to return [`ControlFlow::Continue`] with the
+    /// duration to wait before the request can be retried.
+    #[allow(async_fn_in_trait)]
+    async fn check_response_for_error(
+        &mut self,
+        name: &str,
+        resp: Response,
+    ) -> Result<ControlFlow<Self::ReturnValue, Duration>, Self::Error>;
+}
+
+/// Options to to control the behavior of
+/// [`OperationSender::make_and_send_request`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OperationRequestOptions {
+    /// Behavior to follow when an authentication failure arises.
+    pub auth_failure_behavior: AuthFailureBehavior,
+
+    /// Behavior to follow when a transport security failure arises.
+    pub transport_sec_failure_behavior: TransportSecFailureBehavior,
+}
+
+/// The behavior to follow when an operation request results in an
+/// authentication failure.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum AuthFailureBehavior {
+    /// Attempt to authenticate again or ask the user for new credentials.
+    #[default]
+    ReAuth,
+
+    /// Fail immediately without attempting to authenticate again or asking the
+    /// user for new credentials.
+    Silent,
+}
+
+/// The behavior to follow when an operation request results in a transport
+/// security failure (e.g. because of an invalid certificate). This specifically
+/// controls the behaviour of `XpComEwsClient::make_operation_request`.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum TransportSecFailureBehavior {
+    /// Immediately alert the user about the security failure.
+    #[default]
+    Alert,
+
+    /// Don't alert the user and propagate the failure to the consumer (which
+    /// might or might not alert the user).
+    Silent,
+}
+
+/// An observer that was registered when starting up the [`OperationSender`],
+/// recorded so it can be cleanly de-registered upon shutdown.
+///
+/// Note that multiple registrations can exist for a given observer, if e.g. it
+/// was registered in multiple ways or against multiple targets.
+struct RegisteredObserver {
+    /// The observer itself.
+    obs: RefPtr<nsIObserver>,
+
+    // The target of the observer's registration.
+    target: ObserverRegistrationTarget,
+}
+
+/// The target of an observer registration.
+enum ObserverRegistrationTarget {
+    /// The observer was registered to be notified when the pref for a given
+    /// server property is changed.
+    Pref(ServerProperty),
+
+    /// The observer was registered for all notifications on a given topic.
+    Topic(String),
+}
+
+/// The central data structure for performing operations against an Exchange
+/// server.
+pub struct OperationSender<ServerT: RefCounted + 'static> {
+    base_url: Arc<RefCell<Url>>,
+    client: moz_http::Client,
+    error_handling_line: Line,
+
+    // Our internal reference on the server, which is wrapped into a
+    // `Mutex<Option<...>>` so it can be "dropped" when we receive the signal
+    // that the client has shut down. See the documentation for the `shutdown()`
+    // method for more information.
+    //
+    // As a result, checking whether the client has shut down (and whether we
+    // should be continuing processing requests) can be done by checking whether
+    // this field's inner value is `None`.
+    server: Mutex<Option<RefPtr<ServerT>>>,
+
+    // The observers we've registered at startup, so we can de-register them at
+    // shutdown. We hold this list in a `Cell` so we can drop it at shutdown.
+    // See the documentation for `shutdown()` for more information.
+    observers_registrations: Cell<Vec<RegisteredObserver>>,
+}
+
+impl<ServerT: ServerType + 'static> OperationSender<ServerT> {
+    // We expect the `OperationSender` to be wrapped inside an `Arc` to make
+    // sure it's properly managed from a memory point of view. `OperationSender`
+    // isn't `Sync` or `Send`, so we could use `Rc` instead; however making it
+    // thread-safe is something we want to look into in the future, so using
+    // `Arc` right now avoids having to selectively replace a bunch of `Rc`s in
+    // the future. See https://bugzilla.mozilla.org/show_bug.cgi?id=2030095
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn new(
+        base_url: Url,
+        server: RefPtr<ServerT>,
+    ) -> Result<OperationSender<ServerT>, ProtocolError> {
+        // Note: semantically `endpoint` should be wrapped in a `Cell` (not a
+        // `RefCell`) since we never borrow, but `Cell` relies on the inner type
+        // implementing `Copy` which `Url` doesn't do.
+        let base_url = Arc::new(RefCell::new(base_url));
+
+        // Subscribe to changes to the base URL property on the server (named
+        // "ews_url" for historical reasons), so we get updated when it changes.
+        let url_observer = UrlPrefObserver::new_observer(base_url.clone())?;
+        server.observe_property(ServerProperty::EwsUrl, url_observer.clone())?;
+
+        // If the server's authentication should be handled by Necko, populate
+        // the authentication cache.
+        server.maybe_set_necko_auth_cache(PasswordLocationForCache::Memory)?;
+
+        // Also observe future changes to the server's authentication-related
+        // properties, as well as any login stored in the logins manager and
+        // cached password (the observer implementation is in charge of checking
+        // that a notification matches the current server).
+        //
+        // We include the username property here, because servers read usernames
+        // from their properties rather than from the logins manager.
+        let auth_observer = observe_auth_changes(server.clone())?;
+
+        // Record the observers we've just set up, so we can de-register them
+        // upon shutdown. This includes registrations made via
+        // `PrefBasedServer::observe_property`.
+        let observers_registrations = vec![
+            RegisteredObserver {
+                obs: url_observer,
+                target: ObserverRegistrationTarget::Pref(ServerProperty::EwsUrl),
+            },
+            RegisteredObserver {
+                obs: auth_observer.clone(),
+                target: ObserverRegistrationTarget::Pref(ServerProperty::AuthMethod),
+            },
+            RegisteredObserver {
+                obs: auth_observer.clone(),
+                target: ObserverRegistrationTarget::Pref(ServerProperty::EwsUrl),
+            },
+            RegisteredObserver {
+                obs: auth_observer.clone(),
+                target: ObserverRegistrationTarget::Pref(ServerProperty::Realm),
+            },
+            RegisteredObserver {
+                obs: auth_observer.clone(),
+                target: ObserverRegistrationTarget::Pref(ServerProperty::Username),
+            },
+            RegisteredObserver {
+                obs: auth_observer.clone(),
+                target: ObserverRegistrationTarget::Topic(OBSERVER_TOPIC_PASSWORDMGR.to_string()),
+            },
+            RegisteredObserver {
+                obs: auth_observer,
+                target: ObserverRegistrationTarget::Topic(
+                    OBSERVER_TOPIC_CACHED_PASSWORD_CHANGED.to_string(),
+                ),
+            },
+        ];
+
+        Ok(OperationSender {
+            base_url,
+            server: Mutex::new(Some(server)),
+            client: moz_http::Client::new(),
+            error_handling_line: Line::new(),
+            observers_registrations: Cell::new(observers_registrations),
+        })
+    }
+
+    /// "Shut down" the operation sender, by dropping the reference it holds on
+    /// the server, and de-registering all observers related to the current
+    /// server.
+    ///
+    /// The server holds a reference on the client, and the client (through
+    /// `OperationSender`) also holds a reference on the server. Thus, dropping
+    /// the reference on the server is necessary so they don't prevent each
+    /// other from being dropped (and leak memory). We need to do the same for
+    /// the observers since some of them also hold references to the server.
+    pub async fn shutdown(&self) {
+        let Some(server) = self.server.lock().await.take() else {
+            log::warn!(
+                "OperationSender::shutdown: called after the server reference is already gone (multiple shutdown attempts?)"
+            );
+            return;
+        };
+
+        // When relevant and possible, include the server's key when logging
+        // errors.
+        let server_display = match server.key().ok() {
+            Some(key) => format!("server \"{key}\""),
+            None => "server".to_string(),
+        };
+
+        // De-register the observers. We need to handle each "kind" of observer
+        // registration differently:
+        //  * Observers that were registered via `PrefBasedServer` methods
+        //    should be de-registered the same way, so that both operations
+        //    happen against the pref service.
+        //  * Observers that were registered directly against the observer
+        //    service should be de-registered against this same service.
+        let obs_svc = match components::Observer::service::<nsIObserverService>() {
+            Ok(svc) => svc,
+            Err(err) => {
+                log::error!("OperationSender::shutdown: failed to get observer service: {err}");
+                return;
+            }
+        };
+
+        // Take the interior value of the observers so the observers are dropped
+        // when this scope exits.
+        let observers_registrations = self.observers_registrations.take();
+
+        for obs_reg in &observers_registrations {
+            match obs_reg.target {
+                ObserverRegistrationTarget::Pref(prop) => {
+                    if let Err(err) = server.stop_observing(prop, obs_reg.obs.clone()) {
+                        log::error!(
+                            "OperationSender::shutdown: failed to remove pref observer for {server_display} property {prop:?}: {err}",
+                        );
+                    }
+                }
+                ObserverRegistrationTarget::Topic(ref topic) => {
+                    // Unwrapping should be fine here, since every string used
+                    // here is derived from one of the consts in `observers.rs`.
+                    let target = CString::new(topic.as_str()).unwrap();
+
+                    let status =
+                        unsafe { obs_svc.RemoveObserver(obs_reg.obs.coerce(), target.as_ptr()) };
+                    if let Err(err) = status.to_result() {
+                        log::error!(
+                            "OperationSender::shutdown: failed to remove observer for topic {topic}: {err}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Remove any entry the Necko HTTP auth cache might have for this
+        // server.
+        if let Err(err) = server.maybe_remove_necko_auth_cache_entry() {
+            log::error!(
+                "OperationSender::shutdown: failed to remove {server_display} from the Necko auth cache: {err}"
+            );
+        }
+    }
+
+    /// Returns the [`Url`] currently used as the protocol API's base URL.
+    ///
+    /// Consumers should use this value to build the full URL for outgoing
+    /// requests.
+    pub fn base_url(&self) -> Url {
+        (*self.base_url).clone().into_inner()
+    }
+
+    /// Get a reference on the server, if it's available.
+    ///
+    /// Returns [`ProtocolError::ClientClosed`] if the shutdown signal has been
+    /// received and the reference on the server has already been dropped.
+    async fn server(&self) -> Result<RefPtr<ServerT>, ProtocolError> {
+        self.server
+            .lock()
+            .await
+            .clone()
+            .ok_or(ProtocolError::ClientClosed)
+    }
+
+    /// Sends the given HTTP [`Request`].
+    ///
+    /// [`OperationSender`] takes care of authenticating outgoing requests. As
+    /// such, any `Authorization` header on the provided `Request` might get
+    /// overwritten.
+    ///
+    /// This function also handles retries as required (e.g. for authentication
+    /// failures, or if we're being throttled) if the request fails.
+    ///
+    /// `operation_id` and `name` are only used for logging purposes.
+    pub async fn send_request<ProcT: ResponseProcessor>(
+        &self,
+        operation_id: &Uuid,
+        name: &str,
+        request: &Request<Vec<u8>>,
+        options: &OperationRequestOptions,
+        mut resp_processor: ProcT,
+    ) -> Result<ProcT::ReturnValue, ProcT::Error> {
+        // Check if we can get a `RefPtr` on the server; if not it means we've
+        // received the shutdown signal and we shouldn't proceed with the
+        // request (since we drop our reference on the server upon shutdown, to
+        // avoid leaking memory).
+        let _ = self.server().await?;
+
+        let mut token = None;
+
+        let op_request = OperationRequest {
+            operation_id,
+            operation_name: name,
+            request,
+        };
+
+        // If the line is currently busy (i.e. another runner is currently
+        // handling an error), wait for it to become free again. Sending our
+        // request now could disrupt the handling of the error by e.g.
+        // increasing the throttling delay or messing up a re-authentication
+        // attempt.
+        while let LineStatus::Busy(shared) = self.error_handling_line.status().await {
+            shared.await.map_err(ProtocolError::from)?;
+        }
+
+        loop {
+            let response = match self.send_http_request(&op_request).await {
+                Ok(response) => response,
+                Err(err) => {
+                    let resp = match self
+                        .error_handling_line
+                        .try_acquire_token()
+                        .await
+                        .or_token(token)
+                    {
+                        AcquireOutcome::Success(new_token) => {
+                            token = Some(new_token);
+                            self.handle_early_failure(err, options).await?;
+
+                            // The early failure has been handled. An `Ok`
+                            // return value means the request should be ready to
+                            // get retried, so let's do just that.
+                            continue;
+                        }
+                        AcquireOutcome::Failure(shared) => {
+                            log::debug!("early failure: waiting for another runner to handle");
+                            token = None;
+                            shared.await.map_err(ProtocolError::from)?;
+                            None
+                        }
+                    };
+
+                    if let Some(resp) = resp {
+                        // We've managed to acquire the line and to retry our
+                        // request, and it has yielded a response, so we can
+                        // move on to inspecting it for further errors.
+                        resp
+                    } else {
+                        // We've waited for the line to be freed; that's
+                        // happened, so we should be able to retry the request.
+                        continue;
+                    }
+                }
+            };
+
+            // If we managed to connect to the server, but the response's HTTP
+            // status code is an error (e.g. because the server encountered an
+            // internal error, the path is invalid, etc.), we should also raise
+            // a connection error. From manual testing, it does not look like
+            // throttling results in actual 429 responses (but instead in 200
+            // responses with the relevant response message).
+            let response = match response.error_from_status() {
+                Ok(response) => {
+                    report_connection_success(self.server().await?).map_err(ProtocolError::from)?;
+                    response
+                }
+                Err(moz_http::Error::StatusCode { status, response })
+                    if resp_processor.handles_error_status(status) =>
+                {
+                    log::error!(
+                        "Request {operation_id} FAILED with status {status}, handing over to response processor"
+                    );
+                    response
+                }
+                Err(err) => {
+                    if let moz_http::Error::StatusCode { ref response, .. } = err {
+                        log::error!(
+                            "Request {operation_id} FAILED with status {}: {err}",
+                            response.status().map_err(ProtocolError::from)?
+                        );
+                    } else {
+                        log::error!(
+                            "Request {operation_id}: moz_http::Response::error_from_status returned an unexpected error: {err:?}"
+                        );
+                    }
+
+                    maybe_handle_connection_error(
+                        (&err).into(),
+                        self.server().await?,
+                        ErrorBehavior::Notify,
+                    )
+                    .map_err(ProtocolError::from)?;
+                    return Err(ProtocolError::from(err).into());
+                }
+            };
+
+            match resp_processor
+                .check_response_for_error(name, response)
+                .await?
+            {
+                ControlFlow::Continue(sleep_delay) => {
+                    token = match self
+                        .error_handling_line
+                        .try_acquire_token()
+                        .await
+                        .or_token(token)
+                    {
+                        AcquireOutcome::Success(new_token) => {
+                            log::debug!(
+                                "Request {operation_id}: rate-limited: waiting for {}ms before next attempt",
+                                sleep_delay.as_millis()
+                            );
+
+                            xpcom_async_glue::sleep(sleep_delay)
+                                .await
+                                .map_err(ProtocolError::from)?;
+                            Some(new_token)
+                        }
+                        AcquireOutcome::Failure(shared) => {
+                            log::debug!(
+                                "Request {operation_id}: rate-limited: waiting for another runner to handle"
+                            );
+                            shared.await.map_err(ProtocolError::from)?;
+                            None
+                        }
+                    };
+
+                    continue;
+                }
+                ControlFlow::Break(response) => return Ok(response),
+            };
+        }
+    }
+
+    /// Send the given HTTP request.
+    ///
+    /// If relevant with the chosen authentication method, an `Authorization`
+    /// header is added to the outgoing request. This means consumers shouldn't
+    /// concern themselves with adding authentication to the [`Request`] they
+    /// provide.
+    ///
+    /// The `op_name` and `operation_id` parameters are only used for logging.
+    async fn send_http_request<'or>(
+        &self,
+        op_request: &OperationRequest<'or>,
+    ) -> Result<Response, ProtocolError> {
+        let server = self.server().await?;
+        let resp = send_request(&self.client, op_request, server).await?;
+
+        // Catch authentication errors quickly so we can react to them
+        // appropriately.
+        if resp.status()?.0 == 401 {
+            let authenticate_values = resp.header("WWW-Authenticate")?;
+            Err(ProtocolError::Authentication(Some(authenticate_values)))
+        } else {
+            Ok(resp)
+        }
+    }
+
+    /// Handles failures which do not require the response body to be
+    /// deserialized, such as authentication, HTTP and TLS issues.
+    ///
+    /// When the error is recoverable (e.g. an authentication failure), an
+    /// attempt to address it is performed (e.g. asking the user for new
+    /// credentials). If this is successful, [`Ok`] is returned, meaning the
+    /// request can be retried.
+    ///
+    /// If the error isn't recoverable (e.g. the user cancelled from a prompt,
+    /// or we cannot recover even with user input), an error result is returned.
+    /// This can be the error that was passed as input.
+    async fn handle_early_failure(
+        &self,
+        err: ProtocolError,
+        options: &OperationRequestOptions,
+    ) -> Result<(), ProtocolError> {
+        log::warn!("handling early failure: {err}");
+
+        match err {
+            // If the error is an authentication failure, try to authenticate
+            // again (as far as the operation's configuration allows us to).
+            ProtocolError::Authentication(..) => {
+                return self
+                    .handle_authentication_failure(&options.auth_failure_behavior, err)
+                    .await;
+            }
+
+            // If the error is a transport security failure (e.g. an
+            // invalid certificate), handle it here by alerting the
+            // user, but only if the consumer asked us to.
+            ProtocolError::Http(moz_http::Error::TransportSecurityFailure {
+                status: _,
+                ref transport_security_info,
+            }) if matches!(
+                options.transport_sec_failure_behavior,
+                TransportSecFailureBehavior::Alert
+            ) =>
+            {
+                handle_transport_sec_failure(
+                    self.server().await?,
+                    transport_security_info.0.clone(),
+                )?;
+                Err(err)
+            }
+
+            // If the error is network-related, optionally alert the
+            // user (depending on which specific error it is) before
+            // propagating it.
+            ProtocolError::Http(ref http_error) => {
+                maybe_handle_connection_error(
+                    http_error.into(),
+                    self.server().await?,
+                    ErrorBehavior::Notify,
+                )?;
+                Err(err)
+            }
+
+            _ => Err(err),
+        }
+    }
+
+    /// Handles an authentication failure from the server.
+    ///
+    /// This means asking the user to enter a new password if relevant to the
+    /// authentication method. This function returns [`Ok`] if the request can
+    /// be retried, and errors with `err` if we should bail and propagate the
+    /// error.
+    async fn handle_authentication_failure(
+        &self,
+        behavior: &AuthFailureBehavior,
+        err: ProtocolError,
+    ) -> Result<(), ProtocolError> {
+        let ProtocolError::Authentication(authenticate_headers) = &err else {
+            return Err(ProtocolError::Processing {
+                message: format!(
+                    "handle_authentication_failure called with non-authentication error: {err:?}"
+                ),
+            });
+        };
+
+        log::debug!("handling authentication failure");
+
+        // If the error contains `WWW-Authenticate` header values, check if we
+        // can extract a `realm` value from one of them. If we can, and it's
+        // different from the one we're already using, we store it and retry the
+        // request so we try to authenticate against the correct realm. If we
+        // can't, because e.g. no realm value could be extracted, or there are
+        // multiple ones in response headers, fall back to prompting the user
+        // for credentials (if relevant).
+        if let Some(authenticate_headers) = authenticate_headers
+            && !authenticate_headers.is_empty()
+        {
+            let realms: Vec<_> = authenticate_headers
+                .iter()
+                .filter_map(|header_value| {
+                    // Try to find the start of a `realm="foo"` section.
+                    let realm_prefix = " realm=\"";
+                    let pos = header_value.find(realm_prefix)? + realm_prefix.len();
+
+                    // Split at the position we got and try to find the end of
+                    // the section.
+                    let (_, realm) = header_value.split_at(pos);
+                    let Some(pos) = realm.find('"') else {
+                        log::warn!(
+                            "skipping invalid WWW-Authenticate response header value: {header_value}"
+                        );
+                        return None;
+                    };
+
+                    // Split again at the end of the section, after which
+                    // `realm` should contain the realm's name without quotes.
+                    let (realm, _) = realm.split_at(pos);
+                    Some(realm)
+                })
+                .collect();
+
+            // Check if we've authenticated with the same realm configuration
+            // the response says we should. This means:
+            //  * if the response includes a realm, have we been using a
+            //    different one?
+            //  * if the response doesn't include a realm, have we been using
+            //    one?
+            //
+            // If the response to either question is "yes", then we want to
+            // store what we got from the response (i.e. a different realm name,
+            // or an empty string) and try again.
+            //
+            // If a single response contains multiple realms, we consider it
+            // undefined behaviour and ignore it entirely.
+            if realms.len() < 2 {
+                // Check if we already have a realm stored for this server.
+                let server = self.server().await?;
+                let existing_realm = server.get_string_property(ServerProperty::Realm)?;
+
+                // See if what we got from the response matches what we have
+                // stored locally. Let's do this by comparing strings, using an
+                // empty string if we didn't get a realm in the response,
+                // because it's easier.
+                let realm = realms.first().map_or_else(String::new, ToString::to_string);
+                if existing_realm != realm {
+                    log::debug!(
+                        "got response with different realm than what was stored, retrying with new realm"
+                    );
+                    server.set_string_property(ServerProperty::Realm, realm)?;
+                    return Ok(());
+                } else {
+                    log::debug!("ignoring WWW-Authenticate response headers with known realm");
+                }
+            } else {
+                log::warn!(
+                    "ignoring WWW-Authenticate response headers with {} realms",
+                    realms.len(),
+                );
+            }
+        }
+
+        // If this is an operation for which we should always silently fail on
+        // authentication failure, this is as far as we can go so bail out now.
+        // `mailnews_ui_glue::handle_auth_failure` might not always prompt the
+        // user to re-auth, but it will in a number of cases.
+        if let AuthFailureBehavior::Silent = behavior {
+            return Err(err);
+        }
+
+        let outcome = handle_auth_failure(self.server().await?, ErrorBehavior::Notify)?;
+
+        match outcome {
+            // The user has asked us to retry the request, let's do this by
+            // retrying the main request loop.
+            AuthErrorOutcome::RETRY => {
+                log::debug!("retrying auth with new credentials");
+                Ok(())
+            }
+
+            // The user has cancelled from the password prompt, or the
+            // selected authentication method does not support retrying at
+            // this stage, let's stop here.
+            AuthErrorOutcome::ABORT => {
+                log::debug!("aborting attempt to re-authenticate");
+                Err(err)
+            }
+        }
+    }
+}
+
+/// Creates an [`HttpAuthObserver`] and registers it against the given server.
+fn observe_auth_changes<ServerT: ServerType + 'static>(
+    server: RefPtr<ServerT>,
+) -> Result<RefPtr<nsIObserver>, ProtocolError> {
+    let auth_observer = HttpAuthObserver::new_observer(server.clone())?;
+    server.observe_property(ServerProperty::AuthMethod, auth_observer.clone())?;
+    server.observe_property(ServerProperty::EwsUrl, auth_observer.clone())?;
+    server.observe_property(ServerProperty::Realm, auth_observer.clone())?;
+    server.observe_property(ServerProperty::Username, auth_observer.clone())?;
+
+    let obs_svc = components::Observer::service::<nsIObserverService>()?;
+    // SAFETY: Both parameters are valid pointers that stay alive throughout the
+    // function call. It does not matter that the topic's `CString` doesn't live
+    // beyond this, because it is only used to compute a hash for the
+    // `nsIObserverService`'s internal hash table, which happens before
+    // `AddObserver` returns.
+    unsafe {
+        obs_svc.AddObserver(
+            auth_observer.coerce(),
+            // Unwrapping should be fine here, since this string is a
+            // constant we know.
+            CString::new(OBSERVER_TOPIC_PASSWORDMGR).unwrap().as_ptr(),
+            false,
+        )
+    }
+    .to_result()?;
+
+    // SAFETY: Both parameters are valid pointers that stay alive throughout the
+    // function call. It does not matter that the topic's `CString` doesn't live
+    // beyond this, because it is only used to compute a hash for the
+    // `nsIObserverService`'s internal hash table, which happens before
+    // `AddObserver` returns.
+    unsafe {
+        obs_svc.AddObserver(
+            auth_observer.coerce(),
+            // Unwrapping should be fine here, since this string is a
+            // constant we know.
+            CString::new(OBSERVER_TOPIC_CACHED_PASSWORD_CHANGED)
+                .unwrap()
+                .as_ptr(),
+            false,
+        )
+    }
+    .to_result()?;
+
+    Ok(auth_observer)
+}

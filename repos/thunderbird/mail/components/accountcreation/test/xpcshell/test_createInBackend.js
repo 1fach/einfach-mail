@@ -1,0 +1,206 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+"use strict";
+
+const { CreateInBackend } = ChromeUtils.importESModule(
+  "resource:///modules/accountcreation/CreateInBackend.sys.mjs"
+);
+const { AccountConfig } = ChromeUtils.importESModule(
+  "resource:///modules/accountcreation/AccountConfig.sys.mjs"
+);
+const { MailServices } = ChromeUtils.importESModule(
+  "resource:///modules/MailServices.sys.mjs"
+);
+const { GuessConfig } = ChromeUtils.importESModule(
+  "resource:///modules/accountcreation/GuessConfig.sys.mjs"
+);
+
+add_setup(function () {
+  do_get_profile();
+});
+
+add_task(function test_applyCustomOauthSettingsToExchangeServer() {
+  const incomingServer = MailServices.accounts.createIncomingServer(
+    "test@example.com",
+    "outlook.office365.com",
+    "ews"
+  );
+
+  try {
+    CreateInBackend.applyExchangeOAuthSettings(incomingServer, {
+      type: "ews",
+      oauthSettings: {
+        useCustomDetails: true,
+        tenant: "test-tenant",
+        clientId: "test-client-id",
+      },
+    });
+
+    const exchangeServer = incomingServer.QueryInterface(
+      Ci.IExchangeIncomingServer
+    );
+    Assert.ok(
+      exchangeServer.exchangeOverrideOAuthDetails,
+      "Exchange OAuth overrides should be enabled"
+    );
+    Assert.equal(
+      exchangeServer.exchangeTenantId,
+      "test-tenant",
+      "Exchange tenant should be saved"
+    );
+    Assert.equal(
+      exchangeServer.exchangeApplicationId,
+      "test-client-id",
+      "Exchange application ID should be saved"
+    );
+  } finally {
+    MailServices.accounts.removeIncomingServer(incomingServer, true);
+  }
+});
+
+add_task(async function test_createExchangeAccountWithCustomOAuthSettings() {
+  const existingOutgoingServerKeys = new Set(
+    MailServices.outgoingServer.servers.map(server => server.key)
+  );
+  const config = new AccountConfig();
+  config.source = AccountConfig.kSourceUser;
+  config.displayName = "Test User";
+  config.identity.emailAddress = "test@example.com";
+  config.identity.realname = "Test User";
+  config.incoming.type = "ews";
+  config.incoming.hostname = "outlook.office365.com";
+  config.incoming.port = 443;
+  config.incoming.socketType = Ci.nsMsgSocketType.SSL;
+  config.incoming.auth = Ci.nsMsgAuthMethod.OAuth2;
+  config.incoming.username = "test@example.com";
+  config.incoming.exchangeURL =
+    "https://outlook.office365.com/EWS/Exchange.asmx";
+  config.incoming.oauthSettings = {
+    useCustomDetails: true,
+    tenant: "test-tenant",
+    clientId: "test-client-id",
+  };
+
+  const account = await CreateInBackend.createAccountInBackend(config);
+
+  try {
+    Assert.equal(
+      account.incomingServer.type,
+      "ews",
+      "Should create an EWS incoming server"
+    );
+    Assert.equal(
+      account.incomingServer.authMethod,
+      Ci.nsMsgAuthMethod.OAuth2,
+      "Should create the Exchange account with OAuth2 authentication"
+    );
+    Assert.equal(
+      account.incomingServer.getStringValue("ews_url"),
+      "https://outlook.office365.com/EWS/Exchange.asmx",
+      "Should store the Exchange URL"
+    );
+
+    const exchangeServer = account.incomingServer.QueryInterface(
+      Ci.IExchangeIncomingServer
+    );
+    Assert.ok(
+      exchangeServer.exchangeOverrideOAuthDetails,
+      "Exchange OAuth overrides should be enabled on the created account"
+    );
+    Assert.equal(
+      exchangeServer.exchangeTenantId,
+      "test-tenant",
+      "Exchange tenant should be saved on the created account"
+    );
+    Assert.equal(
+      exchangeServer.exchangeApplicationId,
+      "test-client-id",
+      "Exchange application ID should be saved on the created account"
+    );
+  } finally {
+    MailServices.accounts.removeAccount(account, true);
+    for (const outgoingServer of Array.from(
+      MailServices.outgoingServer.servers
+    )) {
+      if (!existingOutgoingServerKeys.has(outgoingServer.key)) {
+        MailServices.outgoingServer.deleteServer(outgoingServer);
+      }
+    }
+  }
+});
+
+add_task(async function test_createAccountWithoutPorts() {
+  const config = new AccountConfig();
+  config.incoming.hostname = "example.com";
+  config.incoming.username = "test";
+  config.incoming.type = "imap";
+  config.incoming.port = GuessConfig.UNKNOWN;
+  config.outgoing.hostname = "example.com";
+  config.outgoing.username = "test";
+  config.outgoing.type = "smtp";
+  config.outgoing.port = GuessConfig.UNKNOWN;
+  const account = await CreateInBackend.createAccountInBackend(config);
+
+  const outgoingServer = MailServices.outgoingServer.getServerByIdentity(
+    account.defaultIdentity
+  );
+
+  Assert.equal(
+    outgoingServer.serverURI.spec,
+    "smtp://test@example.com/",
+    "Outgoing server should have a valid URI"
+  );
+  Assert.notEqual(
+    outgoingServer.port,
+    GuessConfig.UNKNOWN,
+    "Should not propagate unknown value as port for outgoing server"
+  );
+  Assert.greater(
+    account.incomingServer.port,
+    0,
+    "Should have a value for the incoming server port"
+  );
+
+  MailServices.accounts.removeAccount(account, true);
+  MailServices.outgoingServer.deleteServer(outgoingServer);
+});
+
+/**
+ * An outgoing server left behind unconfigured by an earlier, interrupted setup
+ * must not block the creation of new accounts (bug 2069949).
+ */
+add_task(function test_checkOutgoingServerAlreadyExistsSkipsUnconfigured() {
+  const unconfigured = MailServices.outgoingServer.createServer("smtp");
+  // An empty hostname next to a username is what makes the URI malformed.
+  unconfigured.username = "test@example.com";
+  const existing = MailServices.outgoingServer.createServer("smtp");
+  existing.QueryInterface(Ci.nsISmtpServer).hostname = "smtp.example.com";
+  existing.QueryInterface(Ci.nsISmtpServer).port = 587;
+  existing.username = "test@example.com";
+
+  const config = new AccountConfig();
+  config.outgoing.type = "smtp";
+  config.outgoing.hostname = "smtp.example.com";
+  config.outgoing.port = 587;
+  config.outgoing.username = "test@example.com";
+
+  try {
+    Assert.equal(
+      CreateInBackend.checkOutgoingServerAlreadyExists(config)?.key,
+      existing.key,
+      "the matching server should be found past the unconfigured one"
+    );
+
+    config.outgoing.hostname = "smtp.example.net";
+    Assert.equal(
+      CreateInBackend.checkOutgoingServerAlreadyExists(config),
+      null,
+      "a config that matches nothing should not match the unconfigured server"
+    );
+  } finally {
+    MailServices.outgoingServer.deleteServer(unconfigured);
+    MailServices.outgoingServer.deleteServer(existing);
+  }
+});

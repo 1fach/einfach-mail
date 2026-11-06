@@ -36,6 +36,19 @@ Do not request application permissions for this signed-in desktop client. They c
 
 Desktop sign-in, redirect registration, and Conditional Access constraints are covered in [Microsoft identity research](microsoft-identity.md).
 
+## Upstream source snapshots
+
+Snapshot pins reviewed on 2026-11-06:
+
+| Snapshot | Upstream commit | License |
+| --- | --- | --- |
+| [Thunderbird desktop](../../repos/thunderbird/) | `177df5d51f7f9a3528514fb72d44fe67ed1b1fcb` | No root license file or single SPDX license is identified. Preserve nested notices and license files. |
+| [Wino Mail](../../repos/wino-mail/) | `c569dff5a4f97865b5258dc7960ec1d5a5fb1bbd` | GPL-3.0 |
+| [Microsoft Graph Go SDK](../../repos/msgraph-sdk-go/) | `11b148f27ef6db3fdba4a5a26b948d191c6a2eb6` | MIT |
+| [io-msgraph Rust client](../../repos/io-msgraph/) | `20616935dd4cb67547493ae77db07bc4d3948dbd` | MIT OR Apache-2.0 |
+
+Use these trees only for source inspection. Do not add them as application dependencies. Microsoft documentation and accepted ADRs remain authoritative. Einfach Mail has copied no implementation code from these projects.
+
 ## Sources
 
 - [Migrate Exchange Web Services apps to Microsoft Graph](https://learn.microsoft.com/en-us/graph/migrate-exchange-web-services-overview)
@@ -46,5 +59,3 @@ Desktop sign-in, redirect registration, and Conditional Access constraints are c
 - [Microsoft Graph dateTimeTimeZone resource and supported zones](https://learn.microsoft.com/en-us/graph/api/resources/datetimetimezone?view=graph-rest-1.0)
 - [Microsoft Graph throttling guidance](https://learn.microsoft.com/en-us/graph/throttling)
 - [Microsoft Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference?view=graph-rest-1.0)
-
-No external mail-client repository has been copied into this project. Provider behavior should come from Microsoft API documentation and sanitized contract fixtures.

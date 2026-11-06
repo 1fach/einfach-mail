@@ -1,0 +1,43 @@
+[DEFAULT]
+support-files = [
+  "../../../../../test/browser/openpgp/data/keys/*",
+  "../../../../../../mailnews/test/data/*",
+  "data/*",
+]
+tags = ["openpgp"]
+
+["test_alias.js"]
+
+["test_armor.js"]
+
+["test_badKeys.js"]
+
+["test_encryptAndOrSign.js"]
+
+["test_externalGnuPGSigning.js"]
+skip-if = ["os != 'linux'"]
+
+["test_externalSigningKey.js"]
+
+["test_formatPlaintextMsg.js"]
+
+["test_integrityProtection.js"]
+
+["test_mimeTree.js"]
+
+# ML-KEM requires the experimental RNP library, which is only
+# distributed in nightly builds.
+["test_pqcSubkey.js"]
+run-if = ["nightly_build"]
+
+["test_revocation.js"]
+
+["test_secretKeys.js"]
+
+["test_strip.js"]
+
+["test_uid.js"]
+
+["test_unlockTracker.js"]
+
+["test_wkdLookup.js"]

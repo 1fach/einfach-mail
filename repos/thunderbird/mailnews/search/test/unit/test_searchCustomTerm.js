@@ -1,0 +1,152 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/*
+ * Testing of custom search features.
+ *
+ */
+/* import-globals-from ../../../test/resources/searchTestUtils.js */
+load("../../../resources/searchTestUtils.js");
+
+var { MailServices } = ChromeUtils.importESModule(
+  "resource:///modules/MailServices.sys.mjs"
+);
+
+var kCustomId = "xpcomtest@mozilla.org#test";
+var kFailingId = "xpcomtest@mozilla.org#failing";
+var gHdr;
+
+var Tests = [
+  {
+    customId: kCustomId,
+    setValue: "iamgood",
+    testValue: "iamnotgood",
+    op: Ci.nsMsgSearchOp.Is,
+    count: 0,
+  },
+  {
+    customId: kCustomId,
+    setValue: "iamgood",
+    testValue: "iamgood",
+    op: Ci.nsMsgSearchOp.Is,
+    count: 1,
+  },
+  // A custom term that fails must not count as a match, even for a message
+  // whose value would otherwise satisfy it.
+  {
+    customId: kFailingId,
+    setValue: "iamgood",
+    testValue: "iamgood",
+    op: Ci.nsMsgSearchOp.Is,
+    count: 0,
+  },
+];
+
+// nsIMsgSearchCustomTerm object
+var customTerm = {
+  id: kCustomId,
+  name: "term name",
+  getEnabled(scope, op) {
+    return (
+      scope == Ci.nsMsgSearchScope.offlineMail && op == Ci.nsMsgSearchOp.Is
+    );
+  },
+  getAvailable(scope, op) {
+    return (
+      scope == Ci.nsMsgSearchScope.offlineMail && op == Ci.nsMsgSearchOp.Is
+    );
+  },
+  getAvailableOperators() {
+    return [Ci.nsMsgSearchOp.Is];
+  },
+  match(msgHdr, searchValue, searchOp) {
+    switch (searchOp) {
+      case Ci.nsMsgSearchOp.Is:
+        if (msgHdr.getStringProperty("theTestProperty") == searchValue) {
+          return true;
+        }
+    }
+    return false;
+  },
+};
+
+// nsIMsgSearchCustomTerm object whose match() always fails. Note that
+// XPConnect zeroes the retval before the call, so the false result comes from
+// there rather than from the caller's error handling.
+var failingTerm = {
+  id: kFailingId,
+  name: "failing term name",
+  getEnabled(scope, op) {
+    return (
+      scope == Ci.nsMsgSearchScope.offlineMail && op == Ci.nsMsgSearchOp.Is
+    );
+  },
+  getAvailable(scope, op) {
+    return (
+      scope == Ci.nsMsgSearchScope.offlineMail && op == Ci.nsMsgSearchOp.Is
+    );
+  },
+  getAvailableOperators() {
+    return [Ci.nsMsgSearchOp.Is];
+  },
+  match() {
+    throw new Components.Exception("custom term failure", Cr.NS_ERROR_FAILURE);
+  },
+};
+
+function run_test() {
+  localAccountUtils.loadLocalMailAccount();
+  MailServices.filters.addCustomTerm(customTerm);
+  MailServices.filters.addCustomTerm(failingTerm);
+
+  /** @implements {nsIMsgCopyServiceListener} */
+  var copyListener = {
+    onStartCopy() {},
+    onProgress() {},
+    setMessageKey(aKey) {
+      gHdr = localAccountUtils.inboxFolder.getMsgHdr(aKey);
+    },
+    getMessageId() {
+      return null;
+    },
+    onStopCopy() {
+      doTest();
+    },
+  };
+
+  // Get a message into the local filestore.
+  // function testSearch() continues the testing after the copy.
+  const bugmail1 = do_get_file("../../../data/bugmail1");
+  do_test_pending();
+
+  MailServices.copy.copyFileMessage(
+    bugmail1,
+    localAccountUtils.inboxFolder,
+    null,
+    false,
+    0,
+    "",
+    copyListener,
+    null
+  );
+}
+
+function doTest() {
+  const test = Tests.shift();
+  if (test) {
+    gHdr.setStringProperty("theTestProperty", test.setValue);
+    new TestSearch(
+      localAccountUtils.inboxFolder,
+      test.testValue,
+      Ci.nsMsgSearchAttrib.Custom,
+      test.op,
+      test.count,
+      doTest,
+      test.customId
+    );
+  } else {
+    gHdr = null;
+    do_test_finished();
+  }
+}

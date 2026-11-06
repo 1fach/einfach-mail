@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <title>Test for the pane-splitter custom element</title>
+  <style>
+    html,
+    body {
+      margin: 0;
+      overflow: hidden;
+    }
+
+    /* Contrast colours to make the splitter more obvious for debugging. */
+    hr[is="pane-splitter"] {
+      border-color: #fc3 !important;
+      background-color: #f006 !important;
+    }
+
+    #horizontal-before {
+      display: grid;
+      grid-template-columns: minmax(auto, var(--splitter1-width)) 0 auto;
+      width: 500px;
+      height: 100px;
+      --splitter1-width: 200px;
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    #horizontal-after {
+      display: grid;
+      grid-template-columns: auto 0 minmax(auto, var(--splitter2-width));
+      width: 500px;
+      height: 100px;
+      --splitter2-width: 200px;
+      position: absolute;
+      top: 110px;
+      left: 0;
+    }
+
+    #vertical-before {
+      display: inline-grid;
+      grid-template-rows: minmax(auto, var(--splitter3-height)) 0 auto;
+      width: 100px;
+      height: 500px;
+      --splitter3-height: 200px;
+    }
+
+    #vertical-after {
+      display: inline-grid;
+      grid-template-rows: auto 0 minmax(auto, var(--splitter4-height));
+      width: 100px;
+      height: 500px;
+      --splitter4-height: 200px;
+    }
+
+    #vertical-splitters {
+      display: flex;
+      position: absolute;
+      top: 0;
+      left: 510px;
+      gap: 10px;
+    }
+
+    .resized,
+    .fill2 {
+      background-color: lightblue;
+    }
+
+    .fill {
+      background-color: lightslategrey;
+    }
+
+    #window-resize-splitter-vertical {
+      display: grid;
+      --splitter6-height: 400px;
+      grid-template-rows: auto min-content minmax(auto, var(--splitter6-height));
+      height: 80vh;
+      width: 100px;
+      position: absolute;
+      top: 0;
+      right: 0;
+      pointer-events: none;
+    }
+
+    #window-resize-splitter {
+      display: grid;
+      --splitter5-width: 200px;
+      --splitter5-2-width: 200px;
+      grid-template-columns:  minmax(auto, var(--splitter5-width)) min-content minmax(auto, 1fr) min-content minmax(auto, var(--splitter5-2-width));
+      width: 90vw;
+      height: 100px;
+      position: absolute;
+      bottom: 0px;
+      left: 0;
+      pointer-events: none;
+    }
+
+    #resizeSplitter-before {
+      min-width: 120px;
+    }
+
+    #resizeSplitter-after {
+      min-width: 160px;
+    }
+
+    #resizeSplitter-vertical-before {
+      min-height: 120px;
+    }
+
+    /* Show the position of the last mouse event, for debugging. */
+    #markerX {
+      position: absolute;
+      top: 510px;
+      border-left: 1px red solid;
+    }
+
+    #markerY {
+      position: absolute;
+      left: 730px;
+      border-top: 1px red solid;
+    }
+  </style>
+  <script type="module" src="chrome://messenger/content/pane-splitter.mjs"></script>
+  <script>
+    // Show the position of the last mouse event, for debugging.
+    function moveMarker(event) {
+      const markerX = document.getElementById("markerX");
+      markerX.style.left = `${event.clientX + window.scrollX}px`;
+      markerX.textContent = `${event.type} event here`;
+
+      const markerY = document.getElementById("markerY");
+      markerY.style.top = `${event.clientY + window.scrollY}px`;
+      markerY.textContent = `${event.type} event here`;
+    }
+
+    document.addEventListener("mousedown", moveMarker);
+    document.addEventListener("mousemove", moveMarker);
+    document.addEventListener("mouseup", moveMarker);
+
+    window.addEventListener("load", () => {
+      for (const splitter of document.querySelectorAll('hr[is="pane-splitter"]')) {
+        if (splitter.hasAttribute("resize-id")) {
+          splitter.resizeElement;
+          continue;
+        }
+
+        const element = splitter.parentNode.querySelector(".resized");
+        if (element) {
+          splitter.resizeElement = element;
+        }
+      }
+    });
+  </script>
+</head>
+<body>
+  <div id="horizontal-before">
+    <div id="splitter1-before" class="resized"></div>
+    <hr is="pane-splitter" id="splitter1" resize-direction="horizontal" />
+    <div id="splitter1-after" class="fill"></div>
+  </div>
+
+  <div id="horizontal-after">
+    <div id="splitter2-before" class="fill"></div>
+    <hr is="pane-splitter" id="splitter2" resize="next" resize-direction="horizontal" />
+    <div id="splitter2-after" class="resized"></div>
+  </div>
+
+  <div id="vertical-splitters">
+    <div id="vertical-before">
+      <div id="splitter3-before" class="resized"></div>
+      <hr is="pane-splitter" id="splitter3" />
+      <div id="splitter3-after" class="fill"></div>
+    </div>
+
+    <div id="vertical-after">
+      <div id="splitter4-before" class="fill"></div>
+      <hr is="pane-splitter" id="splitter4" resize="next" />
+      <div id="splitter4-after" class="resized"></div>
+    </div>
+  </div>
+
+  <div id="window-resize-splitter">
+    <div id="resizeSplitter-before" class="fill2"></div>
+    <hr
+      is="pane-splitter"
+      id="splitter5"
+      resize-id="resizeSplitter-before"
+      resize-direction="horizontal"/>
+    <div id="resizeSplitter-after" class="fill"></div>
+    <hr
+      is="pane-splitter"
+      id="splitter5-2"
+      resize-id="resizeSplitter-after2"
+      resize-direction="horizontal"
+      resize-lock-ids="resizeSplitter-after,resizeSplitter-before"
+      resize-with-window="true"/>
+    <div id="resizeSplitter-after2" class="fill2"></div>
+  </div>
+
+  <div id="window-resize-splitter-vertical">
+    <div id="resizeSplitter-vertical-before" class="fill"></div>
+    <hr
+      is="pane-splitter"
+      id="splitter6"
+      resize-id="resizeSplitter-vertical-after"
+      resize-direction="vertical"
+      resize-lock-ids="resizeSplitter-vertical-before"
+      resize-with-window="true"/>
+    <div id="resizeSplitter-vertical-after" class="fill2"></div>
+  </div>
+
+  <div id="self-resize-splitter">
+    <hr
+      is="pane-splitter"
+      id="splitter7"
+      resize-id="self-resize-splitter"
+      resize-direction="horizontal"/>
+  </div>
+
+  <div id="markerX"></div>
+  <div id="markerY"></div>
+</body>
+</html>

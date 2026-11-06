@@ -1,0 +1,143 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, you can obtain one at http://mozilla.org/MPL/2.0/. */
+
+const { MessageGenerator } = ChromeUtils.importESModule(
+  "resource://testing-common/mailnews/MessageGenerator.sys.mjs"
+);
+const { ensure_cards_view, prepare_thread_row_descendant_click } =
+  ChromeUtils.importESModule(
+    "resource://testing-common/MailViewHelpers.sys.mjs"
+  );
+
+const tabmail = document.getElementById("tabmail");
+const about3Pane = tabmail.currentAbout3Pane;
+const { threadTree } = about3Pane;
+
+add_setup(async function () {
+  await SpecialPowers.pushPrefEnv({
+    set: [["mailnews.scroll_to_new_message", false]],
+  });
+  // Create an account for the test.
+  const account = MailServices.accounts.createLocalMailAccount();
+  account.addIdentity(MailServices.accounts.createIdentity());
+
+  // Create a folder for the account to store test messages.
+  const rootFolder = account.incomingServer.rootFolder.QueryInterface(
+    Ci.nsIMsgLocalMailFolder
+  );
+  const testFolder = rootFolder
+    .createLocalSubfolder("zoom")
+    .QueryInterface(Ci.nsIMsgLocalMailFolder);
+
+  // Generate test messages.
+  const generator = new MessageGenerator();
+  testFolder.addMessageBatch(
+    generator
+      .makeMessages({ count: 5, msgsPerThread: 5 })
+      .map(message => message.toMessageString())
+  );
+
+  // Use the test folder.
+  about3Pane.displayFolder(testFolder.URI);
+  await ensure_cards_view(document);
+
+  // Remove test account on cleanup.
+  registerCleanupFunction(() => {
+    MailServices.accounts.removeAccount(account, false);
+  });
+});
+
+/**
+ * Tests zooming in and out of the multi-message view using keyboard shortcuts
+ * when viewing a thread.
+ */
+add_task(async function testMultiMessageZoom() {
+  // Threads need to be collapsed, otherwise the multi-message view
+  // won't be shown.
+  const row = threadTree.getRowAtIndex(0);
+  await BrowserTestUtils.waitForMutationCondition(
+    row,
+    {
+      attributes: true,
+      attributeFilter: ["class"],
+    },
+    () => row.classList.contains("collapsed")
+  );
+
+  const subjectLine = row.querySelector(
+    ".thread-card-subject-container .subject"
+  );
+  // Simulate a click on the row's subject line to select the row.
+  const selectPromise = BrowserTestUtils.waitForEvent(threadTree, "select");
+  await prepare_thread_row_descendant_click(row, AccessibilityUtils);
+  EventUtils.synthesizeMouseAtCenter(
+    subjectLine,
+    { clickCount: 1 },
+    about3Pane
+  );
+  AccessibilityUtils.resetEnv();
+  await selectPromise;
+  // Make sure the correct thread is selected and that the multi-message view is
+  // visible.
+  Assert.ok(
+    row.classList.contains("selected"),
+    "The thread row should be selected"
+  );
+  Assert.ok(
+    BrowserTestUtils.isVisible(about3Pane.multiMessageBrowser),
+    "The multi-message browser should be visible"
+  );
+
+  // Record the zoom value before the operation.
+  let previousZoom = top.ZoomManager.getZoomForBrowser(
+    about3Pane.multiMessageBrowser
+  );
+
+  // Emulate a zoom in.
+  EventUtils.synthesizeKey("+", { accelKey: true });
+
+  // Test that the zoom value increases.
+  await TestUtils.waitForCondition(
+    () =>
+      top.ZoomManager.getZoomForBrowser(about3Pane.multiMessageBrowser) >
+      previousZoom,
+    "zoom value should be greater than before keyboard event"
+  );
+
+  // Emulate a zoom out.
+  previousZoom = top.ZoomManager.getZoomForBrowser(
+    about3Pane.multiMessageBrowser
+  );
+  EventUtils.synthesizeKey("-", { accelKey: true });
+
+  // Test that the zoom value decreases.
+  await TestUtils.waitForCondition(
+    () =>
+      previousZoom >
+      top.ZoomManager.getZoomForBrowser(about3Pane.multiMessageBrowser),
+    "zoom value should be less than before keyboard event"
+  );
+});
+
+/**
+ * Tests that toggling between full zoom and text zoom keeps the zoom level.
+ */
+add_task(async function testToggleZoom() {
+  await SpecialPowers.pushPrefEnv({ set: [["browser.zoom.full", true]] });
+  const browser = about3Pane.multiMessageBrowser;
+  top.ZoomManager.setZoomForBrowser(browser, 1.5);
+
+  top.ZoomManager.toggleZoom(browser);
+  Assert.ok(!top.ZoomManager.useFullZoom, "text zoom should be in use");
+  Assert.equal(browser.textZoom, 1.5, "text zoom should keep the zoom level");
+  Assert.equal(browser.fullZoom, 1, "full zoom should be reset");
+
+  top.ZoomManager.toggleZoom(browser);
+  Assert.ok(top.ZoomManager.useFullZoom, "full zoom should be in use");
+  Assert.equal(browser.fullZoom, 1.5, "full zoom should keep the zoom level");
+  Assert.equal(browser.textZoom, 1, "text zoom should be reset");
+
+  top.ZoomManager.reset(browser);
+  await SpecialPowers.popPrefEnv();
+});

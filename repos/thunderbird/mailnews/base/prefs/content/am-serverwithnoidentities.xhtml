@@ -1,0 +1,174 @@
+<?xml version="1.0"?>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at http://mozilla.org/MPL/2.0/. -->
+
+<!DOCTYPE html>
+<html
+  xmlns="http://www.w3.org/1999/xhtml"
+  xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+>
+  <head>
+    <title data-l10n-id="account-settings-document-title"></title>
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src chrome:; script-src chrome: 'unsafe-inline' moz-src:; style-src chrome: 'unsafe-inline'"
+    />
+    <link rel="localization" href="messenger/accountSettings.ftl" />
+    <link rel="stylesheet" href="chrome://messenger/skin/colors.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/variables.css" />
+    <link rel="stylesheet" href="chrome://messenger/skin/accountManage.css" />
+    <script
+      defer="defer"
+      src="chrome://messenger/content/globalOverlay.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://global/content/editMenuOverlay.js"
+    ></script>
+    <script
+      defer="defer"
+      src="chrome://messenger/content/am-serverwithnoidentities.js"
+    ></script>
+    <script defer="defer" src="chrome://messenger/content/amUtils.js"></script>
+    <script>
+      // FIXME: move to script file.
+      window.addEventListener("load", event => {
+        parent.onPanelLoaded("am-serverwithnoidentities.xhtml");
+      });
+    </script>
+  </head>
+  <html:body
+    xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  >
+    <vbox id="containerBox" flex="1">
+      <hbox class="dialogheader">
+        <label
+          class="dialogheader-title"
+          data-l10n-id="account-settings-title"
+        />
+      </hbox>
+
+      <separator class="thin" />
+
+      <label
+        hidden="hidden"
+        wsm_persist="true"
+        preftype="string"
+        prefattribute="value"
+        prefstring="mail.server.%serverkey%.storeContractID"
+        genericattr="true"
+        id="server.storeContractID"
+      />
+
+      <description
+        class="secDesc"
+        data-l10n-id="account-settings-special-account-description"
+      />
+      <html:div class="input-container" xmlns="http://www.w3.org/1999/xhtml">
+        <div class="input-container-column flex-grow">
+          <xul:label
+            id="server.prettyName.label"
+            data-l10n-id="account-settings-account-name"
+            control="server.prettyName"
+          />
+          <input
+            id="server.prettyName"
+            type="text"
+            wsm_persist="true"
+            class="input-inline"
+            onblur="parent.setAccountLabel(gAccount.key, this.value)"
+            prefstring="mail.server.%serverkey%.name"
+            aria-labelledby="server.prettyName.label"
+          />
+        </div>
+        <div class="input-container-column flex-no-grow">
+          <label
+            id="server.color.label"
+            for="serverColor"
+            data-l10n-id="account-settings-color-label"
+          />
+          <div class="input-container">
+            <input id="serverColor" type="color" class="input-inline" />
+            <button
+              id="resetColor"
+              type="button"
+              data-l10n-id="account-settings-reset-color-button"
+              class="button button-flat icon-button icon-only"
+            />
+          </div>
+        </div>
+      </html:div>
+
+      <separator class="thin" />
+
+      <html:div>
+        <html:fieldset>
+          <html:legend data-l10n-id="account-settings-message-storage" />
+
+          <vbox align="start">
+            <checkbox
+              wsm_persist="true"
+              id="server.emptyTrashOnExit"
+              data-l10n-id="account-settings-empty-trash-on-exit"
+              prefattribute="value"
+              prefstring="mail.server.%serverkey%.empty_trash_on_exit"
+            />
+            <hbox align="center">
+              <label
+                data-l10n-id="account-settings-message-store-type"
+                control="server.storeTypeMenulist"
+              />
+              <menulist
+                id="server.storeTypeMenulist"
+                oncommand="clickStoreTypeMenu(this)"
+              >
+                <menupopup id="server.storeTypeMenupopup">
+                  <menuitem
+                    id="server.mboxStore"
+                    value="@mozilla.org/msgstore/berkeleystore;1"
+                    data-l10n-id="account-settings-message-store-mbox"
+                  />
+                  <menuitem
+                    id="server.maildirStore"
+                    value="@mozilla.org/msgstore/maildirstore;1"
+                    data-l10n-id="account-settings-message-store-maildir"
+                  />
+                </menupopup>
+              </menulist>
+            </hbox>
+          </vbox>
+
+          <separator class="thin" />
+
+          <hbox align="center">
+            <label
+              id="server.localPath.label"
+              data-l10n-id="account-settings-local-directory"
+              control="server.localPath"
+            />
+            <hbox class="input-container" flex="1">
+              <html:input
+                id="server.localPath"
+                type="text"
+                readonly="readonly"
+                wsm_persist="true"
+                datatype="nsIFile"
+                prefstring="mail.server.%serverkey%.directory"
+                class="uri-element input-inline"
+                aria-labelledby="server.localPath.label"
+              />
+            </hbox>
+            <button
+              id="browseForLocalFolder"
+              data-l10n-id="account-settings-browse-local-directory"
+              data-l10n-attrs="filepickertitle"
+              oncommand="BrowseForLocalFolders()"
+            />
+          </hbox>
+        </html:fieldset>
+      </html:div>
+    </vbox>
+  </html:body>
+</html>

@@ -1,0 +1,20 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "nsISupports.idl"
+interface nsITransactionManager;
+
+[scriptable, uuid(5c0b4a0e-6f8d-4c38-9b0a-2d6e3f1f7a41)]
+interface nsIMsgTransactionService : nsISupports {
+  /**
+   * Transaction types, see nsIMsgTxn.txnType.
+   */
+  const long eUnknown = 0;
+  const long eDeleteMsg = 1;
+  const long eMoveMsg = 2;
+  const long eCopyMsg = 3;
+  const long eMarkAllMsg = 4;
+
+  attribute nsITransactionManager transactionManager;
+};

@@ -1,0 +1,239 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this file,
+ * You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+const [daemon, server, handler] = setupServerDaemon();
+handler.kCapabilities = ["uidl", "top"]; // CAPA response is case-insensitive.
+server.start();
+registerCleanupFunction(() => {
+  server.stop();
+});
+
+/**
+ * Test when alwaysSTARTTLS is set, but the server doesn't support STARTTLS,
+ * should abort after CAPA response.
+ */
+add_task(async function testSTARTTLS() {
+  server.resetTest();
+
+  const incomingServer = createPop3ServerAndLocalFolders(server.port);
+  // Set to always use STARTTLS.
+  incomingServer.socketType = Ci.nsMsgSocketType.alwaysSTARTTLS;
+
+  const urlListener = {
+    OnStartRunningUrl() {},
+    OnStopRunningUrl(url, result) {
+      try {
+        const transaction = server.playTransaction();
+        do_check_transaction(transaction, ["AUTH", "CAPA"]);
+        Assert.equal(result, Cr.NS_ERROR_FAILURE);
+      } catch (e) {
+      } finally {
+        MailServices.accounts.removeIncomingServer(incomingServer, false);
+        do_test_finished();
+      }
+    },
+  };
+
+  // Now get the mail.
+  MailServices.pop3.GetNewMail(
+    null,
+    urlListener,
+    localAccountUtils.inboxFolder,
+    incomingServer
+  );
+
+  server.performTest();
+
+  do_test_pending();
+});
+
+/**
+ * Test that depending on user prefs and message size, TOP or RETR should be used.
+ *
+ * @param {nsIMsgIncomingServer} incomingServer - A server instance.
+ * @param {string[]} transaction - The commands sent to the server.
+ */
+async function testTopOrRetr(incomingServer, transaction) {
+  server.resetTest();
+  // Any message file larger than 50KB is good for this test.
+  daemon.setMessages(["mailformed_subject.eml"]);
+
+  const urlListener = {
+    OnStartRunningUrl() {},
+    OnStopRunningUrl(url, result) {
+      try {
+        do_check_transaction(server.playTransaction(), transaction);
+        Assert.equal(result, 0);
+      } catch (e) {
+      } finally {
+        MailServices.accounts.removeIncomingServer(incomingServer, false);
+        do_test_finished();
+      }
+    },
+  };
+
+  // Now get the mail.
+  MailServices.pop3.GetNewMail(
+    null,
+    urlListener,
+    localAccountUtils.inboxFolder,
+    incomingServer
+  );
+
+  server.performTest();
+
+  do_test_pending();
+}
+
+/**
+ * Turn off server.limitOfflineMessageSize, test RETR is used.
+ */
+add_task(async function testNoOfflineMessageSizeLimit() {
+  const incomingServer = createPop3ServerAndLocalFolders(server.port);
+  incomingServer.limitOfflineMessageSize = false;
+  incomingServer.maxMessageSize = 1;
+
+  testTopOrRetr(incomingServer, [
+    "AUTH",
+    "CAPA",
+    "AUTH PLAIN",
+    "STAT",
+    "LIST",
+    "UIDL",
+    "RETR 1",
+    "DELE 1",
+  ]);
+});
+
+/**
+ * Turn on server.limitOfflineMessageSize and set maxMessageSize to 1KB, test
+ * TOP is used.
+ */
+add_task(async function testMaxMessageSize() {
+  const incomingServer = createPop3ServerAndLocalFolders(server.port);
+  incomingServer.limitOfflineMessageSize = true;
+  incomingServer.maxMessageSize = 1;
+
+  testTopOrRetr(incomingServer, [
+    "AUTH",
+    "CAPA",
+    "AUTH PLAIN",
+    "STAT",
+    "LIST",
+    "UIDL",
+    "TOP 1 20",
+  ]);
+});
+
+/**
+ * Turn on server.headersOnly, test TOP is used.
+ */
+add_task(async function testHeadersOnly() {
+  const incomingServer = createPop3ServerAndLocalFolders(server.port);
+  incomingServer.headersOnly = true;
+
+  testTopOrRetr(incomingServer, [
+    "AUTH",
+    "CAPA",
+    "AUTH PLAIN",
+    "STAT",
+    "LIST",
+    "UIDL",
+    "TOP 1 0",
+  ]);
+});
+
+/**
+ * Test that a response line split over several data events is only parsed
+ * once complete, and is parsed in full.
+ */
+add_task(async function testSplitLine() {
+  const { Pop3Client } = ChromeUtils.importESModule(
+    "resource:///modules/Pop3Client.sys.mjs"
+  );
+  const { LineReader } = ChromeUtils.importESModule(
+    "resource:///modules/LineReader.sys.mjs"
+  );
+  const incomingServer = createPop3ServerAndLocalFolders(server.port);
+  const client = new Pop3Client(incomingServer);
+  client._lineReader = new LineReader();
+  client._pendingPayload = "";
+  const responses = [];
+  client._nextAction = res => responses.push(res);
+
+  for (const chunk of [
+    "+OK ready ",
+    "<1896.6971",
+    "70952@dbc.mtview.ca.us>\r",
+    "\n",
+  ]) {
+    await client._onData({
+      data: new TextEncoder().encode(chunk).buffer,
+    });
+  }
+
+  Assert.equal(responses.length, 1, "the line should be parsed once");
+  Assert.ok(responses[0].success, "the response should be a success");
+  Assert.equal(
+    responses[0].statusText,
+    "ready <1896.697170952@dbc.mtview.ca.us>",
+    "the status text should be complete"
+  );
+  Assert.equal(client._pendingPayload, "", "nothing should be left pending");
+
+  MailServices.accounts.removeIncomingServer(incomingServer, false);
+});
+
+/**
+ * Test that bare LF line endings in a downloaded message still end the
+ * headers at the empty line, so that header-like lines in the body don't end
+ * up in the message database.
+ */
+add_task(async function testBareLFHeaderSeparator() {
+  const { PromiseTestUtils } = ChromeUtils.importESModule(
+    "resource://testing-common/mailnews/PromiseTestUtils.sys.mjs"
+  );
+  server.resetTest();
+  // Send the message exactly as given, without converting bare LF to CRLF.
+  handler.postCommand = function (reader) {
+    Object.getPrototypeOf(this).postCommand.call(this, reader);
+    reader.preventLFMunge();
+  };
+  daemon.setMessages([
+    {
+      fileData:
+        "From: sender@example.com\n" +
+        "Subject: bare LF separator\n" +
+        "\n" +
+        "Hello: there\n" +
+        "To: someone@example.com\n" +
+        "Content-Type: multipart/mixed; boundary=xyz\n" +
+        "\n" +
+        "Body text\r\n",
+    },
+  ]);
+
+  const incomingServer = createPop3ServerAndLocalFolders(server.port);
+  const inbox = localAccountUtils.inboxFolder;
+  const urlListener = new PromiseTestUtils.PromiseUrlListener();
+  MailServices.pop3.GetNewMail(null, urlListener, inbox, incomingServer);
+  await urlListener.promise;
+
+  const msgHdr = [...inbox.messages].find(
+    hdr => hdr.subject == "bare LF separator"
+  );
+  Assert.ok(msgHdr, "the message should have been downloaded");
+  Assert.equal(
+    msgHdr.recipients,
+    "",
+    "a To line in the body should not be parsed as a header"
+  );
+  Assert.ok(
+    !(msgHdr.flags & Ci.nsMsgMessageFlags.Attachment),
+    "a Content-Type line in the body should not be parsed as a header"
+  );
+
+  delete handler.postCommand;
+  MailServices.accounts.removeIncomingServer(incomingServer, false);
+});

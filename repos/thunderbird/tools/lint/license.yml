@@ -1,0 +1,80 @@
+---
+license:
+    description: License Check
+    include:
+        - comm/
+    exclude:
+        # By design
+        - comm/build/macosx/hardenedruntime/v2/developer/browser.xml
+        - comm/build/macosx/hardenedruntime/v2/developer/media-plugin-helper.xml
+        - comm/build/macosx/hardenedruntime/v2/developer/plugin-container.xml
+        - comm/build/macosx/hardenedruntime/v2/developer/security-module-helper.xml
+        - comm/build/macosx/hardenedruntime/v2/developer/utility.xml
+        - comm/build/macosx/hardenedruntime/v2/production/browser.xml
+        - comm/build/macosx/hardenedruntime/v2/production/media-plugin-helper.xml
+        - comm/build/macosx/hardenedruntime/v2/production/plugin-container.xml
+        - comm/build/macosx/hardenedruntime/v2/production/security-module-helper.xml
+        # License not super clear, Firefox excludes its branding
+        - comm/mail/branding/
+        # Need to verify
+        - comm/mail/components/im/messages
+        # License file in directory
+        - comm/mail/components/extensions/annotations/includes
+        # Public Domain, but do not match pre-approved strings from Mozilla
+        - comm/mailnews/db/mork/morkDeque.cpp
+        - comm/mailnews/db/mork/morkDeque.h
+        # No license for README files
+        - comm/mailnews/jsaccount/readme.html
+        # License file in directory
+        - comm/mailnews/mime/jsmime
+        - '**/test*'
+    extensions:
+        - .c
+        - .cc
+        - .cpp
+        - .css
+        - .dtd
+        - .ftl
+        - .h
+        - .html
+        - .idl
+        - .java
+        - .js
+        - .jsx
+        - .kt
+        - .m
+        - .mm
+        - .mjs
+        - .nsh
+        - .nsi
+        - .properties
+        - .py
+        - .rs
+        - .svg
+        - .webidl
+        - .xhtml
+        - .xml
+    support-files:
+        - 'tools/lint/mozcheck/**'
+        - 'tools/lint/license/valid-licenses.txt'
+    type: external
+    payload: commlint:lint_wrapper
+    wraps: mozcheck:lint
+    check: license
+
+---
+license-declarations:
+    description: |
+        Checks that every LICENSED_UNDER id in a moz.build has a matching
+        LICENSES declaration somewhere in the tree, and that every `spdx`
+        flag is a valid SPDX expression.
+    include:
+        - comm/
+    extensions:
+        - build
+        - mozbuild
+    support-files:
+        - 'tools/lint/license/**'
+    type: global
+    payload: commlint:lint_wrapper
+    wraps: license:lint

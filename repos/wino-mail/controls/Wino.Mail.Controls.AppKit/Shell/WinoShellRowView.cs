@@ -1,0 +1,119 @@
+using AppKit;
+using CoreGraphics;
+using Wino.Presentation.AppKit;
+
+namespace Wino.Mail.Controls.AppKit.Shell;
+
+/// <summary>
+/// Row background for the shell pane: the source-list look, a subtle rounded fill inset from the
+/// pane edges, with a lighter fill on hover. <see cref="ShowsIndicator"/> marks the active account
+/// while a folder below it holds the selection; the cell shows it through its title weight, so the
+/// row itself draws nothing for it.
+/// </summary>
+public sealed class WinoShellRowView : NSTableRowView
+{
+    public const double HorizontalInset = 6;
+    public const double CornerRadius = 5;
+
+    private bool _showsIndicator;
+    private bool _highlightable = true;
+    private bool _isDropTarget;
+    private bool _hovered;
+
+    /// <summary>Draws the accent pipe even while the row is not selected.</summary>
+    public bool ShowsIndicator
+    {
+        get => _showsIndicator;
+        set { if (_showsIndicator == value) return; _showsIndicator = value; NeedsDisplay = true; }
+    }
+
+    /// <summary>False for rows that never show a selection fill (headers, separators, hosted controls).</summary>
+    public bool Highlightable
+    {
+        get => _highlightable;
+        set { if (_highlightable == value) return; _highlightable = value; NeedsDisplay = true; }
+    }
+
+    /// <summary>
+    /// Marks the row as the target of a drag in progress: an accent fill at 16% with a 2pt inset accent
+    /// ring (the Windows IsDraggingItemOver state), drawn instead of the native blue drop outline.
+    /// </summary>
+    public bool IsDropTarget
+    {
+        get => _isDropTarget;
+        set { if (_isDropTarget == value) return; _isDropTarget = value; NeedsDisplay = true; }
+    }
+
+    /// <summary>True while the pointer is over the row; the pane draws a lighter fill than the selection.</summary>
+    public bool IsHovered
+    {
+        get => _hovered;
+        set { if (_hovered == value) return; _hovered = value; NeedsDisplay = true; }
+    }
+
+    private NSTrackingArea? _tracking;
+
+    /// <summary>One InVisibleRect area follows the bounds by itself; it is added once rather than rebuilt per scroll.</summary>
+    public override void UpdateTrackingAreas()
+    {
+        base.UpdateTrackingAreas();
+        if (_tracking is not null) return;
+        _tracking = new NSTrackingArea(Bounds, NSTrackingAreaOptions.MouseEnteredAndExited | NSTrackingAreaOptions.ActiveInKeyWindow | NSTrackingAreaOptions.InVisibleRect, this, null);
+        AddTrackingArea(_tracking);
+    }
+
+    public override void MouseEntered(NSEvent theEvent) => IsHovered = true;
+    public override void MouseExited(NSEvent theEvent) => IsHovered = false;
+
+    public override void PrepareForReuse()
+    {
+        base.PrepareForReuse();
+        IsHovered = false;
+    }
+
+    /// <summary>Cells keep their own colours; nothing is inverted on selection.</summary>
+    public override NSBackgroundStyle InteriorBackgroundStyle => NSBackgroundStyle.Normal;
+
+    public override void DrawSelection(CGRect dirtyRect)
+    {
+        if (!_highlightable) return;
+        var rect = new CGRect(Bounds.X + HorizontalInset, Bounds.Y + 0.5, Bounds.Width - HorizontalInset * 2, Bounds.Height - 1);
+        // The selected title is semibold accent text, so the fill is a tint of the same accent rather than neutral grey.
+        WinoStyle.Accent.ColorWithAlphaComponent(WinoIcons.IsDark(EffectiveAppearance) ? 0.10f : 0.08f).SetFill();
+        NSBezierPath.FromRoundedRect(rect, (nfloat)CornerRadius, (nfloat)CornerRadius).Fill();
+    }
+
+    public override void DrawBackground(CGRect dirtyRect)
+    {
+        base.DrawBackground(dirtyRect);
+        if (!Selected && _hovered && _highlightable && !_isDropTarget) DrawHover();
+        if (_isDropTarget) DrawDropTarget();
+    }
+
+    private void DrawHover()
+    {
+        var rect = new CGRect(Bounds.X + HorizontalInset, Bounds.Y + 0.5, Bounds.Width - HorizontalInset * 2, Bounds.Height - 1);
+        WinoStyle.RowHoverFill.SetFill();
+        NSBezierPath.FromRoundedRect(rect, (nfloat)CornerRadius, (nfloat)CornerRadius).Fill();
+    }
+
+    private void DrawDropTarget()
+    {
+        var rect = new CGRect(Bounds.X + HorizontalInset, Bounds.Y + 0.5, Bounds.Width - HorizontalInset * 2, Bounds.Height - 1);
+        WinoStyle.Accent.ColorWithAlphaComponent(0.16f).SetFill();
+        NSBezierPath.FromRoundedRect(rect, (nfloat)CornerRadius, (nfloat)CornerRadius).Fill();
+        var ring = NSBezierPath.FromRoundedRect(rect.Inset(1, 1), (nfloat)(CornerRadius - 1), (nfloat)(CornerRadius - 1));
+        ring.LineWidth = 2;
+        WinoStyle.Accent.SetStroke();
+        ring.Stroke();
+    }
+
+    /// <summary>The pane draws its own drop highlight (<see cref="IsDropTarget"/>).</summary>
+    public override void DrawDraggingDestinationFeedback(CGRect dirtyRect) { }
+
+    public override void ViewDidChangeEffectiveAppearance()
+    {
+        base.ViewDidChangeEffectiveAppearance();
+        NeedsDisplay = true;
+    }
+}
