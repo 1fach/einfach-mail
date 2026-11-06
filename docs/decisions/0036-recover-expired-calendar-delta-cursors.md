@@ -10,7 +10,7 @@ Calendar view synchronization stores a completed delta cursor and an interrupted
 
 Graph documents two reset responses for delta synchronization: `410 Gone` with a `Location` URL containing an empty `$deltatoken`, and a 4XX response with an error code such as `syncStateNotFound`. Calendar event delta uses a fixed view range. The precise Exchange Online response shape remains unverified; see [Microsoft Graph research](../research/microsoft-graph.md#mail-and-calendar-synchronization) and [issue #6](https://github.com/1fach/einfach-mail/issues/6).
 
-Issue #49 is part of M3, which is read-only. Calendar write operations are M4 work and are outside this decision. ADR 0044 defines how the existing M4 event actions interact with interrupted replacement scans.
+Issue #49 is part of M3, which is read-only. Calendar provider writes are outside this decision. [ADR 0044](0044-block-calendar-actions-during-replacement-sync.md) defines how the existing M4 event actions interact with interrupted replacement scans.
 
 ## Decision
 

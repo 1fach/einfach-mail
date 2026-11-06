@@ -922,16 +922,15 @@ where
         &self,
         creation: &CalendarEventCreation,
     ) -> Result<CalendarEventCreationOutcome, CalendarWorkflowError> {
-        let _reservation = reserve_calendar_view(&self.reservations, creation.view()).map_err(
-            |error| match error {
+        let _reservation = reserve_account(&self.reservations, creation.view().account_id())
+            .map_err(|error| match error {
                 AccountReservationError::OperationInProgress => {
                     CalendarWorkflowError::OperationInProgress
                 }
                 AccountReservationError::StateUnavailable => {
                     CalendarWorkflowError::StateUnavailable
                 }
-            },
-        )?;
+            })?;
         self.ensure_calendar_write_ready(creation.view()).await?;
         self.cache.stage_event_creation(creation).await?;
         let event = match self.provider.create_event(creation).await {

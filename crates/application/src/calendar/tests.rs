@@ -29,6 +29,7 @@ struct CalendarWriteGate {
 #[derive(Clone, Default)]
 struct FixtureProvider {
     pages: Arc<Mutex<VecDeque<Result<CalendarDeltaResponse, CalendarOperationError>>>>,
+    delta_gate: Arc<Mutex<Option<CalendarWriteGate>>>,
     requests: Arc<Mutex<Vec<CalendarDeltaRequest>>>,
     creations: Arc<Mutex<Vec<CalendarEventCreationId>>>,
     creation_error: Arc<Mutex<Option<CalendarOperationError>>>,
@@ -47,6 +48,7 @@ impl FixtureProvider {
     ) -> Self {
         Self {
             pages: Arc::new(Mutex::new(pages.into_iter().collect())),
+            delta_gate: Arc::new(Mutex::new(None)),
             requests: Arc::new(Mutex::new(Vec::new())),
             creations: Arc::new(Mutex::new(Vec::new())),
             creation_error: Arc::new(Mutex::new(None)),
@@ -65,6 +67,24 @@ impl FixtureProvider {
             .lock()
             .expect("synthetic page queue mutex is not poisoned")
             .push_back(page);
+    }
+
+    fn hold_next_delta(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self
+            .delta_gate
+            .lock()
+            .expect("synthetic delta gate mutex is not poisoned") = Some(CalendarWriteGate {
+            started: started_tx,
+            release: release_rx,
+        });
+        (started_rx, release_tx)
     }
 
     fn fail_next_creation(&self, error: CalendarOperationError) {
@@ -139,6 +159,11 @@ impl CalendarProvider for FixtureProvider {
         request: CalendarDeltaRequest,
     ) -> impl Future<Output = Result<CalendarDeltaResponse, CalendarOperationError>> + Send + '_
     {
+        let gate = self
+            .delta_gate
+            .lock()
+            .expect("synthetic delta gate mutex is not poisoned")
+            .take();
         let pages = Arc::clone(&self.pages);
         let requests = Arc::clone(&self.requests);
         async move {
@@ -146,6 +171,10 @@ impl CalendarProvider for FixtureProvider {
                 .lock()
                 .expect("synthetic request log mutex is not poisoned")
                 .push(request);
+            if let Some(gate) = gate {
+                let _ = gate.started.send(());
+                let _ = gate.release.await;
+            }
             pages
                 .lock()
                 .expect("synthetic page queue mutex is not poisoned")
@@ -2372,6 +2401,56 @@ fn event_update_reserves_the_whole_account_until_the_cache_commit_finishes() {
             update_task.await,
             Ok(CalendarEventUpdateOutcome::Cached(_))
         ));
+    });
+}
+
+#[test]
+fn event_creation_reserves_the_account_while_another_view_sync_is_in_flight() {
+    smol::block_on(async {
+        let view = view();
+        let another_view = view_for_week(6);
+        let provider = FixtureProvider::default();
+        let workflow = std::sync::Arc::new(CalendarWorkflow::new(
+            provider.clone(),
+            FixtureCache::default(),
+        ));
+        synchronize_empty_view(&workflow, &provider, &view, "create-sync-race-source").await;
+        synchronize_empty_view(
+            &workflow,
+            &provider,
+            &another_view,
+            "create-sync-race-target",
+        )
+        .await;
+        provider.push_page(Ok(response(
+            Vec::new(),
+            CalendarDeltaProgress::Complete(link("create-sync-race-followup")),
+        )));
+
+        let (started, release) = provider.hold_next_delta();
+        let syncing_workflow = std::sync::Arc::clone(&workflow);
+        let syncing_view = view.clone();
+        let sync = smol::spawn(async move { syncing_workflow.sync_view(&syncing_view).await });
+        started
+            .await
+            .expect("the synthetic delta request has started");
+
+        assert_eq!(
+            workflow.create_event(&creation(another_view)).await,
+            Err(CalendarWorkflowError::OperationInProgress)
+        );
+        assert!(
+            provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned")
+                .is_empty()
+        );
+
+        release
+            .send(())
+            .expect("the synthetic delta request is waiting for release");
+        assert!(sync.await.is_ok());
     });
 }
 
