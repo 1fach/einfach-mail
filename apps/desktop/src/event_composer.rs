@@ -1108,6 +1108,9 @@ fn render_rejected_cleanup_failure(
 
 fn rejected_cleanup_error_text(error: CalendarCacheError) -> &'static str {
     match error {
+        CalendarCacheError::InUse => {
+            "The calendar cache is in use by another operation. Wait for it to finish, then clear the rejected draft."
+        }
         CalendarCacheError::Unavailable => {
             "The encrypted calendar cache is unavailable. Restore cache access, then clear the rejected draft."
         }
@@ -1553,6 +1556,9 @@ fn update_error_text(error: CalendarWorkflowError) -> &'static str {
 
 fn cache_creation_error_text(error: CalendarCacheError) -> &'static str {
     match error {
+        CalendarCacheError::InUse => {
+            "The calendar cache is in use by another operation. This event was not sent to Microsoft. Wait for it to finish, then retry."
+        }
         CalendarCacheError::Unavailable => {
             "The encrypted calendar cache is unavailable. This event was not sent to Microsoft. Restore cache access, then retry."
         }

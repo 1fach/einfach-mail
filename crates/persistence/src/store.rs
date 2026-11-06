@@ -219,8 +219,9 @@ pub struct SqliteMailCache {
     client: Client,
     database_path: std::path::PathBuf,
     database_identity: security::DatabaseIdentity,
-    lock_path: std::path::PathBuf,
     credential_account: String,
+    lifecycle_lock_path: std::path::PathBuf,
+    account_lock: Arc<std::fs::File>,
     #[cfg(test)]
     fail_next_pending_send_clear: Arc<AtomicBool>,
     #[cfg(test)]
@@ -264,8 +265,9 @@ impl SqliteMailCache {
             client: opened.client,
             database_path: opened.database_path,
             database_identity: opened.database_identity,
-            lock_path: opened.lock_path,
             credential_account: opened.credential_account,
+            lifecycle_lock_path: opened.lifecycle_lock_path,
+            account_lock: opened.account_lock,
             #[cfg(test)]
             fail_next_pending_send_clear: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
@@ -285,7 +287,7 @@ impl SqliteMailCache {
             let cache = Self::open_for_account(account_id.clone()).await?;
             <Self as MailCache>::remove_account(&cache, account_id).await
         } else {
-            security::remove_account_without_open_client(account_id).await
+            security::remove_account_without_open_client(account_id)
         }
     }
 
@@ -295,19 +297,17 @@ impl SqliteMailCache {
         account_id: AccountId,
         key_byte: u8,
     ) -> Self {
-        let client = security::open_test_database(&database_path, key_byte)
+        let opened = security::open_test_database(&database_path, key_byte)
             .await
             .expect("synthetic encrypted cache opens");
-        let database_identity = security::DatabaseIdentity::read(&database_path)
-            .expect("synthetic cache file identity is readable");
-        let lock_path = database_path.with_extension("lock");
         Self {
             account_id,
-            client,
-            database_path,
-            database_identity,
-            lock_path,
-            credential_account: "synthetic-cache-key".to_owned(),
+            client: opened.client,
+            database_path: opened.database_path,
+            database_identity: opened.database_identity,
+            credential_account: opened.credential_account,
+            lifecycle_lock_path: opened.lifecycle_lock_path,
+            account_lock: opened.account_lock,
             fail_next_pending_send_clear: Arc::new(AtomicBool::new(false)),
             removal_gate: Arc::new(Mutex::new(None)),
             pending_send_read_gate: Arc::new(Mutex::new(None)),
@@ -414,6 +414,52 @@ impl SqliteMailCache {
             })
             .await
             .map_err(CacheFailure::public)
+    }
+
+    async fn remove_account_under_lock(
+        &self,
+        account_id: &AccountId,
+        removal_lock: security::AccountRemovalLock,
+    ) -> Result<(), MailCacheError> {
+        match self.remove_account_contents(account_id).await {
+            Ok(()) => {
+                removal_lock.retain_exclusive();
+                Ok(())
+            }
+            Err(error) => {
+                removal_lock.restore_shared()?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn remove_account_contents(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
+        if !self.database_identity.matches_path(&self.database_path)? {
+            return Err(MailCacheError::Unavailable);
+        }
+        if self.load_pending_send(account_id).await?.is_some() {
+            return Err(MailCacheError::SendAlreadyPending);
+        }
+        if self.has_unresolved_event_creation(account_id).await? {
+            return Err(MailCacheError::CalendarEventCreationUnresolved);
+        }
+        #[cfg(test)]
+        self.wait_for_removal_test_gate().await;
+        security::delete_database_files(&self.client, &self.database_path).await?;
+        security::remove_credential(&self.credential_account)
+    }
+
+    #[cfg(test)]
+    async fn wait_for_removal_test_gate(&self) {
+        let gate = self
+            .removal_gate
+            .lock()
+            .expect("synthetic account-removal gate mutex is healthy")
+            .take();
+        if let Some((checked, release)) = gate {
+            let _ = checked.send(()).await;
+            let _ = release.recv().await;
+        }
     }
 
     fn check_folder(&self, folder: &FolderReference) -> Result<(), MailCacheError> {
@@ -997,7 +1043,6 @@ impl MailCache for SqliteMailCache {
         let client = self.client.clone();
         let database_path = self.database_path.clone();
         let database_identity = self.database_identity;
-        let lock_path = self.lock_path.clone();
         async move {
             let (created_seconds, created_nanoseconds) = validation?;
             let account_id = pending.account_id().as_str().to_owned();
@@ -1019,7 +1064,6 @@ impl MailCache for SqliteMailCache {
                         Some(source.message_id().as_str().to_owned()),
                     ),
                 };
-            let _lock = security::lock_account_directory(&lock_path).await?;
             if !database_identity.matches_path(&database_path)? {
                 return Err(MailCacheError::Unavailable);
             }
@@ -1106,33 +1150,14 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
         let validation = self.check_account(account_id);
         let account_id = account_id.clone();
-        let client = self.client.clone();
-        let lock_path = self.lock_path.clone();
-        let database_path = self.database_path.clone();
-        let credential_account = self.credential_account.clone();
-        #[cfg(test)]
-        let removal_gate = Arc::clone(&self.removal_gate);
+        let lifecycle_lock_path = self.lifecycle_lock_path.clone();
+        let account_lock = Arc::clone(&self.account_lock);
         async move {
             validation?;
-            let _lock = security::lock_account_directory(&lock_path).await?;
-            if self.load_pending_send(&account_id).await?.is_some() {
-                return Err(MailCacheError::SendAlreadyPending);
-            }
-            if self.has_unresolved_event_creation(&account_id).await? {
-                return Err(MailCacheError::CalendarEventCreationUnresolved);
-            }
-            #[cfg(test)]
-            let gate = removal_gate
-                .lock()
-                .expect("synthetic account-removal gate mutex is healthy")
-                .take();
-            #[cfg(test)]
-            if let Some((checked, release)) = gate {
-                let _ = checked.send(()).await;
-                let _ = release.recv().await;
-            }
-            security::delete_database_files(&client, &database_path).await?;
-            security::remove_credential(&credential_account)
+            let removal_lock =
+                security::AccountRemovalLock::acquire(&lifecycle_lock_path, account_lock)?;
+            self.remove_account_under_lock(&account_id, removal_lock)
+                .await
         }
     }
 }
@@ -1436,6 +1461,7 @@ impl CalendarCache for SqliteMailCache {
             removal.await.map_err(|error| match error {
                 MailCacheError::AccountMismatch => CalendarCacheError::AccountMismatch,
                 MailCacheError::InvalidData => CalendarCacheError::InvalidData,
+                MailCacheError::InUse => CalendarCacheError::InUse,
                 MailCacheError::Unavailable
                 | MailCacheError::MissingEncryptionKey
                 | MailCacheError::MessageNotCached

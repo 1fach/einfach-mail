@@ -1175,6 +1175,9 @@ async fn remove_verified_account_cache_and_sign_out<P: AccountProvider>(
 
 fn mail_cache_error_message(error: MailCacheError) -> &'static str {
     match error {
+        MailCacheError::InUse => {
+            "Another Einfach Mail operation is opening or using this account cache. Wait for it to finish, or close the other account view and try again."
+        }
         MailCacheError::OperationInProgress => {
             "A mail or calendar operation is still active. Wait for it to finish, then try signing out again."
         }
@@ -1623,6 +1626,14 @@ mod tests {
     }
 
     #[test]
+    fn in_use_cache_message_explains_how_to_retry() {
+        let message = super::mail_cache_error_message(MailCacheError::InUse);
+
+        assert!(message.contains("Another Einfach Mail operation"));
+        assert!(message.contains("close the other account view"));
+        assert!(message.contains("try again"));
+    }
+
     fn unavailable_cache_message_covers_file_and_keyring_recovery() {
         let message = super::mail_cache_error_message(MailCacheError::Unavailable);
 

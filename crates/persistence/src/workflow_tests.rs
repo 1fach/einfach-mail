@@ -3660,13 +3660,10 @@ fn stale_cache_handle_cannot_stage_a_send_after_account_cache_removal() {
         let account = account_id();
         let removal_cache = open_cache(&directory, account.clone()).await;
         let stale_send_cache = open_cache(&directory, account.clone()).await;
-        let _lock = security::lock_account_directory(&directory.path().join("mail.lock"))
-            .await
-            .expect("synthetic cache lifecycle lock is acquired");
         removal_cache.close_for_tests().await;
+        drop(removal_cache);
         std::fs::remove_file(directory.path().join("mail.sqlite3"))
-            .expect("cache removal unlinks the database before the stale handle can stage a send");
-        drop(_lock);
+            .expect("cache replacement unlinks the database before the stale handle stages a send");
 
         let provider = FixtureProvider::new(
             account.clone(),

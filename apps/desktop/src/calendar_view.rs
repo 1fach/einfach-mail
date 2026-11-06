@@ -8,7 +8,7 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountProfile, CalendarOccurrence, CalendarOccurrenceTime, CalendarViewRange,
-    CalendarViewReference, PendingCalendarEventCreation,
+    CalendarViewReference, EventId, PendingCalendarEventCreation,
 };
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt, WindowExt,
@@ -16,8 +16,8 @@ use gpui_kit::component::{
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    AnyElement, AsyncApp, Context, Entity, EventEmitter, IntoElement, Render, Role, Subscription,
-    Task, WeakEntity, Window, div, prelude::*,
+    AnyElement, App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, IntoElement, KeyBinding,
+    Render, Role, ScrollHandle, Subscription, Task, WeakEntity, Window, div, prelude::*,
 };
 use jiff::{Span, Timestamp, civil, tz::TimeZone};
 use time::{Date, Month, OffsetDateTime};
@@ -25,6 +25,30 @@ use time::{Date, Month, OffsetDateTime};
 use crate::event_composer::{
     EventComposer, EventComposerEvent, EventComposerIntent, EventComposerSetup,
 };
+
+gpui_kit::actions!(
+    calendar_event_list,
+    [
+        SelectPreviousCalendarEvent,
+        SelectNextCalendarEvent,
+        SelectFirstCalendarEvent,
+        SelectLastCalendarEvent,
+        OpenSelectedCalendarEvent,
+    ]
+);
+
+const CALENDAR_EVENT_LIST_CONTEXT: &str = "CalendarEventList";
+
+pub(crate) fn bind_calendar_event_navigation_keys(cx: &mut App) {
+    let context = Some(CALENDAR_EVENT_LIST_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("up", SelectPreviousCalendarEvent, context),
+        KeyBinding::new("down", SelectNextCalendarEvent, context),
+        KeyBinding::new("home", SelectFirstCalendarEvent, context),
+        KeyBinding::new("end", SelectLastCalendarEvent, context),
+        KeyBinding::new("enter", OpenSelectedCalendarEvent, context),
+    ]);
+}
 
 pub(crate) enum CalendarViewEvent {
     BackToAccount,
@@ -40,6 +64,9 @@ pub(crate) struct CalendarView<S: CalendarSession + ?Sized = dyn CalendarSession
     view: CalendarViewReference,
     events: Vec<CalendarOccurrence>,
     pending_creation: Option<PendingCalendarEventCreation>,
+    event_list_focus: FocusHandle,
+    agenda_scroll: ScrollHandle,
+    selected_agenda_event: Option<AgendaEventKey>,
     sync_state: Option<einfach_mail_application::CalendarSyncState>,
     write_readiness: CalendarWriteReadiness,
     status: CalendarStatus,
@@ -61,6 +88,59 @@ struct DisplayEvent<'a> {
     event: &'a CalendarOccurrence,
     sort_key: EventSortKey,
     time_label: String,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct AgendaEventKey {
+    date: civil::Date,
+    event_id: EventId,
+}
+
+struct AgendaEvent<'a> {
+    key: AgendaEventKey,
+    display: DisplayEvent<'a>,
+}
+
+enum AgendaRow<'a> {
+    DayHeading(civil::Date),
+    EmptyDay,
+    Event(AgendaEvent<'a>),
+}
+
+#[derive(Clone, Copy)]
+enum CalendarEventNavigation {
+    Previous,
+    Next,
+    First,
+    Last,
+}
+
+impl CalendarEventNavigation {
+    fn target_index(self, selected_index: Option<usize>, event_count: usize) -> Option<usize> {
+        if event_count == 0 {
+            return None;
+        }
+
+        let last_index = event_count - 1;
+        match self {
+            Self::Previous => Some(
+                selected_index.map_or(last_index, |index| index.min(last_index).saturating_sub(1)),
+            ),
+            Self::Next => Some(selected_index.map_or(0, |index| {
+                index.min(last_index).saturating_add(1).min(last_index)
+            })),
+            Self::First => Some(0),
+            Self::Last => Some(last_index),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AgendaOptionPosition {
+    scroll_index: usize,
+    event_position: usize,
+    event_count: usize,
+    selected: bool,
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
@@ -170,6 +250,9 @@ where
             view,
             events: Vec::new(),
             pending_creation: None,
+            event_list_focus: cx.focus_handle().tab_stop(true),
+            agenda_scroll: ScrollHandle::new(),
+            selected_agenda_event: None,
             sync_state: None,
             write_readiness: CalendarWriteReadiness::ViewSyncRequired,
             status: CalendarStatus::LoadingCache,
@@ -302,6 +385,17 @@ where
         self.events = snapshot.events().to_vec();
         self.pending_creation = snapshot.pending_creation().cloned();
         self.write_readiness = snapshot.write_readiness();
+        if let Some(selected) = self.selected_agenda_event.clone() {
+            let selected_row = self
+                .agenda_rows()
+                .iter()
+                .position(|row| matches!(row, AgendaRow::Event(event) if event.key == selected));
+            if let Some(scroll_index) = selected_row {
+                self.agenda_scroll.scroll_to_item(scroll_index);
+            } else {
+                self.selected_agenda_event = None;
+            }
+        }
         self.sync_state = Some(snapshot.sync_state().clone());
     }
 
@@ -435,6 +529,134 @@ where
         cx.notify();
     }
 
+    fn agenda_rows(&self) -> Vec<AgendaRow<'_>> {
+        let mut rows = Vec::new();
+        for offset in 0..7_i64 {
+            let Some(date) = self.week_start.checked_add(Span::new().days(offset)).ok() else {
+                continue;
+            };
+            rows.push(AgendaRow::DayHeading(date));
+            let day_events = display_events(&self.events, date, &self.time_zone);
+            if day_events.is_empty() {
+                rows.push(AgendaRow::EmptyDay);
+            } else {
+                rows.extend(day_events.into_iter().map(|display| {
+                    AgendaRow::Event(AgendaEvent {
+                        key: AgendaEventKey {
+                            date,
+                            event_id: display.event.id().clone(),
+                        },
+                        display,
+                    })
+                }));
+            }
+        }
+        rows
+    }
+
+    fn navigate_event(&mut self, navigation: CalendarEventNavigation, cx: &mut Context<Self>) {
+        let rows = self.agenda_rows();
+        let event_rows = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row_index, row)| match row {
+                AgendaRow::Event(event) => Some((row_index, &event.key)),
+                AgendaRow::DayHeading(_) | AgendaRow::EmptyDay => None,
+            })
+            .collect::<Vec<_>>();
+        let selected_index = self
+            .selected_agenda_event
+            .as_ref()
+            .and_then(|selected| event_rows.iter().position(|(_, key)| *key == selected));
+        let Some(target_index) = navigation.target_index(selected_index, event_rows.len()) else {
+            return;
+        };
+        let Some((scroll_index, selected_event)) = event_rows.get(target_index) else {
+            return;
+        };
+        let scroll_index = *scroll_index;
+        let selected_event = (*selected_event).clone();
+        self.agenda_scroll.scroll_to_item(scroll_index);
+        self.selected_agenda_event = Some(selected_event);
+        cx.notify();
+    }
+
+    fn select_event_from_option(
+        &mut self,
+        selected_event: AgendaEventKey,
+        scroll_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .agenda_rows()
+            .iter()
+            .any(|row| matches!(row, AgendaRow::Event(event) if event.key == selected_event))
+        {
+            return;
+        }
+        self.agenda_scroll.scroll_to_item(scroll_index);
+        self.event_list_focus.focus(window, cx);
+        self.selected_agenda_event = Some(selected_event);
+        cx.notify();
+    }
+
+    fn on_select_previous_calendar_event(
+        &mut self,
+        _: &SelectPreviousCalendarEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_event(CalendarEventNavigation::Previous, cx);
+    }
+
+    fn on_select_next_calendar_event(
+        &mut self,
+        _: &SelectNextCalendarEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_event(CalendarEventNavigation::Next, cx);
+    }
+
+    fn on_select_first_calendar_event(
+        &mut self,
+        _: &SelectFirstCalendarEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_event(CalendarEventNavigation::First, cx);
+    }
+
+    fn on_select_last_calendar_event(
+        &mut self,
+        _: &SelectLastCalendarEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_event(CalendarEventNavigation::Last, cx);
+    }
+
+    fn on_open_selected_calendar_event(
+        &mut self,
+        _: &OpenSelectedCalendarEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selected) = self.selected_agenda_event.as_ref() else {
+            return;
+        };
+        let Some(event) = self
+            .events
+            .iter()
+            .find(|event| event.id() == &selected.event_id)
+            .cloned()
+        else {
+            return;
+        };
+        self.open_event_editor(event, window, cx);
+    }
+
     fn change_week(&mut self, weeks: i64, cx: &mut Context<Self>) {
         let Some(week_start) = self.week_start.checked_add(Span::new().weeks(weeks)).ok() else {
             return;
@@ -451,6 +673,8 @@ where
         self.view = view;
         self.events.clear();
         self.write_readiness = CalendarWriteReadiness::ViewSyncRequired;
+        self.agenda_scroll.scroll_to_item(0);
+        self.selected_agenda_event = None;
         self.sync_state = None;
         self.refresh(cx);
     }
@@ -461,6 +685,7 @@ where
         self.sync_running = false;
         self.events.clear();
         self.pending_creation = None;
+        self.selected_agenda_event = None;
         self.sync_state = None;
         self.write_readiness = CalendarWriteReadiness::ViewSyncRequired;
     }
@@ -614,98 +839,108 @@ where
         render_status_label(label, role, colors)
     }
 
-    fn render_agenda(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut agenda = div()
+    fn render_agenda(&self, colors: ColorTokens, cx: &mut Context<Self>) -> AnyElement {
+        let agenda = div()
+            .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap_2()
             .p_4()
             .child(primary_calendar_heading());
-        if self.events.is_empty() {
+        let rows = self.agenda_rows();
+        let event_count = rows
+            .iter()
+            .filter(|row| matches!(row, AgendaRow::Event(_)))
+            .count();
+        if event_count == 0 {
             return agenda
                 .child(render_empty_agenda(self.status, colors))
                 .into_any_element();
         }
 
-        for offset in 0..7_i64 {
-            let Some(date) = self.week_start.checked_add(Span::new().days(offset)).ok() else {
-                continue;
-            };
-            agenda = agenda.child(self.render_day(date, colors, cx));
-        }
-        agenda.into_any_element()
-    }
-
-    fn render_day(
-        &self,
-        date: civil::Date,
-        colors: ColorTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let day_events = display_events(&self.events, date, &self.time_zone);
-        div()
-            .flex()
-            .items_start()
-            .gap_4()
-            .p_3()
-            .border_b_1()
-            .border_color(colors.border)
-            .child(render_day_label(date))
-            .child(self.render_day_events(date, day_events, colors, cx))
-    }
-
-    fn render_day_events(
-        &self,
-        date: civil::Date,
-        events: Vec<DisplayEvent<'_>>,
-        colors: ColorTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+        let mut event_position = 0;
         let mut event_list = div()
+            .id("calendar-event-list")
             .debug_selector(|| "calendar-event-list".to_owned())
+            .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
             .gap_2()
-            .flex_1()
-            .min_w_0();
-        if events.is_empty() {
-            return event_list.child(
-                div()
-                    .p_3()
-                    .text_sm()
-                    .text_color(colors.muted_foreground)
-                    .child("No events"),
-            );
-        }
-        for display_event in events {
-            let edit_action = match display_event.event.time() {
-                CalendarOccurrenceTime::Timed { .. } => {
-                    let cached_event = display_event.event.clone();
-                    let button_id = format!(
-                        "calendar-event-edit-{}-{}",
-                        cached_event.id().as_str(),
-                        date.strftime("%Y-%m-%d")
-                    );
-                    Some(
-                        Button::new(button_id)
-                            .debug_selector(|| "calendar-event-edit".to_owned())
-                            .ghost()
-                            .label("Edit")
-                            .disabled(
-                                self.sync_running
-                                    || self.write_readiness != CalendarWriteReadiness::Ready,
-                            )
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.open_event_editor(cached_event.clone(), window, cx);
-                            }))
-                            .into_any_element(),
-                    )
+            .track_scroll(&self.agenda_scroll)
+            .track_focus(&self.event_list_focus)
+            .key_context(CALENDAR_EVENT_LIST_CONTEXT)
+            .role(Role::ListBox)
+            .aria_label("Events this week")
+            .on_action(cx.listener(Self::on_select_previous_calendar_event))
+            .on_action(cx.listener(Self::on_select_next_calendar_event))
+            .on_action(cx.listener(Self::on_select_first_calendar_event))
+            .on_action(cx.listener(Self::on_select_last_calendar_event))
+            .on_action(cx.listener(Self::on_open_selected_calendar_event))
+            .focus_visible(|style| style.border_1().border_color(colors.ring))
+            .overflow_y_scroll();
+
+        for (scroll_index, row) in rows.iter().enumerate() {
+            event_list = match row {
+                AgendaRow::DayHeading(date) => event_list.child(render_agenda_day_heading(*date)),
+                AgendaRow::EmptyDay => event_list.child(render_empty_day(colors)),
+                AgendaRow::Event(event) => {
+                    event_position += 1;
+                    let edit_action =
+                        self.render_event_edit_action(event.display.event, event.key.date, cx);
+                    event_list.child(render_agenda_event(
+                        event,
+                        AgendaOptionPosition {
+                            scroll_index,
+                            event_position,
+                            event_count,
+                            selected: self.selected_agenda_event.as_ref() == Some(&event.key),
+                        },
+                        edit_action,
+                        colors,
+                        cx,
+                    ))
                 }
-                CalendarOccurrenceTime::AllDay { .. } => None,
             };
-            event_list = event_list.child(render_event(&display_event, colors, edit_action));
         }
-        event_list
+        agenda
+            .child(event_list.vertical_scrollbar(&self.agenda_scroll))
+            .into_any_element()
+    }
+
+    fn render_event_edit_action(
+        &self,
+        event: &CalendarOccurrence,
+        date: civil::Date,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        match event.time() {
+            CalendarOccurrenceTime::Timed { .. } => {
+                let cached_event = event.clone();
+                let button_id = format!(
+                    "calendar-event-edit-{}-{}",
+                    cached_event.id().as_str(),
+                    date.strftime("%Y-%m-%d")
+                );
+                Some(
+                    Button::new(button_id)
+                        .debug_selector(|| "calendar-event-edit".to_owned())
+                        .ghost()
+                        .label("Edit")
+                        .tab_stop(false)
+                        .disabled(
+                            self.sync_running
+                                || self.write_readiness != CalendarWriteReadiness::Ready,
+                        )
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            view.open_event_editor(cached_event.clone(), window, cx);
+                        }))
+                        .into_any_element(),
+                )
+            }
+            CalendarOccurrenceTime::AllDay { .. } => None,
+        }
     }
 }
 
@@ -740,13 +975,7 @@ where
             .bg(colors.background)
             .text_color(colors.foreground)
             .child(self.render_header(colors, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .child(self.render_agenda(colors, cx)),
-            )
+            .child(self.render_agenda(colors, cx))
     }
 }
 
@@ -806,7 +1035,7 @@ fn render_status_label(label: String, role: Role, colors: ColorTokens) -> AnyEle
         .into_any_element()
 }
 
-fn render_day_label(date: civil::Date) -> impl IntoElement {
+fn render_agenda_day_heading(date: civil::Date) -> impl IntoElement {
     div()
         .w_32()
         .flex()
@@ -1017,26 +1246,80 @@ fn timed_event_time_label(display_range: &TimedEventDisplayRange) -> String {
     }
 }
 
-fn render_event(
-    event: &DisplayEvent<'_>,
-    colors: ColorTokens,
+fn render_agenda_event<S>(
+    agenda_event: &AgendaEvent<'_>,
+    position: AgendaOptionPosition,
     edit_action: Option<AnyElement>,
-) -> impl IntoElement {
+    colors: ColorTokens,
+    cx: &mut Context<CalendarView<S>>,
+) -> impl IntoElement
+where
+    S: CalendarSession + ?Sized + 'static,
+{
+    let selected = position.selected;
+    let event_key = agenda_event.key.clone();
+    let date_id = event_key.date.strftime("%Y-%m-%d").to_string();
+    let event_id = event_key.event_id.as_str().to_owned();
+    let accessible_label = calendar_event_accessible_label(&agenda_event.display, event_key.date);
     let mut card = div()
+        .id(format!("calendar-event-option-{date_id}-{event_id}"))
+        .debug_selector(move || format!("calendar-event-row-{date_id}-{event_id}"))
+        .w_full()
         .flex()
         .flex_col()
         .gap_1()
         .p_3()
-        .bg(colors.surface)
+        .bg(if selected {
+            colors.accent
+        } else {
+            colors.surface
+        })
+        .text_color(if selected {
+            colors.accent_foreground
+        } else {
+            colors.foreground
+        })
         .border_1()
-        .border_color(colors.border)
+        .border_color(if selected {
+            colors.accent
+        } else {
+            colors.border
+        })
         .rounded_md()
-        .debug_selector(|| "calendar-event".to_owned())
-        .child(render_event_heading(event, edit_action));
-    if let Some(location) = event.event.location() {
-        card = card.child(render_event_location(location, colors));
+        .role(Role::ListBoxOption)
+        .aria_label(accessible_label)
+        .aria_position_in_set(position.event_position)
+        .aria_size_of_set(position.event_count)
+        .aria_selected(selected)
+        .when(selected, |option| option.aria_active_descendant())
+        .hover(|option| {
+            option.bg(if selected {
+                colors.accent
+            } else {
+                colors.muted
+            })
+        })
+        .child(render_event_heading(&agenda_event.display, edit_action));
+    if let Some(location) = agenda_event.display.event.location() {
+        card = card.child(render_event_location(location, colors, selected));
     }
-    card
+    card.on_click(cx.listener(move |view, _, window, cx| {
+        view.select_event_from_option(event_key.clone(), position.scroll_index, window, cx);
+    }))
+}
+
+fn calendar_event_accessible_label(event: &DisplayEvent<'_>, date: civil::Date) -> String {
+    let subject = event.event.subject().unwrap_or("(No title)");
+    match event.event.location() {
+        Some(location) => format!(
+            "{}, {}, {}, {}",
+            date_label(date),
+            event.time_label,
+            subject,
+            location
+        ),
+        None => format!("{}, {}, {}", date_label(date), event.time_label, subject),
+    }
 }
 
 fn render_event_heading(
@@ -1070,11 +1353,15 @@ fn render_event_subject(event: &DisplayEvent<'_>) -> impl IntoElement {
         .child(subject.to_owned())
 }
 
-fn render_event_location(location: &str, colors: ColorTokens) -> impl IntoElement {
+fn render_event_location(location: &str, colors: ColorTokens, selected: bool) -> impl IntoElement {
     div()
         .pl_32()
         .text_sm()
-        .text_color(colors.muted_foreground)
+        .text_color(if selected {
+            colors.accent_foreground
+        } else {
+            colors.muted_foreground
+        })
         .child(location.to_owned())
 }
 
@@ -1152,6 +1439,7 @@ mod tests {
     use std::{
         collections::HashMap,
         future::{Future, ready},
+        ops::Deref,
         sync::{
             Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1160,8 +1448,8 @@ mod tests {
 
     use einfach_mail_application::{
         CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
-        CalendarOperationError, CalendarProvider, CalendarSyncState, CalendarWorkflow,
-        CalendarWriteReadiness,
+        CalendarOperationError, CalendarProvider, CalendarSession, CalendarSyncState,
+        CalendarWorkflow, CalendarWriteReadiness,
     };
     use einfach_mail_domain::{
         AccountId, AccountProfile, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
@@ -1171,12 +1459,12 @@ mod tests {
         PendingCalendarEventCreation,
     };
     use gpui_kit::component::WindowExt as _;
-    use gpui_kit::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};
+    use gpui_kit::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, px, size};
     use jiff::{Span, civil, tz::TimeZone};
     use time::{Date, Month, OffsetDateTime};
     use tokio::sync::oneshot;
 
-    use super::{CalendarView, current_week_start, view_for_week};
+    use super::{CalendarEventNavigation, CalendarView, current_week_start, view_for_week};
 
     #[derive(Clone, Default)]
     struct TestProvider {
@@ -1443,6 +1731,7 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct TestCache {
+        events: Option<Vec<CalendarOccurrence>>,
         created_events:
             Arc<Mutex<HashMap<CalendarViewReference, HashMap<String, CalendarOccurrence>>>>,
         pending_creation: Arc<Mutex<Option<PendingCalendarEventCreation>>>,
@@ -1453,6 +1742,13 @@ mod tests {
     }
 
     impl TestCache {
+        fn with_events(events: Vec<CalendarOccurrence>) -> Self {
+            Self {
+                events: Some(events),
+                ..Self::default()
+            }
+        }
+
         fn fail_rejected_cleanup_once(&self) {
             self.fail_next_rejected_cleanup
                 .store(true, Ordering::SeqCst);
@@ -1492,6 +1788,9 @@ mod tests {
             view: &CalendarViewReference,
         ) -> impl Future<Output = Result<Vec<CalendarOccurrence>, CalendarCacheError>> + Send + '_
         {
+            if let Some(events) = &self.events {
+                return ready(Ok(events.clone()));
+            }
             let created_events = self
                 .created_events
                 .lock()
@@ -1752,6 +2051,14 @@ mod tests {
     }
 
     fn timed_event(start: OffsetDateTime, end: OffsetDateTime) -> CalendarOccurrence {
+        timed_event_with_id("synthetic-timed-event", start, end)
+    }
+
+    fn timed_event_with_id(
+        event_id: &str,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+    ) -> CalendarOccurrence {
         let account = AccountId::try_from("synthetic-account".to_owned())
             .expect("synthetic account ID is valid");
         let start_date = Date::from_calendar_date(2030, Month::January, 7)
@@ -1775,10 +2082,52 @@ mod tests {
         patch
             .into_new(
                 CalendarViewReference::new(account, range),
-                EventId::try_from("synthetic-timed-event".to_owned())
-                    .expect("synthetic event ID is valid"),
+                EventId::try_from(event_id.to_owned()).expect("synthetic event ID is valid"),
             )
             .expect("synthetic timed event is valid")
+    }
+
+    fn agenda_events(count: usize) -> Vec<CalendarOccurrence> {
+        let date =
+            Date::from_calendar_date(2030, Month::January, 7).expect("synthetic date is valid");
+        (0..count)
+            .map(|index| {
+                let event_id = format!("synthetic-calendar-event-{}", index + 1);
+                let start_minutes = 8 * 60 + i32::try_from(index).expect("event index fits") * 5;
+                let start = date.midnight().assume_utc().replace_time(
+                    time::Time::from_hms(
+                        u8::try_from(start_minutes / 60).expect("hour fits"),
+                        u8::try_from(start_minutes % 60).expect("minute fits"),
+                        0,
+                    )
+                    .expect("synthetic event time is valid"),
+                );
+                timed_event_with_id(&event_id, start, start + time::Duration::minutes(30))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn calendar_event_navigation_handles_empty_lists_and_stops_at_boundaries() {
+        let cases = [
+            (CalendarEventNavigation::Previous, None, 0, None),
+            (CalendarEventNavigation::Next, None, 0, None),
+            (CalendarEventNavigation::First, None, 0, None),
+            (CalendarEventNavigation::Last, None, 0, None),
+            (CalendarEventNavigation::Previous, None, 3, Some(2)),
+            (CalendarEventNavigation::Next, None, 3, Some(0)),
+            (CalendarEventNavigation::Previous, Some(0), 3, Some(0)),
+            (CalendarEventNavigation::Next, Some(2), 3, Some(2)),
+            (CalendarEventNavigation::First, Some(1), 3, Some(0)),
+            (CalendarEventNavigation::Last, Some(1), 3, Some(2)),
+        ];
+
+        for (navigation, selected_index, event_count, expected_index) in cases {
+            assert_eq!(
+                navigation.target_index(selected_index, event_count),
+                expected_index
+            );
+        }
     }
 
     fn draw_calendar_view(context: &mut VisualTestContext) {
@@ -1845,6 +2194,136 @@ mod tests {
         assert_eq!(last_day_events.len(), 1);
         assert_eq!(last_day_events[0].time_label, "Until 10:00 UTC");
         assert!(matches!(event.time(), CalendarOccurrenceTime::Timed { .. }));
+    }
+
+    #[gpui_kit::test]
+    async fn calendar_agenda_navigates_events_with_one_focus_stop_and_keeps_selection_visible(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            super::bind_calendar_event_navigation_keys(cx);
+        });
+        let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
+        let workflow = Arc::new(CalendarWorkflow::new(
+            TestProvider::default(),
+            TestCache::with_events(agenda_events(20)),
+        ));
+        let mut calendar_view = None;
+        let window = cx.open_window(size(px(1280.), px(800.)), |window, cx| {
+            let view = cx.new(|cx| {
+                CalendarView::new_for_week(
+                    profile(),
+                    workflow,
+                    super::CalendarWeekSelection {
+                        week_start,
+                        time_zone: TimeZone::UTC,
+                        utc_fallback: false,
+                    },
+                    cx,
+                )
+            });
+            calendar_view = Some(view.clone());
+            gpui_kit::base::Root::new(view, window, cx)
+        });
+        cx.run_until_parked();
+        let context = VisualTestContext::from_window(*window.deref(), cx).into_mut();
+        let view = calendar_view.expect("calendar view is created with the test window");
+
+        for _ in 0..100 {
+            context.run_until_parked();
+            draw_calendar_view(context);
+            if !context.cx.update(|cx| view.read(cx).sync_running) {
+                break;
+            }
+            context
+                .cx
+                .executor()
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert!(context.debug_bounds("calendar-event-list").is_some());
+        assert!(
+            context
+                .cx
+                .update(|cx| view.read(cx).selected_agenda_event.is_none())
+        );
+
+        context.update(gpui_kit::Window::focus_next);
+        let mut list_focused =
+            context.update(|window, cx| view.read(cx).event_list_focus.is_focused(window));
+        for _ in 0..24 {
+            if list_focused {
+                break;
+            }
+            context.simulate_keystrokes("tab");
+            list_focused =
+                context.update(|window, cx| view.read(cx).event_list_focus.is_focused(window));
+            if list_focused {
+                break;
+            }
+        }
+        assert!(list_focused, "Tab reaches the calendar event list");
+
+        context.simulate_keystrokes("up");
+        assert_selected_event(context, &view, "synthetic-calendar-event-20");
+        context.simulate_keystrokes("down");
+        assert_selected_event(context, &view, "synthetic-calendar-event-20");
+
+        context.simulate_keystrokes("home");
+        assert_selected_event(context, &view, "synthetic-calendar-event-1");
+        context.simulate_keystrokes("up");
+        assert_selected_event(context, &view, "synthetic-calendar-event-1");
+        context.simulate_keystrokes("down");
+        assert_selected_event(context, &view, "synthetic-calendar-event-2");
+        context.simulate_keystrokes("end");
+        context.run_until_parked();
+        draw_calendar_view(context);
+        assert_selected_event(context, &view, "synthetic-calendar-event-20");
+
+        let list_bounds = context
+            .debug_bounds("calendar-event-list")
+            .expect("event list is rendered");
+        let selected_bounds = context
+            .debug_bounds("calendar-event-row-2030-01-07-synthetic-calendar-event-20")
+            .expect("End scrolls the last event into view");
+        assert!(
+            selected_bounds.top() >= list_bounds.top(),
+            "selected event starts above the agenda viewport; list={list_bounds:?}, selected={selected_bounds:?}"
+        );
+        assert!(
+            selected_bounds.bottom() <= list_bounds.bottom(),
+            "selected event ends below the agenda viewport; list={list_bounds:?}, selected={selected_bounds:?}"
+        );
+        let (scroll_offset, max_scroll_offset) = context.cx.update(|cx| {
+            let scroll = &view.read(cx).agenda_scroll;
+            (scroll.offset(), scroll.max_offset())
+        });
+        assert!(
+            max_scroll_offset.y > px(0.),
+            "the short test viewport should require agenda scrolling; max={max_scroll_offset:?}, list={list_bounds:?}"
+        );
+        assert!(
+            scroll_offset.y < px(0.),
+            "End should scroll the agenda down; offset={scroll_offset:?}, max={max_scroll_offset:?}"
+        );
+
+        context.cx.update(|cx| {
+            view.update(cx, |view, _| view.agenda_scroll.scroll_to_item(0));
+        });
+        context.run_until_parked();
+        draw_calendar_view(context);
+        context.simulate_keystrokes("tab");
+        assert!(
+            !context.update(|window, cx| view.read(cx).event_list_focus.is_focused(window)),
+            "Tab leaves the event list as one focus stop"
+        );
+        let first_row = context
+            .debug_bounds("calendar-event-row-2030-01-07-synthetic-calendar-event-1")
+            .expect("the first event is visible after Home");
+        context.simulate_click(first_row.center(), Modifiers::default());
+        assert_selected_event(context, &view, "synthetic-calendar-event-1");
+        assert!(context.update(|window, cx| view.read(cx).event_list_focus.is_focused(window)));
     }
 
     #[gpui_kit::test]
@@ -2969,5 +3448,21 @@ mod tests {
             1,
             "opening the editor after sync does not replay the update"
         );
+    }
+
+    fn assert_selected_event<S>(
+        context: &mut VisualTestContext,
+        view: &gpui_kit::Entity<CalendarView<S>>,
+        expected: &str,
+    ) where
+        S: CalendarSession + ?Sized + 'static,
+    {
+        let selected = context.cx.update(|cx| {
+            view.read(cx)
+                .selected_agenda_event
+                .as_ref()
+                .map(|key| key.event_id.as_str().to_owned())
+        });
+        assert_eq!(selected.as_deref(), Some(expected));
     }
 }

@@ -16,6 +16,9 @@ pub enum MailCacheError {
     /// The encrypted cache or its credential service is unavailable.
     #[error("the local mail cache is unavailable")]
     Unavailable,
+    /// Another cache handle, initialization, or removal owns an account lock.
+    #[error("the local mail cache is in use")]
+    InUse,
     /// The cache exists but its encryption key is missing or malformed.
     #[error("the local mail cache encryption key is unavailable")]
     MissingEncryptionKey,
@@ -455,7 +458,9 @@ pub trait MailCache: Send + Sync {
     /// Returns [`MailCacheError::AccountMismatch`] for another account,
     /// [`MailCacheError::SendAlreadyPending`] while a mail send is unresolved,
     /// [`MailCacheError::CalendarEventCreationUnresolved`] while an event creation is unresolved,
-    /// [`MailCacheError::OperationInProgress`] while an operation is active, or
+    /// [`MailCacheError::OperationInProgress`] while an operation is active,
+    /// [`MailCacheError::InUse`] while another cache handle or lifecycle operation owns an
+    /// account lock, or
     /// [`MailCacheError::Unavailable`] when the cache cannot be inspected or removed.
     fn remove_account(
         &self,

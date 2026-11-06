@@ -980,6 +980,9 @@ fn cache_error_text(error: MailCacheError) -> &'static str {
         MailCacheError::MissingEncryptionKey => {
             "The encrypted mail cache key is unavailable. Restore cache access before sending."
         }
+        MailCacheError::InUse => {
+            "The account cache is being used by another operation. Wait for it to finish before sending."
+        }
         MailCacheError::Unavailable => {
             "The encrypted mail cache is unavailable. Restore cache access before sending."
         }

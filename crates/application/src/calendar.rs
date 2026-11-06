@@ -205,6 +205,9 @@ pub enum CalendarCacheError {
     /// The encrypted cache is unavailable.
     #[error("the local calendar cache is unavailable")]
     Unavailable,
+    /// Another cache handle or lifecycle operation owns an account lock.
+    #[error("the local calendar cache is in use")]
+    InUse,
     /// Stored values do not satisfy the calendar domain contract.
     #[error("the local calendar cache contains invalid data")]
     InvalidData,
@@ -459,7 +462,9 @@ pub trait CalendarCache: Send + Sync {
     /// Returns [`CalendarCacheError::AccountMismatch`] for another account,
     /// [`CalendarCacheError::PendingMailSend`] while a send outcome is unresolved,
     /// [`CalendarCacheError::UnresolvedEventCreation`] while an event-creation outcome is
-    /// unresolved, or [`CalendarCacheError::Unavailable`] when cache removal fails.
+    /// unresolved, [`CalendarCacheError::InUse`] while another cache handle or lifecycle
+    /// operation owns an account lock, or
+    /// [`CalendarCacheError::Unavailable`] when cache removal fails.
     fn remove_account(
         &self,
         account_id: &AccountId,
