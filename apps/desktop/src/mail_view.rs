@@ -103,6 +103,17 @@ enum MessageListState {
     Failed(MailWorkflowError),
 }
 
+fn empty_message_detail_copy(
+    message_list_state: &MessageListState,
+    selected_folder: Option<&FolderReference>,
+    messages: &[MailMessage],
+) -> &'static str {
+    match (message_list_state, selected_folder, messages.is_empty()) {
+        (MessageListState::Ready, Some(_), false) => "Select a message to read it",
+        _ => "No message selected",
+    }
+}
+
 enum MessageDetailState {
     Empty,
     Loading,
