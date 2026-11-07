@@ -18,13 +18,13 @@ use einfach_mail_domain::{
 use crate::account_recovery::AccountWorkflowRecovery;
 use crate::operation_reservations::{ActiveOperations, reserve_account};
 use crate::{
-    AccountCache, AccountCacheRemovalError, CalendarCache, CalendarEventCreationOutcome,
-    CalendarEventDeletionOutcome, CalendarEventUpdateOutcome, CalendarProvider, CalendarSnapshot,
-    CalendarSyncReport, CalendarWorkflow, CalendarWorkflowError, FollowUpFlagUpdateOutcome,
-    MailCache, MailCacheError, MailProvider, MailSendOutcome, MailSendResolutionError,
-    MailSendWorkflowError, MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflow,
-    MailWorkflowError, MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
-    WellKnownFolderMoveOutcome, WellKnownMailFolder,
+    AccountCache, AccountCacheOpenError, AccountCacheRemovalError, CalendarCache,
+    CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
+    CalendarProvider, CalendarSnapshot, CalendarSyncReport, CalendarWorkflow,
+    CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCache, MailCacheError, MailProvider,
+    MailSendOutcome, MailSendResolutionError, MailSendWorkflowError, MailSyncProgress,
+    MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError, MessageMoveOutcome,
+    OpenedMessage, ReadStateUpdateOutcome, WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -317,12 +317,16 @@ pub trait AccountSessionFactory: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account cache or its credential is unavailable.
-    /// Returns [`MailCacheError::InUse`] when a removal or another cache initialization is active.
+    /// Returns [`AccountCacheOpenError::Unavailable`] when cache initialization or shared recovery
+    /// state is unavailable. Returns [`AccountCacheOpenError::InUse`] when another lifecycle
+    /// operation holds the account lock. Returns [`AccountCacheOpenError::MissingEncryptionKey`]
+    /// when the cache key is missing, [`AccountCacheOpenError::InvalidData`] when stored cache
+    /// values are invalid, and [`AccountCacheOpenError::AccountMismatch`] when the cache belongs
+    /// to another account.
     fn open_session(
         &self,
         account_id: AccountId,
-    ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>>;
+    ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, AccountCacheOpenError>>;
 
     /// Removes an account cache when no open session is available to remove it.
     ///
@@ -345,12 +349,16 @@ pub trait AccountCacheFactory: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account cache or its credential is unavailable.
-    /// Returns [`MailCacheError::InUse`] when a removal or another cache initialization is active.
+    /// Returns [`AccountCacheOpenError::Unavailable`] when cache or credential access fails.
+    /// Returns [`AccountCacheOpenError::InUse`] when another lifecycle operation holds the
+    /// account lock. Returns [`AccountCacheOpenError::MissingEncryptionKey`] when an existing
+    /// cache has no usable key, [`AccountCacheOpenError::InvalidData`] when stored values are
+    /// invalid, and [`AccountCacheOpenError::AccountMismatch`] when the cache belongs to another
+    /// account.
     fn open_for_account(
         &self,
         account_id: AccountId,
-    ) -> impl Future<Output = Result<Self::Cache, MailCacheError>> + Send + '_;
+    ) -> impl Future<Output = Result<Self::Cache, AccountCacheOpenError>> + Send + '_;
 
     /// Removes the cache and encryption key owned by `account_id`.
     ///
@@ -387,11 +395,11 @@ impl<P, F> AccountSessionWorkflowFactory<P, F> {
     fn recovery_for_account(
         &self,
         account_id: &AccountId,
-    ) -> Result<Arc<AccountWorkflowRecovery>, MailCacheError> {
+    ) -> Result<Arc<AccountWorkflowRecovery>, AccountCacheOpenError> {
         let mut recovery_by_account = self
             .recovery_by_account
             .lock()
-            .map_err(|_| MailCacheError::Unavailable)?;
+            .map_err(|_| AccountCacheOpenError::Unavailable)?;
         recovery_by_account.retain(|_, recovery| recovery.strong_count() > 0);
         if let Some(recovery) = recovery_by_account.get(account_id).and_then(Weak::upgrade) {
             return Ok(recovery);
@@ -411,7 +419,7 @@ where
     fn open_session(
         &self,
         account_id: AccountId,
-    ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
+    ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, AccountCacheOpenError>> {
         Box::pin(async move {
             let cache = self
                 .cache_factory

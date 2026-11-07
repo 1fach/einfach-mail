@@ -4,9 +4,9 @@ use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::mail_composer::MailPermissionRequester;
 use crate::mail_view::{MailView, MailViewEvent};
 use einfach_mail_application::{
-    AccountCacheRemovalError, AccountOperationCancellation, AccountOperationError,
-    AccountPermissionRequest, AccountProvider, AccountSession, AccountSessionFactory,
-    AccountWorkflow, MailCacheError,
+    AccountCacheOpenError, AccountCacheRemovalError, AccountOperationCancellation,
+    AccountOperationError, AccountPermissionRequest, AccountProvider, AccountSession,
+    AccountSessionFactory, AccountWorkflow,
 };
 use einfach_mail_domain::AccountProfile;
 use gpui_kit::component::{
@@ -217,7 +217,7 @@ enum AccountSignOutError {
 
 #[derive(Clone, Copy)]
 enum AccountViewCacheError {
-    Open(MailCacheError),
+    Open(AccountCacheOpenError),
     Removal(AccountCacheRemovalError),
 }
 
@@ -1077,12 +1077,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         let mut content = content.child(self.render_status());
         if let Some(error) = self.session_open_error {
             let message = match error {
-                AccountViewCacheError::Open(error) => mail_cache_error_message(error),
+                AccountViewCacheError::Open(error) => account_cache_open_error_message(error),
                 AccountViewCacheError::Removal(error) => account_cache_removal_error_message(error),
             };
             content = content.child(
                 div()
                     .id("account-cache-error")
+                    .debug_selector(|| "account-cache-error".to_owned())
                     .role(Role::Alert)
                     .text_sm()
                     .child(message),
@@ -1203,18 +1204,20 @@ async fn remove_verified_account_cache_and_sign_out<P: AccountProvider>(
         .map_err(AccountSignOutError::CredentialRemoval)
 }
 
-fn mail_cache_error_message(error: MailCacheError) -> &'static str {
+fn account_cache_open_error_message(error: AccountCacheOpenError) -> &'static str {
     match error {
-        MailCacheError::InUse => {
+        AccountCacheOpenError::InUse => {
             "Another Einfach Mail operation is opening or using this account cache. Wait for it to finish, or close the other account view and try again."
         }
-        MailCacheError::MissingEncryptionKey => {
+        AccountCacheOpenError::MissingEncryptionKey => {
             "The encrypted account cache key is missing. Remove the local cache before syncing again."
         }
-        MailCacheError::Unavailable => {
-            "The encrypted cache could not be read or removed. Check that the cache files are accessible and your Linux keyring is unlocked, then try again."
+        AccountCacheOpenError::Unavailable => {
+            "The encrypted account cache could not be opened. Check that the cache files are accessible and your Linux keyring is unlocked, then try again."
         }
-        _ => "The local mail cache could not be opened. Try again.",
+        AccountCacheOpenError::InvalidData | AccountCacheOpenError::AccountMismatch => {
+            "The account cache could not be opened. Try again."
+        }
     }
 }
 
@@ -1236,7 +1239,7 @@ fn account_cache_removal_error_message(error: AccountCacheRemovalError) -> &'sta
             "The encrypted account cache key is missing. Remove the local cache before syncing again."
         }
         AccountCacheRemovalError::InvalidData | AccountCacheRemovalError::AccountMismatch => {
-            "The local mail cache could not be opened. Try again."
+            "The account cache could not be opened. Try again."
         }
         AccountCacheRemovalError::Unavailable => {
             "The encrypted cache could not be read or removed. Check that the cache files are accessible and your Linux keyring is unlocked, then try again."

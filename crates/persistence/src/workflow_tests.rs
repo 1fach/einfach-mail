@@ -9,8 +9,8 @@ use std::{
 };
 
 use einfach_mail_application::{
-    AccountCache, AccountCacheFactory, AccountCacheRemovalError, AccountSession,
-    AccountSessionFactory, AccountSessionWorkflowFactory, CalendarDeltaRequest,
+    AccountCache, AccountCacheFactory, AccountCacheOpenError, AccountCacheRemovalError,
+    AccountSession, AccountSessionFactory, AccountSessionWorkflowFactory, CalendarDeltaRequest,
     CalendarDeltaResponse, CalendarOperationError, CalendarProvider, CalendarWorkflowError,
     MailCache, MailCacheError, MailOperationError, MailProvider, MailSendOutcome,
     MailSendProviderError, MailSendResolutionError, MailSendWorkflowError, MailSyncProgress,
@@ -91,7 +91,7 @@ impl AccountCacheFactory for FixtureCacheFactory {
     fn open_for_account(
         &self,
         account_id: AccountId,
-    ) -> impl Future<Output = Result<Self::Cache, MailCacheError>> + Send + '_ {
+    ) -> impl Future<Output = Result<Self::Cache, AccountCacheOpenError>> + Send + '_ {
         let database_path = self.database_directory.join("mail.sqlite3");
         async move {
             Ok(
@@ -115,11 +115,11 @@ impl AccountCacheFactory for RetainedCacheFactory {
     fn open_for_account(
         &self,
         account_id: AccountId,
-    ) -> impl Future<Output = Result<Self::Cache, MailCacheError>> + Send + '_ {
+    ) -> impl Future<Output = Result<Self::Cache, AccountCacheOpenError>> + Send + '_ {
         ready(if account_id == self.account_id {
             Ok(self.cache.clone())
         } else {
-            Err(MailCacheError::AccountMismatch)
+            Err(AccountCacheOpenError::AccountMismatch)
         })
     }
 

@@ -10,8 +10,8 @@ use std::sync::{
 
 use async_sqlite::Client;
 use einfach_mail_application::{
-    AccountCache, AccountCacheFactory, AccountCacheRemovalError, CalendarCacheError, MailCache,
-    MailCacheError,
+    AccountCache, AccountCacheFactory, AccountCacheOpenError, AccountCacheRemovalError,
+    CalendarCacheError, MailCache, MailCacheError,
 };
 use einfach_mail_domain::AccountId;
 use thiserror::Error;
@@ -125,7 +125,10 @@ pub struct SqliteMailCacheFactory;
 impl AccountCacheFactory for SqliteMailCacheFactory {
     type Cache = SqliteMailCache;
 
-    async fn open_for_account(&self, account_id: AccountId) -> Result<Self::Cache, MailCacheError> {
+    async fn open_for_account(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Self::Cache, AccountCacheOpenError> {
         SqliteMailCache::open_for_account(account_id).await
     }
 
@@ -145,9 +148,15 @@ impl SqliteMailCache {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when paths, Secret Service, SQLCipher, or migrations fail.
-    pub async fn open_for_account(account_id: AccountId) -> Result<Self, MailCacheError> {
-        let opened = security::open_database(&account_id).await?;
+    /// Returns [`AccountCacheOpenError::Unavailable`] when paths, Secret Service, SQLCipher, or
+    /// migrations cannot be accessed. Returns [`AccountCacheOpenError::InUse`] when another
+    /// lifecycle operation holds the account lock. Returns
+    /// [`AccountCacheOpenError::MissingEncryptionKey`] when an existing cache has no usable key.
+    /// Returns [`AccountCacheOpenError::InvalidData`] when stored values are invalid.
+    pub async fn open_for_account(account_id: AccountId) -> Result<Self, AccountCacheOpenError> {
+        let opened = security::open_database(&account_id)
+            .await
+            .map_err(AccountCacheOpenError::from)?;
         Ok(Self {
             account_id,
             client: opened.client,
