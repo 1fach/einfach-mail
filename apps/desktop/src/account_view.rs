@@ -616,6 +616,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 {
                     return;
                 }
+                view.task = None;
                 view.content = AccountContent::Account;
                 match session {
                     Ok(session) => {
