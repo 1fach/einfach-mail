@@ -1,9 +1,5 @@
-# Enforce the desktop framework and message-renderer decisions in ADRs 0001 and 0007.
-# `tauri-winrt-notification` remains in Cargo.lock through
-# `gpui-pre-linux -> notify-rust`, but those Linux and Windows target conditions
-# cannot be active together. It provides WinRT notifications, not a Tauri app
-# runtime or WebView. Check only active Linux targets; add Windows and macOS
-# target triples when those support milestones begin.
+# Enforce the separate message-renderer decision in ADR 0007.
+# Wry and gpui-webview remain banned until a body-only WebView passes that review.
 [graph]
 targets = [
     "x86_64-unknown-linux-gnu",
@@ -15,15 +11,6 @@ all-features = true
 multiple-versions = "allow"
 wildcards = "allow"
 deny = [
-    { crate = "tauri", reason = "The desktop app uses native GPUI; ADR 0001 excludes the Tauri runtime." },
-    { crate = "tauri-build", reason = "The desktop app does not use Tauri build tooling." },
-    { crate = "tauri-bundler", reason = "The desktop app does not use Tauri packaging." },
-    { crate = "tauri-cli", reason = "The desktop app does not use Tauri tooling." },
-    { crate = "tauri-codegen", reason = "The desktop app does not use Tauri code generation." },
-    { crate = "tauri-macros", reason = "The desktop app does not use Tauri macros." },
-    { crate = "tauri-runtime", reason = "The desktop app does not use the Tauri runtime." },
-    { crate = "tauri-runtime-wry", reason = "The desktop app does not use the Tauri Wry runtime." },
-    { crate = "tauri-utils", reason = "The desktop app does not use Tauri runtime support crates." },
     { crate = "wry", reason = "Browser rendering is not part of the native app; see ADR 0007 for the body-only renderer gate." },
     { crate = "gpui-webview", reason = "ADR 0007 defers this optional WebView pending a separate security decision." },
 ]

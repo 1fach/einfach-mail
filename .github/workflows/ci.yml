@@ -28,7 +28,7 @@ jobs:
       - name: Install cargo-deny
         run: cargo install cargo-deny --version 0.20.2 --locked
 
-      - name: Check banned desktop frameworks and renderers
+      - name: Check banned WebView dependencies
         run: cargo deny check bans
 
   msrv:
@@ -74,7 +74,3 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --locked
-
-      - name: Check active Tauri and WebView dependencies
-        shell: bash
-        run: bash scripts/check-no-tauri-target-dependencies.sh

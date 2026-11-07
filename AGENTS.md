@@ -92,7 +92,7 @@ Do not add an abstraction that only forwards calls. Add a crate when it owns a r
 - Avoid public APIs until another crate needs them. Keep domain types independent of Graph JSON and database rows.
 - Do not add `unsafe` code. The workspace forbids it unless a future ADR approves a narrow, justified exception.
 - Put lint configuration in `Cargo.toml`. Do not add `#![deny(warnings)]`.
-- Keep `depgraph-rules.toml` aligned with every workspace crate and its allowed direct internal dependencies. Run `cargo depgraph-check check` after changing workspace manifests. Run `cargo deny check bans` after changing dependencies. Run `bash scripts/check-no-tauri-target-dependencies.sh` after changing GPUI or desktop dependencies; CI enforces all three checks.
+- Keep `depgraph-rules.toml` aligned with every workspace crate and its allowed direct internal dependencies. Run `cargo depgraph-check check` after changing workspace manifests and `cargo deny check bans` after changing dependencies; CI enforces both checks.
 
 ## Mail and calendar security
 

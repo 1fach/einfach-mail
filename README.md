@@ -53,7 +53,7 @@ The repository defines build, dependency, and test gates in [its Linux workflow]
 - `.agents/skills/` contains pinned rust and GPUI Kit coding and design guidance; `skills-lock.json` records the upstream repository and content hashes.
 - `AGENTS.md` is the required workflow and code guidance for contributors and coding agents.
 - `depgraph-rules.toml` lists the allowed direct dependencies between workspace crates; CI checks it with `cargo-depgraph-check`.
-- `deny.toml` blocks Tauri runtime and WebView crates. CI also checks active target graphs with `scripts/check-no-tauri-target-dependencies.sh`.
+- `deny.toml` blocks Wry and `gpui-webview` until the optional message-body renderer passes the security review in ADR 0007.
 - `.github/` contains issue and pull request templates, Linux Rust CI, RustSec auditing, and Dependabot configuration.
 
 ## Current project state
