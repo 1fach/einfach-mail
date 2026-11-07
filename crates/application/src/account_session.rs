@@ -199,17 +199,6 @@ pub trait MailSession: Send + Sync {
         account_id: &'a AccountId,
         operation_id: MailSendOperationId,
     ) -> AccountSessionFuture<'a, Result<(), MailSendResolutionError>>;
-
-    /// Removes this session's account cache and its local encryption key.
-    ///
-    /// # Errors
-    ///
-    /// Returns an account-cache removal error when active work, an unresolved operation, or a
-    /// cache failure prevents removal.
-    fn remove_account_cache<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>>;
 }
 
 /// Calendar operations for one signed-in account.
@@ -411,12 +400,14 @@ where
             let calendar_workflow: Arc<dyn CalendarSession> =
                 Arc::new(CalendarWorkflow::with_reservations(
                     self.provider.clone(),
-                    cache,
+                    cache.clone(),
                     Arc::clone(&self.reservations),
                 ));
             Ok(Arc::new(AccountSessionWorkflow::new(
                 mail_workflow,
                 calendar_workflow,
+                cache,
+                Arc::clone(&self.reservations),
             )) as Arc<dyn AccountSession>)
         })
     }
@@ -433,18 +424,33 @@ where
     }
 }
 
-pub(crate) struct AccountSessionWorkflow {
+pub(crate) struct AccountSessionWorkflow<C> {
     mail: Arc<dyn MailSession>,
     calendar: Arc<dyn CalendarSession>,
+    cache: C,
+    reservations: Arc<Mutex<ActiveOperations>>,
 }
 
-impl AccountSessionWorkflow {
-    pub(crate) fn new(mail: Arc<dyn MailSession>, calendar: Arc<dyn CalendarSession>) -> Self {
-        Self { mail, calendar }
+impl<C> AccountSessionWorkflow<C> {
+    pub(crate) fn new(
+        mail: Arc<dyn MailSession>,
+        calendar: Arc<dyn CalendarSession>,
+        cache: C,
+        reservations: Arc<Mutex<ActiveOperations>>,
+    ) -> Self {
+        Self {
+            mail,
+            calendar,
+            cache,
+            reservations,
+        }
     }
 }
 
-impl AccountSession for AccountSessionWorkflow {
+impl<C> AccountSession for AccountSessionWorkflow<C>
+where
+    C: AccountCache,
+{
     fn mail_session(&self) -> Arc<dyn MailSession> {
         Arc::clone(&self.mail)
     }
@@ -457,7 +463,11 @@ impl AccountSession for AccountSessionWorkflow {
         &'a self,
         account_id: &'a AccountId,
     ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
-        self.mail.remove_account_cache(account_id)
+        Box::pin(crate::account_cache::remove_reserved_account_cache(
+            &self.cache,
+            &self.reservations,
+            account_id,
+        ))
     }
 }
 
@@ -605,13 +615,6 @@ where
             account_id,
             operation_id,
         ))
-    }
-
-    fn remove_account_cache<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
-        Box::pin(MailWorkflow::remove_account_cache(self, account_id))
     }
 }
 

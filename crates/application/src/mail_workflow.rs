@@ -1114,9 +1114,12 @@ where
         &self,
         account_id: &AccountId,
     ) -> Result<(), AccountCacheRemovalError> {
-        let _reservation = reserve_account(&self.reservations, account_id)
-            .map_err(AccountCacheRemovalError::from)?;
-        self.cache.remove_account(account_id).await
+        crate::account_cache::remove_reserved_account_cache(
+            &self.cache,
+            &self.reservations,
+            account_id,
+        )
+        .await
     }
 }
 
