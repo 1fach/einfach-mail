@@ -25,8 +25,17 @@ fn validate_identifier(provider_identifier: String) -> Result<Box<str>, EmptyIde
 macro_rules! define_identifier {
     ($name:ident, $description:literal) => {
         #[doc = $description]
-        #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+        #[derive(Clone, Eq, Hash, PartialEq)]
         pub struct $name(Box<str>);
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter
+                    .debug_tuple(stringify!($name))
+                    .field(&"<redacted>")
+                    .finish()
+            }
+        }
 
         impl $name {
             /// Returns the exact provider-issued identifier without normalization.
@@ -56,7 +65,7 @@ define_identifier!(EventId, "An opaque identifier for a calendar event.");
 
 #[cfg(test)]
 mod tests {
-    use super::{EmptyIdentifier, MessageId};
+    use super::{AccountId, CalendarId, EmptyIdentifier, EventId, FolderId, MessageId};
 
     #[test]
     fn rejects_empty_provider_identifiers() {
@@ -69,5 +78,52 @@ mod tests {
             .expect("a non-empty synthetic provider ID is valid");
 
         assert_eq!(message_id.as_str(), "AbC/9-Q");
+    }
+
+    #[test]
+    fn debug_output_redacts_every_provider_identifier_kind() {
+        let debug_outputs = [
+            format!(
+                "{:?}",
+                AccountId::try_from("account-id-marker".to_owned())
+                    .expect("synthetic ID is non-empty")
+            ),
+            format!(
+                "{:?}",
+                FolderId::try_from("folder-id-marker".to_owned())
+                    .expect("synthetic ID is non-empty")
+            ),
+            format!(
+                "{:?}",
+                MessageId::try_from("message-id-marker".to_owned())
+                    .expect("synthetic ID is non-empty")
+            ),
+            format!(
+                "{:?}",
+                CalendarId::try_from("calendar-id-marker".to_owned())
+                    .expect("synthetic ID is non-empty")
+            ),
+            format!(
+                "{:?}",
+                EventId::try_from("event-id-marker".to_owned()).expect("synthetic ID is non-empty")
+            ),
+        ];
+
+        for (debug, marker) in debug_outputs.iter().zip([
+            "account-id-marker",
+            "folder-id-marker",
+            "message-id-marker",
+            "calendar-id-marker",
+            "event-id-marker",
+        ]) {
+            assert!(
+                !debug.contains(marker),
+                "Debug output included provider ID {marker:?}: {debug}"
+            );
+            assert!(
+                debug.contains("<redacted>"),
+                "Debug output omitted the redaction marker: {debug}"
+            );
+        }
     }
 }

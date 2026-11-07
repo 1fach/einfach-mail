@@ -1,6 +1,6 @@
 # Rust dependency review
 
-Last reviewed: 2026-11-04. These notes record dependency evidence and adopted choices. Recheck versions and project fit before adding or upgrading a crate.
+Last reviewed: 2026-11-07. These notes record dependency evidence and adopted choices. Recheck versions and project fit before adding or upgrading a crate.
 
 ## Review rules
 
@@ -71,6 +71,14 @@ All eight findings are RustSec `INFO Unmaintained` advisories. The audit found n
 No direct replacement or audit suppression is added for M0. These maintenance warnings remain an upstream dependency risk; revisit them when GPUI Kit or its platform/rendering dependencies publish compatible updates. The local and PR #13 strict audits found no vulnerable or yanked crates. Keep issue #10 open until the workflow lands on `main`.
 
 ## Candidates
+
+### Redacted domain Debug formatting — 2026-11-07
+
+| Candidate | Evidence | Decision |
+| --- | --- | --- |
+| `derive_more` 2.1.1 | [Package metadata and manifest](https://docs.rs/crate/derive_more/2.1.1), [Debug derive documentation](https://docs.rs/derive_more/2.1.1/derive_more/derive.Debug.html), and [upstream changelog](https://docs.rs/crate/derive_more/2.1.1/source/CHANGELOG.md). MIT licensed, Rust 1.81 MSRV, portable procedural macro, and version already present through GPUI. The latest release listed in its changelog is dated 2025-12-22. Its `debug` feature enables `unicode-xid` 0.2.6 through `derive_more-impl`, adding a new package to the lockfile. The local RustSec audit found no advisory for the existing `derive_more` package. | Reject as a direct dependency for this fixed formatting policy: enabling it adds an unnecessary package for a capability already provided by `std::fmt`. |
+| `std::fmt::Debug` | The standard library supports custom structured formatting, and the code already uses it for message bodies and calendar records. It adds no package or platform-specific behavior. | Use small, explicit implementations for sensitive domain types and the identifier macro. Redaction stays at each type boundary, while nested outer values inherit it. |
+| `redactable` 0.14.0 and `sensitive-fmt` 0.3.0 | [`redactable`](https://docs.rs/crate/redactable/0.14.0) requires Rust 1.97, above the workspace's Rust 1.95 MSRV. [`sensitive-fmt`](https://docs.rs/crate/sensitive-fmt/0.3.0) is a newer project whose maintenance and security history are not established. | Reject: neither improves fit enough to justify its MSRV incompatibility or added project risk. |
 
 ### Native message move — 2026-11-01
 

@@ -52,3 +52,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0045](0045-incremental-graph-permissions.md) | Request Graph permissions incrementally | Accepted; live consent verification remains open |
 | [0046](0046-account-cache-removal-port.md) | Use one account cache removal port | Accepted |
 | [0047](0047-share-write-recovery-across-account-sessions.md) | Share write recovery across account sessions | Accepted |
+| [0048](0048-redact-sensitive-debug-output.md) | Redact sensitive domain Debug output | Accepted |

@@ -17,12 +17,24 @@ impl fmt::Display for MissingAccountLabel {
 impl std::error::Error for MissingAccountLabel {}
 
 /// Provider-independent identity details for one connected account.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AccountProfile {
     id: AccountId,
     display_name: Option<String>,
     mailbox: Option<Mailbox>,
     user_principal_name: Option<String>,
+}
+
+impl fmt::Debug for AccountProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AccountProfile")
+            .field("id", &self.id)
+            .field("display_name", &"<redacted>")
+            .field("mailbox", &self.mailbox)
+            .field("user_principal_name", &"<redacted>")
+            .finish()
+    }
 }
 
 impl AccountProfile {
@@ -164,5 +176,29 @@ mod tests {
             AccountProfile::try_new(account_id(), Some("  ".to_owned()), None, None);
 
         assert_eq!(profile_result, Err(MissingAccountLabel));
+    }
+
+    #[test]
+    fn account_profile_debug_output_redacts_identity_values() {
+        let id = AccountId::try_from("account-id-marker".to_owned())
+            .expect("synthetic account ID is non-empty");
+        let profile = AccountProfile::try_new(
+            id,
+            Some("account-display-marker".to_owned()),
+            Some("mailbox-address-marker@example.test".to_owned()),
+            Some("user-principal-marker@example.test".to_owned()),
+        )
+        .expect("synthetic account profile is valid");
+
+        let debug = format!("{profile:?}");
+
+        for marker in [
+            "account-id-marker",
+            "account-display-marker",
+            "mailbox-address-marker",
+            "user-principal-marker",
+        ] {
+            assert!(!debug.contains(marker), "Debug output included {marker:?}");
+        }
     }
 }
