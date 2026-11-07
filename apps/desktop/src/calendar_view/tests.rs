@@ -27,7 +27,7 @@ use jiff::{Span, civil, tz::TimeZone};
 use time::{Date, Month, OffsetDateTime};
 use tokio::sync::oneshot;
 
-use super::{CalendarEventNavigation, CalendarView, current_week_start, view_for_week};
+use super::{CalendarView, current_week_start, view_for_week};
 
 #[derive(Clone, Default)]
 struct TestProvider {
@@ -666,29 +666,6 @@ fn agenda_events(count: usize) -> Vec<CalendarOccurrence> {
             timed_event_with_id(&event_id, start, start + time::Duration::minutes(30))
         })
         .collect()
-}
-
-#[test]
-fn calendar_event_navigation_handles_empty_lists_and_stops_at_boundaries() {
-    let cases = [
-        (CalendarEventNavigation::Previous, None, 0, None),
-        (CalendarEventNavigation::Next, None, 0, None),
-        (CalendarEventNavigation::First, None, 0, None),
-        (CalendarEventNavigation::Last, None, 0, None),
-        (CalendarEventNavigation::Previous, None, 3, Some(2)),
-        (CalendarEventNavigation::Next, None, 3, Some(0)),
-        (CalendarEventNavigation::Previous, Some(0), 3, Some(0)),
-        (CalendarEventNavigation::Next, Some(2), 3, Some(2)),
-        (CalendarEventNavigation::First, Some(1), 3, Some(0)),
-        (CalendarEventNavigation::Last, Some(1), 3, Some(2)),
-    ];
-
-    for (navigation, selected_index, event_count, expected_index) in cases {
-        assert_eq!(
-            navigation.target_index(selected_index, event_count),
-            expected_index
-        );
-    }
 }
 
 fn draw_calendar_view(context: &mut VisualTestContext) {

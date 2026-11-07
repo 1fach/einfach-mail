@@ -1,4 +1,5 @@
 use crate::calendar_time::{to_offset_date_time, to_timestamp};
+use crate::list_navigation::ListNavigation;
 use std::{sync::Arc, time::SystemTime};
 
 use crate::sync_age::relative_age_label;
@@ -106,34 +107,6 @@ enum AgendaRow<'a> {
     DayHeading(civil::Date),
     EmptyDay,
     Event(AgendaEvent<'a>),
-}
-
-#[derive(Clone, Copy)]
-enum CalendarEventNavigation {
-    Previous,
-    Next,
-    First,
-    Last,
-}
-
-impl CalendarEventNavigation {
-    fn target_index(self, selected_index: Option<usize>, event_count: usize) -> Option<usize> {
-        if event_count == 0 {
-            return None;
-        }
-
-        let last_index = event_count - 1;
-        match self {
-            Self::Previous => Some(
-                selected_index.map_or(last_index, |index| index.min(last_index).saturating_sub(1)),
-            ),
-            Self::Next => Some(selected_index.map_or(0, |index| {
-                index.min(last_index).saturating_add(1).min(last_index)
-            })),
-            Self::First => Some(0),
-            Self::Last => Some(last_index),
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -556,7 +529,7 @@ where
         rows
     }
 
-    fn navigate_event(&mut self, navigation: CalendarEventNavigation, cx: &mut Context<Self>) {
+    fn navigate_event(&mut self, navigation: ListNavigation, cx: &mut Context<Self>) {
         let rows = self.agenda_rows();
         let event_rows = rows
             .iter()
@@ -609,7 +582,7 @@ where
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_event(CalendarEventNavigation::Previous, cx);
+        self.navigate_event(ListNavigation::Previous, cx);
     }
 
     fn on_select_next_calendar_event(
@@ -618,7 +591,7 @@ where
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_event(CalendarEventNavigation::Next, cx);
+        self.navigate_event(ListNavigation::Next, cx);
     }
 
     fn on_select_first_calendar_event(
@@ -627,7 +600,7 @@ where
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_event(CalendarEventNavigation::First, cx);
+        self.navigate_event(ListNavigation::First, cx);
     }
 
     fn on_select_last_calendar_event(
@@ -636,7 +609,7 @@ where
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_event(CalendarEventNavigation::Last, cx);
+        self.navigate_event(ListNavigation::Last, cx);
     }
 
     fn on_open_selected_calendar_event(
