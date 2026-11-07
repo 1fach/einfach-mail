@@ -21,7 +21,7 @@ use super::{
     FollowUpFlagUpdateStatus, MESSAGE_LIST_CONTEXT, MESSAGE_ROW_HEIGHT, MailView, MailViewEvent,
     MessageDetailState, MessageListState, MessageMoveMenuAction, MessageMoveStatus,
     MoveRecoveryReason, ReadStateFeedback, SyncStatus, WellKnownFolderActionStatus,
-    follow_up_flag_cache_sync_message, follow_up_flag_confirmed_message,
+    empty_message_detail_copy, follow_up_flag_cache_sync_message, follow_up_flag_confirmed_message,
     follow_up_flag_failure_message, follow_up_flag_progress_message, mail_error_message,
     message_sender,
 };
@@ -323,12 +323,11 @@ impl MailView {
     ) -> impl IntoElement {
         match &self.message_detail_state {
             MessageDetailState::Empty => {
-                let empty_state = match &self.message_list_state {
-                    MessageListState::Ready => "Select a message to read it.",
-                    MessageListState::Loading | MessageListState::Failed(_) => {
-                        "No message selected."
-                    }
-                };
+                let empty_state = empty_message_detail_copy(
+                    &self.message_list_state,
+                    self.selected_folder.as_ref(),
+                    &self.messages,
+                );
                 let panel = div()
                     .flex_1()
                     .min_w_0()

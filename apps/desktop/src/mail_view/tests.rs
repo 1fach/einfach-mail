@@ -33,7 +33,8 @@ use super::{
     FollowUpFlagUpdateStatus, MailPermissionRequester, MailSyncProgress, MailView, MailViewEvent,
     MessageDetailState, MessageListState, MessageMoveMenuAction, MoveRecoveryReason,
     ReadStateUpdateStatus, SyncStatus, WellKnownFolderActionStatus, bind_message_navigation_keys,
-    follow_up_flag_failure_message, mail_error_message, read_state_failure_message,
+    empty_message_detail_copy, follow_up_flag_failure_message, mail_error_message,
+    read_state_failure_message,
 };
 use crate::mail_composer::bind_mail_composer_keys;
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
@@ -43,6 +44,51 @@ fn active_mail_operation_explains_when_to_retry() {
     assert_eq!(
         mail_error_message(MailWorkflowError::OperationInProgress),
         "Another mail operation is active. Try again shortly."
+    );
+}
+
+#[test]
+fn empty_message_detail_copy_reflects_message_availability() {
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (_, cache, _) = fixture(account);
+    let messages = cache
+        .0
+        .lock()
+        .expect("fixture cache mutex is healthy")
+        .messages
+        .clone();
+    let folder = messages
+        .first()
+        .expect("fixture contains a synthetic message")
+        .folder()
+        .clone();
+
+    assert_eq!(
+        empty_message_detail_copy(&MessageListState::Ready, Some(&folder), &messages),
+        "Select a message to read it"
+    );
+    assert_eq!(
+        empty_message_detail_copy(&MessageListState::Ready, Some(&folder), &[]),
+        "No message selected"
+    );
+    assert_eq!(
+        empty_message_detail_copy(&MessageListState::Ready, None, &messages),
+        "No message selected"
+    );
+    assert_eq!(
+        empty_message_detail_copy(&MessageListState::Loading, Some(&folder), &messages),
+        "No message selected"
+    );
+    assert_eq!(
+        empty_message_detail_copy(
+            &MessageListState::Failed(MailWorkflowError::Provider(
+                MailOperationError::ServiceUnavailable,
+            )),
+            Some(&folder),
+            &messages,
+        ),
+        "No message selected"
     );
 }
 
