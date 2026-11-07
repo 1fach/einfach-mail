@@ -14,7 +14,7 @@ use einfach_mail_domain::{
 
 use super::{
     MicrosoftGraphProvider, ProviderConfig,
-    session::{AccessTokenError, ensure_access_token, invalidate_access_token},
+    session::{AccessTokenError, ensure_access_token, invalidate_rejected_access_token},
 };
 
 impl From<AccessTokenError> for CalendarOperationError {
@@ -134,9 +134,8 @@ async fn map_calendar_result<T>(
     access_token: &Arc<AccessToken>,
     calendar_result: Result<T, GraphError>,
 ) -> Result<T, CalendarOperationError> {
-    if matches!(&calendar_result, Err(GraphError::AccessTokenRejected)) {
-        invalidate_access_token(config, account_id, access_token).await;
-    }
+    let calendar_result =
+        invalidate_rejected_access_token(config, account_id, access_token, calendar_result).await;
     calendar_result.map_err(map_calendar_graph_error)
 }
 

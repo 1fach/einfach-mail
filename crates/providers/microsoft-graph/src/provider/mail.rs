@@ -15,7 +15,7 @@ use einfach_mail_domain::{
 
 use super::{
     MicrosoftGraphProvider, ProviderConfig,
-    session::{AccessTokenError, ensure_access_token, invalidate_access_token},
+    session::{AccessTokenError, ensure_access_token, invalidate_rejected_access_token},
 };
 
 impl From<AccessTokenError> for MailOperationError {
@@ -232,9 +232,8 @@ async fn map_mail_result<T>(
     access_token: &Arc<AccessToken>,
     mail_result: Result<T, GraphError>,
 ) -> Result<T, MailOperationError> {
-    if matches!(&mail_result, Err(GraphError::AccessTokenRejected)) {
-        invalidate_access_token(config, account_id, access_token).await;
-    }
+    let mail_result =
+        invalidate_rejected_access_token(config, account_id, access_token, mail_result).await;
     mail_result.map_err(map_graph_error)
 }
 
@@ -244,9 +243,7 @@ async fn map_send_submission_result(
     access_token: &Arc<AccessToken>,
     result: Result<(), GraphError>,
 ) -> Result<(), MailSendProviderError> {
-    if matches!(&result, Err(GraphError::AccessTokenRejected)) {
-        invalidate_access_token(config, account_id, access_token).await;
-    }
+    let result = invalidate_rejected_access_token(config, account_id, access_token, result).await;
     result.map_err(map_send_graph_error)
 }
 

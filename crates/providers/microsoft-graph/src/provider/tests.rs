@@ -42,7 +42,10 @@ use einfach_mail_domain::{
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 
-use super::{MicrosoftGraphProvider, ProviderConfig, ProviderSession};
+use super::{
+    MicrosoftGraphProvider, ProviderConfig, ProviderSession,
+    session::invalidate_rejected_access_token,
+};
 
 struct MemoryRefreshTokenStore {
     credential: Mutex<Option<SavedRefreshToken>>,
@@ -1279,6 +1282,93 @@ async fn restore_reports_a_rejected_graph_access_token() {
     );
     token_refresh.assert_async().await;
     profile_request.assert_async().await;
+}
+
+#[tokio::test]
+async fn rejected_graph_result_only_invalidates_the_request_token() {
+    let server = MockServer::start_async().await;
+    let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+    let credentials = Arc::new(MemoryRefreshTokenStore::new(None));
+    let provider = synthetic_provider(&server, browser_sender, credentials);
+    let account_id =
+        AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+    let rejected_token = access_token("synthetic-rejected-access");
+    *provider.config.session.lock().await = Some(ProviderSession {
+        account_id: account_id.clone(),
+        access_token: Some(Arc::clone(&rejected_token)),
+    });
+
+    let rejected_result: Result<(), GraphError> = Err(GraphError::AccessTokenRejected);
+    assert!(matches!(
+        invalidate_rejected_access_token(
+            &provider.config,
+            &account_id,
+            &rejected_token,
+            rejected_result,
+        )
+        .await,
+        Err(GraphError::AccessTokenRejected)
+    ));
+    let cleared_session = provider.config.session.lock().await;
+    assert!(cleared_session.as_ref().is_some_and(|session| {
+        session.account_id == account_id && session.access_token.is_none()
+    }));
+    drop(cleared_session);
+
+    let current_token = access_token("synthetic-current-access");
+    *provider.config.session.lock().await = Some(ProviderSession {
+        account_id: account_id.clone(),
+        access_token: Some(Arc::clone(&current_token)),
+    });
+    let delayed_rejection: Result<(), GraphError> = Err(GraphError::AccessTokenRejected);
+    assert!(matches!(
+        invalidate_rejected_access_token(
+            &provider.config,
+            &account_id,
+            &rejected_token,
+            delayed_rejection,
+        )
+        .await,
+        Err(GraphError::AccessTokenRejected)
+    ));
+    let preserved_session = provider.config.session.lock().await;
+    assert!(preserved_session.as_ref().is_some_and(|session| {
+        session
+            .access_token
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(cached, &current_token))
+    }));
+    drop(preserved_session);
+
+    let unrelated_error: Result<(), GraphError> = Err(GraphError::AccessDenied);
+    assert!(matches!(
+        invalidate_rejected_access_token(
+            &provider.config,
+            &account_id,
+            &current_token,
+            unrelated_error,
+        )
+        .await,
+        Err(GraphError::AccessDenied)
+    ));
+    let successful_result: Result<usize, GraphError> = Ok(42);
+    assert!(matches!(
+        invalidate_rejected_access_token(
+            &provider.config,
+            &account_id,
+            &current_token,
+            successful_result,
+        )
+        .await,
+        Ok(42)
+    ));
+    let preserved_session = provider.config.session.lock().await;
+    assert!(preserved_session.as_ref().is_some_and(|session| {
+        session
+            .access_token
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(cached, &current_token))
+    }));
 }
 
 #[tokio::test]
