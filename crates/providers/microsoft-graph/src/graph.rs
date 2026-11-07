@@ -1514,7 +1514,10 @@ mod tests {
         token::{AccessToken, BearerAccessToken},
     };
     use serde_json::json;
-    use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
+    use time::{
+        Date, Month, OffsetDateTime, PrimitiveDateTime, Time,
+        format_description::well_known::Rfc3339,
+    };
     use url::Url;
 
     use einfach_mail_application::{
@@ -1566,6 +1569,68 @@ mod tests {
         )
         .expect("synthetic calendar range is valid");
         CalendarViewReference::new(account, range)
+    }
+
+    fn synthetic_utc_datetime(date_time_text: &str) -> OffsetDateTime {
+        OffsetDateTime::parse(date_time_text, &Rfc3339).expect("synthetic UTC date-time is valid")
+    }
+
+    fn recurring_graph_event_json(id: &str, start: &str, end: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "type": "occurrence",
+            "seriesMasterId": "synthetic-weekly-series",
+            "start": {"dateTime": start, "timeZone": "UTC"},
+            "end": {"dateTime": end, "timeZone": "UTC"},
+            "isAllDay": false,
+            "originalStartTimeZone": "W. Europe Standard Time",
+            "originalEndTimeZone": "W. Europe Standard Time"
+        })
+    }
+
+    fn assert_dst_occurrence(
+        occurrence: &CalendarOccurrence,
+        event_id: &str,
+        start: &str,
+        end: &str,
+    ) {
+        assert_eq!(
+            occurrence.id().as_str(),
+            event_id,
+            "the Graph occurrence keeps its event ID"
+        );
+        assert_eq!(
+            occurrence.time(),
+            &CalendarOccurrenceTime::Timed {
+                start: synthetic_utc_datetime(start),
+                end: synthetic_utc_datetime(end)
+            },
+            "the Graph occurrence keeps its returned UTC instants"
+        );
+        assert_eq!(
+            occurrence.original_start_time_zone(),
+            Some("W. Europe Standard Time"),
+            "the source start-zone ID remains opaque metadata"
+        );
+        assert_eq!(
+            occurrence.original_end_time_zone(),
+            Some("W. Europe Standard Time"),
+            "the source end-zone ID remains opaque metadata"
+        );
+    }
+
+    fn occurrence_from_graph_change(
+        change: CalendarDeltaChange,
+        view: &CalendarViewReference,
+    ) -> CalendarOccurrence {
+        match change {
+            CalendarDeltaChange::Upsert { id, patch } => patch
+                .into_new(view.clone(), id)
+                .expect("synthetic Graph occurrence is complete"),
+            CalendarDeltaChange::Removed { .. } => {
+                panic!("synthetic Graph delta returns only occurrences")
+            }
+        }
     }
 
     #[test]
@@ -2849,6 +2914,106 @@ mod tests {
 
         first_request.assert_async().await;
         continuation_request.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn calendar_delta_preserves_recurring_occurrence_instants_across_dst() {
+        let server = MockServer::start_async().await;
+        let delta_link = server.url("/v1.0/me/calendarView/delta?$deltatoken=synthetic-dst");
+        let page = json!({
+            "value": [
+                recurring_graph_event_json(
+                    "synthetic-before-dst",
+                    "2026-03-22T08:00:00.0000000",
+                    "2026-03-22T09:00:00.0000000"
+                ),
+                recurring_graph_event_json(
+                    "synthetic-after-dst",
+                    "2026-03-29T07:00:00.0000000",
+                    "2026-03-29T08:00:00.0000000"
+                )
+            ],
+            "@odata.deltaLink": delta_link
+        });
+        let request = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/v1.0/me/calendarView/delta")
+                    .query_param("startDateTime", "2026-03-15T23:00:00Z")
+                    .query_param("endDateTime", "2026-03-29T22:00:00Z")
+                    .header("content-type", "application/json")
+                    .header("prefer", "IdType=\"ImmutableId\"");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(page.to_string());
+            })
+            .await;
+        let (api, _transport) = synthetic_graph_api(&server);
+        let account = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let start_date = Date::from_calendar_date(2026, Month::March, 16)
+            .expect("synthetic calendar start date is valid");
+        let end_date = Date::from_calendar_date(2026, Month::March, 30)
+            .expect("synthetic calendar end date is valid");
+        let range = CalendarViewRange::new(
+            synthetic_utc_datetime("2026-03-15T23:00:00Z"),
+            synthetic_utc_datetime("2026-03-29T22:00:00Z"),
+            start_date,
+            end_date,
+        )
+        .expect("synthetic calendar range spans the DST transition");
+        let view = CalendarViewReference::new(account, range);
+
+        let response = api
+            .calendar_delta_page(
+                &view,
+                CalendarDeltaRequest::Initial,
+                synthetic_access_token(),
+            )
+            .await
+            .expect("synthetic calendar delta request succeeds");
+        let CalendarDeltaResponse::Page(page) = response else {
+            panic!("synthetic initial calendar response contains a page");
+        };
+        let (page, response_bytes) = page.into_parts();
+        assert!(response_bytes > 0, "Graph returns a non-empty delta page");
+        let (changes, progress) = page.into_parts();
+        assert!(
+            matches!(progress, CalendarDeltaProgress::Complete(_)),
+            "synthetic initial response ends with a delta link"
+        );
+        assert_eq!(changes.len(), 2, "Graph expands both weekly occurrences");
+        let mut changes = changes.into_iter();
+        let before_dst = occurrence_from_graph_change(
+            changes
+                .next()
+                .expect("the response contains a pre-DST occurrence"),
+            &view,
+        );
+        let after_dst = occurrence_from_graph_change(
+            changes
+                .next()
+                .expect("the response contains a post-DST occurrence"),
+            &view,
+        );
+        assert!(
+            changes.next().is_none(),
+            "the response contains two occurrences"
+        );
+
+        assert_dst_occurrence(
+            &before_dst,
+            "synthetic-before-dst",
+            "2026-03-22T08:00:00Z",
+            "2026-03-22T09:00:00Z",
+        );
+        assert_dst_occurrence(
+            &after_dst,
+            "synthetic-after-dst",
+            "2026-03-29T07:00:00Z",
+            "2026-03-29T08:00:00Z",
+        );
+        request.assert_async().await;
     }
 
     #[tokio::test]
