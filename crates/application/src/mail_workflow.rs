@@ -3,10 +3,7 @@
 use std::{
     collections::HashSet,
     future::Future,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -17,6 +14,7 @@ use einfach_mail_domain::{
 };
 use thiserror::Error;
 
+use crate::account_recovery::AccountWorkflowRecovery;
 use crate::{
     AccountCache, AccountCacheRemovalError, MailCache, MailCacheError, MailOperationError,
     MailProvider, MailSendProviderError, MessageBodyForDisplay, MessageDeltaResponse,
@@ -298,7 +296,7 @@ pub struct MailWorkflow<P, C> {
     provider: P,
     cache: C,
     reservations: Arc<Mutex<ActiveOperations>>,
-    account_sync_ready: AtomicBool,
+    recovery: Arc<AccountWorkflowRecovery>,
 }
 
 impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
@@ -312,6 +310,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             provider,
             cache,
             Arc::new(Mutex::new(ActiveOperations::default())),
+            Arc::new(AccountWorkflowRecovery::default()),
         )
     }
 
@@ -319,12 +318,13 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         provider: P,
         cache: C,
         reservations: Arc<Mutex<ActiveOperations>>,
+        recovery: Arc<AccountWorkflowRecovery>,
     ) -> Self {
         Self {
             provider,
             cache,
             reservations,
-            account_sync_ready: AtomicBool::new(false),
+            recovery,
         }
     }
 
@@ -553,7 +553,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         progress_handler: &(dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> Result<MailSyncReport, MailWorkflowError> {
         let _reservation = self.reserve_account(account_id)?;
-        self.account_sync_ready.store(false, Ordering::Release);
+        self.recovery.mark_mail_sync_required();
         let initial_cutoff = sync_started_at
             .checked_sub(INITIAL_SYNC_WINDOW)
             .ok_or(MailWorkflowError::ClockUnavailable)?;
@@ -567,7 +567,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         let page_count = self
             .sync_folders(&folders, initial_cutoff, progress_handler)
             .await?;
-        self.account_sync_ready.store(true, Ordering::Release);
+        self.recovery.mark_mail_sync_ready();
         Ok(MailSyncReport {
             folder_count: folders.len(),
             page_count,
@@ -971,7 +971,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     }
 
     fn ensure_account_sync_ready(&self) -> Result<(), MailWorkflowError> {
-        if self.account_sync_ready.load(Ordering::Acquire) {
+        if self.recovery.mail_sync_ready() {
             Ok(())
         } else {
             Err(MailWorkflowError::AccountSyncRequired)
@@ -984,7 +984,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         message_id: &MessageId,
         destination_folder: &FolderReference,
     ) -> Result<MessageMoveOutcome, MailWorkflowError> {
-        let mut reconciliation = MoveReconciliationGuard::new(&self.account_sync_ready);
+        let mut reconciliation = MoveReconciliationGuard::new(&self.recovery);
         if let Err(error) = self
             .provider
             .move_message(source_folder, message_id, destination_folder)
@@ -1148,14 +1148,14 @@ fn validate_move_folder_pair(
 /// Marks the session unsynchronized when a move ends without a definitive outcome.
 #[must_use = "dropping an unresolved move guard blocks message moves until sync"]
 struct MoveReconciliationGuard<'a> {
-    account_sync_ready: &'a AtomicBool,
+    recovery: &'a AccountWorkflowRecovery,
     complete: bool,
 }
 
 impl<'a> MoveReconciliationGuard<'a> {
-    fn new(account_sync_ready: &'a AtomicBool) -> Self {
+    fn new(recovery: &'a AccountWorkflowRecovery) -> Self {
         Self {
-            account_sync_ready,
+            recovery,
             complete: false,
         }
     }
@@ -1168,7 +1168,7 @@ impl<'a> MoveReconciliationGuard<'a> {
 impl Drop for MoveReconciliationGuard<'_> {
     fn drop(&mut self) {
         if !self.complete {
-            self.account_sync_ready.store(false, Ordering::Release);
+            self.recovery.mark_mail_sync_required();
         }
     }
 }

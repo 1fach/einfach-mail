@@ -14,7 +14,7 @@ Issue #35 has already added a Delete workflow that resolves Deleted Items and th
 
 - Add an application-owned `WellKnownMailFolder` value with `Archive` and `DeletedItems` variants. The Microsoft Graph adapter maps these variants to Graph well-known names and returns a `FolderReference` scoped to the verified active account. The application checks that reference against its visible cached folder tree.
 - Replace the Delete-only application workflow entry point with one `move_message_to_well_known_folder` operation. Keep Archive and Delete as distinct native actions that select the typed destination.
-- The application workflow owns the shared safety rules: require a successful sync in the session, reserve the source while resolving the destination, verify the cached source and visible destination, reserve both folders, require exact Graph confirmation, and reconcile the encrypted message row and body transactionally.
+- The application workflow owns the shared safety rules: require account sync, reserve the source while resolving the destination, verify the cached source and visible destination, reserve both folders, require exact Graph confirmation, and reconcile the encrypted message row and body transactionally. Mail sync readiness is shared by sessions for the same account that one `AccountSessionWorkflowFactory` opens. An uncertain, canceled, or uncommitted move blocks message moves in those sessions until sync; see ADR 0047.
 - Return the resolved destination reference and cache result after provider confirmation. The Archive view offers an `Open Archive` action after successful cache reconciliation; the UI does not infer the folder from a localized display name or call the provider directly.
 - Reject a source already in its selected destination. Preserve the existing confirmed, uncertain, canceled, and cache-failure recovery behavior. Do not queue actions offline or retry an uncertain move.
 - Keep Archive limited to the default Outlook folder. Do not add Exchange Online Archive Mailbox support, an unarchive action, a dependency, or a cache schema change. Keep consent and live service verification in issue #38.
@@ -30,7 +30,7 @@ Issue #35 has already added a Delete workflow that resolves Deleted Items and th
 ## Consequences
 
 - The UI can offer to open the exact Archive folder returned for the active account, independent of locale.
-- A provider rejection leaves the encrypted cache unchanged. An uncertain or canceled move, or confirmed server success followed by cache failure, requires a successful account sync before another special-folder action.
+- A provider rejection leaves the encrypted cache unchanged. An uncertain or canceled move, or confirmed server success followed by cache failure, requires a successful account sync in the shared factory state before any later message move from its sessions.
 - The scope is the user's primary mailbox Archive folder. Graph documentation explicitly distinguishes it from the in-place Exchange Online Archive Mailbox.
 - Synthetic Graph, workflow, persistence, and headless GPUI tests verify the resolution, ordering, reservations, confirmation, recovery, encrypted body preservation, and navigation target. Issue #38 remains open for tenant consent and live Graph behavior.
 

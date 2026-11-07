@@ -51,3 +51,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0044](0044-block-calendar-actions-during-replacement-sync.md) | Block calendar actions during replacement sync | Accepted |
 | [0045](0045-incremental-graph-permissions.md) | Request Graph permissions incrementally | Accepted; live consent verification remains open |
 | [0046](0046-account-cache-removal-port.md) | Use one account cache removal port | Accepted |
+| [0047](0047-share-write-recovery-across-account-sessions.md) | Share write recovery across account sessions | Accepted |

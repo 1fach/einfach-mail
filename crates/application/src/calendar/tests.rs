@@ -14,6 +14,8 @@ use einfach_mail_domain::{
 };
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
+use crate::{account_recovery::AccountWorkflowRecovery, operation_reservations::ActiveOperations};
+
 use super::{
     CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
     CalendarDeltaResponse, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
@@ -787,6 +789,45 @@ fn updated_event(
         .apply_to(&mut event)
         .map_err(|_| CalendarOperationError::InvalidResponse)?;
     Ok(event)
+}
+
+fn update_request(event: EditableCalendarEvent) -> CalendarEventUpdate {
+    let draft = CalendarEventUpdateDraft::timed(
+        "Updated planning".to_owned(),
+        utc(2030, Month::January, 8) + time::Duration::hours(11),
+        utc(2030, Month::January, 8) + time::Duration::hours(12),
+    )
+    .expect("synthetic edit draft is valid");
+    CalendarEventUpdate::new(event, draft).expect("synthetic event values changed")
+}
+
+struct CalendarWorkflowPair {
+    first: Arc<CalendarWorkflow<FixtureProvider, FixtureCache>>,
+    sibling: Arc<CalendarWorkflow<FixtureProvider, FixtureCache>>,
+}
+
+fn workflows_sharing_account_state(
+    provider: &FixtureProvider,
+    cache: &FixtureCache,
+) -> CalendarWorkflowPair {
+    let reservations = Arc::new(Mutex::new(ActiveOperations::default()));
+    let recovery = Arc::new(AccountWorkflowRecovery::default());
+    let first = Arc::new(CalendarWorkflow::with_reservations(
+        provider.clone(),
+        cache.clone(),
+        Arc::clone(&reservations),
+        Arc::clone(&recovery),
+    ));
+    let second = Arc::new(CalendarWorkflow::with_reservations(
+        provider.clone(),
+        cache.clone(),
+        reservations,
+        recovery,
+    ));
+    CalendarWorkflowPair {
+        first,
+        sibling: second,
+    }
 }
 
 fn apply_incremental_changes(
@@ -2032,6 +2073,49 @@ fn event_deletion_reserves_the_account_until_the_provider_returns() {
 }
 
 #[test]
+fn canceled_event_deletion_requires_sync_before_another_write() {
+    smol::block_on(async {
+        let view = view();
+        let provider = FixtureProvider::default();
+        let cache = FixtureCache::default();
+        let workflows = workflows_sharing_account_state(&provider, &cache);
+        synchronize_empty_view(
+            &workflows.first,
+            &provider,
+            &view,
+            "cancel-delete-initial-sync",
+        )
+        .await;
+        let CalendarEventCreationOutcome::Cached(event) = workflows
+            .first
+            .create_event(&creation(view))
+            .await
+            .expect("synthetic event creation is confirmed")
+        else {
+            panic!("synthetic event is cached");
+        };
+        let editable = workflows
+            .first
+            .editable_event(&event)
+            .await
+            .expect("synthetic event is editable");
+        let retry = editable.clone();
+        let (started, _release) = provider.hold_next_deletion();
+        let deleting_workflow = std::sync::Arc::clone(&workflows.first);
+        let deletion = smol::spawn(async move { deleting_workflow.delete_event(&editable).await });
+        started
+            .await
+            .expect("synthetic deletion request has started");
+
+        assert!(deletion.cancel().await.is_none());
+        assert_eq!(
+            workflows.sibling.delete_event(&retry).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+    });
+}
+
+#[test]
 fn unknown_event_update_requires_successful_sync_before_another_write() {
     smol::block_on(async {
         let view = view();
@@ -2139,6 +2223,76 @@ fn unknown_event_update_requires_successful_sync_before_another_write() {
                 .len(),
             1,
             "uncertain updates are not replayed after sync"
+        );
+    });
+}
+
+#[test]
+fn uncertain_update_and_delete_recovery_blocks_sibling_workflows() {
+    smol::block_on(async {
+        let view = view();
+        let provider = FixtureProvider::default();
+        let cache = FixtureCache::default();
+        let workflows = workflows_sharing_account_state(&provider, &cache);
+        synchronize_empty_view(
+            &workflows.first,
+            &provider,
+            &view,
+            "shared-recovery-initial-sync",
+        )
+        .await;
+        let CalendarEventCreationOutcome::Cached(event) = workflows
+            .first
+            .create_event(&creation(view.clone()))
+            .await
+            .expect("synthetic event creation is confirmed")
+        else {
+            panic!("synthetic event is cached");
+        };
+        let editable = workflows
+            .first
+            .editable_event(&event)
+            .await
+            .expect("synthetic event is editable");
+        let update = update_request(editable.clone());
+        let sibling_update = update_request(editable.clone());
+        provider.fail_next_update(CalendarOperationError::UpdateOutcomeUnknown);
+
+        assert_eq!(
+            workflows.first.update_event(&update).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::UpdateOutcomeUnknown
+            ))
+        );
+        assert_eq!(
+            workflows.sibling.update_event(&sibling_update).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+
+        synchronize_empty_view(
+            &workflows.sibling,
+            &provider,
+            &view,
+            "shared-recovery-update-sync",
+        )
+        .await;
+        let editable = workflows
+            .sibling
+            .editable_event(&event)
+            .await
+            .expect("successful sync restores calendar writes");
+        let sibling_editable = editable.clone();
+        provider.fail_next_deletion(CalendarOperationError::DeleteOutcomeUnknown);
+
+        assert_eq!(
+            workflows.first.delete_event(&editable).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::DeleteOutcomeUnknown
+            ))
+        );
+        assert_eq!(
+            workflows.sibling.delete_event(&sibling_editable).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
         );
     });
 }
@@ -2373,6 +2527,48 @@ fn event_update_reserves_the_whole_account_until_the_cache_commit_finishes() {
             update_task.await,
             Ok(CalendarEventUpdateOutcome::Cached(_))
         ));
+    });
+}
+
+#[test]
+fn canceled_event_update_requires_sync_before_another_write() {
+    smol::block_on(async {
+        let view = view();
+        let provider = FixtureProvider::default();
+        let cache = FixtureCache::default();
+        let workflows = workflows_sharing_account_state(&provider, &cache);
+        synchronize_empty_view(
+            &workflows.first,
+            &provider,
+            &view,
+            "cancel-update-initial-sync",
+        )
+        .await;
+        let CalendarEventCreationOutcome::Cached(event) = workflows
+            .first
+            .create_event(&creation(view))
+            .await
+            .expect("synthetic event creation is confirmed")
+        else {
+            panic!("synthetic event is cached");
+        };
+        let editable = workflows
+            .first
+            .editable_event(&event)
+            .await
+            .expect("synthetic event is editable");
+        let update = update_request(editable.clone());
+        let retry = update_request(editable);
+        let (started, _release) = provider.hold_next_update();
+        let updating_workflow = std::sync::Arc::clone(&workflows.first);
+        let update_task = smol::spawn(async move { updating_workflow.update_event(&update).await });
+        started.await.expect("synthetic update request has started");
+
+        assert!(update_task.cancel().await.is_none());
+        assert_eq!(
+            workflows.sibling.update_event(&retry).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
     });
 }
 
