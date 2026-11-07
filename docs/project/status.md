@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-11-06
+Last updated: 2026-11-07
 
 ## Current milestone
 
@@ -10,18 +10,22 @@ PR #47 merged read-only mail into `main` at `409d299ffbe11dfe41c8f5a428b8e49b9ac
 
 PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d0b705efb6b8f7560b60c45e6f` on 2026-11-06. All four required checks passed on head `3b99b11a708a80bb02ef82553e2144165bd88ab7`. ADR 0036 records the reset flow, ADR 0043 records the per-account session boundary, and ADR 0044 records the event-action gate during replacement scans. Keep issue #49 open until a Microsoft 365 tenant confirms the cursor-reset response shape.
 
+[PR #79](https://github.com/1fach/einfach-mail/pull/79) and [PR #80](https://github.com/1fach/einfach-mail/pull/80) added headless accessibility snapshots for the agenda and message list. [PR #81](https://github.com/1fach/einfach-mail/pull/81) merged into `main` at `54df53621d0bc4ac337cde88a68def0b2c5a9bd4` on 2026-11-07. It adds synthetic Graph coverage for recurring occurrences across a daylight-saving transition and completes issue #6's synthetic fixture criterion. Issue #6 remains open for live recurrence, time-zone, and all-day verification.
+
 ## Active risks
 
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep live sign-in, initial mail sync, read-state, flag, send, reply, move, and calendar verification open under their existing issues.
-- Manual Linux review of real-window layout, focus, scrolling, and screen-reader behavior remains open for issues #9 and #22. No GUI has been launched during this work.
+- Issue #6 has synthetic recurrence coverage only. Graph's live recurrence, time-zone, and all-day behavior remain unverified until a Microsoft 365 tenant is available.
+- Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
 - Windows and macOS support remain deferred.
 - Fedora GNOME Keyring evidence does not establish behavior for every Secret Service implementation.
 
 ## Next actions
 
 1. Keep issue #49 open until a Microsoft 365 tenant confirms the documented cursor-reset response shape.
-2. Keep issue #28 open until a dedicated Microsoft 365 test tenant is available for delegated consent and live Graph send verification.
-3. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
+2. Keep issue #6 open until a tenant confirms recurring occurrence, time-zone, and all-day behavior.
+3. Keep issue #28 open until a dedicated Microsoft 365 test tenant is available for delegated consent and live Graph send verification.
+4. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
 
 ## Update rule
 
