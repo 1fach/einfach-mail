@@ -1,7 +1,4 @@
-use async_sqlite::{
-    Client, ClientBuilder,
-    rusqlite::{Connection, backup::Backup},
-};
+use async_sqlite::{Client, ClientBuilder};
 use rusqlite_migration::{M, Migrations};
 #[cfg(target_os = "linux")]
 use std::io;
@@ -9,7 +6,6 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
-    time::Duration,
 };
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -137,26 +133,6 @@ async fn schema_version(client: &Client) -> ProofResult<i64> {
     Ok(version)
 }
 
-async fn create_encrypted_backup(
-    source: &Client,
-    backup_path: &Path,
-    key: &DatabaseKey,
-) -> ProofResult<()> {
-    let backup_path = PathBuf::from(backup_path);
-    let statement = key.sqlcipher_key_statement();
-    source
-        .conn_and_then(move |source_connection| -> ProofResult<()> {
-            let mut destination = Connection::open(backup_path)?;
-            // Apply the raw key before the online backup writes its first page.
-            destination.execute_batch(statement.as_str())?;
-            let backup = Backup::new(source_connection, &mut destination)?;
-            backup.run_to_completion(64, Duration::from_millis(10), None)?;
-            Ok(())
-        })
-        .await?;
-    Ok(())
-}
-
 fn assert_database_file_is_encrypted(path: &Path) -> ProofResult<()> {
     let file_bytes = fs::read(path)?;
     assert!(file_bytes.len() >= SQLITE_HEADER.len());
@@ -201,43 +177,6 @@ fn encrypted_database_migrates_reopens_and_rejects_a_wrong_key() -> ProofResult<
         assert_database_file_is_encrypted(&database_path)?;
         assert_database_reopens_with_key(&database_path, 0x41).await?;
         assert_wrong_key_is_rejected(&database_path, 0x42).await?;
-        Ok(())
-    })
-}
-
-async fn create_database_backup(
-    database_path: &Path,
-    backup_path: &Path,
-    key_byte: u8,
-) -> ProofResult<()> {
-    let database = open_encrypted_database(database_path, DatabaseKey::synthetic(key_byte)).await?;
-    apply_proof_migrations(&database.client).await?;
-    write_synthetic_action(&database.client).await?;
-    create_encrypted_backup(&database.client, backup_path, &database.key).await?;
-    database.client.close().await?;
-    Ok(())
-}
-
-async fn assert_backup_reopens_with_key(path: &Path, key_byte: u8) -> ProofResult<()> {
-    let backup = open_encrypted_database(path, DatabaseKey::synthetic(key_byte)).await?;
-    apply_proof_migrations(&backup.client).await?;
-    assert_eq!(
-        read_synthetic_action(&backup.client).await?,
-        SYNTHETIC_ACTION
-    );
-    backup.client.close().await?;
-    Ok(())
-}
-
-#[test]
-fn encrypted_backup_can_be_reopened_with_the_original_key() -> ProofResult<()> {
-    smol::block_on(async {
-        let directory = TempDir::new()?;
-        let database_path = directory.path().join("cache.sqlite3");
-        let backup_path = directory.path().join("cache.backup.sqlite3");
-        create_database_backup(&database_path, &backup_path, 0x31).await?;
-        assert_database_file_is_encrypted(&backup_path)?;
-        assert_backup_reopens_with_key(&backup_path, 0x31).await?;
         Ok(())
     })
 }
@@ -300,19 +239,19 @@ mod credential_tests {
     }
 
     fn credential_key(
-        encrypted_data_exists: bool,
+        encrypted_database_exists: bool,
         secret_result: keyring::Result<Vec<u8>>,
     ) -> ProofResult<CredentialKey> {
         match secret_result {
             Ok(secret) => Ok(CredentialKey::Existing(DatabaseKey::from_secret(secret)?)),
-            Err(KeyringError::NoEntry) if encrypted_data_exists => Ok(CredentialKey::Missing),
+            Err(KeyringError::NoEntry) if encrypted_database_exists => Ok(CredentialKey::Missing),
             Err(KeyringError::NoEntry) => Ok(CredentialKey::Create),
             Err(error) => Err(Box::new(error)),
         }
     }
 
-    fn encrypted_data_exists(database_path: &Path, backup_path: &Path) -> ProofResult<bool> {
-        Ok(database_path.try_exists()? || backup_path.try_exists()?)
+    fn encrypted_database_exists(database_path: &Path) -> ProofResult<bool> {
+        Ok(database_path.try_exists()?)
     }
 
     #[test]
@@ -335,31 +274,12 @@ mod credential_tests {
         Ok(())
     }
 
-    #[test]
-    fn backup_without_primary_still_requires_its_missing_credential() -> ProofResult<()> {
-        let directory = TempDir::new()?;
-        let database_path = directory.path().join("cache.sqlite3");
-        let backup_path = directory.path().join("cache.backup.sqlite3");
-        fs::write(&backup_path, b"synthetic encrypted backup")?;
-
-        let has_encrypted_data = encrypted_data_exists(&database_path, &backup_path)?;
-        assert!(!database_path.exists());
-        assert!(has_encrypted_data);
-        assert!(matches!(
-            credential_key(has_encrypted_data, Err(KeyringError::NoEntry))?,
-            CredentialKey::Missing
-        ));
-        assert!(backup_path.exists());
-        Ok(())
-    }
-
     async fn open_or_create_cache(
         database_path: &Path,
-        backup_path: &Path,
         credential: &TestCredential,
     ) -> ProofResult<CacheOpen> {
         let credential_entry = credential.entry()?;
-        let has_encrypted_data = encrypted_data_exists(database_path, backup_path)?;
+        let has_encrypted_data = encrypted_database_exists(database_path)?;
         let key = match credential_key(has_encrypted_data, credential_entry.get_secret())? {
             CredentialKey::Existing(key) => key,
             CredentialKey::Missing => return Ok(CacheOpen::MissingKey),
@@ -416,10 +336,8 @@ mod credential_tests {
     async fn create_credentialed_cache(
         credential: &TestCredential,
         database_path: &Path,
-        backup_path: &Path,
     ) -> ProofResult<()> {
-        let CacheOpen::Open(database) =
-            open_or_create_cache(database_path, backup_path, credential).await?
+        let CacheOpen::Open(database) = open_or_create_cache(database_path, credential).await?
         else {
             return Err(io::Error::other("new cache unexpectedly had no key").into());
         };
@@ -427,21 +345,17 @@ mod credential_tests {
         assert_eq!(stored_key.as_slice(), database.key.as_bytes());
         apply_proof_migrations(&database.client).await?;
         write_synthetic_action(&database.client).await?;
-        create_encrypted_backup(&database.client, backup_path, &database.key).await?;
         database.client.close().await?;
         drop(database);
-        assert_credentialed_cache_reopens(credential, database_path, backup_path).await?;
-        assert_credentialed_cache_reopens(credential, backup_path, backup_path).await?;
+        assert_credentialed_cache_reopens(credential, database_path).await?;
         Ok(())
     }
 
     async fn assert_credentialed_cache_reopens(
         credential: &TestCredential,
         database_path: &Path,
-        backup_path: &Path,
     ) -> ProofResult<()> {
-        let CacheOpen::Open(database) =
-            open_or_create_cache(database_path, backup_path, credential).await?
+        let CacheOpen::Open(database) = open_or_create_cache(database_path, credential).await?
         else {
             return Err(io::Error::other("stored credential did not reopen the cache").into());
         };
@@ -455,27 +369,20 @@ mod credential_tests {
         Ok(())
     }
 
-    async fn assert_missing_key_preserves_encrypted_files(
+    async fn assert_missing_key_preserves_database(
         credential: &TestCredential,
         database_path: &Path,
-        backup_path: &Path,
     ) -> ProofResult<()> {
         let database_before = fs::read(database_path)?;
-        let backup_before = fs::read(backup_path)?;
 
         assert!(matches!(
-            open_or_create_cache(database_path, backup_path, credential).await?,
+            open_or_create_cache(database_path, credential).await?,
             CacheOpen::MissingKey
         ));
         assert_file_unchanged(
             database_path,
             &database_before,
             "database changed while its key was missing",
-        )?;
-        assert_file_unchanged(
-            backup_path,
-            &backup_before,
-            "backup changed while its key was missing",
         )?;
         assert_credential_is_missing(credential)?;
         Ok(())
@@ -498,35 +405,13 @@ mod credential_tests {
         Ok(())
     }
 
-    async fn assert_missing_key_preserves_primary_cache(
+    async fn assert_missing_key_preserves_cache(
         credential: &TestCredential,
         database_path: &Path,
-        backup_path: &Path,
     ) -> ProofResult<()> {
-        create_credentialed_cache(credential, database_path, backup_path).await?;
+        create_credentialed_cache(credential, database_path).await?;
         credential.entry()?.delete_credential()?;
-        assert_missing_key_preserves_encrypted_files(credential, database_path, backup_path).await
-    }
-
-    async fn assert_missing_key_preserves_backup_without_primary(
-        credential: &TestCredential,
-        database_path: &Path,
-        backup_path: &Path,
-    ) -> ProofResult<()> {
-        fs::remove_file(database_path)?;
-        let backup_before_missing_key = fs::read(backup_path)?;
-        assert!(matches!(
-            open_or_create_cache(database_path, backup_path, credential).await?,
-            CacheOpen::MissingKey
-        ));
-        assert!(!database_path.exists());
-        assert_file_unchanged(
-            backup_path,
-            &backup_before_missing_key,
-            "backup changed while its key was missing",
-        )?;
-        assert_credential_is_missing(credential)?;
-        Ok(())
+        assert_missing_key_preserves_database(credential, database_path).await
     }
 
     #[ignore = "requires a desktop Secret Service; run explicitly with --ignored"]
@@ -536,16 +421,8 @@ mod credential_tests {
             let temporary_directory = TempDir::new()?;
             let account_directory = make_account_directory(&temporary_directory)?;
             let database_path = account_directory.join("cache.sqlite3");
-            let backup_path = account_directory.join("cache.backup.sqlite3");
             let credential = TestCredential::create()?;
-            assert_missing_key_preserves_primary_cache(&credential, &database_path, &backup_path)
-                .await?;
-            assert_missing_key_preserves_backup_without_primary(
-                &credential,
-                &database_path,
-                &backup_path,
-            )
-            .await?;
+            assert_missing_key_preserves_cache(&credential, &database_path).await?;
             remove_account_data(&credential, &account_directory)?;
             assert!(!account_directory.exists());
             Ok(())
@@ -554,10 +431,9 @@ mod credential_tests {
 
     fn assert_cache_open_fails_without_secret_service(
         database_path: &Path,
-        backup_path: &Path,
         credential: &TestCredential,
     ) -> ProofResult<()> {
-        let error = smol::block_on(open_or_create_cache(database_path, backup_path, credential))
+        let error = smol::block_on(open_or_create_cache(database_path, credential))
             .err()
             .ok_or_else(|| {
                 io::Error::other("cache opened even though the Secret Service was unavailable")
@@ -577,29 +453,23 @@ mod credential_tests {
         credential: &TestCredential,
     ) -> ProofResult<()> {
         let database_path = directory.path().join("existing-cache.sqlite3");
-        let backup_path = directory.path().join("existing-cache.backup.sqlite3");
-        smol::block_on(create_database_backup(&database_path, &backup_path, 0x52))?;
+        smol::block_on(create_database_with_synthetic_action(&database_path, 0x52))?;
         assert_database_file_is_encrypted(&database_path)?;
-        assert_database_file_is_encrypted(&backup_path)?;
         let database_before = fs::read(&database_path)?;
-        let backup_before = fs::read(&backup_path)?;
 
-        assert_cache_open_fails_without_secret_service(&database_path, &backup_path, credential)?;
+        assert_cache_open_fails_without_secret_service(&database_path, credential)?;
 
         assert_eq!(fs::read(database_path)?, database_before);
-        assert_eq!(fs::read(backup_path)?, backup_before);
         Ok(())
     }
 
     fn assert_unavailable_secret_service_does_not_create_or_modify_a_cache() -> ProofResult<()> {
         let directory = TempDir::new()?;
         let database_path = directory.path().join("new-cache.sqlite3");
-        let backup_path = directory.path().join("new-cache.backup.sqlite3");
         let credential = TestCredential::create()?;
 
-        assert_cache_open_fails_without_secret_service(&database_path, &backup_path, &credential)?;
+        assert_cache_open_fails_without_secret_service(&database_path, &credential)?;
         assert!(!database_path.exists());
-        assert!(!backup_path.exists());
         assert_existing_cache_is_preserved_without_secret_service(&directory, &credential)?;
         Ok(())
     }
@@ -650,9 +520,8 @@ mod credential_tests {
             let temporary_directory = TempDir::new()?;
             let account_directory = make_account_directory(&temporary_directory)?;
             let database_path = account_directory.join("cache.sqlite3");
-            let backup_path = account_directory.join("cache.backup.sqlite3");
             let credential = TestCredential::create()?;
-            create_credentialed_cache(&credential, &database_path, &backup_path).await?;
+            create_credentialed_cache(&credential, &database_path).await?;
             remove_account_data(&credential, &account_directory)?;
             assert_credential_is_missing(&credential)?;
             assert!(!account_directory.exists());

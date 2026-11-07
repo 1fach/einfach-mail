@@ -134,7 +134,7 @@ For follow-up flag updates, no additional library fits the single Graph-specific
 
 ### Test-only storage proof dependencies
 
-The dependencies declared in `tools/storage-proof/` are development-only. The package has no application API and does not exercise production persistence; it keeps distinct manual Linux Secret Service and SQLCipher dependency evidence until equivalent production-path coverage exists. The Microsoft provider separately uses `keyring` for refresh-token storage and has an ignored Secret Service lifecycle test.
+The dependencies declared in `tools/storage-proof/` are development-only. The package has no application API and does not exercise production persistence; it keeps distinct manual Linux Secret Service and SQLCipher dependency evidence until equivalent production-path coverage exists. It does not test backup support, which production does not implement. The Microsoft provider separately uses `keyring` for refresh-token storage and has an ignored Secret Service lifecycle test.
 
 | Crate | Evidence and use |
 | --- | --- |
@@ -142,7 +142,7 @@ The dependencies declared in `tools/storage-proof/` are development-only. The pa
 | `zeroize` 1.9.1 | Apache-2.0 OR MIT, Rust 1.85, pure Rust and portable. Enable only `alloc`; use `Zeroizing` for raw key arrays, credential byte buffers, and SQLCipher key strings. |
 | `hex` 0.4.3 | MIT OR Apache-2.0, no declared MSRV, no runtime dependencies. Use its standard encoding implementation to form SQLCipher's documented raw-key literal, wrapping both temporary and final strings in `Zeroizing`. |
 | `smol` 2.0.2 | Apache-2.0 OR MIT, Rust 1.63. Use `block_on` to exercise `async-sqlite` with the same executor family used by GPUI Kit; async-sqlite also documents tests with Tokio. |
-| `tempfile` 3.27.0 | MIT OR Apache-2.0, Rust 1.63, maintained cross-platform test utility. Use `TempDir` for automatic cleanup of synthetic database and backup files. |
+| `tempfile` 3.27.0 | MIT OR Apache-2.0, Rust 1.63, maintained cross-platform test utility. Use `TempDir` for automatic cleanup of synthetic database files. |
 | `keyring` 4.2.0 | MIT OR Apache-2.0, Rust 1.88, within the workspace's Rust 1.95 MSRV. GitHub lists v4.2.0 as its latest release and 47 commits to `main` since that release. Its `v1` API provides synchronous binary-secret operations and selects the zbus Secret Service backend on Linux. Keep those synchronous calls off the GPUI UI thread. The `cli` feature is disabled, avoiding unrelated credential-store adapters. The Linux backend adds Rust dependencies but no new native build tools; it reuses zbus 5.19.0 already present through GPUI. The current lockfile audit found no vulnerable `keyring` version and reports the unmaintained zbus helper crates documented above. The proof uses random synthetic credential names and removes credentials on completion. |
 
 Local Linux proof passed with `OPENSSL_NO_VENDOR=1` because this Fedora image lacks `FindBin.pm`; that run used system OpenSSL. Linux CI installed the vendored OpenSSL build requirements and passed without that override. Windows x64 CI also passed with vendored OpenSSL. The required Fedora modules are `perl-FindBin` and `perl-Text-Template`; Ubuntu installs `perl` and `libtext-template-perl`. Windows needs Perl, `Text::Template`, MSVC, and NASM for the vendored OpenSSL build.
