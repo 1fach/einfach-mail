@@ -38,10 +38,16 @@ The per-account session that joins mail and calendar workflows is defined in [AD
 - Event IDs and opaque delta links remain scoped to the account and exact range; cursors are never shown or logged.
 - Each page and its cursor commit in one transaction, so a retry converges on the same cached state.
 - Calendar failures preserve cached events and do not prevent mail browsing.
+- Graph's v1.0 docs say event start and end values default to UTC when no response-time-zone preference is set.
+- The event resource requires an all-day event's start and end to be midnight in the same time zone. The docs do not describe how a non-UTC all-day event appears in a UTC-default `calendarView` response.
+- The adapter's mapping of UTC-midnight values to dates has synthetic coverage only. Keep issue #6 open for tenant verification.
 - Synthetic Linux tests do not prove live Graph recurrence, time-zone, or all-day semantics, and the implementation does not establish Windows or macOS support.
 
 ## Sources
 
+- [Microsoft Graph list calendarView](https://learn.microsoft.com/en-us/graph/api/user-list-calendarview?view=graph-rest-1.0)
+- [Microsoft Graph event resource](https://learn.microsoft.com/en-us/graph/api/resources/event?view=graph-rest-1.0)
+- [Microsoft Graph dateTimeTimeZone resource](https://learn.microsoft.com/en-us/graph/api/resources/datetimetimezone?view=graph-rest-1.0)
 - [Microsoft Graph event delta](https://learn.microsoft.com/en-us/graph/api/event-delta?view=graph-rest-1.0)
 - [Microsoft Graph delta query for events](https://learn.microsoft.com/en-us/graph/delta-query-events)
 - [Microsoft Graph permissions reference](https://learn.microsoft.com/graph/permissions-reference?view=graph-rest-1.0)
