@@ -124,7 +124,7 @@ Run the separate storage dependency proof when reviewing the Linux Secret Servic
 cargo test --locked --package einfach-mail-storage-proof
 ```
 
-This tool builds a synthetic encrypted cache separate from production persistence. Its default Linux run checks behavior when Secret Service is unavailable. The credential and SQLCipher lifecycle tests require an unlocked desktop Secret Service and are ignored by default. Run them explicitly with:
+This tool tests a synthetic encrypted SQLite cache and Linux credential access. It does not exercise production persistence or a backup workflow. Its default Linux run checks behavior when Secret Service is unavailable. The credential lifecycle tests require an unlocked desktop Secret Service and are ignored by default. Run them explicitly with:
 
 ```sh
 cargo test --locked --package einfach-mail-storage-proof -- --ignored --test-threads=1

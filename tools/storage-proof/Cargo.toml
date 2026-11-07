@@ -7,7 +7,7 @@ publish = false
 description = "Test-only proof for encrypted SQLite and Linux credential storage"
 
 [dev-dependencies]
-async-sqlite = { version = "0.6.0", default-features = false, features = ["backup", "bundled-sqlcipher-vendored-openssl"] }
+async-sqlite = { version = "0.6.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 getrandom = "0.4.3"
 hex = "0.4.3"
 rusqlite_migration = "2.6.0"
