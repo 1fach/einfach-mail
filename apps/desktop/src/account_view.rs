@@ -503,85 +503,84 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn open_mail(&mut self, cx: &mut Context<Self>) {
-        if !self.content.is_account() {
-            return;
-        }
-        let AccountStatus::Connected(profile) = &self.status else {
-            return;
-        };
-        let Some(account_session_factory) = self.account_session_factory.clone() else {
-            return;
-        };
         let permission_requester = self
             .workflow
             .clone()
             .map(|workflow| -> Arc<dyn MailPermissionRequester> { workflow });
-        let profile = profile.clone();
-        let retained_session = self.account_session.clone();
-        self.content = AccountContent::Opening(OpeningContent::Mail);
-        self.session_open_error = None;
-        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let session = match retained_session {
-                Some(session) => Ok(session),
-                None => {
-                    let account_id = profile.id().clone();
-                    cx.background_executor()
-                        .spawn(
-                            async move { account_session_factory.open_session(account_id).await },
-                        )
-                        .await
-                }
-            };
-            match session {
-                Ok(session) => {
-                    let _ = this.update(cx, |view, cx| {
-                        if view.content.opening_kind() != Some(OpeningContent::Mail)
-                            || !matches!(&view.status, AccountStatus::Connected(_))
-                        {
-                            return;
+        self.open_account_content(
+            OpeningContent::Mail,
+            move |profile, session, cx| {
+                let mail_view_session = session.mail_session();
+                let mail_view = cx
+                    .new(|cx| MailView::new(profile, mail_view_session, permission_requester, cx));
+                let subscription = cx.subscribe(
+                    &mail_view,
+                    |view, _, event: &MailViewEvent, cx| match event {
+                        MailViewEvent::BackToAccount => {
+                            drop(view.close_content_view(cx));
+                            cx.notify();
                         }
-                        view.content = AccountContent::Account;
-                        let mail_view_session = session.mail_session();
-                        let mail_view = cx.new(|cx| {
-                            MailView::new(profile, mail_view_session, permission_requester, cx)
-                        });
-                        let subscription =
-                            cx.subscribe(&mail_view, |view, _, event: &MailViewEvent, cx| {
-                                match event {
-                                    MailViewEvent::BackToAccount => {
-                                        drop(view.close_content_view(cx));
-                                        cx.notify();
-                                    }
-                                    MailViewEvent::ReviewMailWritePermission => {
-                                        drop(view.close_content_view(cx));
-                                        view.prepare_permission_review(
-                                            AccountPermissionRequest::MailReadWrite,
-                                            cx,
-                                        );
-                                    }
-                                }
-                            });
-                        view.content = AccountContent::Mail {
-                            view: mail_view,
-                            subscription,
-                        };
-                        view.account_session = Some(session);
-                        cx.notify();
-                    });
+                        MailViewEvent::ReviewMailWritePermission => {
+                            drop(view.close_content_view(cx));
+                            view.prepare_permission_review(
+                                AccountPermissionRequest::MailReadWrite,
+                                cx,
+                            );
+                        }
+                    },
+                );
+                AccountContent::Mail {
+                    view: mail_view,
+                    subscription,
                 }
-                Err(error) => {
-                    let _ = this.update(cx, |view, cx| {
-                        view.content = AccountContent::Account;
-                        view.session_open_error = Some(AccountViewCacheError::Open(error));
-                        cx.notify();
-                    });
-                }
-            }
-        }));
-        cx.notify();
+            },
+            cx,
+        );
     }
 
     fn open_calendar(&mut self, cx: &mut Context<Self>) {
+        self.open_account_content(
+            OpeningContent::Calendar,
+            |profile, session, cx| {
+                let calendar_session = session.calendar_session();
+                let calendar_view = cx.new(|cx| CalendarView::new(profile, calendar_session, cx));
+                let subscription =
+                    cx.subscribe(&calendar_view, |view, _, event: &CalendarViewEvent, cx| {
+                        match event {
+                            CalendarViewEvent::BackToAccount => {
+                                drop(view.close_content_view(cx));
+                                cx.notify();
+                            }
+                            CalendarViewEvent::ReviewCalendarWritePermission => {
+                                drop(view.close_content_view(cx));
+                                view.prepare_permission_review(
+                                    AccountPermissionRequest::CalendarReadWrite,
+                                    cx,
+                                );
+                            }
+                        }
+                    });
+                AccountContent::Calendar {
+                    view: calendar_view,
+                    subscription,
+                }
+            },
+            cx,
+        );
+    }
+
+    fn open_account_content(
+        &mut self,
+        opening: OpeningContent,
+        build_content: impl FnOnce(
+            AccountProfile,
+            Arc<dyn AccountSession>,
+            &mut Context<Self>,
+        ) -> AccountContent
+        + Send
+        + 'static,
+        cx: &mut Context<Self>,
+    ) {
         if !self.content.is_account() {
             return;
         }
@@ -593,7 +592,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         };
         let profile = profile.clone();
         let retained_session = self.account_session.clone();
-        self.content = AccountContent::Opening(OpeningContent::Calendar);
+        self.content = AccountContent::Opening(opening);
         self.session_open_error = None;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let session = match retained_session {
@@ -607,50 +606,24 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                         .await
                 }
             };
-            match session {
-                Ok(session) => {
-                    let _ = this.update(cx, |view, cx| {
-                        if view.content.opening_kind() != Some(OpeningContent::Calendar)
-                            || !matches!(&view.status, AccountStatus::Connected(_))
-                        {
-                            return;
-                        }
-                        view.content = AccountContent::Account;
-                        let calendar_session = session.calendar_session();
-                        let calendar_view =
-                            cx.new(|cx| CalendarView::new(profile, calendar_session, cx));
-                        let subscription = cx.subscribe(
-                            &calendar_view,
-                            |view, _, event: &CalendarViewEvent, cx| match event {
-                                CalendarViewEvent::BackToAccount => {
-                                    drop(view.close_content_view(cx));
-                                    cx.notify();
-                                }
-                                CalendarViewEvent::ReviewCalendarWritePermission => {
-                                    drop(view.close_content_view(cx));
-                                    view.prepare_permission_review(
-                                        AccountPermissionRequest::CalendarReadWrite,
-                                        cx,
-                                    );
-                                }
-                            },
-                        );
-                        view.content = AccountContent::Calendar {
-                            view: calendar_view,
-                            subscription,
-                        };
+            let _ = this.update(cx, move |view, cx| {
+                if view.content.opening_kind() != Some(opening)
+                    || !matches!(&view.status, AccountStatus::Connected(_))
+                {
+                    return;
+                }
+                view.content = AccountContent::Account;
+                match session {
+                    Ok(session) => {
+                        view.content = build_content(profile, Arc::clone(&session), cx);
                         view.account_session = Some(session);
-                        cx.notify();
-                    });
-                }
-                Err(error) => {
-                    let _ = this.update(cx, |view, cx| {
-                        view.content = AccountContent::Account;
+                    }
+                    Err(error) => {
                         view.session_open_error = Some(AccountViewCacheError::Open(error));
-                        cx.notify();
-                    });
+                    }
                 }
-            }
+                cx.notify();
+            });
         }));
         cx.notify();
     }
