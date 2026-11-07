@@ -19,6 +19,7 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 - Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
 - Windows and macOS support remain deferred.
 - Fedora GNOME Keyring evidence does not establish behavior for every Secret Service implementation.
+- The 2026-11-07 local RustSec audit reports eight transitive `INFO Unmaintained` crates. Seven are in the active Linux graph; `rustls-pemfile` is cross-target only. The audit found no vulnerable or yanked versions. GPUI Kit and its current Linux integration graph still use these crates; see the [dependency review](dependency-review.md) for paths and replacement checks.
 
 ## Next actions
 
@@ -26,6 +27,7 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 2. Keep issue #6 open until a tenant confirms recurring occurrence, time-zone, and all-day behavior.
 3. Keep issue #28 open until a dedicated Microsoft 365 test tenant is available for delegated consent and live Graph send verification.
 4. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
+5. Recheck the transitive RustSec warnings when GPUI Kit or its Linux integration dependencies publish compatible updates.
 
 ## Update rule
 
