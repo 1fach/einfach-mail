@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn update_requires_a_changed_subject_or_timed_range() {
-        let event = occurrence("Planning", range());
+        let event = occurrence("Planning", primary_calendar_view());
         let editable = EditableCalendarEvent::new(
             event,
             CalendarEventVersion::try_from("version-1".to_owned())
@@ -271,10 +271,87 @@ mod tests {
     }
 
     #[test]
-    fn confirms_only_the_same_account_view_event_and_requested_values() {
-        let view = range();
+    fn confirmation_rejects_a_different_account() {
+        let update = event_update();
+        let event = occurrence_with_confirmation_fields(
+            view_for_account("synthetic-other-account"),
+            "synthetic-event",
+            "Updated planning",
+            (timestamp(11), timestamp(12)),
+        );
+
+        assert!(!update.confirms(&event));
+    }
+
+    #[test]
+    fn confirmation_rejects_a_different_view_range() {
+        let update = event_update();
+        let event = occurrence_with_confirmation_fields(
+            view_with_shifted_range(),
+            "synthetic-event",
+            "Updated planning",
+            (timestamp(11), timestamp(12)),
+        );
+
+        assert!(!update.confirms(&event));
+    }
+
+    #[test]
+    fn confirmation_rejects_a_different_event_id() {
+        let update = event_update();
+        let event = occurrence_with_confirmation_fields(
+            primary_calendar_view(),
+            "synthetic-other-event",
+            "Updated planning",
+            (timestamp(11), timestamp(12)),
+        );
+
+        assert!(!update.confirms(&event));
+    }
+
+    #[test]
+    fn confirmation_rejects_a_different_subject() {
+        let update = event_update();
+        let event = occurrence_with_confirmation_fields(
+            primary_calendar_view(),
+            "synthetic-event",
+            "Different planning",
+            (timestamp(11), timestamp(12)),
+        );
+
+        assert!(!update.confirms(&event));
+    }
+
+    #[test]
+    fn confirmation_rejects_a_different_time_range() {
+        let update = event_update();
+        let event = occurrence_with_confirmation_fields(
+            primary_calendar_view(),
+            "synthetic-event",
+            "Updated planning",
+            (timestamp(9), timestamp(10)),
+        );
+
+        assert!(!update.confirms(&event));
+    }
+
+    #[test]
+    fn confirmation_accepts_the_same_event_and_requested_values() {
+        let update = event_update();
+        let event = occurrence_with_confirmation_fields(
+            primary_calendar_view(),
+            "synthetic-event",
+            "Updated planning",
+            (timestamp(11), timestamp(12)),
+        );
+
+        assert!(update.confirms(&event));
+    }
+
+    fn event_update() -> CalendarEventUpdate {
+        let view = primary_calendar_view();
         let source = EditableCalendarEvent::new(
-            occurrence("Planning", view.clone()),
+            occurrence("Planning", view),
             CalendarEventVersion::try_from("version-1".to_owned())
                 .expect("synthetic version is valid"),
         )
@@ -285,48 +362,45 @@ mod tests {
             timestamp(12),
         )
         .expect("synthetic update draft is valid");
-        let update = CalendarEventUpdate::new(source, draft).expect("values changed");
-
-        assert!(!update.confirms(&occurrence("Updated planning", view.clone())));
-        let updated = updated_occurrence(view);
-        assert!(update.confirms(&updated));
+        CalendarEventUpdate::new(source, draft).expect("values changed")
     }
 
     fn occurrence(subject: &str, range: CalendarViewReference) -> crate::CalendarOccurrence {
+        occurrence_with_confirmation_fields(
+            range,
+            "synthetic-event",
+            subject,
+            (timestamp(9), timestamp(10)),
+        )
+    }
+
+    fn occurrence_with_confirmation_fields(
+        reference: CalendarViewReference,
+        id: &str,
+        subject: &str,
+        time_range: (OffsetDateTime, OffsetDateTime),
+    ) -> crate::CalendarOccurrence {
         let mut patch = CalendarOccurrencePatch::new();
         patch.set_subject(Some(subject.to_owned()));
+        let (start, end) = time_range;
         let mut time = crate::CalendarOccurrenceTimePatch::new();
-        time.set_start(timestamp(9));
-        time.set_end(timestamp(10));
+        time.set_start(start);
+        time.set_end(end);
         time.set_is_all_day(false);
         patch.set_time(time);
         patch
             .into_new(
-                range,
-                EventId::try_from("synthetic-event".to_owned())
-                    .expect("synthetic event ID is valid"),
+                reference,
+                EventId::try_from(id.to_owned()).expect("synthetic event ID is valid"),
             )
             .expect("synthetic event is complete")
     }
 
-    fn updated_occurrence(view: CalendarViewReference) -> crate::CalendarOccurrence {
-        let mut patch = CalendarOccurrencePatch::new();
-        patch.set_subject(Some("Updated planning".to_owned()));
-        let mut time = crate::CalendarOccurrenceTimePatch::new();
-        time.set_start(timestamp(11));
-        time.set_end(timestamp(12));
-        time.set_is_all_day(false);
-        patch.set_time(time);
-        patch
-            .into_new(
-                view,
-                EventId::try_from("synthetic-event".to_owned())
-                    .expect("synthetic event ID is valid"),
-            )
-            .expect("synthetic event is complete")
+    fn primary_calendar_view() -> CalendarViewReference {
+        view_for_account("synthetic-account")
     }
 
-    fn range() -> CalendarViewReference {
+    fn view_for_account(account_id: &str) -> CalendarViewReference {
         let start_date = Date::from_calendar_date(2030, Month::January, 7)
             .expect("synthetic start date is valid");
         let end_date = Date::from_calendar_date(2030, Month::January, 14)
@@ -339,10 +413,22 @@ mod tests {
         )
         .expect("synthetic week is valid");
         CalendarViewReference::new(
-            AccountId::try_from("synthetic-account".to_owned())
-                .expect("synthetic account ID is valid"),
+            AccountId::try_from(account_id.to_owned()).expect("synthetic account ID is valid"),
             range,
         )
+    }
+
+    fn view_with_shifted_range() -> CalendarViewReference {
+        let view = primary_calendar_view();
+        let source_range = view.range();
+        let range = CalendarViewRange::new(
+            source_range.start() + time::Duration::hours(1),
+            source_range.end(),
+            source_range.start_date(),
+            source_range.end_date_exclusive(),
+        )
+        .expect("synthetic shifted week is valid");
+        CalendarViewReference::new(view.account_id().clone(), range)
     }
 
     fn timestamp(hour: u8) -> OffsetDateTime {
