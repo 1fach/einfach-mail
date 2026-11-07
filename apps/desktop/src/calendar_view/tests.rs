@@ -251,7 +251,6 @@ impl CalendarProvider for TestProvider {
     }
 }
 
-/// Waits for the optional request gate before returning the configured result.
 async fn create_event_after_wait(
     creation: CalendarEventCreation,
     gate: Option<oneshot::Receiver<()>>,

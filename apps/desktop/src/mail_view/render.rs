@@ -13,17 +13,20 @@ use gpui_kit::component::{
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, Context, Div, IntoElement, Render, Role, Stateful, WeakEntity, Window, div,
+    AnyElement, Context, Div, IntoElement, Pixels, Render, Role, Stateful, WeakEntity, Window, div,
     prelude::*, px,
 };
 
 use super::{
-    FollowUpFlagUpdateStatus, MESSAGE_LIST_CONTEXT, MailView, MailViewEvent, MessageDetailState,
-    MessageListState, MessageMoveMenuAction, MessageMoveStatus, MoveRecoveryReason,
-    ReadStateFeedback, SyncStatus, WellKnownFolderActionStatus, follow_up_flag_cache_sync_message,
-    follow_up_flag_confirmed_message, follow_up_flag_failure_message,
-    follow_up_flag_progress_message, mail_error_message, message_sender,
+    FollowUpFlagUpdateStatus, MESSAGE_LIST_CONTEXT, MESSAGE_ROW_HEIGHT, MailView, MailViewEvent,
+    MessageDetailState, MessageListState, MessageMoveMenuAction, MessageMoveStatus,
+    MoveRecoveryReason, ReadStateFeedback, SyncStatus, WellKnownFolderActionStatus,
+    follow_up_flag_cache_sync_message, follow_up_flag_confirmed_message,
+    follow_up_flag_failure_message, follow_up_flag_progress_message, mail_error_message,
+    message_sender,
 };
+
+const MESSAGE_LIST_WIDTH: Pixels = px(344.);
 
 impl MailView {
     fn render_reply_action(&self, message_id: &MessageId, cx: &mut Context<Self>) -> AnyElement {
@@ -152,7 +155,7 @@ impl MailView {
     fn render_message_list(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(folder) = self.selected_folder.as_ref() else {
             return div()
-                .w(px(344.))
+                .w(MESSAGE_LIST_WIDTH)
                 .min_h_0()
                 .p_4()
                 .text_color(colors.muted_foreground)
@@ -163,7 +166,7 @@ impl MailView {
             MessageListState::Ready => {}
             MessageListState::Loading => {
                 return div()
-                    .w(px(344.))
+                    .w(MESSAGE_LIST_WIDTH)
                     .min_h_0()
                     .p_4()
                     .id("mail-list-loading")
@@ -173,7 +176,7 @@ impl MailView {
             }
             MessageListState::Failed(error) => {
                 let list_error = div()
-                    .w(px(344.))
+                    .w(MESSAGE_LIST_WIDTH)
                     .min_h_0()
                     .p_4()
                     .id("mail-list-error")
@@ -187,7 +190,7 @@ impl MailView {
         }
         if self.messages.is_empty() {
             return div()
-                .w(px(344.))
+                .w(MESSAGE_LIST_WIDTH)
                 .min_h_0()
                 .p_4()
                 .text_color(colors.muted_foreground)
@@ -198,7 +201,7 @@ impl MailView {
         let folder_reference = folder.clone();
         let sizes = Rc::clone(&self.message_row_sizes);
         div()
-            .w(px(344.))
+            .w(MESSAGE_LIST_WIDTH)
             .min_h_0()
             .flex()
             .flex_col()
@@ -245,7 +248,7 @@ impl MailView {
                                                 format!("message-row-{}", message_id.as_str())
                                             })
                                             .w_full()
-                                            .h(px(72.))
+                                            .h(MESSAGE_ROW_HEIGHT)
                                             .px_3()
                                             .py_3()
                                             .rounded_md()

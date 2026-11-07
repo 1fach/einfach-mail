@@ -18,8 +18,8 @@ use gpui_kit::base::VirtualListScrollHandle;
 use gpui_kit::component::StyledExt;
 use gpui_kit::component::WindowExt;
 use gpui_kit::{
-    App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, KeyBinding, Role, ScrollStrategy,
-    Subscription, Task, Window, div, prelude::*, px, size,
+    App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, KeyBinding, Pixels, Role,
+    ScrollStrategy, Subscription, Task, Window, div, prelude::*, px, size,
 };
 
 gpui_kit::actions!(
@@ -33,6 +33,7 @@ gpui_kit::actions!(
 );
 
 const MESSAGE_LIST_CONTEXT: &str = "MailMessageList";
+const MESSAGE_ROW_HEIGHT: Pixels = px(72.);
 
 pub(crate) fn bind_message_navigation_keys(cx: &mut App) {
     let context = Some(MESSAGE_LIST_CONTEXT);
@@ -455,7 +456,7 @@ impl MailView {
     fn set_messages(&mut self, messages: Vec<MailMessage>) {
         self.message_list_scroll
             .scroll_to_item(0, ScrollStrategy::Top);
-        self.message_row_sizes = Rc::new(vec![size(px(1.), px(72.)); messages.len()]);
+        self.message_row_sizes = Rc::new(vec![size(px(1.), MESSAGE_ROW_HEIGHT); messages.len()]);
         self.messages = messages;
     }
 
