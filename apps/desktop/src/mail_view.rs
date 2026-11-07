@@ -364,7 +364,7 @@ impl MailView {
             folders: Vec::new(),
             selected_folder: None,
             messages: Vec::new(),
-            message_list_state: MessageListState::Ready,
+            message_list_state: MessageListState::Loading,
             message_row_sizes: Rc::new(Vec::new()),
             message_list_focus: cx.focus_handle().tab_stop(true),
             message_list_scroll: VirtualListScrollHandle::new(),
@@ -405,6 +405,7 @@ impl MailView {
                 Err(error) => {
                     view.sync_running = false;
                     view.sync_status = SyncStatus::Failed(error);
+                    view.message_list_state = MessageListState::Failed(error);
                     cx.notify();
                 }
             });

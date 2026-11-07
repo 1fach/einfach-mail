@@ -153,41 +153,57 @@ impl MailView {
     }
 
     fn render_message_list(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(folder) = self.selected_folder.as_ref() else {
-            return div()
-                .w(MESSAGE_LIST_WIDTH)
-                .min_h_0()
-                .p_4()
-                .text_color(colors.muted_foreground)
-                .child("No visible mail folders were found.")
-                .into_any_element();
-        };
         match &self.message_list_state {
             MessageListState::Ready => {}
             MessageListState::Loading => {
-                return div()
+                let loading = div()
                     .w(MESSAGE_LIST_WIDTH)
                     .min_h_0()
                     .p_4()
                     .id("mail-list-loading")
                     .role(Role::Status)
-                    .child("Loading messages…")
-                    .into_any_element();
+                    .child("Loading messages…");
+                #[cfg(test)]
+                let loading = loading
+                    .debug_selector(|| "mail-list-loading".to_owned())
+                    .test_support();
+                return loading.into_any_element();
             }
             MessageListState::Failed(error) => {
+                let role = if self.selected_folder.is_some() {
+                    Role::Alert
+                } else {
+                    Role::Status
+                };
                 let list_error = div()
                     .w(MESSAGE_LIST_WIDTH)
                     .min_h_0()
                     .p_4()
                     .id("mail-list-error")
-                    .role(Role::Alert)
+                    .role(role)
                     .aria_label(mail_error_message(*error))
                     .child(mail_error_message(*error));
                 #[cfg(test)]
-                let list_error = list_error.test_support();
+                let list_error = list_error
+                    .debug_selector(|| "mail-list-error".to_owned())
+                    .test_support();
                 return list_error.into_any_element();
             }
         }
+        let Some(folder) = self.selected_folder.as_ref() else {
+            let empty = div()
+                .id("mail-list-empty-folders")
+                .w(MESSAGE_LIST_WIDTH)
+                .min_h_0()
+                .p_4()
+                .text_color(colors.muted_foreground)
+                .child("No visible mail folders were found.");
+            #[cfg(test)]
+            let empty = empty
+                .debug_selector(|| "mail-list-empty-folders".to_owned())
+                .test_support();
+            return empty.into_any_element();
+        };
         if self.messages.is_empty() {
             return div()
                 .w(MESSAGE_LIST_WIDTH)
