@@ -1,17 +1,13 @@
-use std::{
-    rc::Rc,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{rc::Rc, sync::Arc, time::SystemTime};
 
 use crate::mail_composer::{
     ComposerTarget, MailComposer, MailComposerContext, MailComposerEvent, MailPermissionRequester,
 };
+use crate::{message_body::render_message_body, sync_age::relative_age_label};
 use einfach_mail_application::{
     FollowUpFlagUpdateOutcome, MailCacheError, MailOperationError, MailSession, MailSyncProgress,
-    MailSyncReport, MailSyncState, MailWorkflowError, MessageBodyForDisplay, MessageMoveOutcome,
-    OpenedMessage, ReadStateUpdateOutcome, SanitizedEmailHtml, WellKnownFolderMoveOutcome,
-    WellKnownMailFolder, allowed_external_message_url,
+    MailSyncReport, MailSyncState, MailWorkflowError, MessageMoveOutcome, OpenedMessage,
+    ReadStateUpdateOutcome, WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage,
@@ -28,10 +24,9 @@ use gpui_kit::component::{
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, App, AsyncApp, Context, Div, Entity, EventEmitter, FocusHandle, ImageSource,
-    IntoElement, KeyBinding, Render, Role, ScrollStrategy, SharedString, Stateful, Subscription,
-    Task, WeakEntity, Window, base::TextSelectionLayer, component::text::TextView, div, prelude::*,
-    px, size,
+    AnyElement, App, AsyncApp, Context, Div, Entity, EventEmitter, FocusHandle, IntoElement,
+    KeyBinding, Render, Role, ScrollStrategy, Stateful, Subscription, Task, WeakEntity, Window,
+    div, prelude::*, px, size,
 };
 
 gpui_kit::actions!(
@@ -1516,9 +1511,9 @@ impl MailView {
                     .is_some_and(MailSyncState::is_rebuilding)
                     && *error != MailWorkflowError::RepeatedDeltaReset;
                 let cached_age = self.sync_state.as_ref().and_then(|state| {
-                    state
-                        .last_synchronized_at()
-                        .map(|last_sync| format!(" Cached mail from {}.", elapsed_label(last_sync)))
+                    state.last_synchronized_at().map(|last_sync| {
+                        format!(" Cached mail from {}.", relative_age_label(last_sync))
+                    })
                 });
                 format!(
                     "{}{}{}",
@@ -1540,7 +1535,7 @@ impl MailView {
             .and_then(MailSyncState::last_synchronized_at)
             .map_or_else(
                 || prefix.to_owned(),
-                |time| format!("{prefix} · {}", elapsed_label(time)),
+                |time| format!("{prefix} · {}", relative_age_label(time)),
             )
     }
 
@@ -2433,115 +2428,6 @@ fn open_composer_sheet(
     });
 }
 
-fn render_message_body(body: &MessageBodyForDisplay, colors: ColorTokens) -> AnyElement {
-    match body {
-        MessageBodyForDisplay::PlainText(text) => render_plain_text_body(text),
-        MessageBodyForDisplay::SanitizedHtml(html) => render_sanitized_html_body(html),
-        MessageBodyForDisplay::PlainTextFallback(content) => {
-            render_plain_text_fallback(content, colors)
-        }
-        MessageBodyForDisplay::HtmlTooLarge => render_oversized_html_fallback(colors),
-    }
-}
-
-fn render_plain_text_body(text: &Arc<str>) -> AnyElement {
-    div()
-        .id("mail-message-plain-body")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scrollbar()
-        .p_6()
-        .child(SharedString::from(Arc::clone(text)))
-        .into_any_element()
-}
-
-fn render_plain_text_fallback(content: &SanitizedEmailHtml, colors: ColorTokens) -> AnyElement {
-    div()
-        .id("mail-message-html-fallback")
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .p_6()
-        .child(render_plain_text_fallback_status(colors))
-        .child(render_plain_text_fallback_content(content))
-        .into_any_element()
-}
-
-fn render_plain_text_fallback_status(colors: ColorTokens) -> AnyElement {
-    div()
-        .id("mail-message-html-fallback-status")
-        .debug_selector(|| "mail-message-html-fallback-status".into())
-        .text_color(colors.muted_foreground)
-        .role(Role::Status)
-        .child(
-            "Rich formatting was removed. Only the beginning of this message is shown as plain text.",
-        )
-        .into_any_element()
-}
-
-fn render_plain_text_fallback_content(content: &SanitizedEmailHtml) -> AnyElement {
-    div()
-        .id("mail-message-html-fallback-body")
-        .debug_selector(|| "mail-message-html-fallback-body".into())
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-        .overflow_y_scrollbar()
-        .child(TextSelectionLayer)
-        .child(
-            TextView::html(
-                "mail-message-html-fallback-content",
-                content.shared_content(),
-            )
-            .selectable(true)
-            .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
-            .on_link_click(|_, _, _, _| {}),
-        )
-        .into_any_element()
-}
-
-fn render_sanitized_html_body(html: &SanitizedEmailHtml) -> AnyElement {
-    div()
-        .id("mail-message-html-body")
-        .debug_selector(|| "mail-message-html-body".into())
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-        .overflow_y_scrollbar()
-        .p_6()
-        .child(TextSelectionLayer)
-        .child(
-            TextView::html("mail-message-html-content", html.shared_content())
-                .selectable(true)
-                .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
-                .on_link_click(|href, event, _, cx| {
-                    if event.is_secondary() {
-                        return;
-                    }
-                    if let Some(url) = allowed_external_message_url(href.as_ref()) {
-                        cx.open_url(url.as_str());
-                    }
-                }),
-        )
-        .into_any_element()
-}
-
-fn render_oversized_html_fallback(colors: ColorTokens) -> AnyElement {
-    div()
-        .flex_1()
-        .min_h_0()
-        .p_6()
-        .text_color(colors.muted_foreground)
-        .id("mail-message-body-too-large")
-        .debug_selector(|| "mail-message-body-too-large".into())
-        .role(Role::Status)
-        .child("This message is too large to display safely.")
-        .into_any_element()
-}
-
 impl EventEmitter<MailViewEvent> for MailView {}
 
 impl Render for MailView {
@@ -2753,18 +2639,6 @@ fn message_sender(message: &MailMessage) -> String {
         )
 }
 
-fn elapsed_label(last_sync: SystemTime) -> String {
-    let elapsed = SystemTime::now()
-        .duration_since(last_sync)
-        .unwrap_or(Duration::ZERO);
-    match elapsed.as_secs() {
-        seconds if seconds < 60 => "less than a minute ago".to_owned(),
-        seconds if seconds < 3_600 => format!("{} min ago", seconds / 60),
-        seconds if seconds < 86_400 => format!("{} hr ago", seconds / 3_600),
-        seconds => format!("{} days ago", seconds / 86_400),
-    }
-}
-
 fn mail_sync_progress_channel() -> (
     impl Fn(MailSyncProgress) + Send + Sync + 'static,
     tokio::sync::watch::Receiver<Option<MailSyncProgress>>,
@@ -2885,9 +2759,10 @@ mod tests {
     };
 
     use einfach_mail_application::{
-        AccountOperationError, MailCache, MailCacheError, MailOperationError, MailProvider,
-        MailSendProviderError, MailSyncState, MailWorkflow, MailWorkflowError,
-        MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+        AccountCache, AccountCacheRemovalError, AccountOperationError, MailCache, MailCacheError,
+        MailOperationError, MailProvider, MailSendProviderError, MailSyncState, MailWorkflow,
+        MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
+        MessageDeltaResponse, WellKnownMailFolder,
     };
     use einfach_mail_domain::{
         AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
@@ -2906,10 +2781,10 @@ mod tests {
 
     use super::{
         FollowUpFlagUpdateStatus, MailPermissionRequester, MailSyncProgress, MailView,
-        MailViewEvent, MessageBodyForDisplay, MessageMoveMenuAction, MessageNavigation,
-        MessageState, MoveRecoveryReason, ReadStateUpdateStatus, SyncStatus,
-        WellKnownFolderActionStatus, bind_message_navigation_keys, follow_up_flag_failure_message,
-        mail_error_message, read_state_failure_message,
+        MailViewEvent, MessageMoveMenuAction, MessageNavigation, MessageState, MoveRecoveryReason,
+        ReadStateUpdateStatus, SyncStatus, WellKnownFolderActionStatus,
+        bind_message_navigation_keys, follow_up_flag_failure_message, mail_error_message,
+        read_state_failure_message,
     };
     use crate::mail_composer::bind_mail_composer_keys;
 
@@ -4057,12 +3932,24 @@ mod tests {
             }
             ready(Ok(()))
         }
+    }
 
+    impl AccountCache for FixtureCache {
         fn remove_account(
             &self,
-            _: &AccountId,
-        ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
-            ready(Ok(()))
+            account_id: &AccountId,
+        ) -> impl Future<Output = Result<(), AccountCacheRemovalError>> + Send + '_ {
+            let mut data = self.0.lock().expect("fixture cache mutex is healthy");
+            let result = match data.account_id.as_ref() {
+                Some(saved) if saved != account_id => {
+                    Err(AccountCacheRemovalError::AccountMismatch)
+                }
+                _ => {
+                    *data = FixtureData::default();
+                    Ok(())
+                }
+            };
+            ready(result)
         }
     }
 

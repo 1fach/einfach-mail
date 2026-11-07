@@ -1,3 +1,4 @@
+use crate::calendar_time::to_offset_date_time;
 use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike, Weekday};
@@ -1120,9 +1121,6 @@ fn rejected_cleanup_error_text(error: CalendarCacheError) -> &'static str {
         CalendarCacheError::InvalidData | CalendarCacheError::CreationAlreadyPending => {
             "The saved event draft could not be verified. Refresh the calendar before clearing it."
         }
-        CalendarCacheError::PendingMailSend | CalendarCacheError::UnresolvedEventCreation => {
-            "Another account operation must be resolved before this draft can be cleared."
-        }
     }
 }
 
@@ -1429,14 +1427,7 @@ fn resolve_local_datetime(
         .unambiguous()
         .ok()?
         .timestamp();
-    offset_date_time(timestamp)
-}
-
-fn offset_date_time(timestamp: Timestamp) -> Option<OffsetDateTime> {
-    OffsetDateTime::from_unix_timestamp(timestamp.as_second())
-        .ok()?
-        .replace_nanosecond(u32::try_from(timestamp.subsec_nanosecond()).ok()?)
-        .ok()
+    to_offset_date_time(timestamp)
 }
 
 fn format_local_range(draft: &CalendarEventDraft) -> String {
@@ -1570,12 +1561,6 @@ fn cache_creation_error_text(error: CalendarCacheError) -> &'static str {
         }
         CalendarCacheError::CreationAlreadyPending => {
             "Another event creation needs to be resolved before a new event can be created."
-        }
-        CalendarCacheError::PendingMailSend => {
-            "A pending mail send must be resolved before the account can be removed."
-        }
-        CalendarCacheError::UnresolvedEventCreation => {
-            "A pending calendar event must be resolved before the account cache can be removed."
         }
     }
 }

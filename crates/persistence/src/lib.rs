@@ -1,4 +1,4 @@
-//! SQLCipher-backed storage for the Linux mail cache.
+//! SQLCipher-backed mail and calendar cache storage for Linux.
 //!
 //! The application layer uses [`SqliteMailCache`] through its provider-independent
 //! cache port and never receives a database or encryption-key handle.

@@ -11,18 +11,22 @@ use std::{
 };
 
 use einfach_mail_domain::{
-    AccountId, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MailMessage, MailReplyDraft, MailSendOperationId, MessageBody, MessageDeltaProgress, MessageId,
+    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
+    MailReplyDraft, MailSendOperationId, MessageBody, MessageDeltaProgress, MessageId,
     PendingMailSend, ReadState,
 };
 use thiserror::Error;
 
 use crate::{
-    AccountCacheFactory, AccountSession, AccountSessionFactory, AccountSessionFuture,
-    CalendarProvider, CalendarSession, CalendarWorkflow, MailCache, MailCacheError,
-    MailOperationError, MailProvider, MailSendProviderError, MailSession, MessageBodyForDisplay,
-    MessageDeltaResponse, WellKnownMailFolder, account_session::AccountSessionWorkflow,
+    AccountCache, AccountCacheRemovalError, MailCache, MailCacheError, MailOperationError,
+    MailProvider, MailSendProviderError, MessageBodyForDisplay, MessageDeltaResponse,
+    WellKnownMailFolder,
+    operation_reservations::{
+        AccountReservationError, ActiveOperations, OperationReservation, reserve_account,
+        reserve_folders,
+    },
     prepare_message_body_for_display,
+    sync_budget::response_bytes_after,
 };
 
 const INITIAL_SYNC_WINDOW: Duration = Duration::from_secs(90 * 24 * 60 * 60);
@@ -31,7 +35,6 @@ const MAX_PAGES_PER_FOLDER_ROUND: usize = 1_000;
 fn mail_folder_is_visible(folders: &[MailFolder], reference: &FolderReference) -> bool {
     folders.iter().any(|folder| folder.reference() == reference)
 }
-const MAX_SYNC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DELTA_RESETS_PER_ATTEMPT: usize = 1;
 
 /// A user-safe category for a mail workflow failure.
@@ -272,31 +275,30 @@ impl MailSyncReport {
     }
 }
 
+impl From<AccountReservationError> for MailWorkflowError {
+    fn from(error: AccountReservationError) -> Self {
+        match error {
+            AccountReservationError::OperationInProgress => Self::OperationInProgress,
+            AccountReservationError::StateUnavailable => Self::StateUnavailable,
+        }
+    }
+}
+
+impl From<AccountReservationError> for MailSendWorkflowError {
+    fn from(error: AccountReservationError) -> Self {
+        match error {
+            AccountReservationError::OperationInProgress => Self::OperationInProgress,
+            AccountReservationError::StateUnavailable => Self::StateUnavailable,
+        }
+    }
+}
+
 /// Coordinates provider reads with account-scoped encrypted cache workflows.
 pub struct MailWorkflow<P, C> {
     provider: P,
     cache: C,
     reservations: Arc<Mutex<ActiveOperations>>,
     account_sync_ready: AtomicBool,
-}
-
-/// Creates account sessions and shares operation reservations among them.
-pub struct AccountSessionWorkflowFactory<P, F> {
-    provider: P,
-    cache_factory: F,
-    reservations: Arc<Mutex<ActiveOperations>>,
-}
-
-impl<P, F> AccountSessionWorkflowFactory<P, F> {
-    /// Combines a provider with the factory that opens account caches.
-    #[must_use]
-    pub fn new(provider: P, cache_factory: F) -> Self {
-        Self {
-            provider,
-            cache_factory,
-            reservations: Arc::new(Mutex::new(ActiveOperations::default())),
-        }
-    }
 }
 
 impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
@@ -313,7 +315,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         )
     }
 
-    fn with_reservations(
+    pub(crate) fn with_reservations(
         provider: P,
         cache: C,
         reservations: Arc<Mutex<ActiveOperations>>,
@@ -622,9 +624,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
                 }
                 MessageDeltaResponse::Page(response) => {
                     let (page, page_bytes) = response.into_parts();
-                    response_bytes = response_bytes
-                        .checked_add(page_bytes)
-                        .filter(|total| *total <= MAX_SYNC_RESPONSE_BYTES)
+                    response_bytes = response_bytes_after(response_bytes, page_bytes)
                         .ok_or(MailWorkflowError::ResponseLimitExceeded)?;
                     if let MessageDeltaProgress::Next(link) = page.progress()
                         && seen_requests.contains(&Some(link.clone()))
@@ -1076,143 +1076,48 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         Ok((message, body, false))
     }
 
-    /// Removes the account's encrypted mail cache and its local encryption key.
-    ///
-    /// # Errors
-    ///
-    /// Returns a cache error when the account does not own this cache or removal fails.
-    pub async fn remove_account_cache(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
-        let _reservation =
-            reserve_account(&self.reservations, account_id).map_err(MailCacheError::from)?;
-        self.cache.remove_account(account_id).await?;
-        Ok(())
-    }
-
     /// Atomically reserves every requested folder against account and folder operations.
     fn reserve_folders(
         &self,
         folders: &[FolderReference],
     ) -> Result<OperationReservation, MailWorkflowError> {
-        let folders = folders.iter().cloned().collect::<HashSet<_>>();
-        let mut reservations = self
-            .reservations
-            .lock()
-            .map_err(|_| MailWorkflowError::StateUnavailable)?;
-        if folders.iter().any(|folder| {
-            reservations.accounts.contains(folder.account_id())
-                || reservations.folders.contains(folder)
-        }) {
-            return Err(MailWorkflowError::OperationInProgress);
-        }
-        reservations.folders.extend(folders.iter().cloned());
-        Ok(OperationReservation {
-            reservations: Arc::clone(&self.reservations),
-            key: ReservationKey::Folders(folders),
-        })
+        reserve_folders(&self.reservations, folders).map_err(MailWorkflowError::from)
     }
 
     fn reserve_account(
         &self,
         account: &AccountId,
     ) -> Result<OperationReservation, MailWorkflowError> {
-        reserve_account(&self.reservations, account).map_err(|error| match error {
-            AccountReservationError::OperationInProgress => MailWorkflowError::OperationInProgress,
-            AccountReservationError::StateUnavailable => MailWorkflowError::StateUnavailable,
-        })
+        reserve_account(&self.reservations, account).map_err(MailWorkflowError::from)
     }
 
     fn reserve_send(
         &self,
         account: &AccountId,
     ) -> Result<OperationReservation, MailSendWorkflowError> {
-        self.reserve_account(account).map_err(|error| match error {
-            MailWorkflowError::OperationInProgress => MailSendWorkflowError::OperationInProgress,
-            MailWorkflowError::StateUnavailable => MailSendWorkflowError::StateUnavailable,
-            _ => MailSendWorkflowError::StateUnavailable,
-        })
+        reserve_account(&self.reservations, account).map_err(MailSendWorkflowError::from)
     }
 }
 
-impl<P, F> AccountSessionFactory for AccountSessionWorkflowFactory<P, F>
+impl<P, C> MailWorkflow<P, C>
 where
-    P: MailProvider + CalendarProvider + Clone + 'static,
-    F: AccountCacheFactory + 'static,
+    P: MailProvider,
+    C: MailCache + AccountCache,
 {
-    fn open_session(
+    /// Removes the shared account cache while holding the account reservation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an account cache removal error when active work, an unresolved operation, or a
+    /// cache failure prevents removal.
+    pub async fn remove_account_cache(
         &self,
-        account_id: AccountId,
-    ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
-        Box::pin(async move {
-            let cache = self.cache_factory.open_for_account(account_id).await?;
-            let mail_workflow: Arc<dyn MailSession> = Arc::new(MailWorkflow::with_reservations(
-                self.provider.clone(),
-                cache.clone(),
-                Arc::clone(&self.reservations),
-            ));
-            let calendar_workflow: Arc<dyn CalendarSession> =
-                Arc::new(CalendarWorkflow::with_reservations(
-                    self.provider.clone(),
-                    cache,
-                    Arc::clone(&self.reservations),
-                ));
-            Ok(Arc::new(AccountSessionWorkflow::new(
-                mail_workflow,
-                calendar_workflow,
-            )) as Arc<dyn AccountSession>)
-        })
+        account_id: &AccountId,
+    ) -> Result<(), AccountCacheRemovalError> {
+        let _reservation = reserve_account(&self.reservations, account_id)
+            .map_err(AccountCacheRemovalError::from)?;
+        self.cache.remove_account(account_id).await
     }
-
-    fn remove_account_cache<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
-        Box::pin(async move {
-            let _reservation =
-                reserve_account(&self.reservations, account_id).map_err(MailCacheError::from)?;
-            self.cache_factory.remove_for_account(account_id).await
-        })
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum AccountReservationError {
-    OperationInProgress,
-    StateUnavailable,
-}
-
-impl From<AccountReservationError> for MailCacheError {
-    fn from(error: AccountReservationError) -> Self {
-        match error {
-            AccountReservationError::OperationInProgress => Self::OperationInProgress,
-            AccountReservationError::StateUnavailable => Self::Unavailable,
-        }
-    }
-}
-
-pub(crate) fn reserve_account(
-    active: &Arc<Mutex<ActiveOperations>>,
-    account: &AccountId,
-) -> Result<OperationReservation, AccountReservationError> {
-    let mut reservations = active
-        .lock()
-        .map_err(|_| AccountReservationError::StateUnavailable)?;
-    if reservations.accounts.contains(account)
-        || reservations
-            .folders
-            .iter()
-            .any(|folder| folder.account_id() == account)
-        || reservations
-            .calendar_views
-            .iter()
-            .any(|view| view.account_id() == account)
-    {
-        return Err(AccountReservationError::OperationInProgress);
-    }
-    reservations.accounts.insert(account.clone());
-    Ok(OperationReservation {
-        reservations: Arc::clone(active),
-        key: ReservationKey::Account(account.clone()),
-    })
 }
 
 fn request_cursor(
@@ -1235,42 +1140,6 @@ fn validate_move_folder_pair(
     } else {
         Err(MailWorkflowError::InvalidMoveDestination)
     }
-}
-
-pub(crate) fn reserve_calendar_view(
-    active: &Arc<Mutex<ActiveOperations>>,
-    view: &CalendarViewReference,
-) -> Result<OperationReservation, AccountReservationError> {
-    let mut reservations = active
-        .lock()
-        .map_err(|_| AccountReservationError::StateUnavailable)?;
-    if reservations.accounts.contains(view.account_id())
-        || !reservations.calendar_views.insert(view.clone())
-    {
-        return Err(AccountReservationError::OperationInProgress);
-    }
-    Ok(OperationReservation {
-        reservations: Arc::clone(active),
-        key: ReservationKey::CalendarView(view.clone()),
-    })
-}
-
-#[derive(Default)]
-pub(crate) struct ActiveOperations {
-    accounts: HashSet<AccountId>,
-    folders: HashSet<FolderReference>,
-    calendar_views: HashSet<CalendarViewReference>,
-}
-
-enum ReservationKey {
-    Account(AccountId),
-    Folders(HashSet<FolderReference>),
-    CalendarView(CalendarViewReference),
-}
-
-pub(crate) struct OperationReservation {
-    reservations: Arc<Mutex<ActiveOperations>>,
-    key: ReservationKey,
 }
 
 /// Marks the session unsynchronized when a move ends without a definitive outcome.
@@ -1297,26 +1166,6 @@ impl Drop for MoveReconciliationGuard<'_> {
     fn drop(&mut self) {
         if !self.complete {
             self.account_sync_ready.store(false, Ordering::Release);
-        }
-    }
-}
-
-impl Drop for OperationReservation {
-    fn drop(&mut self) {
-        if let Ok(mut reservations) = self.reservations.lock() {
-            match &self.key {
-                ReservationKey::Account(account) => {
-                    reservations.accounts.remove(account);
-                }
-                ReservationKey::Folders(folders) => {
-                    for folder in folders {
-                        reservations.folders.remove(folder);
-                    }
-                }
-                ReservationKey::CalendarView(view) => {
-                    reservations.calendar_views.remove(view);
-                }
-            }
         }
     }
 }

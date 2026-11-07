@@ -4,7 +4,9 @@ use std::fmt;
 
 use time::OffsetDateTime;
 
-use crate::{CalendarOccurrence, CalendarOccurrenceTime};
+use crate::{
+    CalendarOccurrence, CalendarOccurrenceTime, calendar_subject::normalized_event_subject,
+};
 
 /// The provider version captured when an event is opened for editing.
 ///
@@ -131,10 +133,7 @@ impl CalendarEventUpdateDraft {
         start: OffsetDateTime,
         end: OffsetDateTime,
     ) -> Result<Self, InvalidCalendarEventUpdateDraft> {
-        let subject = subject.trim();
-        if subject.is_empty() || subject.chars().any(char::is_control) {
-            return Err(InvalidCalendarEventUpdateDraft);
-        }
+        let subject = normalized_event_subject(&subject).ok_or(InvalidCalendarEventUpdateDraft)?;
         let time = CalendarOccurrenceTime::timed(start, end)
             .map_err(|_| InvalidCalendarEventUpdateDraft)?;
         Ok(Self {

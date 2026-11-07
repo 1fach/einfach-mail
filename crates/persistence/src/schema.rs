@@ -1,4 +1,4 @@
-//! SQL schema and migrations for the encrypted mail cache.
+//! SQL schema and migrations for the encrypted mail and calendar cache.
 
 use async_sqlite::{Client, rusqlite::Connection};
 use rusqlite_migration::{M, Migrations};

@@ -4,8 +4,9 @@ use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::mail_composer::MailPermissionRequester;
 use crate::mail_view::{MailView, MailViewEvent};
 use einfach_mail_application::{
-    AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    AccountSession, AccountSessionFactory, AccountWorkflow, MailCacheError,
+    AccountCacheRemovalError, AccountOperationCancellation, AccountOperationError,
+    AccountPermissionRequest, AccountProvider, AccountSession, AccountSessionFactory,
+    AccountWorkflow, MailCacheError,
 };
 use einfach_mail_domain::AccountProfile;
 use gpui_kit::component::{
@@ -172,7 +173,7 @@ pub(super) struct AccountView<P: AccountProvider + 'static> {
     status: AccountStatus,
     pending_permission_review: Option<AccountPermissionRequest>,
     opening_content: Option<OpeningContent>,
-    session_open_error: Option<MailCacheError>,
+    session_open_error: Option<AccountViewCacheError>,
     mail_view: Option<Entity<MailView>>,
     mail_view_subscription: Option<Subscription>,
     calendar_view: Option<Entity<CalendarView>>,
@@ -188,8 +189,14 @@ enum OpeningContent {
 
 enum AccountSignOutError {
     Identity(AccountOperationError),
-    CacheRemoval(MailCacheError),
+    CacheRemoval(AccountCacheRemovalError),
     CredentialRemoval(AccountOperationError),
+}
+
+#[derive(Clone, Copy)]
+enum AccountViewCacheError {
+    Open(MailCacheError),
+    Removal(AccountCacheRemovalError),
 }
 
 fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static str {
@@ -545,7 +552,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 Err(error) => {
                     let _ = this.update(cx, |view, cx| {
                         view.opening_content = None;
-                        view.session_open_error = Some(error);
+                        view.session_open_error = Some(AccountViewCacheError::Open(error));
                         cx.notify();
                     });
                 }
@@ -620,7 +627,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 Err(error) => {
                     let _ = this.update(cx, |view, cx| {
                         view.opening_content = None;
-                        view.session_open_error = Some(error);
+                        view.session_open_error = Some(AccountViewCacheError::Open(error));
                         cx.notify();
                     });
                 }
@@ -670,12 +677,12 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             }
             Err(AccountSignOutError::CacheRemoval(error)) => {
                 self.status = previous_status;
-                self.session_open_error = Some(error);
+                self.session_open_error = Some(AccountViewCacheError::Removal(error));
                 if !matches!(
                     error,
-                    MailCacheError::OperationInProgress
-                        | MailCacheError::SendAlreadyPending
-                        | MailCacheError::CalendarEventCreationUnresolved
+                    AccountCacheRemovalError::OperationInProgress
+                        | AccountCacheRemovalError::PendingMailSend
+                        | AccountCacheRemovalError::PendingCalendarEventCreation
                 ) {
                     self.account_session = None;
                 }
@@ -1047,12 +1054,16 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         }
         let mut content = content.child(self.render_status());
         if let Some(error) = self.session_open_error {
+            let message = match error {
+                AccountViewCacheError::Open(error) => mail_cache_error_message(error),
+                AccountViewCacheError::Removal(error) => account_cache_removal_error_message(error),
+            };
             content = content.child(
                 div()
                     .id("account-cache-error")
                     .role(Role::Alert)
                     .text_sm()
-                    .child(mail_cache_error_message(error)),
+                    .child(message),
             );
         }
         self.render_account_actions(content, colors, cx)
@@ -1140,12 +1151,12 @@ async fn remove_account_cache(
     account_session: Option<Arc<dyn AccountSession>>,
     account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
     account_id: einfach_mail_domain::AccountId,
-) -> Result<(), MailCacheError> {
+) -> Result<(), AccountCacheRemovalError> {
     match account_session {
         Some(account_session) => account_session.remove_account_cache(&account_id).await,
         None => {
             account_session_factory
-                .ok_or(MailCacheError::Unavailable)?
+                .ok_or(AccountCacheRemovalError::Unavailable)?
                 .remove_account_cache(&account_id)
                 .await
         }
@@ -1178,15 +1189,6 @@ fn mail_cache_error_message(error: MailCacheError) -> &'static str {
         MailCacheError::InUse => {
             "Another Einfach Mail operation is opening or using this account cache. Wait for it to finish, or close the other account view and try again."
         }
-        MailCacheError::OperationInProgress => {
-            "A mail or calendar operation is still active. Wait for it to finish, then try signing out again."
-        }
-        MailCacheError::SendAlreadyPending => {
-            "A previous send needs review. Open Mail, check Sent Items, and resolve it before signing out."
-        }
-        MailCacheError::CalendarEventCreationUnresolved => {
-            "A calendar event may already exist in Microsoft. Open Calendar and resolve the saved operation before signing out."
-        }
         MailCacheError::MissingEncryptionKey => {
             "The encrypted account cache key is missing. Remove the local cache before syncing again."
         }
@@ -1194,6 +1196,32 @@ fn mail_cache_error_message(error: MailCacheError) -> &'static str {
             "The encrypted cache could not be read or removed. Check that the cache files are accessible and your Linux keyring is unlocked, then try again."
         }
         _ => "The local mail cache could not be opened. Try again.",
+    }
+}
+
+fn account_cache_removal_error_message(error: AccountCacheRemovalError) -> &'static str {
+    match error {
+        AccountCacheRemovalError::InUse => {
+            "Another Einfach Mail operation is opening or using this account cache. Wait for it to finish, or close the other account view and try again."
+        }
+        AccountCacheRemovalError::OperationInProgress => {
+            "A mail or calendar operation is still active. Wait for it to finish, then try signing out again."
+        }
+        AccountCacheRemovalError::PendingMailSend => {
+            "A previous send needs review. Open Mail, check Sent Items, and resolve it before signing out."
+        }
+        AccountCacheRemovalError::PendingCalendarEventCreation => {
+            "A calendar event may already exist in Microsoft. Open Calendar and resolve the saved operation before signing out."
+        }
+        AccountCacheRemovalError::MissingEncryptionKey => {
+            "The encrypted account cache key is missing. Remove the local cache before syncing again."
+        }
+        AccountCacheRemovalError::InvalidData | AccountCacheRemovalError::AccountMismatch => {
+            "The local mail cache could not be opened. Try again."
+        }
+        AccountCacheRemovalError::Unavailable => {
+            "The encrypted cache could not be read or removed. Check that the cache files are accessible and your Linux keyring is unlocked, then try again."
+        }
     }
 }
 
@@ -1218,9 +1246,9 @@ mod tests {
 
     use super::{AccountStatus, AccountView, SetupIssue};
     use einfach_mail_application::{
-        AccountOperationCancellation, AccountOperationError, AccountPermissionRequest,
-        AccountProvider, AccountSession, AccountSessionFactory, AccountSessionFuture,
-        AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome,
+        AccountCacheRemovalError, AccountOperationCancellation, AccountOperationError,
+        AccountPermissionRequest, AccountProvider, AccountSession, AccountSessionFactory,
+        AccountSessionFuture, AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome,
         CalendarEventDeletionOutcome, CalendarEventUpdateOutcome, CalendarSession,
         CalendarSnapshot, CalendarSyncReport, CalendarWorkflowError, MailCacheError, MailSession,
     };
@@ -1265,7 +1293,7 @@ mod tests {
         fn remove_account_cache<'a>(
             &'a self,
             account_id: &'a AccountId,
-        ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+        ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
             let attempts = Arc::clone(&self.removal_attempts);
             let account_id = account_id.clone();
             Box::pin(async move {
@@ -1274,7 +1302,7 @@ mod tests {
                     .expect("synthetic session removal log mutex is healthy");
                 attempts.push(account_id);
                 if attempts.len() == 1 {
-                    Err(MailCacheError::OperationInProgress)
+                    Err(AccountCacheRemovalError::OperationInProgress)
                 } else {
                     Ok(())
                 }
@@ -1374,9 +1402,9 @@ mod tests {
         fn remove_account_cache<'a>(
             &'a self,
             _: &'a AccountId,
-        ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+        ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
             self.fallback_removals.store(true, Ordering::SeqCst);
-            Box::pin(ready(Err(MailCacheError::Unavailable)))
+            Box::pin(ready(Err(AccountCacheRemovalError::Unavailable)))
         }
     }
 
@@ -1391,7 +1419,7 @@ mod tests {
         fn remove_account_cache<'a>(
             &'a self,
             account_id: &'a AccountId,
-        ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+        ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
             self.sign_out_events
                 .lock()
                 .expect("synthetic sign-out event log mutex is healthy")

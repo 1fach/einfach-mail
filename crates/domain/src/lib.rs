@@ -6,6 +6,7 @@ mod account;
 mod calendar;
 mod calendar_creation;
 mod calendar_edit;
+mod calendar_subject;
 mod identifiers;
 mod mail;
 mod mailbox;

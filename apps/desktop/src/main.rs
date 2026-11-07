@@ -14,11 +14,14 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 mod account_view;
+mod calendar_time;
 mod calendar_view;
 mod event_composer;
 mod mail_composer;
 mod mail_view;
+mod message_body;
 mod single_instance;
+mod sync_age;
 
 use account_view::{AccountView, SetupIssue};
 

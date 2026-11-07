@@ -37,18 +37,12 @@ pub enum MailCacheError {
     /// Another unresolved send already exists for this account.
     #[error("a previous mail send needs to be resolved")]
     SendAlreadyPending,
-    /// An unresolved calendar event creation must remain with its encrypted cache.
-    #[error("a calendar event creation needs recovery before account removal")]
-    CalendarEventCreationUnresolved,
     /// The operation ID does not match the account's pending send marker.
     #[error("the pending mail send does not match the requested operation")]
     PendingSendMismatch,
     /// The account has no pending send marker with the requested ID.
     #[error("the pending mail send no longer exists")]
     PendingSendNotFound,
-    /// An active account operation prevents cache removal.
-    #[error("an account operation is still active")]
-    OperationInProgress,
 }
 
 /// A folder's account-wide cutoff and message delta checkpoints.
@@ -449,21 +443,5 @@ pub trait MailCache: Send + Sync {
         &self,
         account_id: &AccountId,
         operation_id: MailSendOperationId,
-    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
-
-    /// Removes an account's encrypted data and its local key.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MailCacheError::AccountMismatch`] for another account,
-    /// [`MailCacheError::SendAlreadyPending`] while a mail send is unresolved,
-    /// [`MailCacheError::CalendarEventCreationUnresolved`] while an event creation is unresolved,
-    /// [`MailCacheError::OperationInProgress`] while an operation is active,
-    /// [`MailCacheError::InUse`] while another cache handle or lifecycle operation owns an
-    /// account lock, or
-    /// [`MailCacheError::Unavailable`] when the cache cannot be inspected or removed.
-    fn remove_account(
-        &self,
-        account_id: &AccountId,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
 }

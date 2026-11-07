@@ -695,7 +695,6 @@ fn redacted_field<T>(field: &CalendarField<T>) -> &'static str {
 }
 
 #[cfg(test)]
-/// Tests for calendar-domain invariants.
 mod tests {
     use time::{Date, Duration, Month, OffsetDateTime};
 

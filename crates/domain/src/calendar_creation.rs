@@ -5,7 +5,9 @@ use std::fmt;
 use time::{OffsetDateTime, PrimitiveDateTime};
 use uuid::Uuid;
 
-use crate::{CalendarOccurrenceTime, CalendarViewReference};
+use crate::{
+    CalendarOccurrenceTime, CalendarViewReference, calendar_subject::normalized_event_subject,
+};
 
 /// A stable identifier for one calendar event creation attempt.
 ///
@@ -127,7 +129,7 @@ impl CalendarEventDraft {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidCalendarEventDraft`] for a blank or multiline subject,
+    /// Returns [`InvalidCalendarEventDraft`] for a blank or control-containing subject,
     /// unordered local values, or a UTC range that is empty, reversed, or not
     /// expressed with the UTC offset.
     pub fn timed(
@@ -138,8 +140,8 @@ impl CalendarEventDraft {
         start: OffsetDateTime,
         end: OffsetDateTime,
     ) -> Result<Self, InvalidCalendarEventDraft> {
-        let subject = subject.trim();
-        if subject.is_empty() || subject.chars().any(char::is_control) || local_start >= local_end {
+        let subject = normalized_event_subject(&subject).ok_or(InvalidCalendarEventDraft)?;
+        if local_start >= local_end {
             return Err(InvalidCalendarEventDraft);
         }
         let time =

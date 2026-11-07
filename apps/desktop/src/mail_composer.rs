@@ -971,9 +971,6 @@ fn cache_error_text(error: MailCacheError) -> &'static str {
         MailCacheError::SendAlreadyPending => {
             "A previous send needs review before another message can be submitted."
         }
-        MailCacheError::CalendarEventCreationUnresolved => {
-            "A calendar event still needs recovery before the account cache can be removed."
-        }
         MailCacheError::PendingSendMismatch | MailCacheError::PendingSendNotFound => {
             "The pending send changed. Reload mail before continuing."
         }
@@ -986,8 +983,8 @@ fn cache_error_text(error: MailCacheError) -> &'static str {
         MailCacheError::Unavailable => {
             "The encrypted mail cache is unavailable. Restore cache access before sending."
         }
-        MailCacheError::SyncStateChanged | MailCacheError::OperationInProgress => {
-            "Another account operation is active. Wait for it to finish before sending."
+        MailCacheError::SyncStateChanged => {
+            "The folder changed during this send. Reload mail before continuing."
         }
         MailCacheError::InvalidData | MailCacheError::MessageNotCached => {
             "The local send status is invalid. Reload mail before sending."

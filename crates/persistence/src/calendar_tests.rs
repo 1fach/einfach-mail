@@ -120,24 +120,6 @@ async fn open_cache(directory: &TempDir, account: AccountId) -> SqliteMailCache 
 }
 
 #[test]
-fn calendar_cache_removal_preserves_the_in_use_error() {
-    smol::block_on(async {
-        let directory = TempDir::new().expect("temporary directory is created");
-        let account = account_id("synthetic-account");
-        let first = open_cache(&directory, account.clone()).await;
-        let second = open_cache(&directory, account.clone()).await;
-
-        assert_eq!(
-            <SqliteMailCache as CalendarCache>::remove_account(&first, &account).await,
-            Err(CalendarCacheError::InUse)
-        );
-
-        first.close_for_tests().await;
-        second.close_for_tests().await;
-    });
-}
-
-#[test]
 fn calendar_cursor_and_sparse_event_updates_survive_restart_and_stay_range_scoped() {
     smol::block_on(async {
         let directory = TempDir::new().expect("temporary directory is created");
