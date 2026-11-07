@@ -1217,7 +1217,7 @@ fn account_cache_removal_error_message(error: AccountCacheRemovalError) -> &'sta
             "The encrypted account cache key is missing. Remove the local cache before syncing again."
         }
         AccountCacheRemovalError::InvalidData | AccountCacheRemovalError::AccountMismatch => {
-            "The account cache could not be opened. Try again."
+            "The account cache could not be verified for removal. Your account is still signed in."
         }
         AccountCacheRemovalError::Unavailable => {
             "The encrypted cache could not be read or removed. Check that the cache files are accessible and your Linux keyring is unlocked, then try again."
