@@ -27,7 +27,7 @@ use crate::{
 };
 
 const INITIAL_SYNC_WINDOW: Duration = Duration::from_secs(90 * 24 * 60 * 60);
-const MAX_PAGES_PER_FOLDER_ROUND: usize = 1_000;
+const MAX_PAGES_PER_FOLDER_ATTEMPT: usize = 1_000;
 
 fn mail_folder_is_visible(folders: &[MailFolder], reference: &FolderReference) -> bool {
     folders.iter().any(|folder| folder.reference() == reference)
@@ -64,8 +64,8 @@ pub enum MailWorkflowError {
     /// The provider repeatedly invalidated the folder's delta state.
     #[error("the mail service repeatedly reset the folder synchronization state")]
     RepeatedDeltaReset,
-    /// The current round reached its page limit and remains resumable.
-    #[error("the folder synchronization reached its page limit")]
+    /// The folder reached its per-attempt page limit; its last checkpoint remains resumable.
+    #[error("the folder synchronization reached its per-attempt page limit")]
     PageLimitExceeded,
     /// The current sync attempt reached its response size limit and is resumable.
     #[error("the folder synchronization reached its response size limit")]
@@ -600,7 +600,6 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         let mut state = self.cache.ensure_sync_state(folder, initial_cutoff).await?;
         let mut seen_requests = HashSet::new();
         let mut page_count = 0;
-        let mut round_page_count = 0;
         let mut response_bytes = 0_usize;
         let mut reset_count = 0;
         loop {
@@ -622,7 +621,6 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
                     }
                     reset_count += 1;
                     seen_requests.clear();
-                    round_page_count = 0;
                 }
                 MessageDeltaResponse::Page(response) => {
                     let (page, page_bytes) = response.into_parts();
@@ -638,11 +636,10 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
                         .commit_delta_page(folder, &expected_state, page, SystemTime::now())
                         .await?;
                     page_count += 1;
-                    round_page_count += 1;
                     if state.next_link().is_none() {
                         return Ok(page_count);
                     }
-                    if round_page_count == MAX_PAGES_PER_FOLDER_ROUND {
+                    if page_count == MAX_PAGES_PER_FOLDER_ATTEMPT {
                         return Err(MailWorkflowError::PageLimitExceeded);
                     }
                 }

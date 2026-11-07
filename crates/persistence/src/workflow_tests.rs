@@ -3507,6 +3507,133 @@ fn response_budget_stops_before_committing_an_over_budget_page() {
 }
 
 #[test]
+fn mail_page_limit_counts_pages_across_a_cursor_reset() {
+    smol::block_on(async {
+        const PAGE_LIMIT: usize = 1_000;
+
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let folder_reference = cached_folder.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let old_delta_link = MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=old"
+                .to_owned(),
+        );
+        let cache = open_cache(&directory, account.clone()).await;
+        let baseline_workflow = MailWorkflow::new(
+            FixtureProvider::new(
+                account.clone(),
+                vec![cached_folder.clone()],
+                [Ok(page_response(MessageDeltaPage::new(
+                    Vec::new(),
+                    MessageDeltaProgress::Complete(old_delta_link.clone()),
+                )))],
+                Err(MailOperationError::ServiceUnavailable),
+            ),
+            cache.clone(),
+        );
+        baseline_workflow
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("baseline delta cursor is saved");
+        drop(baseline_workflow);
+
+        let reset_link = MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken="
+                .to_owned(),
+        );
+        let replacement_next_link = MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$skiptoken=replacement-resume"
+                .to_owned(),
+        );
+        let replacement_delta_link = MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=replacement-complete"
+                .to_owned(),
+        );
+        let mut pages = Vec::with_capacity(PAGE_LIMIT + 2);
+        for page_index in 0..PAGE_LIMIT - 1 {
+            let next_link = MessageDeltaLink::from_opaque(format!(
+                "https://graph.microsoft.com/v1.0/me/mailFolders/folder-inbox/messages/delta?$skiptoken=before-reset-{page_index}"
+            ));
+            pages.push(Ok(page_response(MessageDeltaPage::new(
+                Vec::new(),
+                MessageDeltaProgress::Next(next_link),
+            ))));
+        }
+        pages.push(Ok(MessageDeltaResponse::Reset(reset_link)));
+        pages.push(Ok(page_response(MessageDeltaPage::new(
+            Vec::new(),
+            MessageDeltaProgress::Next(replacement_next_link.clone()),
+        ))));
+        pages.push(Ok(page_response(MessageDeltaPage::new(
+            Vec::new(),
+            MessageDeltaProgress::Complete(replacement_delta_link.clone()),
+        ))));
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![cached_folder],
+            pages,
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let requests = Arc::clone(&provider.requests);
+        let workflow = MailWorkflow::new(provider, cache.clone());
+
+        let error = workflow
+            .synchronize_account(
+                &account,
+                started_at + Duration::from_secs(1),
+                &ignore_sync_progress,
+            )
+            .await
+            .expect_err("the attempt stops at its aggregate page limit");
+        assert_eq!(error, MailWorkflowError::PageLimitExceeded);
+        assert_eq!(
+            requests
+                .lock()
+                .expect("synthetic request log mutex is healthy")
+                .len(),
+            PAGE_LIMIT + 1
+        );
+        let interrupted_state = workflow
+            .cached_sync_state(&folder_reference)
+            .await
+            .expect("replacement checkpoint remains readable")
+            .expect("folder state exists");
+        assert_eq!(interrupted_state.delta_link(), Some(&old_delta_link));
+        assert_eq!(interrupted_state.next_link(), Some(&replacement_next_link));
+        assert!(interrupted_state.is_rebuilding());
+
+        let report = workflow
+            .synchronize_account(
+                &account,
+                started_at + Duration::from_secs(2),
+                &ignore_sync_progress,
+            )
+            .await
+            .expect("the next attempt resumes the replacement scan");
+        assert_eq!(report.page_count(), 1);
+        let completed_state = workflow
+            .cached_sync_state(&folder_reference)
+            .await
+            .expect("replacement cursor remains readable")
+            .expect("folder state exists");
+        assert_eq!(completed_state.delta_link(), Some(&replacement_delta_link));
+        assert!(completed_state.next_link().is_none());
+        assert!(!completed_state.is_rebuilding());
+        assert_eq!(
+            requests
+                .lock()
+                .expect("synthetic request log mutex is healthy")
+                .last(),
+            Some(&MessageDeltaRequest::Continue(replacement_next_link))
+        );
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
 fn expired_delta_cursor_rebuild_keeps_cached_mail_until_the_snapshot_commits() {
     smol::block_on(async {
         let directory = TempDir::new().expect("temporary directory is created");
