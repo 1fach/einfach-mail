@@ -7,6 +7,7 @@ use reqwest::Client;
 
 use crate::{
     credential::{CredentialIdentity, SavedRefreshToken},
+    error::GraphError,
     http_client, identity,
 };
 
@@ -97,14 +98,18 @@ fn access_token_error_from_account(error: AccountOperationError) -> AccessTokenE
         _ => AccessTokenError::ServiceUnavailable,
     }
 }
-pub(super) async fn invalidate_access_token(
+pub(super) async fn invalidate_rejected_access_token<T>(
     config: &ProviderConfig,
     account_id: &AccountId,
     rejected_token: &Arc<AccessToken>,
-) {
+    graph_result: Result<T, GraphError>,
+) -> Result<T, GraphError> {
+    if !matches!(&graph_result, Err(GraphError::AccessTokenRejected)) {
+        return graph_result;
+    }
     let mut session = config.session.lock().await;
     let Some(account_session) = session.as_mut() else {
-        return;
+        return graph_result;
     };
     if &account_session.account_id == account_id
         && account_session
@@ -114,4 +119,5 @@ pub(super) async fn invalidate_access_token(
     {
         account_session.access_token = None;
     }
+    graph_result
 }
