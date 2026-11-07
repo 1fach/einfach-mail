@@ -15,6 +15,8 @@ use gpui_kit::component::{
     input::{Input, InputState, Textarea, TextareaState},
     scroll::ScrollableElement,
 };
+#[cfg(test)]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, App, AsyncApp, Context, Entity, EventEmitter, IntoElement, KeyBinding, Render,
     Role, Task, Window, div, prelude::*, px,
@@ -567,7 +569,7 @@ impl MailComposer {
                 }
             }
         };
-        pending_view
+        let pending_view = pending_view
             .child(format!(
                 "Started: {}",
                 format_system_time(pending.created_at())
@@ -579,8 +581,10 @@ impl MailComposer {
                     .label(button_label)
                     .disabled(self.task.is_some())
                     .on_click(cx.listener(|composer, _, _, cx| composer.resolve_pending(cx))),
-            )
-            .into_any_element()
+            );
+        #[cfg(test)]
+        let pending_view = pending_view.test_support();
+        pending_view.into_any_element()
     }
 
     fn render_status(&self, colors: ColorTokens, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -597,18 +601,25 @@ impl MailComposer {
             })
             .child(text);
         match self.status {
-            ComposerStatus::PermissionRequired => Some(
-                feedback
+            ComposerStatus::PermissionRequired => {
+                let feedback = feedback
                     .child(" The request is limited to sending as the signed-in account. Microsoft may show a consent screen in your system browser; approval grants permission but does not send this message. Return here and press Send to submit it.")
-                    .child(self.permission_review_button(cx))
-                    .into_any_element(),
-            ),
-            ComposerStatus::DuplicateConfirmation => Some(
-                feedback
-                    .child(self.duplicate_confirmation_button(cx))
-                    .into_any_element(),
-            ),
-            _ => Some(feedback.into_any_element()),
+                    .child(self.permission_review_button(cx));
+                #[cfg(test)]
+                let feedback = feedback.test_support();
+                Some(feedback.into_any_element())
+            }
+            ComposerStatus::DuplicateConfirmation => {
+                let feedback = feedback.child(self.duplicate_confirmation_button(cx));
+                #[cfg(test)]
+                let feedback = feedback.test_support();
+                Some(feedback.into_any_element())
+            }
+            _ => {
+                #[cfg(test)]
+                let feedback = feedback.test_support();
+                Some(feedback.into_any_element())
+            }
         }
     }
 

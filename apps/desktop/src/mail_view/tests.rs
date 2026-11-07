@@ -36,6 +36,7 @@ use super::{
     follow_up_flag_failure_message, mail_error_message, read_state_failure_message,
 };
 use crate::mail_composer::bind_mail_composer_keys;
+use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
 
 #[test]
 fn active_mail_operation_explains_when_to_retry() {
@@ -1461,14 +1462,7 @@ async fn cached_message_list_navigates_by_keyboard_and_keeps_one_tab_stop(cx: &m
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
 
     assert_accessible_message_list(context);
     assert_eq!(accessible_message_list_focus(context), Some(false));
@@ -1639,26 +1633,15 @@ async fn message_move_menu_moves_cached_message_and_opens_destination(cx: &mut T
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-move").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
     let move_action = context
         .debug_bounds("message-move")
         .expect("opened message exposes its native move menu");
@@ -1676,19 +1659,13 @@ async fn message_move_menu_moves_cached_message_and_opens_destination(cx: &mut T
         });
     });
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.cx.update(|cx| {
-            matches!(
-                view.read(cx).message_detail_state,
-                MessageDetailState::MoveCompleted { .. }
-            )
-        }) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        matches!(
+            view.read(app).message_detail_state,
+            MessageDetailState::MoveCompleted { .. }
+        )
+    })
+    .await;
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(context.debug_bounds("message-move-completed").is_some());
     assert!(context.cx.update(|cx| view.read(cx).messages.is_empty()));
@@ -1703,21 +1680,15 @@ async fn message_move_menu_moves_cached_message_and_opens_destination(cx: &mut T
         .debug_bounds("open-moved-message-folder")
         .expect("move confirmation offers the destination folder");
     context.simulate_click(open_folder.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.cx.update(|cx| {
-            let view = view.read(cx);
-            view.selected_folder.as_ref() == Some(&destination)
-                && view
-                    .messages
-                    .iter()
-                    .any(|message| message.id() == &message_id)
-        }) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        let view = view.read(app);
+        view.selected_folder.as_ref() == Some(&destination)
+            && view
+                .messages
+                .iter()
+                .any(|message| message.id() == &message_id)
+    })
+    .await;
     assert!(context.cx.update(|cx| {
         let view = view.read(cx);
         view.selected_folder.as_ref() == Some(&destination)
@@ -1749,39 +1720,24 @@ async fn message_delete_action_moves_cached_message_to_deleted_items(cx: &mut Te
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-delete").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
     let delete_action = context
         .debug_bounds("message-delete")
         .expect("opened message exposes its native Delete action");
     context.simulate_click(delete_action.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-delete-completed").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-delete-completed")
+    })
+    .await;
     let deleted_reference = FolderReference::new(
         account,
         FolderId::try_from("deleted-items".to_owned())
@@ -1840,39 +1796,24 @@ async fn denied_message_delete_shows_permission_recovery_and_keeps_source(cx: &m
         })
     });
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-delete").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
     let delete_action = context
         .debug_bounds("message-delete")
         .expect("opened message exposes its native Delete action");
     context.simulate_click(delete_action.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-delete-error").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-delete-error")
+    })
+    .await;
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(context.debug_bounds("message-delete-error").is_some());
     assert!(
@@ -1930,39 +1871,24 @@ async fn native_archive_action_moves_cached_message_to_archive(cx: &mut TestAppC
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-archive").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
     let archive_action = context
         .debug_bounds("message-archive")
         .expect("opened message exposes its native Archive action");
     context.simulate_click(archive_action.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-move-completed").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-move-completed")
+    })
+    .await;
     let archive_reference = FolderReference::new(
         account,
         FolderId::try_from("archive".to_owned()).expect("synthetic Archive ID is valid"),
@@ -1986,21 +1912,15 @@ async fn native_archive_action_moves_cached_message_to_archive(cx: &mut TestAppC
         .debug_bounds("open-moved-message-folder")
         .expect("archive confirmation offers to open Archive");
     context.simulate_click(open_archive.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.cx.update(|cx| {
-            let view = view.read(cx);
-            view.selected_folder.as_ref() == Some(&archive_reference)
-                && view
-                    .messages
-                    .iter()
-                    .any(|message| message.id() == &message_id)
-        }) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        let view = view.read(app);
+        view.selected_folder.as_ref() == Some(&archive_reference)
+            && view
+                .messages
+                .iter()
+                .any(|message| message.id() == &message_id)
+    })
+    .await;
     assert!(context.cx.update(|cx| {
         let view = view.read(cx);
         view.selected_folder.as_ref() == Some(&archive_reference)
@@ -2031,39 +1951,24 @@ async fn pending_message_delete_keeps_the_native_action_busy(cx: &mut TestAppCon
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-delete").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
     let delete_action = context
         .debug_bounds("message-delete")
         .expect("opened message exposes its native Delete action");
     context.simulate_click(delete_action.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-delete-pending").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-delete-pending")
+    })
+    .await;
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(context.debug_bounds("message-delete-pending").is_some());
     assert!(context.cx.update(|cx| {
@@ -2095,39 +2000,24 @@ async fn unknown_message_delete_requires_sync_and_keeps_source_cached(cx: &mut T
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-delete").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
     let delete_action = context
         .debug_bounds("message-delete")
         .expect("opened message exposes its native Delete action");
     context.simulate_click(delete_action.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-move-recovery").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-move-recovery")
+    })
+    .await;
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(context.debug_bounds("message-move-recovery").is_some());
     assert!(context.debug_bounds("sync-after-message-move").is_some());
@@ -2183,26 +2073,15 @@ async fn folder_write_sync_requirement_disables_and_blocks_message_move(cx: &mut
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-move").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
 
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
@@ -2271,40 +2150,25 @@ async fn unknown_message_move_shows_sync_recovery_and_keeps_source_cached(cx: &m
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-move").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
             view.move_selected_message_to(destination.clone(), "Archive".to_owned(), cx);
         });
     });
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-move-recovery").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-move-recovery")
+    })
+    .await;
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(context.debug_bounds("message-move-recovery").is_some());
     assert!(context.debug_bounds("sync-after-message-move").is_some());
@@ -2362,40 +2226,25 @@ async fn confirmed_message_move_with_cache_failure_requests_sync(cx: &mut TestAp
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-move").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
             view.move_selected_message_to(destination.clone(), "Archive".to_owned(), cx);
         });
     });
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-move-recovery").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-move-recovery")
+    })
+    .await;
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(context.debug_bounds("message-move-recovery").is_some());
     assert!(context.cx.update(|cx| {
@@ -2433,32 +2282,19 @@ async fn message_body_failure_keeps_the_cached_list_and_selection(cx: &mut TestA
     let workflow = Arc::new(MailWorkflow::new(provider, cache));
     let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
 
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("cached message row is visible before opening");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.cx.update(|cx| {
-            matches!(
-                &view.read(cx).message_detail_state,
-                MessageDetailState::Failed(_)
-            )
-        }) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        matches!(
+            &view.read(app).message_detail_state,
+            MessageDetailState::Failed(_)
+        )
+    })
+    .await;
 
     assert!(context.debug_bounds("message-row-message-1").is_some());
     assert_eq!(
@@ -2503,14 +2339,7 @@ async fn folder_message_list_failure_does_not_claim_a_message_is_loading(cx: &mu
     ));
     let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
 
     cache
         .0
@@ -2519,19 +2348,13 @@ async fn folder_message_list_failure_does_not_claim_a_message_is_loading(cx: &mu
         .list_messages_error = Some(MailCacheError::Unavailable);
     let archive = context.update(|window, _| window.find_by_label("Archive"));
     context.simulate_click(archive.bounds().center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.cx.update(|cx| {
-            matches!(
-                &view.read(cx).message_list_state,
-                MessageListState::Failed(_)
-            )
-        }) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        matches!(
+            &view.read(app).message_list_state,
+            MessageListState::Failed(_)
+        )
+    })
+    .await;
 
     assert_eq!(
         accessible_alert_count(
@@ -3487,26 +3310,15 @@ async fn reply_composer_uses_the_cached_source_and_requires_an_explicit_send(
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("cached source message is rendered");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-reply").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
     let reply_action = context
         .debug_bounds("message-reply")
         .expect("opened cached message exposes a native Reply action");
@@ -3526,14 +3338,10 @@ async fn reply_composer_uses_the_cached_source_and_requires_an_explicit_send(
         .debug_bounds("mail-send-button")
         .expect("reply composer exposes an explicit Send action");
     context.simulate_click(send.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("review-send-permission").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "mail-composer-status")
+    })
+    .await;
     assert_eq!(send_calls.load(Ordering::Relaxed), 1);
     let review = context
         .debug_bounds("review-send-permission")
@@ -3549,14 +3357,7 @@ async fn reply_composer_uses_the_cached_source_and_requires_an_explicit_send(
         .debug_bounds("mail-send-button")
         .expect("permission review leaves the reply available");
     context.simulate_click(send.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if send_calls.load(Ordering::Relaxed) == 2 {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, _| send_calls.load(Ordering::Relaxed) == 2).await;
 
     assert_eq!(send_calls.load(Ordering::Relaxed), 2);
     assert_eq!(
@@ -3611,26 +3412,15 @@ async fn unknown_reply_requires_sent_items_review_and_duplicate_confirmation(
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("cached source message is rendered");
     context.simulate_click(row.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("message-reply").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "message-actions")
+    })
+    .await;
     let reply_action = context
         .debug_bounds("message-reply")
         .expect("opened cached message exposes a native Reply action");
@@ -3646,14 +3436,10 @@ async fn unknown_reply_requires_sent_items_review_and_duplicate_confirmation(
         .debug_bounds("mail-send-button")
         .expect("reply composer exposes its Send action");
     context.simulate_click(send.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("mail-pending-send").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "mail-pending-send")
+    })
+    .await;
     assert_eq!(send_calls.load(Ordering::Relaxed), 1);
     assert!(context.debug_bounds("mail-pending-send").is_some());
 
@@ -3668,14 +3454,11 @@ async fn unknown_reply_requires_sent_items_review_and_duplicate_confirmation(
         .debug_bounds("resolve-pending-mail-send")
         .expect("unknown reply requires explicit Sent Items review");
     context.simulate_click(resolve.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("confirm-duplicate-risk").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "mail-composer-status")
+            && !test_element_is_visible(window, "mail-pending-send")
+    })
+    .await;
     assert!(context.debug_bounds("mail-pending-send").is_none());
     assert_eq!(send_calls.load(Ordering::Relaxed), 1);
     let confirm = context
@@ -3688,14 +3471,7 @@ async fn unknown_reply_requires_sent_items_review_and_duplicate_confirmation(
         .debug_bounds("mail-send-button")
         .expect("confirmed duplicate risk allows a separate reply");
     context.simulate_click(send.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if send_calls.load(Ordering::Relaxed) == 2 {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, _| send_calls.load(Ordering::Relaxed) == 2).await;
 
     assert_eq!(send_calls.load(Ordering::Relaxed), 2);
     assert_eq!(
@@ -3750,14 +3526,7 @@ async fn permission_review_requires_a_separate_send_action(cx: &mut TestAppConte
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let compose = context
         .debug_bounds("new-mail-message")
         .expect("mail view exposes the compose action");
@@ -3781,14 +3550,10 @@ async fn permission_review_requires_a_separate_send_action(cx: &mut TestAppConte
         .expect("composer exposes its explicit send action");
     context.simulate_click(send.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("review-send-permission").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "mail-composer-status")
+    })
+    .await;
     let review = context
         .debug_bounds("review-send-permission")
         .expect("permission denial offers an explicit review action");
@@ -3807,21 +3572,15 @@ async fn permission_review_requires_a_separate_send_action(cx: &mut TestAppConte
         context.update(|window, cx| window.has_active_sheet(cx));
     let _ = permission_release.send(());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.cx.update(|cx| {
-            !view
-                .read(cx)
-                .composer
-                .as_ref()
-                .is_some_and(|composer| composer.read(cx).operation_in_progress())
-        }) && context.debug_bounds("mail-composer-status").is_some()
-        {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, app| {
+        !view
+            .read(app)
+            .composer
+            .as_ref()
+            .is_some_and(|composer| composer.read(app).operation_in_progress())
+            && test_element_is_visible(window, "mail-composer-status")
+    })
+    .await;
     assert!(remains_open_after_permission_escape);
     assert!(remains_open_after_permission_close);
     assert_eq!(permission_requests.load(Ordering::Relaxed), 1);
@@ -3870,14 +3629,7 @@ async fn pending_send_cannot_be_dismissed_by_escape_or_outside_click(cx: &mut Te
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let compose = context
         .debug_bounds("new-mail-message")
         .expect("mail view exposes the compose action");
@@ -3958,14 +3710,7 @@ async fn send_staging_failure_skips_provider_and_accepted_cleanup_failure_can_be
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     let compose = context
         .debug_bounds("new-mail-message")
         .expect("mail view exposes the compose action");
@@ -3987,20 +3732,15 @@ async fn send_staging_failure_skips_provider_and_accepted_cleanup_failure_can_be
         .expect("composer exposes its explicit send action");
     context.simulate_click(send.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        let operation_in_progress = context.cx.update(|cx| {
-            view.read(cx)
-                .composer
-                .as_ref()
-                .is_some_and(|composer| composer.read(cx).operation_in_progress())
-        });
-        if !operation_in_progress && context.debug_bounds("mail-composer-status").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, app| {
+        !view
+            .read(app)
+            .composer
+            .as_ref()
+            .is_some_and(|composer| composer.read(app).operation_in_progress())
+            && test_element_is_visible(window, "mail-composer-status")
+    })
+    .await;
     assert_eq!(send_calls.load(Ordering::Relaxed), 0);
     assert!(context.cx.update(|cx| view.read(cx).pending_send.is_none()));
     let send = context
@@ -4013,14 +3753,10 @@ async fn send_staging_failure_skips_provider_and_accepted_cleanup_failure_can_be
         .fail_next_pending_send_clear = true;
     context.simulate_click(send.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.debug_bounds("resolve-pending-mail-send").is_some() {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "mail-pending-send")
+    })
+    .await;
     let resolve = context
         .debug_bounds("resolve-pending-mail-send")
         .expect("accepted send with a failed cleanup exposes an explicit resolution");
@@ -4028,14 +3764,7 @@ async fn send_staging_failure_skips_provider_and_accepted_cleanup_failure_can_be
     assert!(context.cx.update(|cx| view.read(cx).pending_send.is_some()));
     context.simulate_click(resolve.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_mail_view(context);
-        if context.cx.update(|cx| view.read(cx).pending_send.is_none()) {
-            break;
-        }
-        context.cx.executor().timer(Duration::from_millis(10)).await;
-    }
+    wait_for_ui_condition(context, |_, app| view.read(app).pending_send.is_none()).await;
     assert!(context.cx.update(|cx| view.read(cx).pending_send.is_none()));
     assert!(context.debug_bounds("resolve-pending-mail-send").is_none());
     assert_eq!(send_calls.load(Ordering::Relaxed), 1);

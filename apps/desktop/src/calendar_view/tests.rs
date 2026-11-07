@@ -28,6 +28,7 @@ use time::{Date, Month, OffsetDateTime};
 use tokio::sync::oneshot;
 
 use super::{CalendarView, current_week_start, view_for_week};
+use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
 
 #[derive(Clone, Default)]
 struct TestProvider {
@@ -781,18 +782,7 @@ async fn calendar_agenda_navigates_events_with_one_focus_stop_and_keeps_selectio
     let context = VisualTestContext::from_window(*window.deref(), cx).into_mut();
     let view = calendar_view.expect("calendar view is created with the test window");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if !context.cx.update(|cx| view.read(cx).sync_running) {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
     assert_accessible_agenda(context, AGENDA_EVENT_COUNT);
     assert!(context.debug_bounds("calendar-event-list").is_some());
     assert!(
@@ -923,20 +913,10 @@ async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
     });
 
     context.run_until_parked();
-    let mut rendered_sync_error = false;
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("calendar-sync-error").is_some() {
-            rendered_sync_error = true;
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "calendar-sync-error")
+    })
+    .await;
     let (sync_running, status_failed) = context.cx.update(|cx| {
         let view = view.read(cx);
         (
@@ -945,7 +925,6 @@ async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
         )
     });
     assert!(!sync_running && status_failed, "calendar refresh completes");
-    assert!(rendered_sync_error, "calendar refresh reports its error");
     assert!(context.debug_bounds("calendar-sync-error").is_some());
     assert!(context.debug_bounds("calendar-utc-fallback").is_some());
     assert!(
@@ -1010,21 +989,14 @@ async fn native_event_composer_recovers_uncertain_and_rejected_creations(cx: &mu
         gpui_kit::base::Root::new(calendar, window, cx)
     });
     let calendar = calendar_handle.expect("calendar entity is retained for assertions");
-    let mut sync_finished = false;
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("calendar-sync-error").is_some() {
-            sync_finished = true;
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
-    assert!(sync_finished, "calendar sync reaches a visible error state");
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "calendar-sync-error")
+    })
+    .await;
+    assert!(
+        context.debug_bounds("calendar-sync-error").is_some(),
+        "calendar sync reaches a visible error state"
+    );
 
     let new_event = context
         .debug_bounds("calendar-new-event")
@@ -1038,21 +1010,11 @@ async fn native_event_composer_recovers_uncertain_and_rejected_creations(cx: &mu
         .debug_bounds("calendar-sync")
         .expect("calendar offers a retry after the initial sync fails");
     context.simulate_click(sync.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.cx.update(|cx| {
-            calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
-                && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
-        }) {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        calendar.read(app).write_readiness == CalendarWriteReadiness::Ready
+            && matches!(calendar.read(app).status, super::CalendarStatus::UpToDate)
+    })
+    .await;
     assert!(context.cx.update(|cx| {
         calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
             && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
@@ -1064,18 +1026,10 @@ async fn native_event_composer_recovers_uncertain_and_rejected_creations(cx: &mu
     context.run_until_parked();
     draw_calendar_view(context);
     assert!(context.update(|window, cx| window.has_active_sheet(cx)));
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("event-composer-fields").is_some() {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-composer-fields")
+    })
+    .await;
     assert!(context.debug_bounds("event-composer-fields").is_some());
     let create_event = context
         .debug_bounds("event-composer-submit")
@@ -1105,18 +1059,10 @@ async fn native_event_composer_recovers_uncertain_and_rejected_creations(cx: &mu
         .send(())
         .expect("synthetic provider request is waiting on this test");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("event-creation-status").is_some() {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-creation-status")
+    })
+    .await;
     assert!(context.debug_bounds("event-creation-pending").is_some());
     assert!(context.debug_bounds("event-creation-status").is_some());
 
@@ -1124,18 +1070,10 @@ async fn native_event_composer_recovers_uncertain_and_rejected_creations(cx: &mu
         .debug_bounds("event-composer-submit")
         .expect("the saved operation remains retryable");
     context.simulate_click(retry.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("event-composer-close").is_some() {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-creation-status")
+    })
+    .await;
     assert!(context.debug_bounds("event-creation-pending").is_none());
     assert!(context.debug_bounds("event-creation-status").is_some());
     assert!(context.debug_bounds("event-composer-close").is_some());
@@ -1166,18 +1104,10 @@ async fn native_event_composer_recovers_uncertain_and_rejected_creations(cx: &mu
         .debug_bounds("event-composer-submit")
         .expect("composer offers create action");
     context.simulate_click(create_event.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("event-creation-status").is_some() {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-creation-status")
+    })
+    .await;
     assert!(context.debug_bounds("event-creation-pending").is_some());
     assert!(context.debug_bounds("event-creation-status").is_some());
     let rejected_marker = workflow
@@ -1198,20 +1128,11 @@ async fn native_event_composer_recovers_uncertain_and_rejected_creations(cx: &mu
         .debug_bounds("event-composer-submit")
         .expect("rejected operation offers local cleanup");
     context.simulate_click(clear_rejected.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("event-composer-close").is_some()
-            && context.debug_bounds("event-creation-pending").is_none()
-        {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-creation-status")
+            && !test_element_is_visible(window, "event-creation-pending")
+    })
+    .await;
     assert!(context.debug_bounds("event-creation-pending").is_none());
     assert!(context.debug_bounds("event-composer-close").is_some());
     assert_eq!(provider.event_creation_count.load(Ordering::SeqCst), 3);
@@ -1271,21 +1192,11 @@ async fn denied_calendar_write_emits_permission_review_request(cx: &mut TestAppC
     let calendar = calendar_handle.expect("calendar entity is retained for assertions");
     let _subscription = subscription;
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.cx.update(|cx| {
-            calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
-                && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
-        }) {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        calendar.read(app).write_readiness == CalendarWriteReadiness::Ready
+            && matches!(calendar.read(app).status, super::CalendarStatus::UpToDate)
+    })
+    .await;
     assert!(context.cx.update(|cx| {
         calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
             && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
@@ -1297,18 +1208,10 @@ async fn denied_calendar_write_emits_permission_review_request(cx: &mut TestAppC
     context.run_until_parked();
     draw_calendar_view(context);
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("event-composer-fields").is_some() {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-composer-fields")
+    })
+    .await;
     let title = context
         .debug_bounds("event-composer-subject-input")
         .expect("composer exposes the title input");
@@ -1319,21 +1222,10 @@ async fn denied_calendar_write_emits_permission_review_request(cx: &mut TestAppC
         .expect("composer offers create action");
     context.simulate_click(submit.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context
-            .debug_bounds("review-calendar-write-permission")
-            .is_some()
-        {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-creation-status")
+    })
+    .await;
     let review = context
         .debug_bounds("review-calendar-write-permission")
         .expect("denied write exposes an explicit permission review");
@@ -1373,21 +1265,10 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
     });
     let calendar = calendar_handle.expect("calendar entity is retained for assertions");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context
-            .cx
-            .update(|cx| matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate))
-        {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        matches!(calendar.read(app).status, super::CalendarStatus::UpToDate)
+    })
+    .await;
     assert!(
         context
             .cx
@@ -1401,18 +1282,10 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
     context.simulate_click(edit.center(), Modifiers::default());
     context.run_until_parked();
     draw_calendar_view(context);
-    for _ in 0..100 {
-        if context.debug_bounds("event-composer-fields").is_some() {
-            break;
-        }
-        context.run_until_parked();
-        draw_calendar_view(context);
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-composer-fields")
+    })
+    .await;
     assert!(context.debug_bounds("event-composer-fields").is_some());
 
     let title = context
@@ -1429,18 +1302,10 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
     let (release, gate) = oneshot::channel();
     provider.hold_event_update_until(gate);
     context.simulate_click(save.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if provider.event_update_calls.load(Ordering::SeqCst) == 1 {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, _| {
+        provider.event_update_calls.load(Ordering::SeqCst) == 1
+    })
+    .await;
     assert_eq!(
         provider.event_update_calls.load(Ordering::SeqCst),
         1,
@@ -1476,25 +1341,14 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
     release
         .send(())
         .expect("synthetic provider is waiting on the UI test");
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        let updated = context.cx.update(|cx| {
-            calendar
-                .read(cx)
-                .events
-                .iter()
-                .any(|event| event.subject() == Some("Updated synthetic appointment"))
-        });
-        if updated {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        calendar
+            .read(app)
+            .events
+            .iter()
+            .any(|event| event.subject() == Some("Updated synthetic appointment"))
+    })
+    .await;
     let (updated, saved_status) = context.cx.update(|cx| {
         let view = calendar.read(cx);
         (
@@ -1546,21 +1400,10 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
     });
     let calendar = calendar_handle.expect("calendar entity is retained for assertions");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context
-            .cx
-            .update(|cx| matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate))
-        {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        matches!(calendar.read(app).status, super::CalendarStatus::UpToDate)
+    })
+    .await;
     assert!(
         context
             .cx
@@ -1572,18 +1415,10 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
         .debug_bounds("calendar-event-edit")
         .expect("timed appointment offers an edit action");
     context.simulate_click(edit.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("event-composer-delete").is_some() {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-composer-actions")
+    })
+    .await;
     assert!(context.debug_bounds("event-composer-delete").is_some());
 
     let (release, gate) = oneshot::channel();
@@ -1619,37 +1454,15 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
         .debug_bounds("event-composer-delete")
         .expect("cancel returns to the event editor");
     context.simulate_click(delete.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context
-            .debug_bounds("event-delete-dialog-confirm")
-            .is_some()
-        {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, app| window.has_active_dialog(app)).await;
     let confirm = context
         .debug_bounds("event-delete-dialog-confirm")
         .expect("confirmation offers the destructive action");
     context.simulate_click(confirm.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if provider.event_deletion_calls.load(Ordering::SeqCst) == 1 {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, _| {
+        provider.event_deletion_calls.load(Ordering::SeqCst) == 1
+    })
+    .await;
     assert_eq!(
         provider.event_deletion_calls.load(Ordering::SeqCst),
         1,
@@ -1686,21 +1499,10 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
     release
         .send(())
         .expect("synthetic provider is waiting on the UI test");
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context
-            .cx
-            .update(|cx| calendar.read(cx).write_readiness != CalendarWriteReadiness::Ready)
-        {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        calendar.read(app).write_readiness != CalendarWriteReadiness::Ready
+    })
+    .await;
     assert!(
         context
             .cx
@@ -1716,21 +1518,11 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
         .debug_bounds("calendar-sync")
         .expect("calendar offers recovery sync");
     context.simulate_click(sync.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.cx.update(|cx| {
-            calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
-                && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
-        }) {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        calendar.read(app).write_readiness == CalendarWriteReadiness::Ready
+            && matches!(calendar.read(app).status, super::CalendarStatus::UpToDate)
+    })
+    .await;
     assert!(
         context
             .cx
@@ -1741,76 +1533,36 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
         .debug_bounds("calendar-event-edit")
         .expect("successful sync restores event editing");
     context.simulate_click(edit.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("event-composer-delete").is_some() {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-composer-actions")
+    })
+    .await;
     let delete = context
         .debug_bounds("event-composer-delete")
         .expect("reconciled event can be deleted again");
     context.simulate_click(delete.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context
-            .debug_bounds("event-delete-dialog-confirm")
-            .is_some()
-        {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, app| window.has_active_dialog(app)).await;
     let confirm = context
         .debug_bounds("event-delete-dialog-confirm")
         .expect("reconciled event offers delete confirmation");
     context.simulate_click(confirm.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if provider.event_deletion_calls.load(Ordering::SeqCst) == 2 {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, _| {
+        provider.event_deletion_calls.load(Ordering::SeqCst) == 2
+    })
+    .await;
     assert_eq!(
         provider.event_deletion_calls.load(Ordering::SeqCst),
         2,
         "a successful sync permits a new explicit delete"
     );
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.cx.update(|cx| {
-            calendar
-                .read(cx)
-                .events
-                .iter()
-                .all(|event| event.id().as_str() != "synthetic-timed-event")
-        }) {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        calendar
+            .read(app)
+            .events
+            .iter()
+            .all(|event| event.id().as_str() != "synthetic-timed-event")
+    })
+    .await;
     let deleted = context.cx.update(|cx| {
         calendar
             .read(cx)
@@ -1853,21 +1605,10 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
     });
     let calendar = calendar_handle.expect("calendar entity is retained for assertions");
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context
-            .cx
-            .update(|cx| matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate))
-        {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        matches!(calendar.read(app).status, super::CalendarStatus::UpToDate)
+    })
+    .await;
     assert!(
         context
             .cx
@@ -1879,18 +1620,10 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
         .debug_bounds("calendar-event-edit")
         .expect("timed appointment offers an edit action");
     context.simulate_click(edit.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("event-composer-fields").is_some() {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-composer-fields")
+    })
+    .await;
     let title = context
         .debug_bounds("event-composer-subject-input")
         .expect("editor exposes the appointment title");
@@ -1903,21 +1636,10 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
         .expect("editor offers a save action");
     context.simulate_click(save.center(), Modifiers::default());
 
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context
-            .cx
-            .update(|cx| calendar.read(cx).write_readiness != CalendarWriteReadiness::Ready)
-        {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        calendar.read(app).write_readiness != CalendarWriteReadiness::Ready
+    })
+    .await;
     assert!(
         context
             .cx
@@ -1953,21 +1675,10 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
         .debug_bounds("calendar-sync")
         .expect("calendar exposes a recovery sync action");
     context.simulate_click(sync.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context
-            .cx
-            .update(|cx| matches!(calendar.read(cx).status, super::CalendarStatus::Failed(_)))
-        {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        matches!(calendar.read(app).status, super::CalendarStatus::Failed(_))
+    })
+    .await;
     assert!(
         context
             .cx
@@ -1984,21 +1695,11 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
         .debug_bounds("calendar-sync")
         .expect("calendar keeps sync available after failure");
     context.simulate_click(sync.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.cx.update(|cx| {
-            calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready
-                && matches!(calendar.read(cx).status, super::CalendarStatus::UpToDate)
-        }) {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |_, app| {
+        calendar.read(app).write_readiness == CalendarWriteReadiness::Ready
+            && matches!(calendar.read(app).status, super::CalendarStatus::UpToDate)
+    })
+    .await;
     assert!(
         context
             .cx
@@ -2008,18 +1709,10 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
         .debug_bounds("calendar-event-edit")
         .expect("successful sync restores Edit");
     context.simulate_click(edit.center(), Modifiers::default());
-    for _ in 0..100 {
-        context.run_until_parked();
-        draw_calendar_view(context);
-        if context.debug_bounds("event-composer-fields").is_some() {
-            break;
-        }
-        context
-            .cx
-            .executor()
-            .timer(std::time::Duration::from_millis(10))
-            .await;
-    }
+    wait_for_ui_condition(context, |window, _| {
+        test_element_is_visible(window, "event-composer-fields")
+    })
+    .await;
     assert!(context.debug_bounds("event-composer-fields").is_some());
     assert_eq!(
         provider.event_update_calls.load(Ordering::SeqCst),

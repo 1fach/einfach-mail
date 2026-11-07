@@ -791,6 +791,8 @@ where
         if let Some(message) = write_readiness_message(self.write_readiness) {
             status = status.child(message);
         }
+        #[cfg(test)]
+        let status = status.test_support();
         status.into_any_element()
     }
 

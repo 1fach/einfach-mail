@@ -23,6 +23,8 @@ mod mail_view;
 mod message_body;
 mod single_instance;
 mod sync_age;
+#[cfg(test)]
+mod test_support;
 
 use account_view::{AccountView, SetupIssue};
 
