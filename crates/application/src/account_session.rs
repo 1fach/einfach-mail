@@ -1,9 +1,10 @@
 //! Account-scoped application operations exposed to desktop views.
 
 use std::{
+    collections::HashMap,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::SystemTime,
 };
 
@@ -14,6 +15,7 @@ use einfach_mail_domain::{
     ReadState,
 };
 
+use crate::account_recovery::AccountWorkflowRecovery;
 use crate::operation_reservations::{ActiveOperations, reserve_account};
 use crate::{
     AccountCache, AccountCacheRemovalError, CalendarCache, CalendarEventCreationOutcome,
@@ -367,6 +369,7 @@ pub struct AccountSessionWorkflowFactory<P, F> {
     provider: P,
     cache_factory: F,
     reservations: Arc<Mutex<ActiveOperations>>,
+    recovery_by_account: Mutex<HashMap<AccountId, Weak<AccountWorkflowRecovery>>>,
 }
 
 impl<P, F> AccountSessionWorkflowFactory<P, F> {
@@ -377,7 +380,26 @@ impl<P, F> AccountSessionWorkflowFactory<P, F> {
             provider,
             cache_factory,
             reservations: Arc::new(Mutex::new(ActiveOperations::default())),
+            recovery_by_account: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn recovery_for_account(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<Arc<AccountWorkflowRecovery>, MailCacheError> {
+        let mut recovery_by_account = self
+            .recovery_by_account
+            .lock()
+            .map_err(|_| MailCacheError::Unavailable)?;
+        recovery_by_account.retain(|_, recovery| recovery.strong_count() > 0);
+        if let Some(recovery) = recovery_by_account.get(account_id).and_then(Weak::upgrade) {
+            return Ok(recovery);
+        }
+
+        let recovery = Arc::new(AccountWorkflowRecovery::default());
+        recovery_by_account.insert(account_id.clone(), Arc::downgrade(&recovery));
+        Ok(recovery)
     }
 }
 
@@ -391,17 +413,23 @@ where
         account_id: AccountId,
     ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
         Box::pin(async move {
-            let cache = self.cache_factory.open_for_account(account_id).await?;
+            let cache = self
+                .cache_factory
+                .open_for_account(account_id.clone())
+                .await?;
+            let recovery = self.recovery_for_account(&account_id)?;
             let mail_workflow: Arc<dyn MailSession> = Arc::new(MailWorkflow::with_reservations(
                 self.provider.clone(),
                 cache.clone(),
                 Arc::clone(&self.reservations),
+                Arc::clone(&recovery),
             ));
             let calendar_workflow: Arc<dyn CalendarSession> =
                 Arc::new(CalendarWorkflow::with_reservations(
                     self.provider.clone(),
                     cache.clone(),
                     Arc::clone(&self.reservations),
+                    recovery,
                 ));
             Ok(Arc::new(AccountSessionWorkflow::new(
                 mail_workflow,
@@ -474,7 +502,7 @@ where
 impl<P, C> MailSession for MailWorkflow<P, C>
 where
     P: MailProvider,
-    C: MailCache + AccountCache,
+    C: MailCache,
 {
     fn synchronize_account<'a>(
         &'a self,
@@ -672,5 +700,42 @@ where
         event: &'a EditableCalendarEvent,
     ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>> {
         Box::pin(CalendarWorkflow::delete_event(self, event))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AccountSessionWorkflowFactory;
+    use einfach_mail_domain::AccountId;
+
+    fn account_id(value: &str) -> AccountId {
+        AccountId::try_from(value.to_owned()).expect("synthetic account ID is valid")
+    }
+
+    #[test]
+    fn workflow_recovery_is_shared_per_account_and_restarts_after_last_session_drops() {
+        let factory = AccountSessionWorkflowFactory::new((), ());
+        let account = account_id("synthetic-account");
+        let first = factory
+            .recovery_for_account(&account)
+            .expect("account recovery state is available");
+        first.mark_mail_sync_ready();
+
+        let second = factory
+            .recovery_for_account(&account)
+            .expect("account recovery state is available");
+        assert!(second.mail_sync_ready());
+
+        let other_account = factory
+            .recovery_for_account(&account_id("other-account"))
+            .expect("other account recovery state is available");
+        assert!(!other_account.mail_sync_ready());
+
+        drop(first);
+        drop(second);
+        let reopened = factory
+            .recovery_for_account(&account)
+            .expect("new account recovery state is available");
+        assert!(!reopened.mail_sync_ready());
     }
 }

@@ -1651,6 +1651,118 @@ fn factory_sessions_share_folder_reservations_during_body_fetch() {
 }
 
 #[test]
+fn factory_sessions_share_uncertain_message_move_recovery() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let archive = archive_folder(&account);
+        let inbox_reference = inbox.reference().clone();
+        let archive_reference = archive.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let pages = [
+            Ok(page_response(completed_message_delta_page(
+                "shared-move-inbox",
+                vec![MessageDeltaChange::Upsert {
+                    id: message_id(),
+                    patch: complete_patch("Synthetic subject".to_owned(), started_at),
+                }],
+            ))),
+            Ok(page_response(completed_message_delta_page(
+                "shared-move-archive",
+                Vec::new(),
+            ))),
+            Ok(page_response(completed_message_delta_page(
+                "shared-move-resync-inbox",
+                Vec::new(),
+            ))),
+            Ok(page_response(completed_message_delta_page(
+                "shared-move-resync-archive",
+                Vec::new(),
+            ))),
+        ];
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![inbox, archive],
+            pages,
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let move_calls = Arc::clone(&provider.message_moves);
+        let factory = AccountSessionWorkflowFactory::new(
+            provider.clone(),
+            FixtureCacheFactory {
+                database_directory: directory.path().to_path_buf(),
+            },
+        );
+        let first = factory
+            .open_session(account.clone())
+            .await
+            .expect("first account session opens");
+        let second = factory
+            .open_session(account.clone())
+            .await
+            .expect("second account session opens");
+        first
+            .mail_session()
+            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .await
+            .expect("first account sync completes");
+        *provider
+            .move_result
+            .lock()
+            .expect("synthetic move result mutex is not poisoned") =
+            Err(MailOperationError::MoveOutcomeUnknown);
+
+        assert_eq!(
+            first
+                .mail_session()
+                .move_message(&inbox_reference, &message_id(), &archive_reference)
+                .await,
+            Err(MailWorkflowError::Provider(
+                MailOperationError::MoveOutcomeUnknown
+            ))
+        );
+        assert_eq!(
+            second
+                .mail_session()
+                .move_message(&inbox_reference, &message_id(), &archive_reference)
+                .await,
+            Err(MailWorkflowError::AccountSyncRequired)
+        );
+        assert_eq!(
+            move_calls
+                .lock()
+                .expect("synthetic move log mutex is not poisoned")
+                .len(),
+            1
+        );
+
+        second
+            .mail_session()
+            .synchronize_account(
+                &account,
+                started_at + Duration::from_secs(1),
+                &ignore_sync_progress,
+            )
+            .await
+            .expect("second account sync restores shared mail readiness");
+        *provider
+            .move_result
+            .lock()
+            .expect("synthetic move result mutex is not poisoned") = Ok(());
+        assert_eq!(
+            second
+                .mail_session()
+                .move_message(&inbox_reference, &message_id(), &archive_reference)
+                .await,
+            Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached)
+        );
+        drop(first);
+        drop(second);
+    });
+}
+
+#[test]
 fn calendar_sync_reservation_blocks_sign_out_cache_removal() {
     smol::block_on(async {
         let directory = TempDir::new().expect("temporary directory is created");

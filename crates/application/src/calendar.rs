@@ -12,6 +12,7 @@ use einfach_mail_domain::{
 };
 use thiserror::Error;
 
+use crate::account_recovery::{AccountWorkflowRecovery, CalendarWriteReadiness};
 use crate::{
     AccountOperationError,
     operation_reservations::{
@@ -589,17 +590,6 @@ impl CalendarSyncReport {
     }
 }
 
-/// Calendar write state for one view and its account.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CalendarWriteReadiness {
-    /// This view has completed a sync, and no account view needs recovery.
-    Ready,
-    /// This view has not completed a successful sync in the current workflow.
-    ViewSyncRequired,
-    /// An account view needs recovery or has an active replacement scan.
-    AccountSyncRequired,
-}
-
 /// Cached occurrences and cursor state loaded for a fixed view range.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CalendarSnapshot {
@@ -762,29 +752,7 @@ where
     provider: P,
     cache: C,
     reservations: Arc<Mutex<ActiveOperations>>,
-    write_recovery: Mutex<CalendarWriteRecovery>,
-}
-
-#[derive(Default)]
-struct CalendarWriteRecovery {
-    synchronized_views: std::collections::HashSet<CalendarViewReference>,
-    sync_required_views: std::collections::HashSet<CalendarViewReference>,
-}
-
-impl CalendarWriteRecovery {
-    fn readiness_for(&self, view: &CalendarViewReference) -> CalendarWriteReadiness {
-        if self
-            .sync_required_views
-            .iter()
-            .any(|required_view| required_view.account_id() == view.account_id())
-        {
-            CalendarWriteReadiness::AccountSyncRequired
-        } else if self.synchronized_views.contains(view) {
-            CalendarWriteReadiness::Ready
-        } else {
-            CalendarWriteReadiness::ViewSyncRequired
-        }
-    }
+    recovery: Arc<AccountWorkflowRecovery>,
 }
 
 impl<P, C> CalendarWorkflow<P, C>
@@ -799,6 +767,7 @@ where
             provider,
             cache,
             Arc::new(Mutex::new(ActiveOperations::default())),
+            Arc::new(AccountWorkflowRecovery::default()),
         )
     }
 
@@ -806,12 +775,13 @@ where
         provider: P,
         cache: C,
         reservations: Arc<Mutex<ActiveOperations>>,
+        recovery: Arc<AccountWorkflowRecovery>,
     ) -> Self {
         Self {
             provider,
             cache,
             reservations,
-            write_recovery: Mutex::new(CalendarWriteRecovery::default()),
+            recovery,
         }
     }
 
@@ -831,14 +801,12 @@ where
             .cache
             .account_has_active_replacement(view.account_id())
             .await?;
-        let recovery = self
-            .write_recovery
-            .lock()
-            .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
         let write_readiness = if account_has_active_replacement {
             CalendarWriteReadiness::AccountSyncRequired
         } else {
-            recovery.readiness_for(view)
+            self.recovery
+                .calendar_write_readiness(view)
+                .map_err(|_| CalendarWorkflowError::StateUnavailable)?
         };
         Ok(CalendarSnapshot {
             events,
@@ -869,7 +837,9 @@ where
             reserve_calendar_view(&self.reservations, view).map_err(CalendarWorkflowError::from)?;
         let state = self.cache.ensure_view(view).await?;
         let report = self.sync_round(view, state).await?;
-        self.mark_view_synchronized(view)?;
+        self.recovery
+            .mark_calendar_view_synchronized(view)
+            .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
         Ok(report)
     }
 
@@ -989,7 +959,8 @@ where
     /// The account reservation covers the provider write and cache transaction.
     /// A changed event, uncertain provider result, or confirmed update that
     /// cannot be cached requires successful syncs for previously synchronized
-    /// account views before another calendar write can start.
+    /// account views before another calendar write can start. Dropping this
+    /// future after the provider request starts also requires those syncs.
     ///
     /// # Errors
     ///
@@ -1008,10 +979,11 @@ where
         update: &CalendarEventUpdate,
     ) -> Result<CalendarEventUpdateOutcome, CalendarWorkflowError> {
         let view = update.source().occurrence().reference();
-        let account_id = view.account_id();
-        let _reservation =
-            reserve_account(&self.reservations, account_id).map_err(CalendarWorkflowError::from)?;
+        let account_id = view.account_id().clone();
+        let _reservation = reserve_account(&self.reservations, &account_id)
+            .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
+        let mut reconciliation = CalendarWriteReconciliationGuard::new(&self.recovery, account_id);
         let event = match self.provider.update_event(update).await {
             Ok(event) => event,
             Err(error) => {
@@ -1020,19 +992,24 @@ where
                     CalendarOperationError::EventChanged
                         | CalendarOperationError::UpdateOutcomeUnknown
                 ) {
-                    self.require_account_calendar_write_sync(account_id)?;
+                    reconciliation.require_sync()?;
+                } else {
+                    reconciliation.complete();
                 }
                 return Err(error.into());
             }
         };
         if !update.confirms(&event) {
-            self.require_account_calendar_write_sync(account_id)?;
+            reconciliation.require_sync()?;
             return Err(CalendarWorkflowError::InvalidUpdateConfirmation);
         }
         match self.cache.commit_event_update(update, &event).await {
-            Ok(()) => Ok(CalendarEventUpdateOutcome::Cached(event)),
+            Ok(()) => {
+                reconciliation.complete();
+                Ok(CalendarEventUpdateOutcome::Cached(event))
+            }
             Err(cache_error) => {
-                self.require_account_calendar_write_sync(account_id)?;
+                reconciliation.require_sync()?;
                 Ok(CalendarEventUpdateOutcome::ConfirmedButNotCached { event, cache_error })
             }
         }
@@ -1043,7 +1020,8 @@ where
     /// The account reservation covers the final provider check, Graph request,
     /// and cache transaction. A changed event, uncertain result, or cache
     /// failure requires successful syncs for previously synchronized account
-    /// views before another calendar write can start.
+    /// views before another calendar write can start. Dropping this future
+    /// after the provider request starts also requires those syncs.
     ///
     /// # Errors
     ///
@@ -1058,23 +1036,29 @@ where
         event: &EditableCalendarEvent,
     ) -> Result<CalendarEventDeletionOutcome, CalendarWorkflowError> {
         let view = event.occurrence().reference();
-        let account_id = view.account_id();
-        let _reservation =
-            reserve_account(&self.reservations, account_id).map_err(CalendarWorkflowError::from)?;
+        let account_id = view.account_id().clone();
+        let _reservation = reserve_account(&self.reservations, &account_id)
+            .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
+        let mut reconciliation = CalendarWriteReconciliationGuard::new(&self.recovery, account_id);
         if let Err(error) = self.provider.delete_event(event).await {
             if matches!(
                 error,
                 CalendarOperationError::EventChanged | CalendarOperationError::DeleteOutcomeUnknown
             ) {
-                self.require_account_calendar_write_sync(account_id)?;
+                reconciliation.require_sync()?;
+            } else {
+                reconciliation.complete();
             }
             return Err(error.into());
         }
         match self.cache.commit_event_deletion(event).await {
-            Ok(()) => Ok(CalendarEventDeletionOutcome::Deleted),
+            Ok(()) => {
+                reconciliation.complete();
+                Ok(CalendarEventDeletionOutcome::Deleted)
+            }
             Err(cache_error) => {
-                self.require_account_calendar_write_sync(account_id)?;
+                reconciliation.require_sync()?;
                 Ok(CalendarEventDeletionOutcome::DeletedButNotCached { cache_error })
             }
         }
@@ -1091,50 +1075,17 @@ where
         {
             return Err(CalendarWorkflowError::CalendarWriteSyncRequired);
         }
-        let recovery = self
-            .write_recovery
-            .lock()
-            .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
-        match recovery.readiness_for(view) {
+        match self
+            .recovery
+            .calendar_write_readiness(view)
+            .map_err(|_| CalendarWorkflowError::StateUnavailable)?
+        {
             CalendarWriteReadiness::Ready => Ok(()),
             CalendarWriteReadiness::ViewSyncRequired
             | CalendarWriteReadiness::AccountSyncRequired => {
                 Err(CalendarWorkflowError::CalendarWriteSyncRequired)
             }
         }
-    }
-
-    fn require_account_calendar_write_sync(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<(), CalendarWorkflowError> {
-        let mut recovery = self
-            .write_recovery
-            .lock()
-            .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
-        let synchronized_account_views = recovery
-            .synchronized_views
-            .iter()
-            .filter(|view| view.account_id() == account_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        recovery
-            .sync_required_views
-            .extend(synchronized_account_views);
-        Ok(())
-    }
-
-    fn mark_view_synchronized(
-        &self,
-        view: &CalendarViewReference,
-    ) -> Result<(), CalendarWorkflowError> {
-        let mut recovery = self
-            .write_recovery
-            .lock()
-            .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
-        recovery.synchronized_views.insert(view.clone());
-        recovery.sync_required_views.remove(view);
-        Ok(())
     }
 
     async fn sync_round(
@@ -1190,6 +1141,46 @@ where
                 }
                 Ok(false)
             }
+        }
+    }
+}
+
+#[must_use = "dropping an unresolved calendar write guard requires sync"]
+struct CalendarWriteReconciliationGuard<'a> {
+    recovery: &'a AccountWorkflowRecovery,
+    account_id: AccountId,
+    complete: bool,
+}
+
+impl<'a> CalendarWriteReconciliationGuard<'a> {
+    fn new(recovery: &'a AccountWorkflowRecovery, account_id: AccountId) -> Self {
+        Self {
+            recovery,
+            account_id,
+            complete: false,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.complete = true;
+    }
+
+    fn require_sync(&mut self) -> Result<(), CalendarWorkflowError> {
+        self.recovery
+            .require_account_calendar_write_sync(&self.account_id)
+            .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
+        self.complete();
+        Ok(())
+    }
+}
+
+impl Drop for CalendarWriteReconciliationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            // A poisoned recovery lock makes subsequent readiness checks fail closed.
+            let _ = self
+                .recovery
+                .require_account_calendar_write_sync(&self.account_id);
         }
     }
 }
