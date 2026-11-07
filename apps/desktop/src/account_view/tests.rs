@@ -590,6 +590,19 @@ fn unavailable_account_cache_message_covers_file_and_keyring_recovery() {
     assert!(!message.contains("removed"));
 }
 
+#[test]
+fn cache_removal_validation_failure_explains_sign_in_remains() {
+    for error in [
+        AccountCacheRemovalError::InvalidData,
+        AccountCacheRemovalError::AccountMismatch,
+    ] {
+        let message = super::account_cache_removal_error_message(error);
+
+        assert!(message.contains("verified for removal"));
+        assert!(message.contains("still signed in"));
+    }
+}
+
 #[gpui_kit::test]
 fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
