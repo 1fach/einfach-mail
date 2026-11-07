@@ -16,7 +16,7 @@ export EINFACH_MAIL_ENTRA_CALLBACK_PORT='<registered-loopback-port>'
 cargo run --locked --package einfach-mail-desktop --bin einfach-mail
 ```
 
-`Cargo.lock` pins GPUI Kit and its transitive dependencies. Keep it under version control and do not edit it by hand. When intentionally changing dependencies, update and review the lockfile before committing it. The native window shows the account view. Set `EINFACH_MAIL_ENTRA_CLIENT_ID` to a public app registration ID to enable sign-in. See [development setup](docs/project/setup.md) for the limits.
+`Cargo.lock` pins GPUI Kit and its transitive dependencies. Keep it under version control and do not edit it by hand. When intentionally changing dependencies, update and review the lockfile before committing it. The native window opens to the account view. See [development setup](docs/project/setup.md) for sign-in requirements and limits on live testing.
 
 ## Check changes locally
 
