@@ -14,9 +14,10 @@ use thiserror::Error;
 
 use crate::{
     AccountOperationError,
-    mail_workflow::{
+    operation_reservations::{
         AccountReservationError, ActiveOperations, reserve_account, reserve_calendar_view,
     },
+    sync_budget::response_bytes_after,
 };
 
 /// A user-safe category for a calendar provider failure.
@@ -231,15 +232,9 @@ pub enum CalendarCacheError {
     /// The requested view belongs to another cache account.
     #[error("the local calendar cache belongs to another account")]
     AccountMismatch,
-    /// An unresolved send marker prevents removal of the shared account cache.
-    #[error("a pending mail send must be resolved before removing the account cache")]
-    PendingMailSend,
     /// Another uncertain event creation must be resolved for this account first.
     #[error("another calendar event creation is already pending")]
     CreationAlreadyPending,
-    /// Removing the account cache would discard an unresolved calendar event creation.
-    #[error("a calendar event creation needs recovery before account removal")]
-    UnresolvedEventCreation,
 }
 
 /// An account and view's completed delta cursor and resumable page checkpoint.
@@ -528,21 +523,6 @@ pub trait CalendarCache: Send + Sync {
         &self,
         event: &EditableCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
-
-    /// Removes all account data owned by this cache and its local encryption key.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CalendarCacheError::AccountMismatch`] for another account,
-    /// [`CalendarCacheError::PendingMailSend`] while a send outcome is unresolved,
-    /// [`CalendarCacheError::UnresolvedEventCreation`] while an event-creation outcome is
-    /// unresolved, [`CalendarCacheError::InUse`] while another cache handle or lifecycle
-    /// operation owns an account lock, or
-    /// [`CalendarCacheError::Unavailable`] when cache removal fails.
-    fn remove_account(
-        &self,
-        account_id: &AccountId,
-    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
 }
 
 /// A user-safe category for a calendar workflow failure.
@@ -584,6 +564,15 @@ pub enum CalendarWorkflowError {
     /// The synchronization reservation could not be read or released.
     #[error("the calendar workflow state is unavailable")]
     StateUnavailable,
+}
+
+impl From<AccountReservationError> for CalendarWorkflowError {
+    fn from(error: AccountReservationError) -> Self {
+        match error {
+            AccountReservationError::OperationInProgress => Self::OperationInProgress,
+            AccountReservationError::StateUnavailable => Self::StateUnavailable,
+        }
+    }
 }
 
 /// A count of pages committed by one calendar synchronization request.
@@ -694,7 +683,6 @@ pub enum CalendarEventDeletionOutcome {
 }
 
 const MAX_PAGES_PER_VIEW_ROUND: usize = 1_000;
-const MAX_SYNC_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DELTA_RESETS_PER_VIEW_ROUND: usize = 1;
 
 struct CalendarSyncRound {
@@ -739,10 +727,7 @@ impl CalendarSyncRound {
     }
 
     fn add_response_bytes(&mut self, response_bytes: usize) -> Result<(), CalendarWorkflowError> {
-        self.response_bytes = self
-            .response_bytes
-            .checked_add(response_bytes)
-            .filter(|total| *total <= MAX_SYNC_RESPONSE_BYTES)
+        self.response_bytes = response_bytes_after(self.response_bytes, response_bytes)
             .ok_or(CalendarWorkflowError::ResponseLimitExceeded)?;
         Ok(())
     }
@@ -881,14 +866,7 @@ where
         view: &CalendarViewReference,
     ) -> Result<CalendarSyncReport, CalendarWorkflowError> {
         let _reservation =
-            reserve_calendar_view(&self.reservations, view).map_err(|error| match error {
-                AccountReservationError::OperationInProgress => {
-                    CalendarWorkflowError::OperationInProgress
-                }
-                AccountReservationError::StateUnavailable => {
-                    CalendarWorkflowError::StateUnavailable
-                }
-            })?;
+            reserve_calendar_view(&self.reservations, view).map_err(CalendarWorkflowError::from)?;
         let state = self.cache.ensure_view(view).await?;
         let report = self.sync_round(view, state).await?;
         self.mark_view_synchronized(view)?;
@@ -923,14 +901,7 @@ where
         creation: &CalendarEventCreation,
     ) -> Result<CalendarEventCreationOutcome, CalendarWorkflowError> {
         let _reservation = reserve_account(&self.reservations, creation.view().account_id())
-            .map_err(|error| match error {
-                AccountReservationError::OperationInProgress => {
-                    CalendarWorkflowError::OperationInProgress
-                }
-                AccountReservationError::StateUnavailable => {
-                    CalendarWorkflowError::StateUnavailable
-                }
-            })?;
+            .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(creation.view()).await?;
         self.cache.stage_event_creation(creation).await?;
         let event = match self.provider.create_event(creation).await {
@@ -973,16 +944,8 @@ where
         &self,
         creation: &CalendarEventCreation,
     ) -> Result<(), CalendarWorkflowError> {
-        let _reservation = reserve_calendar_view(&self.reservations, creation.view()).map_err(
-            |error| match error {
-                AccountReservationError::OperationInProgress => {
-                    CalendarWorkflowError::OperationInProgress
-                }
-                AccountReservationError::StateUnavailable => {
-                    CalendarWorkflowError::StateUnavailable
-                }
-            },
-        )?;
+        let _reservation = reserve_calendar_view(&self.reservations, creation.view())
+            .map_err(CalendarWorkflowError::from)?;
         self.cache.mark_event_creation_rejected(creation).await?;
         self.cache.discard_event_creation(creation).await?;
         Ok(())
@@ -1010,14 +973,7 @@ where
     ) -> Result<EditableCalendarEvent, CalendarWorkflowError> {
         let account_id = event.reference().account_id();
         let _reservation =
-            reserve_account(&self.reservations, account_id).map_err(|error| match error {
-                AccountReservationError::OperationInProgress => {
-                    CalendarWorkflowError::OperationInProgress
-                }
-                AccountReservationError::StateUnavailable => {
-                    CalendarWorkflowError::StateUnavailable
-                }
-            })?;
+            reserve_account(&self.reservations, account_id).map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(event.reference()).await?;
         let editable = self.provider.editable_event(event).await?;
         if editable.occurrence().reference() != event.reference()
@@ -1054,14 +1010,7 @@ where
         let view = update.source().occurrence().reference();
         let account_id = view.account_id();
         let _reservation =
-            reserve_account(&self.reservations, account_id).map_err(|error| match error {
-                AccountReservationError::OperationInProgress => {
-                    CalendarWorkflowError::OperationInProgress
-                }
-                AccountReservationError::StateUnavailable => {
-                    CalendarWorkflowError::StateUnavailable
-                }
-            })?;
+            reserve_account(&self.reservations, account_id).map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
         let event = match self.provider.update_event(update).await {
             Ok(event) => event,
@@ -1111,14 +1060,7 @@ where
         let view = event.occurrence().reference();
         let account_id = view.account_id();
         let _reservation =
-            reserve_account(&self.reservations, account_id).map_err(|error| match error {
-                AccountReservationError::OperationInProgress => {
-                    CalendarWorkflowError::OperationInProgress
-                }
-                AccountReservationError::StateUnavailable => {
-                    CalendarWorkflowError::StateUnavailable
-                }
-            })?;
+            reserve_account(&self.reservations, account_id).map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
         if let Err(error) = self.provider.delete_event(event).await {
             if matches!(

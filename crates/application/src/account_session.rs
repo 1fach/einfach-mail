@@ -1,6 +1,11 @@
 //! Account-scoped application operations exposed to desktop views.
 
-use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
@@ -9,14 +14,15 @@ use einfach_mail_domain::{
     ReadState,
 };
 
+use crate::operation_reservations::{ActiveOperations, reserve_account};
 use crate::{
-    CalendarCache, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
-    CalendarEventUpdateOutcome, CalendarProvider, CalendarSnapshot, CalendarSyncReport,
-    CalendarWorkflow, CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCache, MailCacheError,
-    MailProvider, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError,
-    MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError,
-    MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome, WellKnownFolderMoveOutcome,
-    WellKnownMailFolder,
+    AccountCache, AccountCacheRemovalError, CalendarCache, CalendarEventCreationOutcome,
+    CalendarEventDeletionOutcome, CalendarEventUpdateOutcome, CalendarProvider, CalendarSnapshot,
+    CalendarSyncReport, CalendarWorkflow, CalendarWorkflowError, FollowUpFlagUpdateOutcome,
+    MailCache, MailCacheError, MailProvider, MailSendOutcome, MailSendResolutionError,
+    MailSendWorkflowError, MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflow,
+    MailWorkflowError, MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
+    WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -198,13 +204,12 @@ pub trait MailSession: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account does not own the cache or removal fails.
-    /// Returns [`MailCacheError::InUse`] when another cache handle or lifecycle operation owns
-    /// an account lock.
+    /// Returns an account-cache removal error when active work, an unresolved operation, or a
+    /// cache failure prevents removal.
     fn remove_account_cache<'a>(
         &'a self,
         account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), MailCacheError>>;
+    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>>;
 }
 
 /// Calendar operations for one signed-in account.
@@ -307,13 +312,12 @@ pub trait AccountSession: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account does not own the cache or removal fails.
-    /// Returns [`MailCacheError::InUse`] when another cache handle or lifecycle operation owns
-    /// an account lock.
+    /// Returns an account-cache removal error when active work, an unresolved operation, or a
+    /// cache failure prevents removal.
     fn remove_account_cache<'a>(
         &'a self,
         account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), MailCacheError>>;
+    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>>;
 }
 
 /// Opens one account session and removes account caches when no session is open.
@@ -333,19 +337,18 @@ pub trait AccountSessionFactory: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account files or credential cannot be removed.
-    /// Returns [`MailCacheError::InUse`] when another cache handle or lifecycle operation owns
-    /// an account lock.
+    /// Returns an account-cache removal error when another session owns the cache, an unresolved
+    /// operation needs recovery, or the cache or key cannot be removed.
     fn remove_account_cache<'a>(
         &'a self,
         account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), MailCacheError>>;
+    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>>;
 }
 
 /// Opens a cloneable handle to one account's shared mail and calendar cache.
 pub trait AccountCacheFactory: Send + Sync {
     /// A cache whose clones continue to refer to the same account data.
-    type Cache: MailCache + CalendarCache + Clone + 'static;
+    type Cache: MailCache + CalendarCache + AccountCache + Clone + 'static;
 
     /// Opens or creates the cache owned by `account_id`.
     ///
@@ -362,13 +365,72 @@ pub trait AccountCacheFactory: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account files or credential cannot be removed.
-    /// Returns [`MailCacheError::InUse`] when another cache handle or lifecycle operation owns
-    /// an account lock.
+    /// Returns an account-cache removal error when another session owns the cache, an unresolved
+    /// operation needs recovery, or the cache or key cannot be removed.
     fn remove_for_account<'a>(
         &'a self,
         account_id: &'a AccountId,
-    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + 'a;
+    ) -> impl Future<Output = Result<(), AccountCacheRemovalError>> + Send + 'a;
+}
+
+/// Creates account sessions and shares operation reservations among them.
+pub struct AccountSessionWorkflowFactory<P, F> {
+    provider: P,
+    cache_factory: F,
+    reservations: Arc<Mutex<ActiveOperations>>,
+}
+
+impl<P, F> AccountSessionWorkflowFactory<P, F> {
+    /// Combines a provider with the factory that opens account caches.
+    #[must_use]
+    pub fn new(provider: P, cache_factory: F) -> Self {
+        Self {
+            provider,
+            cache_factory,
+            reservations: Arc::new(Mutex::new(ActiveOperations::default())),
+        }
+    }
+}
+
+impl<P, F> AccountSessionFactory for AccountSessionWorkflowFactory<P, F>
+where
+    P: MailProvider + CalendarProvider + Clone + 'static,
+    F: AccountCacheFactory + 'static,
+{
+    fn open_session(
+        &self,
+        account_id: AccountId,
+    ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
+        Box::pin(async move {
+            let cache = self.cache_factory.open_for_account(account_id).await?;
+            let mail_workflow: Arc<dyn MailSession> = Arc::new(MailWorkflow::with_reservations(
+                self.provider.clone(),
+                cache.clone(),
+                Arc::clone(&self.reservations),
+            ));
+            let calendar_workflow: Arc<dyn CalendarSession> =
+                Arc::new(CalendarWorkflow::with_reservations(
+                    self.provider.clone(),
+                    cache,
+                    Arc::clone(&self.reservations),
+                ));
+            Ok(Arc::new(AccountSessionWorkflow::new(
+                mail_workflow,
+                calendar_workflow,
+            )) as Arc<dyn AccountSession>)
+        })
+    }
+
+    fn remove_account_cache<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
+        Box::pin(async move {
+            let _reservation = reserve_account(&self.reservations, account_id)
+                .map_err(AccountCacheRemovalError::from)?;
+            self.cache_factory.remove_for_account(account_id).await
+        })
+    }
 }
 
 pub(crate) struct AccountSessionWorkflow {
@@ -394,7 +456,7 @@ impl AccountSession for AccountSessionWorkflow {
     fn remove_account_cache<'a>(
         &'a self,
         account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
         self.mail.remove_account_cache(account_id)
     }
 }
@@ -402,7 +464,7 @@ impl AccountSession for AccountSessionWorkflow {
 impl<P, C> MailSession for MailWorkflow<P, C>
 where
     P: MailProvider,
-    C: MailCache,
+    C: MailCache + AccountCache,
 {
     fn synchronize_account<'a>(
         &'a self,
@@ -548,7 +610,7 @@ where
     fn remove_account_cache<'a>(
         &'a self,
         account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), MailCacheError>> {
+    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
         Box::pin(MailWorkflow::remove_account_cache(self, account_id))
     }
 }

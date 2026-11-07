@@ -61,6 +61,15 @@ struct ProviderSession {
     access_token: Option<Arc<AccessToken>>,
 }
 
+#[derive(Clone, Copy)]
+enum AccessTokenError {
+    SignInRequired,
+    AccountMismatch,
+    AccessDenied,
+    CredentialStoreUnavailable,
+    ServiceUnavailable,
+}
+
 struct AuthorizedAccount {
     profile: AccountProfile,
     refresh_token: RefreshToken,
@@ -88,6 +97,44 @@ impl MicrosoftGraphProvider {
                 graph_transport: OnceLock::new(),
                 session: tokio::sync::Mutex::new(None),
             }),
+        }
+    }
+}
+
+impl From<AccessTokenError> for MailOperationError {
+    fn from(error: AccessTokenError) -> Self {
+        match error {
+            AccessTokenError::SignInRequired => Self::SignInRequired,
+            AccessTokenError::AccountMismatch => Self::AccountMismatch,
+            AccessTokenError::AccessDenied => Self::AccessDenied,
+            AccessTokenError::CredentialStoreUnavailable => Self::CredentialStoreUnavailable,
+            AccessTokenError::ServiceUnavailable => Self::ServiceUnavailable,
+        }
+    }
+}
+
+impl From<AccessTokenError> for CalendarOperationError {
+    fn from(error: AccessTokenError) -> Self {
+        match error {
+            AccessTokenError::SignInRequired => Self::SignInRequired,
+            AccessTokenError::AccountMismatch => Self::AccountMismatch,
+            AccessTokenError::AccessDenied => Self::AccessDenied,
+            AccessTokenError::CredentialStoreUnavailable | AccessTokenError::ServiceUnavailable => {
+                Self::ServiceUnavailable
+            }
+        }
+    }
+}
+
+impl From<AccessTokenError> for MailSendProviderError {
+    fn from(error: AccessTokenError) -> Self {
+        match error {
+            AccessTokenError::SignInRequired => Self::SignInRequired,
+            AccessTokenError::AccountMismatch => Self::AccountMismatch,
+            AccessTokenError::AccessDenied => Self::PermissionRequired,
+            AccessTokenError::CredentialStoreUnavailable | AccessTokenError::ServiceUnavailable => {
+                Self::ServiceUnavailable
+            }
         }
     }
 }
@@ -470,9 +517,7 @@ impl MailProvider for MicrosoftGraphProvider {
         let config = Arc::clone(&self.config);
         let account_id = account_id.clone();
         worker::run(move |_cancellation: CancellationToken| async move {
-            let token = ensure_access_token(&config, &account_id)
-                .await
-                .map_err(map_mail_operation_to_send)?;
+            let token = ensure_access_token(&config, &account_id).await?;
             let graph_api = config.graph_api().map_err(map_send_graph_error)?;
             let result = graph_api.send_mail(&draft, Arc::clone(&token)).await;
             map_send_submission_result(&config, &account_id, &token, result).await
@@ -490,9 +535,7 @@ impl MailProvider for MicrosoftGraphProvider {
             if draft.source().account_id() != &account_id {
                 return Err(MailSendProviderError::AccountMismatch);
             }
-            let token = ensure_access_token(&config, &account_id)
-                .await
-                .map_err(map_mail_operation_to_send)?;
+            let token = ensure_access_token(&config, &account_id).await?;
             let graph_api = config.graph_api().map_err(map_send_graph_error)?;
             let result = graph_api.reply_to_message(&draft, Arc::clone(&token)).await;
             map_send_submission_result(&config, &account_id, &token, result).await
@@ -511,9 +554,7 @@ impl CalendarProvider for MicrosoftGraphProvider {
         let view = view.clone();
         worker::run(move |_cancellation: CancellationToken| async move {
             let account_id = view.account_id().clone();
-            let token = ensure_access_token(&config, &account_id)
-                .await
-                .map_err(map_mail_operation_to_calendar)?;
+            let token = ensure_access_token(&config, &account_id).await?;
             let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
             let page = graph_api
                 .calendar_delta_page(&view, request, Arc::clone(&token))
@@ -533,9 +574,7 @@ impl CalendarProvider for MicrosoftGraphProvider {
         let creation = creation.clone();
         worker::run(move |_cancellation: CancellationToken| async move {
             let account_id = creation.view().account_id().clone();
-            let token = ensure_access_token(&config, &account_id)
-                .await
-                .map_err(map_mail_operation_to_calendar)?;
+            let token = ensure_access_token(&config, &account_id).await?;
             let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
             let event = graph_api
                 .create_calendar_event(&creation, Arc::clone(&token))
@@ -553,9 +592,7 @@ impl CalendarProvider for MicrosoftGraphProvider {
         let event = event.clone();
         worker::run(move |_cancellation: CancellationToken| async move {
             let account_id = event.reference().account_id().clone();
-            let token = ensure_access_token(&config, &account_id)
-                .await
-                .map_err(map_mail_operation_to_calendar)?;
+            let token = ensure_access_token(&config, &account_id).await?;
             let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
             let editable = graph_api
                 .editable_calendar_event(&event, Arc::clone(&token))
@@ -577,9 +614,7 @@ impl CalendarProvider for MicrosoftGraphProvider {
                 .reference()
                 .account_id()
                 .clone();
-            let token = ensure_access_token(&config, &account_id)
-                .await
-                .map_err(map_mail_operation_to_calendar)?;
+            let token = ensure_access_token(&config, &account_id).await?;
             let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
             let event = graph_api
                 .update_calendar_event(&update, Arc::clone(&token))
@@ -596,9 +631,7 @@ impl CalendarProvider for MicrosoftGraphProvider {
         let event = event.clone();
         worker::run(move |_cancellation: CancellationToken| async move {
             let account_id = event.occurrence().reference().account_id().clone();
-            let token = ensure_access_token(&config, &account_id)
-                .await
-                .map_err(map_mail_operation_to_calendar)?;
+            let token = ensure_access_token(&config, &account_id).await?;
             let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
             let result = graph_api
                 .delete_calendar_event(&event, Arc::clone(&token))
@@ -611,13 +644,13 @@ impl CalendarProvider for MicrosoftGraphProvider {
 async fn ensure_access_token(
     config: &ProviderConfig,
     account_id: &AccountId,
-) -> Result<Arc<AccessToken>, MailOperationError> {
+) -> Result<Arc<AccessToken>, AccessTokenError> {
     let mut session = config.session.lock().await;
     let Some(account_session) = session.as_ref() else {
-        return Err(MailOperationError::SignInRequired);
+        return Err(AccessTokenError::SignInRequired);
     };
     if &account_session.account_id != account_id {
-        return Err(MailOperationError::AccountMismatch);
+        return Err(AccessTokenError::AccountMismatch);
     }
     if let Some(access_token) = account_session.access_token.as_ref()
         && !access_token.is_expired(DEFAULT_ACCESS_TOKEN_LIFETIME, ACCESS_TOKEN_EXPIRY_MARGIN)
@@ -626,12 +659,13 @@ async fn ensure_access_token(
     }
     let saved_credential = config
         .credentials
-        .load()?
-        .ok_or(MailOperationError::SignInRequired)?;
+        .load()
+        .map_err(access_token_error_from_account)?
+        .ok_or(AccessTokenError::SignInRequired)?;
     if saved_credential.account_id() != Some(account_id) {
-        return Err(MailOperationError::AccountMismatch);
+        return Err(AccessTokenError::AccountMismatch);
     }
-    let client = http_client::build_client().map_err(|_| MailOperationError::ServiceUnavailable)?;
+    let client = http_client::build_client().map_err(|_| AccessTokenError::ServiceUnavailable)?;
     refresh_access_token(config, &mut session, saved_credential, client).await
 }
 
@@ -640,28 +674,45 @@ async fn refresh_access_token(
     session: &mut Option<ProviderSession>,
     saved_credential: SavedRefreshToken,
     client: Client,
-) -> Result<Arc<AccessToken>, MailOperationError> {
+) -> Result<Arc<AccessToken>, AccessTokenError> {
     let response = identity::refresh(
         config.client_id,
         &config.endpoints,
         client,
         saved_credential.token().clone(),
     )
-    .await?;
+    .await
+    .map_err(access_token_error_from_account)?;
     let replacement_token = response
         .refresh_token()
         .cloned()
         .unwrap_or_else(|| saved_credential.token().clone());
     let access_token = Arc::new(response.access_token().clone());
     let Some(account_session) = session.as_mut() else {
-        return Err(MailOperationError::SignInRequired);
+        return Err(AccessTokenError::SignInRequired);
     };
-    config.credentials.save(
-        &CredentialIdentity::Verified(account_session.account_id.clone()),
-        &replacement_token,
-    )?;
+    config
+        .credentials
+        .save(
+            &CredentialIdentity::Verified(account_session.account_id.clone()),
+            &replacement_token,
+        )
+        .map_err(access_token_error_from_account)?;
     account_session.access_token = Some(Arc::clone(&access_token));
     Ok(access_token)
+}
+
+fn access_token_error_from_account(error: AccountOperationError) -> AccessTokenError {
+    match error {
+        AccountOperationError::AccessDenied => AccessTokenError::AccessDenied,
+        AccountOperationError::AccessTokenRejected | AccountOperationError::SignInExpired => {
+            AccessTokenError::SignInRequired
+        }
+        AccountOperationError::CredentialStoreUnavailable => {
+            AccessTokenError::CredentialStoreUnavailable
+        }
+        _ => AccessTokenError::ServiceUnavailable,
+    }
 }
 
 /// Checks that replacement keeps any verified saved account ID.
@@ -710,23 +761,6 @@ async fn map_calendar_result<T>(
         invalidate_access_token(config, account_id, access_token).await;
     }
     calendar_result.map_err(map_calendar_graph_error)
-}
-
-fn map_mail_operation_to_calendar(error: MailOperationError) -> CalendarOperationError {
-    match error {
-        MailOperationError::SignInRequired => CalendarOperationError::SignInRequired,
-        MailOperationError::AccountMismatch => CalendarOperationError::AccountMismatch,
-        MailOperationError::AccessDenied => CalendarOperationError::AccessDenied,
-        MailOperationError::RateLimited { retry_after } => {
-            CalendarOperationError::RateLimited { retry_after }
-        }
-        MailOperationError::InvalidResponse => CalendarOperationError::InvalidResponse,
-        MailOperationError::ResourceLimitExceeded => CalendarOperationError::ResourceLimitExceeded,
-        MailOperationError::CredentialStoreUnavailable | MailOperationError::ServiceUnavailable => {
-            CalendarOperationError::ServiceUnavailable
-        }
-        _ => CalendarOperationError::ServiceUnavailable,
-    }
 }
 
 fn map_calendar_graph_error(error: GraphError) -> CalendarOperationError {
@@ -851,22 +885,6 @@ fn map_profile_graph_error(error: GraphError) -> AccountOperationError {
         | GraphError::CalendarEventNotEditable
         | GraphError::CalendarEventChanged
         | GraphError::RateLimited { .. } => AccountOperationError::ServiceUnavailable,
-    }
-}
-
-fn map_mail_operation_to_send(error: MailOperationError) -> MailSendProviderError {
-    match error {
-        MailOperationError::SignInRequired => MailSendProviderError::SignInRequired,
-        MailOperationError::AccountMismatch => MailSendProviderError::AccountMismatch,
-        MailOperationError::AccessDenied => MailSendProviderError::PermissionRequired,
-        MailOperationError::RateLimited { retry_after } => {
-            MailSendProviderError::RateLimited { retry_after }
-        }
-        MailOperationError::CredentialStoreUnavailable
-        | MailOperationError::ServiceUnavailable
-        | MailOperationError::InvalidResponse
-        | MailOperationError::ResourceLimitExceeded => MailSendProviderError::ServiceUnavailable,
-        _ => MailSendProviderError::ServiceUnavailable,
     }
 }
 

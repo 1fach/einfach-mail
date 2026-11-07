@@ -685,7 +685,7 @@ impl MessageDeltaPage {
         &self.progress
     }
 
-    /// Returns the page's changes and cursor after the caller commits the page.
+    /// Returns the page's changes and continuation state as separate values.
     #[must_use]
     pub fn into_parts(self) -> (Vec<MessageDeltaChange>, MessageDeltaProgress) {
         (self.changes, self.progress)
@@ -1062,7 +1062,7 @@ impl MailMessage {
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use crate::{AccountId, EmptyMailboxAddress, FolderId, FolderReference, Mailbox};
+    use crate::{AccountId, FolderId, FolderReference, Mailbox};
 
     use super::{
         FolderParentError, FollowUpFlagStatus, MailFolder, MessageBody, MessageBodyType,
@@ -1105,13 +1105,6 @@ mod tests {
         let parent = folder_reference("account-1", "folder-2");
 
         assert!(MailFolder::new(reference, Some(parent), "Child".to_owned()).is_ok());
-    }
-
-    #[test]
-    fn mailbox_requires_a_non_empty_address() {
-        for address in [String::new(), " \t\n".to_owned()] {
-            assert_eq!(Mailbox::try_new(address, None), Err(EmptyMailboxAddress));
-        }
     }
 
     #[test]

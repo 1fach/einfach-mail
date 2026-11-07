@@ -1,8 +1,7 @@
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use crate::calendar_time::to_offset_date_time;
+use std::{sync::Arc, time::SystemTime};
 
+use crate::sync_age::relative_age_label;
 use einfach_mail_application::{
     CalendarOperationError, CalendarSession, CalendarWorkflowError, CalendarWriteReadiness,
 };
@@ -1075,8 +1074,8 @@ fn view_for_week(
     let week_end = week_start.checked_add(Span::new().weeks(1)).ok()?;
     let start_timestamp = week_start.to_zoned(time_zone.clone()).ok()?.timestamp();
     let end_timestamp = week_end.to_zoned(time_zone.clone()).ok()?.timestamp();
-    let start = offset_date_time(start_timestamp)?;
-    let end = offset_date_time(end_timestamp)?;
+    let start = to_offset_date_time(start_timestamp)?;
+    let end = to_offset_date_time(end_timestamp)?;
     let start_date = domain_date(week_start)?;
     let end_date = domain_date(week_end)?;
     let range = CalendarViewRange::new(start, end, start_date, end_date).ok()?;
@@ -1094,13 +1093,6 @@ fn domain_date(date: civil::Date) -> Option<Date> {
         u8::try_from(date.day()).ok()?,
     )
     .ok()
-}
-
-fn offset_date_time(timestamp: Timestamp) -> Option<OffsetDateTime> {
-    OffsetDateTime::from_unix_timestamp(timestamp.as_second())
-        .ok()?
-        .replace_nanosecond(u32::try_from(timestamp.subsec_nanosecond()).ok()?)
-        .ok()
 }
 
 fn timestamp(date_time: OffsetDateTime) -> Option<Timestamp> {
@@ -1386,19 +1378,7 @@ fn date_label(date: civil::Date) -> String {
 }
 
 fn elapsed_label(last_sync: SystemTime) -> String {
-    let elapsed = SystemTime::now()
-        .duration_since(last_sync)
-        .unwrap_or(Duration::ZERO);
-    match elapsed.as_secs() {
-        seconds if seconds < 60 => "Calendar updated less than a minute ago.".to_owned(),
-        seconds if seconds < 3_600 => {
-            format!("Calendar updated {} min ago.", seconds / 60)
-        }
-        seconds if seconds < 86_400 => {
-            format!("Calendar updated {} hr ago.", seconds / 3_600)
-        }
-        seconds => format!("Calendar updated {} days ago.", seconds / 86_400),
-    }
+    format!("Calendar updated {}.", relative_age_label(last_sync))
 }
 
 fn calendar_error_message(error: CalendarWorkflowError, has_cached_events: bool) -> String {
@@ -2057,13 +2037,6 @@ mod tests {
                     .insert(event_id);
                 Ok(())
             }
-        }
-
-        fn remove_account(
-            &self,
-            _: &AccountId,
-        ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
-            ready(Ok(()))
         }
     }
 

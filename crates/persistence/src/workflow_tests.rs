@@ -9,12 +9,13 @@ use std::{
 };
 
 use einfach_mail_application::{
-    AccountCacheFactory, AccountSessionFactory, AccountSessionWorkflowFactory, CalendarCacheError,
-    CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
-    CalendarWorkflowError, MailCache, MailCacheError, MailOperationError, MailProvider,
-    MailSendOutcome, MailSendProviderError, MailSendWorkflowError, MailSyncProgress, MailWorkflow,
-    MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
-    MessageDeltaResponse, WellKnownMailFolder,
+    AccountCache, AccountCacheFactory, AccountCacheRemovalError, AccountSessionFactory,
+    AccountSessionWorkflowFactory, CalendarDeltaRequest, CalendarDeltaResponse,
+    CalendarOperationError, CalendarProvider, CalendarWorkflowError, MailCache, MailCacheError,
+    MailOperationError, MailProvider, MailSendOutcome, MailSendProviderError,
+    MailSendWorkflowError, MailSyncProgress, MailWorkflow, MailWorkflowError,
+    MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
+    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence, CalendarViewRange,
@@ -97,8 +98,8 @@ impl AccountCacheFactory for FixtureCacheFactory {
     fn remove_for_account<'a>(
         &'a self,
         _: &'a AccountId,
-    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + 'a {
-        ready(Err(MailCacheError::Unavailable))
+    ) -> impl Future<Output = Result<(), AccountCacheRemovalError>> + Send + 'a {
+        ready(Err(AccountCacheRemovalError::Unavailable))
     }
 }
 
@@ -734,8 +735,11 @@ fn provider_with_cached_message(
 
 fn ignore_sync_progress(_: MailSyncProgress) {}
 
-fn assert_removal_completed(result: Result<(), MailCacheError>, database_path: &std::path::Path) {
-    assert_ne!(result, Err(MailCacheError::OperationInProgress));
+fn assert_removal_completed(
+    result: Result<(), AccountCacheRemovalError>,
+    database_path: &std::path::Path,
+) {
+    assert_ne!(result, Err(AccountCacheRemovalError::OperationInProgress));
     assert!(!database_path.exists());
 }
 
@@ -756,6 +760,24 @@ async fn open_cache(directory: &TempDir, account_id: AccountId) -> SqliteMailCac
         DATABASE_KEY_BYTE,
     )
     .await
+}
+
+#[test]
+fn account_cache_removal_preserves_the_in_use_error() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let first = open_cache(&directory, account.clone()).await;
+        let second = open_cache(&directory, account.clone()).await;
+
+        assert_eq!(
+            <SqliteMailCache as AccountCache>::remove_account(&first, &account).await,
+            Err(AccountCacheRemovalError::InUse)
+        );
+
+        first.close_for_tests().await;
+        second.close_for_tests().await;
+    });
 }
 
 #[test]
@@ -1692,11 +1714,11 @@ fn calendar_sync_reservation_blocks_sign_out_cache_removal() {
         );
         assert_eq!(
             session_removal_result,
-            Err(MailCacheError::OperationInProgress)
+            Err(AccountCacheRemovalError::OperationInProgress)
         );
         assert_eq!(
             factory_removal_result,
-            Err(MailCacheError::OperationInProgress)
+            Err(AccountCacheRemovalError::OperationInProgress)
         );
         calendar
             .load_cached_view(&view)
@@ -3756,15 +3778,8 @@ fn unknown_send_marker_survives_encrypted_restart_and_blocks_duplicate_send_and_
         ));
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
-            <SqliteMailCache as MailCache>::remove_account(&reopened, &account).await,
-            Err(MailCacheError::SendAlreadyPending)
-        );
-        assert_eq!(
-            <SqliteMailCache as einfach_mail_application::CalendarCache>::remove_account(
-                &reopened, &account,
-            )
-            .await,
-            Err(CalendarCacheError::PendingMailSend)
+            <SqliteMailCache as AccountCache>::remove_account(&reopened, &account).await,
+            Err(AccountCacheRemovalError::PendingMailSend)
         );
 
         workflow
@@ -3857,15 +3872,8 @@ fn unknown_reply_marker_survives_encrypted_restart_without_reply_body() {
             Ok(Some(pending.clone()))
         );
         assert_eq!(
-            <SqliteMailCache as MailCache>::remove_account(&cache, &account).await,
-            Err(MailCacheError::SendAlreadyPending)
-        );
-        assert_eq!(
-            <SqliteMailCache as einfach_mail_application::CalendarCache>::remove_account(
-                &cache, &account,
-            )
-            .await,
-            Err(CalendarCacheError::PendingMailSend)
+            <SqliteMailCache as AccountCache>::remove_account(&cache, &account).await,
+            Err(AccountCacheRemovalError::PendingMailSend)
         );
 
         drop(workflow);
@@ -4214,7 +4222,7 @@ fn active_send_reservation_blocks_account_removal_before_marker_staging() {
         assert_eq!(cache.load_pending_send(&account).await, Ok(None));
         assert_eq!(
             workflow.remove_account_cache(&account).await,
-            Err(MailCacheError::OperationInProgress)
+            Err(AccountCacheRemovalError::OperationInProgress)
         );
         assert_eq!(send_calls.load(Ordering::Relaxed), 0);
         release_marker_read
@@ -4274,7 +4282,7 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
         assert_eq!(cache.load_pending_send(&account).await, Ok(None));
         assert_eq!(
             workflow.remove_account_cache(&account).await,
-            Err(MailCacheError::OperationInProgress)
+            Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_marker_read
             .send(())
@@ -4286,7 +4294,7 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
             .expect("reply reaches the provider with its account reservation held");
         assert_eq!(
             workflow.remove_account_cache(&account).await,
-            Err(MailCacheError::OperationInProgress)
+            Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_submission
             .send(())
@@ -4299,7 +4307,7 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
             workflow.remove_account_cache(&account).await,
-            Err(MailCacheError::SendAlreadyPending)
+            Err(AccountCacheRemovalError::PendingMailSend)
         );
         assert!(
             cache
@@ -4348,7 +4356,7 @@ fn active_account_sync_blocks_cache_removal() {
 
         assert_eq!(
             workflow.remove_account_cache(&account).await,
-            Err(MailCacheError::OperationInProgress)
+            Err(AccountCacheRemovalError::OperationInProgress)
         );
         assert!(directory.path().join("mail.sqlite3").exists());
         release_sync
@@ -4396,7 +4404,7 @@ fn active_folder_write_blocks_cache_removal() {
 
         assert_eq!(
             workflow.remove_account_cache(&account).await,
-            Err(MailCacheError::OperationInProgress)
+            Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_write
             .send(())
@@ -4450,7 +4458,7 @@ fn uncached_message_body_fetch_blocks_cache_removal() {
 
         assert_eq!(
             workflow.remove_account_cache(&account).await,
-            Err(MailCacheError::OperationInProgress)
+            Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_fetch
             .send(())
@@ -4533,7 +4541,7 @@ fn active_message_move_blocks_cache_removal() {
 
         assert_eq!(
             workflow.remove_account_cache(&account).await,
-            Err(MailCacheError::OperationInProgress)
+            Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_move
             .send(())

@@ -721,34 +721,6 @@ impl CalendarCache for FixtureCache {
             Ok(())
         }
     }
-
-    fn remove_account(
-        &self,
-        account_id: &AccountId,
-    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
-        let views = Arc::clone(&self.views);
-        let pending = Arc::clone(&self.pending);
-        let account_id = account_id.clone();
-        async move {
-            let mut views = views.lock().expect("synthetic cache mutex is not poisoned");
-            if views.keys().any(|view| view.account_id() != &account_id) {
-                return Err(CalendarCacheError::AccountMismatch);
-            }
-            views.retain(|view, _| view.account_id() != &account_id);
-            drop(views);
-            let mut pending = pending
-                .lock()
-                .expect("synthetic cache mutex is not poisoned");
-            if matches!(
-                pending.get(&account_id),
-                Some(PendingCalendarEventCreation::Unresolved(_))
-            ) {
-                return Err(CalendarCacheError::UnresolvedEventCreation);
-            }
-            pending.remove(&account_id);
-            Ok(())
-        }
-    }
 }
 
 fn creation(view: CalendarViewReference) -> CalendarEventCreation {

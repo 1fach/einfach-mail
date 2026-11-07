@@ -3,20 +3,24 @@
 //! This crate coordinates domain behavior without depending on a UI framework, Microsoft Graph, or a database.
 
 mod account;
+mod account_cache;
 mod account_session;
 mod calendar;
 mod email_html;
 mod mail;
 mod mail_cache;
 mod mail_workflow;
+mod operation_reservations;
+mod sync_budget;
 
 pub use account::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
     AccountWorkflow,
 };
+pub use account_cache::{AccountCache, AccountCacheRemovalError};
 pub use account_session::{
     AccountCacheFactory, AccountSession, AccountSessionFactory, AccountSessionFuture,
-    CalendarSession, MailSession,
+    AccountSessionWorkflowFactory, CalendarSession, MailSession,
 };
 pub use calendar::{
     CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
@@ -35,8 +39,7 @@ pub use mail::{
 };
 pub use mail_cache::{MailCache, MailCacheError, MailSyncState};
 pub use mail_workflow::{
-    AccountSessionWorkflowFactory, FollowUpFlagUpdateOutcome, MailSendOutcome,
-    MailSendResolutionError, MailSendWorkflowError, MailSyncProgress, MailSyncReport, MailWorkflow,
-    MailWorkflowError, MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
-    WellKnownFolderMoveOutcome,
+    FollowUpFlagUpdateOutcome, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError,
+    MailSyncProgress, MailSyncReport, MailWorkflow, MailWorkflowError, MessageMoveOutcome,
+    OpenedMessage, ReadStateUpdateOutcome, WellKnownFolderMoveOutcome,
 };
