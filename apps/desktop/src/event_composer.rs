@@ -1,4 +1,4 @@
-use crate::calendar_time::to_offset_date_time;
+use crate::calendar_time::{to_offset_date_time, to_timestamp};
 use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike, Weekday};
@@ -24,7 +24,7 @@ use gpui_kit::{
     AnyElement, App, AsyncApp, Context, Entity, EventEmitter, IntoElement, KeyBinding, Render,
     Role, Task, Window, div, prelude::*,
 };
-use jiff::{Timestamp, civil, tz::TimeZone};
+use jiff::{civil, tz::TimeZone};
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 const EVENT_COMPOSER_WRITE_PENDING_CONTEXT: &str = "CalendarEventWritePending";
@@ -1019,11 +1019,7 @@ fn editable_event_picker_values(
 }
 
 fn picker_value_for_offset(value: OffsetDateTime, time_zone: &TimeZone) -> Option<NaiveDateTime> {
-    let timestamp = Timestamp::new(
-        value.unix_timestamp(),
-        i32::try_from(value.nanosecond()).ok()?,
-    )
-    .ok()?;
+    let timestamp = to_timestamp(value)?;
     let local_datetime = timestamp.to_zoned(time_zone.clone()).datetime();
     picker_value(
         local_datetime.date(),
