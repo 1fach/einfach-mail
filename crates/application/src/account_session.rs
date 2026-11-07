@@ -372,7 +372,8 @@ pub trait AccountCacheFactory: Send + Sync {
     ) -> impl Future<Output = Result<(), AccountCacheRemovalError>> + Send + 'a;
 }
 
-/// Creates account sessions and shares operation reservations among them.
+/// Creates account sessions and shares operation reservations and write-recovery state among
+/// sessions opened by this factory for the same account.
 pub struct AccountSessionWorkflowFactory<P, F> {
     provider: P,
     cache_factory: F,
