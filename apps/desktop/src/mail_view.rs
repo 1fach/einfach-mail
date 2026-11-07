@@ -25,6 +25,8 @@ use gpui_kit::component::{
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     scroll::ScrollableElement,
 };
+#[cfg(test)]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, App, AsyncApp, Context, Div, Entity, EventEmitter, FocusHandle, ImageSource,
     IntoElement, KeyBinding, Render, Role, ScrollStrategy, SharedString, Stateful, Subscription,
@@ -1618,11 +1620,11 @@ impl MailView {
             .border_r_1()
             .border_color(colors.border)
             .child(div().px_4().py_3().text_sm().font_bold().child("Messages"))
-            .child(
-                div()
-                    .id("cached-message-list")
-                    .flex_1()
-                    .min_h_0()
+            .child({
+                let message_list = div().id("cached-message-list").flex_1().min_h_0();
+                #[cfg(test)]
+                let message_list = message_list.test_support();
+                message_list
                     .track_focus(&self.message_list_focus)
                     .key_context(MESSAGE_LIST_CONTEXT)
                     .role(Role::ListBox)
@@ -1652,86 +1654,77 @@ impl MailView {
                                             .to_owned();
                                         let accessible_label = format!("{sender}. {subject}");
                                         let expected_folder = folder_reference.clone();
-                                        Some(
-                                            div()
-                                                .id(format!(
-                                                    "message-option-{}",
-                                                    message_id.as_str()
-                                                ))
-                                                .debug_selector(|| {
-                                                    format!("message-row-{}", message_id.as_str())
-                                                })
-                                                .w_full()
-                                                .h(px(72.))
-                                                .px_3()
-                                                .py_3()
-                                                .rounded_md()
-                                                .text_color(colors.foreground)
-                                                .role(Role::ListBoxOption)
-                                                .aria_label(if view.message_update_in_progress() {
-                                                    format!(
-                                                        "{accessible_label}, mail action pending"
-                                                    )
+                                        let option = div()
+                                            .id(format!("message-option-{}", message_id.as_str()))
+                                            .debug_selector(|| {
+                                                format!("message-row-{}", message_id.as_str())
+                                            })
+                                            .w_full()
+                                            .h(px(72.))
+                                            .px_3()
+                                            .py_3()
+                                            .rounded_md()
+                                            .text_color(colors.foreground)
+                                            .role(Role::ListBoxOption)
+                                            .aria_label(if view.message_update_in_progress() {
+                                                format!("{accessible_label}, mail action pending")
+                                            } else {
+                                                accessible_label
+                                            })
+                                            .aria_position_in_set(index + 1)
+                                            .aria_size_of_set(list_size)
+                                            .aria_selected(selected)
+                                            .when(selected, |option| {
+                                                option
+                                                    .aria_active_descendant()
+                                                    .bg(colors.accent)
+                                                    .text_color(colors.accent_foreground)
+                                            })
+                                            .hover(|option| {
+                                                option.bg(if selected {
+                                                    colors.accent
                                                 } else {
-                                                    accessible_label
+                                                    colors.muted
                                                 })
-                                                .aria_position_in_set(index + 1)
-                                                .aria_size_of_set(list_size)
-                                                .aria_selected(selected)
-                                                .when(selected, |option| {
-                                                    option
-                                                        .aria_active_descendant()
-                                                        .bg(colors.accent)
-                                                        .text_color(colors.accent_foreground)
-                                                })
-                                                .hover(|option| {
-                                                    option.bg(if selected {
-                                                        colors.accent
-                                                    } else {
-                                                        colors.muted
-                                                    })
-                                                })
-                                                .child(
-                                                    div()
-                                                        .w_full()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_1()
-                                                        .child(
-                                                            div()
-                                                                .w_full()
-                                                                .text_sm()
-                                                                .font_bold()
-                                                                .child(sender),
-                                                        )
-                                                        .child(
-                                                            div().w_full().text_sm().child(subject),
-                                                        ),
-                                                )
-                                                .when(
-                                                    !view.message_update_in_progress(),
-                                                    |option| {
-                                                        option.on_click(cx.listener(
-                                                            move |view, _, window, cx| {
-                                                                view.select_message_from_option(
-                                                                    message_id.clone(),
-                                                                    &expected_folder,
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        ))
+                                            })
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_1()
+                                                    .child(
+                                                        div()
+                                                            .w_full()
+                                                            .text_sm()
+                                                            .font_bold()
+                                                            .child(sender),
+                                                    )
+                                                    .child(div().w_full().text_sm().child(subject)),
+                                            )
+                                            .when(!view.message_update_in_progress(), |option| {
+                                                option.on_click(cx.listener(
+                                                    move |view, _, window, cx| {
+                                                        view.select_message_from_option(
+                                                            message_id.clone(),
+                                                            &expected_folder,
+                                                            window,
+                                                            cx,
+                                                        );
                                                     },
-                                                ),
-                                        )
+                                                ))
+                                            });
+                                        #[cfg(test)]
+                                        let option = option.test_support();
+                                        Some(option)
                                     })
                                     .collect()
                             },
                         )
                         .track_scroll(&self.message_list_scroll),
                     )
-                    .focus_visible(|style| style.border_1().border_color(colors.ring)),
-            )
+                    .focus_visible(|style| style.border_1().border_color(colors.ring))
+            })
             .into_any_element()
     }
 
@@ -2904,8 +2897,11 @@ mod tests {
     };
     use gpui_kit::base::TextSelection;
     use gpui_kit::component::WindowExt as _;
+    use gpui_kit::test::TestQueryExt as _;
+    use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{
-        AppContext, Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px,
+        AppContext, Modifiers, MouseButton, ScrollStrategy, TestAppContext, VisualTestContext,
+        point, px,
     };
 
     use super::{
@@ -4231,10 +4227,18 @@ mod tests {
         for index in 2..=message_count {
             let message_id = MessageId::try_from(format!("message-{index}"))
                 .expect("synthetic message ID is valid");
+            let template_metadata = template.metadata();
+            let metadata = einfach_mail_domain::MessageMetadata::new(
+                Some(format!("Synthetic subject {index}")),
+                template_metadata.origin().clone(),
+                *template_metadata.received_at(),
+                template_metadata.read_state(),
+                template_metadata.follow_up_flag_status(),
+            );
             state.messages.push(MailMessage::new(
                 template.folder().clone(),
                 message_id.clone(),
-                template.metadata().clone(),
+                metadata,
             ));
             message_ids.push(message_id);
         }
@@ -4245,21 +4249,71 @@ mod tests {
         context.simulate_keystrokes(key);
     }
 
-    fn assert_selected_message(
+    const SYNTHETIC_MESSAGE_LABEL_PREFIX: &str =
+        "Ada Example <ada@example.test>. Synthetic subject";
+
+    fn assert_accessible_message_list(context: &mut VisualTestContext) {
+        let (lists, options) = context.update(|window, _| {
+            (
+                window.find_all_by_role(gpui_kit::Role::ListBox),
+                window.find_all_by_role(gpui_kit::Role::ListBoxOption),
+            )
+        });
+        assert_eq!(lists.len(), 1, "mail has one message listbox");
+        assert_eq!(lists[0].label(), Some("Messages"));
+        assert!(!options.is_empty(), "visible messages are listbox options");
+        assert!(
+            options.iter().all(|option| option
+                .label()
+                .is_some_and(|label| label.starts_with(SYNTHETIC_MESSAGE_LABEL_PREFIX))),
+            "every visible message option exposes its sender and subject"
+        );
+        assert!(
+            options
+                .iter()
+                .all(|option| option.selected() == Some(false))
+        );
+    }
+
+    fn accessible_message_list_focus(context: &mut VisualTestContext) -> Option<bool> {
+        let lists = context.update(|window, _| window.find_all_by_role(gpui_kit::Role::ListBox));
+        assert_eq!(lists.len(), 1, "mail has one message listbox");
+        lists[0].focused()
+    }
+
+    fn assert_selected_message_and_accessible_label(
         context: &mut VisualTestContext,
         view: &gpui_kit::Entity<MailView>,
-        expected: Option<&MessageId>,
+        expected_message_id: Option<&MessageId>,
+        expected_label: &str,
     ) {
         let selected = context
             .cx
             .update(|cx| view.read(cx).selected_message_id.clone());
-        assert_eq!(selected.as_ref(), expected);
+        assert_eq!(selected.as_ref(), expected_message_id);
+
+        let options =
+            context.update(|window, _| window.find_all_by_role(gpui_kit::Role::ListBoxOption));
+        let selected_option_labels: Vec<_> = options
+            .iter()
+            .filter(|option| option.selected() == Some(true))
+            .map(|option| option.label())
+            .collect();
+        assert_eq!(
+            selected_option_labels,
+            [Some(expected_label)],
+            "exactly one message option is exposed as selected"
+        );
     }
 
     #[gpui_kit::test]
     async fn cached_message_list_navigates_by_keyboard_and_keeps_one_tab_stop(
         cx: &mut TestAppContext,
     ) {
+        const FIRST_MESSAGE_LABEL: &str = SYNTHETIC_MESSAGE_LABEL_PREFIX;
+        const SECOND_MESSAGE_LABEL: &str = "Ada Example <ada@example.test>. Synthetic subject 2";
+        const LAST_MESSAGE_LABEL: &str = "Ada Example <ada@example.test>. Synthetic subject 20";
+
         cx.update(|cx| {
             gpui_kit::init(cx);
             bind_message_navigation_keys(cx);
@@ -4291,6 +4345,9 @@ mod tests {
             context.cx.executor().timer(Duration::from_millis(10)).await;
         }
 
+        assert_accessible_message_list(context);
+        assert_eq!(accessible_message_list_focus(context), Some(false));
+
         context.update(gpui_kit::Window::focus_next);
         let mut list_focused = false;
         for _ in 0..20 {
@@ -4302,23 +4359,63 @@ mod tests {
             }
         }
         assert!(list_focused, "Tab reaches the cached message list");
+        assert_eq!(accessible_message_list_focus(context), Some(true));
 
         press_window_key(context, "up");
         context.run_until_parked();
-        assert_selected_message(context, &view, message_ids.last());
+        draw_mail_view(context);
+        assert_selected_message_and_accessible_label(
+            context,
+            &view,
+            message_ids.last(),
+            LAST_MESSAGE_LABEL,
+        );
         press_window_key(context, "down");
-        assert_selected_message(context, &view, message_ids.last());
+        context.run_until_parked();
+        draw_mail_view(context);
+        assert_selected_message_and_accessible_label(
+            context,
+            &view,
+            message_ids.last(),
+            LAST_MESSAGE_LABEL,
+        );
 
         press_window_key(context, "home");
-        assert_selected_message(context, &view, message_ids.first());
+        context.run_until_parked();
+        draw_mail_view(context);
+        assert_selected_message_and_accessible_label(
+            context,
+            &view,
+            message_ids.first(),
+            FIRST_MESSAGE_LABEL,
+        );
         press_window_key(context, "up");
-        assert_selected_message(context, &view, message_ids.first());
+        context.run_until_parked();
+        draw_mail_view(context);
+        assert_selected_message_and_accessible_label(
+            context,
+            &view,
+            message_ids.first(),
+            FIRST_MESSAGE_LABEL,
+        );
         press_window_key(context, "down");
-        assert_selected_message(context, &view, message_ids.get(1));
+        context.run_until_parked();
+        draw_mail_view(context);
+        assert_selected_message_and_accessible_label(
+            context,
+            &view,
+            message_ids.get(1),
+            SECOND_MESSAGE_LABEL,
+        );
         press_window_key(context, "end");
         context.run_until_parked();
         draw_mail_view(context);
-        assert_selected_message(context, &view, message_ids.last());
+        assert_selected_message_and_accessible_label(
+            context,
+            &view,
+            message_ids.last(),
+            LAST_MESSAGE_LABEL,
+        );
         assert!(
             context
                 .cx
@@ -4327,32 +4424,68 @@ mod tests {
         let row = context
             .debug_bounds("message-row-message-20")
             .expect("End scrolls the selected message into view");
+        let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
+        assert!(
+            row.top() >= list_bounds.top() && row.bottom() <= list_bounds.bottom(),
+            "End keeps the selected message inside the list viewport"
+        );
         let scroll_offset = context
             .cx
             .update(|cx| view.read(cx).message_list_scroll.offset());
         assert!(scroll_offset.y < px(0.));
-        context.simulate_click(row.center(), Modifiers::default());
+        context.cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.message_list_scroll
+                    .scroll_to_item(0, ScrollStrategy::Top);
+            });
+        });
         context.run_until_parked();
+        draw_mail_view(context);
+        let first_row = context
+            .debug_bounds("message-row-message-1")
+            .expect("the first message is visible after scrolling to the top");
+        context.simulate_click(first_row.center(), Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+        assert_selected_message_and_accessible_label(
+            context,
+            &view,
+            message_ids.first(),
+            FIRST_MESSAGE_LABEL,
+        );
         assert!(
             context.update(|window, cx| { view.read(cx).message_list_focus.is_focused(window) })
         );
+        assert_eq!(accessible_message_list_focus(context), Some(true));
 
         press_window_key(context, "shift-tab");
         context.update(|window, cx| {
             assert!(!view.read(cx).message_list_focus.is_focused(window));
         });
         press_window_key(context, "up");
-        assert_selected_message(context, &view, message_ids.last());
+        assert_selected_message_and_accessible_label(
+            context,
+            &view,
+            message_ids.first(),
+            FIRST_MESSAGE_LABEL,
+        );
         press_window_key(context, "tab");
         assert!(
             context.update(|window, cx| { view.read(cx).message_list_focus.is_focused(window) })
         );
+        assert_eq!(accessible_message_list_focus(context), Some(true));
         press_window_key(context, "tab");
         context.update(|window, cx| {
             assert!(!view.read(cx).message_list_focus.is_focused(window));
         });
+        assert_eq!(accessible_message_list_focus(context), Some(false));
         press_window_key(context, "up");
-        assert_selected_message(context, &view, message_ids.last());
+        assert_selected_message_and_accessible_label(
+            context,
+            &view,
+            message_ids.first(),
+            FIRST_MESSAGE_LABEL,
+        );
     }
 
     #[test]
