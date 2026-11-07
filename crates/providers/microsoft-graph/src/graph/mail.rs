@@ -10,7 +10,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     error::GraphError,
-    transport::{GraphOperation, GraphResponse},
+    transport::{GraphPatchOperation, GraphPostJsonOperation, GraphReadOperation, GraphResponse},
 };
 use einfach_mail_application::{
     MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
@@ -34,7 +34,7 @@ impl GraphApi {
         account_id: &AccountId,
         token: std::sync::Arc<AccessToken>,
     ) -> Result<Vec<MailFolder>, GraphError> {
-        let mut traversal = PageTraversal::new(self, GraphOperation::Folders, token);
+        let mut traversal = PageTraversal::new(self, GraphReadOperation::Folders, token);
         let roots = traversal
             .collect::<WireFolder, Option<MailFolder>>(
                 self.authority.root_folders_path()?,
@@ -70,7 +70,7 @@ impl GraphApi {
         let response = self
             .transport
             .get(
-                GraphOperation::Folders,
+                GraphReadOperation::Folders,
                 self.authority.well_known_folder_path(folder)?,
                 token,
             )
@@ -88,7 +88,7 @@ impl GraphApi {
         folder: &FolderReference,
         token: std::sync::Arc<AccessToken>,
     ) -> Result<Vec<MailMessage>, GraphError> {
-        let mut traversal = PageTraversal::new(self, GraphOperation::Messages, token);
+        let mut traversal = PageTraversal::new(self, GraphReadOperation::Messages, token);
         let folder = folder.clone();
         traversal
             .collect::<WireMessage, MailMessage>(
@@ -150,7 +150,7 @@ impl GraphApi {
         let url = self.authority.message_body_path(message_id.as_str())?;
         let response = self
             .transport
-            .get(GraphOperation::MessageBody, url, token)
+            .get(GraphReadOperation::MessageBody, url, token)
             .await?;
         let message = serde_json::from_slice::<WireMessageBody>(&response)
             .map_err(|_| GraphError::InvalidResponse)?;
@@ -171,7 +171,7 @@ impl GraphApi {
         let response = self
             .transport
             .patch_json(
-                GraphOperation::MessageUpdate,
+                GraphPatchOperation::MessageUpdate,
                 self.authority.message_update_path(message_id.as_str())?,
                 token,
                 read_state_patch_body(requested),
@@ -189,7 +189,7 @@ impl GraphApi {
         let response = self
             .transport
             .patch_json(
-                GraphOperation::MessageUpdate,
+                GraphPatchOperation::MessageUpdate,
                 self.authority.message_update_path(message_id.as_str())?,
                 token,
                 follow_up_flag_patch_body(status),
@@ -208,7 +208,7 @@ impl GraphApi {
         let response = self
             .transport
             .post_json(
-                GraphOperation::MessageMove,
+                GraphPostJsonOperation::MessageMove,
                 url,
                 token,
                 message_move_body(destination_folder.folder_id().as_str())?

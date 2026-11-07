@@ -34,49 +34,100 @@ const MAX_THROTTLE_RETRIES: u32 = 2;
 const MAX_AUTOMATIC_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy)]
-pub(super) enum GraphOperation {
+pub(super) enum GraphReadOperation {
     Profile,
     Folders,
     Messages,
-    MessageDelta,
     MessageBody,
-    MessageUpdate,
-    MessageMove,
-    MailSend,
-    CalendarEventCreate,
     CalendarEventRead,
-    CalendarEventUpdate,
-    CalendarEventDelete,
-    CalendarViewDeltaInitial,
-    CalendarViewDeltaContinuation,
 }
 
-impl GraphOperation {
-    fn requires_json_content_type(self) -> bool {
-        matches!(
-            self,
-            Self::MessageDelta
-                | Self::MailSend
-                | Self::CalendarViewDeltaInitial
-                | Self::CalendarViewDeltaContinuation
-        )
+#[derive(Clone, Copy)]
+pub(super) enum GraphCalendarDeltaOperation {
+    Initial,
+    Continuation,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum GraphPostJsonOperation {
+    MessageMove,
+    CalendarEventCreate,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum GraphPatchOperation {
+    MessageUpdate,
+    CalendarEventUpdate,
+}
+
+enum GraphRequestOperation {
+    Get(GraphReadOperation),
+    MessageDelta,
+    CalendarViewDelta(GraphCalendarDeltaOperation),
+    SendMail(Arc<[u8]>),
+    PostJson {
+        operation: GraphPostJsonOperation,
+        body: Arc<[u8]>,
+    },
+    PatchJson {
+        operation: GraphPatchOperation,
+        body: Arc<[u8]>,
+    },
+    DeleteCalendarEvent(GraphEventEtag),
+}
+
+impl GraphRequestOperation {
+    fn requires_json_content_type(&self) -> bool {
+        matches!(self, Self::MessageDelta | Self::CalendarViewDelta(_))
     }
 
-    fn uses_immutable_ids(self) -> bool {
-        matches!(
-            self,
-            Self::Messages
-                | Self::MessageDelta
-                | Self::MessageBody
-                | Self::MessageUpdate
-                | Self::MessageMove
-                | Self::CalendarEventCreate
-                | Self::CalendarEventRead
-                | Self::CalendarEventUpdate
-                | Self::CalendarEventDelete
-                | Self::CalendarViewDeltaInitial
-                | Self::CalendarViewDeltaContinuation
-        )
+    fn uses_immutable_ids(&self) -> bool {
+        match self {
+            Self::Get(GraphReadOperation::Profile | GraphReadOperation::Folders)
+            | Self::SendMail(_) => false,
+            Self::Get(
+                GraphReadOperation::Messages
+                | GraphReadOperation::MessageBody
+                | GraphReadOperation::CalendarEventRead,
+            )
+            | Self::MessageDelta
+            | Self::CalendarViewDelta(_)
+            | Self::PostJson {
+                operation:
+                    GraphPostJsonOperation::MessageMove | GraphPostJsonOperation::CalendarEventCreate,
+                ..
+            }
+            | Self::PatchJson {
+                operation:
+                    GraphPatchOperation::MessageUpdate | GraphPatchOperation::CalendarEventUpdate,
+                ..
+            }
+            | Self::DeleteCalendarEvent(_) => true,
+        }
+    }
+
+    fn uncertain_write_error(&self) -> Option<GraphError> {
+        match self {
+            Self::SendMail(_) => Some(GraphError::SendOutcomeUnknown),
+            Self::PostJson {
+                operation: GraphPostJsonOperation::MessageMove,
+                ..
+            } => Some(GraphError::MessageMoveOutcomeUnknown),
+            Self::PostJson {
+                operation: GraphPostJsonOperation::CalendarEventCreate,
+                ..
+            } => Some(GraphError::CalendarEventCreationOutcomeUnknown),
+            Self::PatchJson {
+                operation: GraphPatchOperation::MessageUpdate,
+                ..
+            } => Some(GraphError::MessageUpdateOutcomeUnknown),
+            Self::PatchJson {
+                operation: GraphPatchOperation::CalendarEventUpdate,
+                ..
+            } => Some(GraphError::CalendarEventUpdateOutcomeUnknown),
+            Self::DeleteCalendarEvent(_) => Some(GraphError::CalendarEventDeletionOutcomeUnknown),
+            Self::Get(_) | Self::MessageDelta | Self::CalendarViewDelta(_) => None,
+        }
     }
 }
 
@@ -87,17 +138,9 @@ enum RetryAfter {
 }
 
 struct GraphRequest {
-    operation: GraphOperation,
-    method: GraphRequestMethod,
+    operation: GraphRequestOperation,
     url: GraphUrl,
     token: Arc<AccessToken>,
-}
-
-enum GraphRequestMethod {
-    Get,
-    PatchJson(Arc<[u8]>),
-    PostJson(Arc<[u8]>),
-    Delete(GraphEventEtag),
 }
 
 struct GraphEventEtag(HeaderValue);
@@ -162,11 +205,11 @@ pub(super) struct GraphTransportHandle {
 impl GraphTransportHandle {
     pub(super) async fn get(
         &self,
-        operation: GraphOperation,
+        operation: GraphReadOperation,
         url: GraphUrl,
         token: Arc<AccessToken>,
     ) -> Result<Vec<u8>, GraphError> {
-        self.request(operation, GraphRequestMethod::Get, url, token)
+        self.request(GraphRequestOperation::Get(operation), url, token)
             .await?
             .into_body()
     }
@@ -178,12 +221,7 @@ impl GraphTransportHandle {
         body: Vec<u8>,
     ) -> Result<(), GraphError> {
         match self
-            .request(
-                GraphOperation::MailSend,
-                GraphRequestMethod::PostJson(body.into()),
-                url,
-                token,
-            )
+            .request(GraphRequestOperation::SendMail(body.into()), url, token)
             .await?
         {
             GraphResponse::Body(body) if body.is_empty() => Ok(()),
@@ -196,25 +234,24 @@ impl GraphTransportHandle {
         url: GraphUrl,
         token: Arc<AccessToken>,
     ) -> Result<GraphResponse, GraphError> {
-        self.request(
-            GraphOperation::MessageDelta,
-            GraphRequestMethod::Get,
-            url,
-            token,
-        )
-        .await
+        self.request(GraphRequestOperation::MessageDelta, url, token)
+            .await
     }
 
     pub(super) async fn patch_json(
         &self,
-        operation: GraphOperation,
+        operation: GraphPatchOperation,
         url: GraphUrl,
         token: Arc<AccessToken>,
         body: Arc<[u8]>,
     ) -> Result<Vec<u8>, GraphError> {
-        self.request(operation, GraphRequestMethod::PatchJson(body), url, token)
-            .await?
-            .into_body()
+        self.request(
+            GraphRequestOperation::PatchJson { operation, body },
+            url,
+            token,
+        )
+        .await?
+        .into_body()
     }
 
     pub(super) async fn delete_calendar_event(
@@ -225,12 +262,7 @@ impl GraphTransportHandle {
     ) -> Result<(), GraphError> {
         let etag = GraphEventEtag::try_from(etag)?;
         match self
-            .request(
-                GraphOperation::CalendarEventDelete,
-                GraphRequestMethod::Delete(etag),
-                url,
-                token,
-            )
+            .request(GraphRequestOperation::DeleteCalendarEvent(etag), url, token)
             .await?
         {
             GraphResponse::Body(body) if body.is_empty() => Ok(()),
@@ -240,27 +272,32 @@ impl GraphTransportHandle {
 
     pub(super) async fn get_calendar_delta(
         &self,
-        operation: GraphOperation,
+        operation: GraphCalendarDeltaOperation,
         url: GraphUrl,
         token: Arc<AccessToken>,
     ) -> Result<GraphResponse, GraphError> {
-        self.request(operation, GraphRequestMethod::Get, url, token)
-            .await
+        self.request(
+            GraphRequestOperation::CalendarViewDelta(operation),
+            url,
+            token,
+        )
+        .await
     }
 
     async fn request(
         &self,
-        operation: GraphOperation,
-        method: GraphRequestMethod,
+        operation: GraphRequestOperation,
         url: GraphUrl,
         token: Arc<AccessToken>,
     ) -> Result<GraphResponse, GraphError> {
         let (reply, response) = oneshot::channel();
+        let worker_closed_error = operation
+            .uncertain_write_error()
+            .unwrap_or(GraphError::WorkerClosed);
         self.commands
             .send(GraphCommand {
                 request: GraphRequest {
                     operation,
-                    method,
                     url,
                     token,
                 },
@@ -268,27 +305,21 @@ impl GraphTransportHandle {
             })
             .await
             .map_err(|_| GraphError::WorkerClosed)?;
-        response.await.map_err(|_| match operation {
-            GraphOperation::MailSend => GraphError::SendOutcomeUnknown,
-            GraphOperation::MessageUpdate => GraphError::MessageUpdateOutcomeUnknown,
-            GraphOperation::MessageMove => GraphError::MessageMoveOutcomeUnknown,
-            GraphOperation::CalendarEventCreate => GraphError::CalendarEventCreationOutcomeUnknown,
-            GraphOperation::CalendarEventUpdate => GraphError::CalendarEventUpdateOutcomeUnknown,
-            GraphOperation::CalendarEventDelete => GraphError::CalendarEventDeletionOutcomeUnknown,
-            _ => GraphError::WorkerClosed,
-        })?
+        response.await.map_err(|_| worker_closed_error)?
     }
 
     pub(super) async fn post_json(
         &self,
-        operation: GraphOperation,
+        operation: GraphPostJsonOperation,
         url: GraphUrl,
         token: Arc<AccessToken>,
         body: impl Into<Arc<[u8]>>,
     ) -> Result<Vec<u8>, GraphError> {
         self.request(
-            operation,
-            GraphRequestMethod::PostJson(body.into()),
+            GraphRequestOperation::PostJson {
+                operation,
+                body: body.into(),
+            },
             url,
             token,
         )
@@ -498,70 +529,55 @@ async fn request_with_retry(
     loop {
         let response = match send_once(client, request, reply).await? {
             Ok(response) => response,
-            Err(GraphError::Transport)
-                if matches!(request.operation, GraphOperation::MessageUpdate) =>
-            {
-                return Some(Err(GraphError::MessageUpdateOutcomeUnknown));
-            }
-            Err(GraphError::Transport) if matches!(request.operation, GraphOperation::MailSend) => {
-                return Some(Err(GraphError::SendOutcomeUnknown));
-            }
-            Err(GraphError::Transport)
-                if matches!(request.operation, GraphOperation::MessageMove) =>
-            {
-                return Some(Err(GraphError::MessageMoveOutcomeUnknown));
-            }
-            Err(GraphError::Transport)
-                if matches!(request.operation, GraphOperation::CalendarEventCreate) =>
-            {
-                return Some(Err(GraphError::CalendarEventCreationOutcomeUnknown));
-            }
-            Err(GraphError::Transport)
-                if matches!(request.operation, GraphOperation::CalendarEventUpdate) =>
-            {
-                return Some(Err(GraphError::CalendarEventUpdateOutcomeUnknown));
-            }
-            Err(GraphError::Transport)
-                if matches!(request.operation, GraphOperation::CalendarEventDelete) =>
-            {
-                return Some(Err(GraphError::CalendarEventDeletionOutcomeUnknown));
+            Err(GraphError::Transport) => {
+                return Some(Err(request
+                    .operation
+                    .uncertain_write_error()
+                    .unwrap_or(GraphError::Transport)));
             }
             Err(error) => return Some(Err(error)),
         };
-        if matches!(request.operation, GraphOperation::MessageMove) {
-            return message_move_response_result(response, reply).await;
-        }
-        if matches!(request.operation, GraphOperation::MessageUpdate) {
-            return message_update_response_result(response, reply).await;
-        }
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            if matches!(request.operation, GraphOperation::MailSend) {
-                return response_result(request.operation, response, reply).await;
-            }
-            match &request.method {
-                GraphRequestMethod::Get => match retry_decision(&response, retry_index) {
-                    RetryDecision::Retry(delay) => {
-                        drop(response);
-                        wait_before_retry(reply, delay).await?;
-                        retry_index += 1;
+            match &request.operation {
+                GraphRequestOperation::Get(_)
+                | GraphRequestOperation::MessageDelta
+                | GraphRequestOperation::CalendarViewDelta(_) => {
+                    match retry_decision(&response, retry_index) {
+                        RetryDecision::Retry(delay) => {
+                            drop(response);
+                            wait_before_retry(reply, delay).await?;
+                            retry_index += 1;
+                        }
+                        RetryDecision::Stop(error) => return Some(Err(error)),
                     }
-                    RetryDecision::Stop(error) => return Some(Err(error)),
-                },
-                GraphRequestMethod::PostJson(_)
-                    if matches!(request.operation, GraphOperation::CalendarEventCreate) =>
-                {
+                }
+                GraphRequestOperation::SendMail(_)
+                | GraphRequestOperation::PostJson {
+                    operation: GraphPostJsonOperation::MessageMove,
+                    ..
+                }
+                | GraphRequestOperation::PatchJson {
+                    operation: GraphPatchOperation::MessageUpdate,
+                    ..
+                } => {
+                    return response_result(&request.operation, response, reply).await;
+                }
+                GraphRequestOperation::PostJson {
+                    operation: GraphPostJsonOperation::CalendarEventCreate,
+                    ..
+                } => {
                     return Some(Err(GraphError::CalendarEventCreationOutcomeUnknown));
                 }
-                GraphRequestMethod::PatchJson(_)
-                | GraphRequestMethod::PostJson(_)
-                | GraphRequestMethod::Delete(_) => {
+                GraphRequestOperation::PatchJson {
+                    operation: GraphPatchOperation::CalendarEventUpdate,
+                    ..
+                }
+                | GraphRequestOperation::DeleteCalendarEvent(_) => {
                     return Some(Err(rate_limit_error(&response)));
                 }
             }
-        } else if matches!(request.operation, GraphOperation::CalendarEventDelete) {
-            return calendar_event_delete_response_result(response);
         } else {
-            return response_result(request.operation, response, reply).await;
+            return response_result(&request.operation, response, reply).await;
         }
     }
 }
@@ -613,12 +629,12 @@ async fn wait_before_retry(
 }
 
 async fn response_result(
-    operation: GraphOperation,
+    operation: &GraphRequestOperation,
     response: Response,
     reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
 ) -> Option<Result<GraphResponse, GraphError>> {
-    if matches!(operation, GraphOperation::MailSend) {
-        return Some(match response.status() {
+    match operation {
+        GraphRequestOperation::SendMail(_) => Some(match response.status() {
             StatusCode::ACCEPTED => Ok(GraphResponse::Body(Vec::new())),
             StatusCode::UNAUTHORIZED => Err(GraphError::AccessTokenRejected),
             StatusCode::FORBIDDEN => Err(GraphError::AccessDenied),
@@ -631,30 +647,60 @@ async fn response_result(
             StatusCode::REQUEST_TIMEOUT => Err(GraphError::SendOutcomeUnknown),
             status if status.is_client_error() => Err(GraphError::SendRejected),
             _ => Err(GraphError::SendOutcomeUnknown),
-        });
+        }),
+        GraphRequestOperation::PostJson {
+            operation: GraphPostJsonOperation::MessageMove,
+            ..
+        } => message_move_response_result(response, reply).await,
+        GraphRequestOperation::PostJson {
+            operation: GraphPostJsonOperation::CalendarEventCreate,
+            ..
+        } => calendar_event_create_response_result(response, reply).await,
+        GraphRequestOperation::PatchJson {
+            operation: GraphPatchOperation::MessageUpdate,
+            ..
+        } => message_update_response_result(response, reply).await,
+        GraphRequestOperation::PatchJson {
+            operation: GraphPatchOperation::CalendarEventUpdate,
+            ..
+        } => calendar_event_update_response_result(response, reply).await,
+        GraphRequestOperation::Get(GraphReadOperation::CalendarEventRead)
+            if response.status() == StatusCode::NOT_FOUND =>
+        {
+            Some(Err(GraphError::CalendarEventChanged))
+        }
+        GraphRequestOperation::Get(
+            GraphReadOperation::Profile
+            | GraphReadOperation::Folders
+            | GraphReadOperation::Messages
+            | GraphReadOperation::MessageBody
+            | GraphReadOperation::CalendarEventRead,
+        )
+        | GraphRequestOperation::CalendarViewDelta(GraphCalendarDeltaOperation::Initial) => {
+            standard_response_result(response, reply).await
+        }
+        GraphRequestOperation::MessageDelta if response.status() == StatusCode::GONE => {
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            Some(Ok(GraphResponse::MessageDeltaReset(location)))
+        }
+        GraphRequestOperation::MessageDelta => standard_response_result(response, reply).await,
+        GraphRequestOperation::CalendarViewDelta(GraphCalendarDeltaOperation::Continuation) => {
+            calendar_delta_response_result(response, reply).await
+        }
+        GraphRequestOperation::DeleteCalendarEvent(_) => {
+            calendar_event_delete_response_result(response)
+        }
     }
-    if matches!(operation, GraphOperation::CalendarEventCreate) {
-        return calendar_event_create_response_result(response, reply).await;
-    }
-    if matches!(operation, GraphOperation::CalendarEventUpdate) {
-        return calendar_event_update_response_result(response, reply).await;
-    }
-    if matches!(operation, GraphOperation::CalendarEventRead)
-        && response.status() == StatusCode::NOT_FOUND
-    {
-        return Some(Err(GraphError::CalendarEventChanged));
-    }
-    if matches!(operation, GraphOperation::MessageDelta) && response.status() == StatusCode::GONE {
-        let location = response
-            .headers()
-            .get(LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        return Some(Ok(GraphResponse::MessageDeltaReset(location)));
-    }
-    if matches!(operation, GraphOperation::CalendarViewDeltaContinuation) {
-        return calendar_delta_response_result(response, reply).await;
-    }
+}
+
+async fn standard_response_result(
+    response: Response,
+    reply: &mut oneshot::Sender<Result<GraphResponse, GraphError>>,
+) -> Option<Result<GraphResponse, GraphError>> {
     match response.status() {
         StatusCode::UNAUTHORIZED => Some(Err(GraphError::AccessTokenRejected)),
         StatusCode::FORBIDDEN => Some(Err(GraphError::AccessDenied)),
@@ -898,48 +944,27 @@ async fn send_once(
         Ok(header) => header,
         Err(error) => return Some(Err(error)),
     };
-    let mut outbound = match (&request.method, request.operation) {
-        (GraphRequestMethod::Get, operation)
-            if !matches!(
-                operation,
-                GraphOperation::MailSend
-                    | GraphOperation::MessageUpdate
-                    | GraphOperation::MessageMove
-                    | GraphOperation::CalendarEventCreate
-                    | GraphOperation::CalendarEventUpdate
-                    | GraphOperation::CalendarEventDelete
-            ) =>
-        {
-            client.get(request.url.as_str())
+    let mut outbound = match &request.operation {
+        GraphRequestOperation::Get(_)
+        | GraphRequestOperation::MessageDelta
+        | GraphRequestOperation::CalendarViewDelta(_) => client.get(request.url.as_str()),
+        GraphRequestOperation::SendMail(body) | GraphRequestOperation::PostJson { body, .. } => {
+            client
+                .post(request.url.as_str())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Arc::clone(body).to_vec())
         }
-        (
-            GraphRequestMethod::PostJson(body),
-            GraphOperation::MailSend
-            | GraphOperation::MessageMove
-            | GraphOperation::CalendarEventCreate,
-        ) => client
-            .post(request.url.as_str())
-            .header(CONTENT_TYPE, "application/json")
-            .body(Arc::clone(body).to_vec()),
-        (
-            GraphRequestMethod::PatchJson(body),
-            GraphOperation::MessageUpdate | GraphOperation::CalendarEventUpdate,
-        ) => client
+        GraphRequestOperation::PatchJson { body, .. } => client
             .patch(request.url.as_str())
             .header(CONTENT_TYPE, "application/json")
             .body(Arc::clone(body).to_vec()),
-        (GraphRequestMethod::Delete(_), GraphOperation::CalendarEventDelete) => {
-            client.delete(request.url.as_str())
-        }
-        _ => return Some(Err(GraphError::InvalidResponse)),
+        GraphRequestOperation::DeleteCalendarEvent(_) => client.delete(request.url.as_str()),
     }
     .header(AUTHORIZATION, authorization);
-    if let GraphRequestMethod::Delete(etag) = &request.method {
+    if let GraphRequestOperation::DeleteCalendarEvent(etag) = &request.operation {
         outbound = outbound.header(IF_MATCH, etag.0.clone());
     }
-    if matches!(&request.method, GraphRequestMethod::Get)
-        && request.operation.requires_json_content_type()
-    {
+    if request.operation.requires_json_content_type() {
         outbound = outbound.header(CONTENT_TYPE, "application/json");
     }
     if request.operation.uses_immutable_ids() {

@@ -6,7 +6,10 @@ use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 use crate::{
     error::GraphError,
-    transport::{GraphOperation, GraphResponse},
+    transport::{
+        GraphCalendarDeltaOperation, GraphPatchOperation, GraphPostJsonOperation,
+        GraphReadOperation, GraphResponse,
+    },
 };
 use einfach_mail_application::{
     CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse,
@@ -33,11 +36,11 @@ impl GraphApi {
     ) -> Result<CalendarDeltaResponse, GraphError> {
         let (operation, request_url) = match request {
             CalendarDeltaRequest::Initial => (
-                GraphOperation::CalendarViewDeltaInitial,
+                GraphCalendarDeltaOperation::Initial,
                 self.authority.calendar_view_delta_path(view.range())?,
             ),
             CalendarDeltaRequest::Continue(link) => (
-                GraphOperation::CalendarViewDeltaContinuation,
+                GraphCalendarDeltaOperation::Continuation,
                 self.authority.calendar_delta_opaque_link(link.as_str())?,
             ),
         };
@@ -83,7 +86,12 @@ impl GraphApi {
         let body = create_calendar_event_body(creation)?;
         let response = self
             .transport
-            .post_json(GraphOperation::CalendarEventCreate, url, token, body)
+            .post_json(
+                GraphPostJsonOperation::CalendarEventCreate,
+                url,
+                token,
+                body,
+            )
             .await?;
         let event = serde_json::from_slice::<WireCalendarEvent>(&response)
             .map_err(|_| GraphError::CalendarEventCreationOutcomeUnknown)?;
@@ -120,7 +128,7 @@ impl GraphApi {
             .editable_calendar_event_path(event.id().as_str())?;
         let response = self
             .transport
-            .get(GraphOperation::CalendarEventRead, url, token)
+            .get(GraphReadOperation::CalendarEventRead, url, token)
             .await?;
         let event = serde_json::from_slice::<WireCalendarEvent>(&response)
             .map_err(|_| GraphError::InvalidResponse)?;
@@ -187,7 +195,7 @@ impl GraphApi {
         let response = self
             .transport
             .patch_json(
-                GraphOperation::CalendarEventUpdate,
+                GraphPatchOperation::CalendarEventUpdate,
                 self.authority.calendar_event_path(event_id.as_str())?,
                 token,
                 body.into(),
