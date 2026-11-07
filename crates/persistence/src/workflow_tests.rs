@@ -10,20 +10,22 @@ use std::{
 
 use einfach_mail_application::{
     AccountCache, AccountCacheFactory, AccountCacheOpenError, AccountCacheRemovalError,
-    AccountSession, AccountSessionFactory, AccountSessionWorkflowFactory, CalendarDeltaRequest,
-    CalendarDeltaResponse, CalendarOperationError, CalendarProvider, CalendarWorkflowError,
-    MailCache, MailCacheError, MailOperationError, MailProvider, MailSendOutcome,
-    MailSendProviderError, MailSendResolutionError, MailSendWorkflowError, MailSyncProgress,
-    MailWorkflow, MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    AccountSession, AccountSessionFactory, AccountSessionWorkflowFactory,
+    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError,
+    CalendarProvider, CalendarWorkflowError, MailCache, MailCacheError, MailOperationError,
+    MailProvider, MailSendOutcome, MailSendProviderError, MailSendResolutionError,
+    MailSendWorkflowError, MailSyncProgress, MailWorkflow, MailWorkflowError,
+    MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
+    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence, CalendarViewRange,
-    CalendarViewReference, EditableCalendarEvent, FolderId, FolderReference, FollowUpFlagStatus,
-    MailDraft, MailFolder, MailMessage, MailRecipient, MailReplyDraft, MailReplySource,
-    MailSendOperationId, MailSubject, MessageBody, MessageBodyType, MessageDeltaChange,
-    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
-    ReadState,
+    AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation,
+    CalendarEventUpdate, CalendarEventVersion, CalendarOccurrence, CalendarOccurrencePatch,
+    CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference, EditableCalendarEvent,
+    EventId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
+    MailRecipient, MailReplyDraft, MailReplySource, MailSendOperationId, MailSubject, MessageBody,
+    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
+    MessageId, MessageMetadataPatch, ReadState,
 };
 use tempfile::TempDir;
 use time::{Date, Month};
@@ -33,6 +35,7 @@ use crate::store::SqliteMailCache;
 const DATABASE_KEY_BYTE: u8 = 0x62;
 
 type PageQueue = VecDeque<Result<MessageDeltaResponse, MailOperationError>>;
+type CalendarPageQueue = VecDeque<CalendarDeltaResponse>;
 type ProviderGate = Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
 type ReadStateGate = Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
 type FollowUpFlagGate =
@@ -74,6 +77,9 @@ struct FixtureProvider {
     well_known_folder_gate: ProviderGate,
     send_gate: ProviderGate,
     calendar_gate: Option<CalendarSyncGate>,
+    calendar_pages: Arc<Mutex<CalendarPageQueue>>,
+    calendar_delete_result: Result<(), CalendarOperationError>,
+    calendar_delete_calls: Arc<AtomicUsize>,
 }
 
 struct FixtureCacheFactory {
@@ -187,7 +193,23 @@ impl FixtureProvider {
             well_known_folder_gate: Arc::new(Mutex::new(None)),
             send_gate: Arc::new(Mutex::new(None)),
             calendar_gate: None,
+            calendar_pages: Arc::new(Mutex::new(VecDeque::new())),
+            calendar_delete_result: Err(CalendarOperationError::ServiceUnavailable),
+            calendar_delete_calls: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn with_calendar_pages(
+        mut self,
+        pages: impl IntoIterator<Item = CalendarDeltaResponse>,
+    ) -> Self {
+        self.calendar_pages = Arc::new(Mutex::new(pages.into_iter().collect()));
+        self
+    }
+
+    fn with_calendar_delete_result(mut self, result: Result<(), CalendarOperationError>) -> Self {
+        self.calendar_delete_result = result;
+        self
     }
 
     fn hold_next_submission(&self) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
@@ -594,7 +616,12 @@ impl CalendarProvider for FixtureProvider {
         &self,
         _: &EditableCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
-        ready(Err(CalendarOperationError::ServiceUnavailable))
+        let result = self.calendar_delete_result;
+        let calls = Arc::clone(&self.calendar_delete_calls);
+        async move {
+            calls.fetch_add(1, Ordering::Relaxed);
+            result
+        }
     }
 
     fn calendar_delta_page(
@@ -605,6 +632,7 @@ impl CalendarProvider for FixtureProvider {
     {
         let matches_account = view.account_id() == &self.account_id;
         let gate = self.calendar_gate.clone();
+        let pages = Arc::clone(&self.calendar_pages);
         async move {
             if !matches_account {
                 return Err(CalendarOperationError::AccountMismatch);
@@ -619,7 +647,11 @@ impl CalendarProvider for FixtureProvider {
                     .await
                     .map_err(|_| CalendarOperationError::ServiceUnavailable)?;
             }
-            Err(CalendarOperationError::ServiceUnavailable)
+            pages
+                .lock()
+                .expect("synthetic calendar page mutex is not poisoned")
+                .pop_front()
+                .ok_or(CalendarOperationError::ServiceUnavailable)
         }
     }
 }
@@ -685,6 +717,39 @@ fn calendar_view(account: &AccountId) -> CalendarViewReference {
     )
     .expect("synthetic calendar view range is valid");
     CalendarViewReference::new(account.clone(), range)
+}
+
+fn completed_calendar_page(cursor: &str) -> CalendarDeltaResponse {
+    CalendarDeltaResponse::Page(CalendarDeltaPageResponse::new(
+        CalendarDeltaPage::new(
+            Vec::new(),
+            CalendarDeltaProgress::Complete(CalendarDeltaLink::from_opaque(format!(
+                "https://graph.microsoft.com/v1.0/me/calendarView/delta?$deltatoken={cursor}"
+            ))),
+        ),
+        128,
+    ))
+}
+
+fn editable_calendar_event(view: CalendarViewReference) -> EditableCalendarEvent {
+    let mut patch = CalendarOccurrencePatch::new();
+    patch.set_subject(Some("Synthetic event".to_owned()));
+    let start = view.range().start() + time::Duration::hours(1);
+    let mut time = CalendarOccurrenceTimePatch::new();
+    time.set_start(start);
+    time.set_end(start + time::Duration::hours(1));
+    time.set_is_all_day(false);
+    patch.set_time(time);
+    let occurrence = patch
+        .into_new(
+            view,
+            EventId::try_from("synthetic-event".to_owned()).expect("synthetic event ID is valid"),
+        )
+        .expect("synthetic calendar event is complete");
+    let version = CalendarEventVersion::try_from("synthetic-version".to_owned())
+        .expect("synthetic calendar version is valid");
+    EditableCalendarEvent::new(occurrence, version)
+        .expect("synthetic timed calendar event is editable")
 }
 
 fn first_page(cutoff: SystemTime, next_link: MessageDeltaLink) -> MessageDeltaPage {
@@ -1805,6 +1870,64 @@ fn factory_sessions_share_uncertain_message_move_recovery() {
         );
         drop(first);
         drop(second);
+    });
+}
+
+#[test]
+fn factory_sessions_share_uncertain_calendar_delete_recovery() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let view = calendar_view(&account);
+        let provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        )
+        .with_calendar_pages([
+            completed_calendar_page("calendar-session-first"),
+            completed_calendar_page("calendar-session-second"),
+        ])
+        .with_calendar_delete_result(Err(CalendarOperationError::DeleteOutcomeUnknown));
+        let delete_calls = Arc::clone(&provider.calendar_delete_calls);
+        let factory = AccountSessionWorkflowFactory::new(
+            provider,
+            FixtureCacheFactory {
+                database_directory: directory.path().to_path_buf(),
+            },
+        );
+        let first = factory
+            .open_session(account.clone())
+            .await
+            .expect("first account session opens");
+        let second = factory
+            .open_session(account)
+            .await
+            .expect("second account session opens");
+        let first_calendar = first.calendar_session();
+        let second_calendar = second.calendar_session();
+        first_calendar
+            .synchronize_view(&view)
+            .await
+            .expect("first calendar view syncs");
+        second_calendar
+            .synchronize_view(&view)
+            .await
+            .expect("second calendar view syncs");
+        let event = editable_calendar_event(view);
+
+        assert_eq!(
+            first_calendar.delete_event(&event).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::DeleteOutcomeUnknown
+            ))
+        );
+        assert_eq!(
+            second_calendar.delete_event(&event).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+        assert_eq!(delete_calls.load(Ordering::Relaxed), 1);
     });
 }
 

@@ -60,7 +60,7 @@ pub enum CalendarWorkflowError {
     /// The provider invalidated more than one cursor in this synchronization attempt.
     #[error("calendar synchronization repeatedly reset its cursor")]
     DeltaResetLimitExceeded,
-    /// The synchronization reservation could not be read or released.
+    /// The account reservation or shared recovery state could not be accessed.
     #[error("the calendar workflow state is unavailable")]
     StateUnavailable,
 }
@@ -287,7 +287,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account or stored view cannot be read.
+    /// Returns a cache error when the account or stored view cannot be read, or
+    /// [`CalendarWorkflowError::StateUnavailable`] when shared recovery state
+    /// cannot be read.
     pub async fn load_cached_view(
         &self,
         view: &CalendarViewReference,
@@ -324,9 +326,10 @@ where
     ///
     /// Returns a provider or cache error when a page cannot be loaded or
     /// committed, [`CalendarWorkflowError::RepeatedCursor`] for a looped link,
-    /// a page, response, or reset limit error while preserving resumable state, or
+    /// a page, response, or reset limit error while preserving resumable state,
     /// [`CalendarWorkflowError::OperationInProgress`] when another operation
-    /// owns the account.
+    /// owns the account, or [`CalendarWorkflowError::StateUnavailable`] when
+    /// the account reservation or shared recovery state cannot be accessed.
     pub async fn sync_view(
         &self,
         view: &CalendarViewReference,
@@ -362,8 +365,8 @@ where
     /// all recovery-required account views have completed successful syncs,
     /// [`CalendarWorkflowError::InvalidConfirmation`] when Graph returns an
     /// event that does not match the staged draft, or
-    /// [`CalendarWorkflowError::StateUnavailable`] when workflow state cannot
-    /// be read.
+    /// [`CalendarWorkflowError::StateUnavailable`] when the account reservation
+    /// or shared recovery state cannot be accessed.
     pub async fn create_event(
         &self,
         creation: &CalendarEventCreation,
@@ -406,8 +409,11 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a cache error if the matching operation cannot be removed, or a
-    /// workflow error when another calendar operation owns the view.
+    /// Returns a cache error if the matching operation cannot be removed,
+    /// [`CalendarWorkflowError::OperationInProgress`] when another calendar
+    /// operation owns the view, or
+    /// [`CalendarWorkflowError::StateUnavailable`] when the account reservation
+    /// cannot be accessed.
     pub async fn discard_rejected_event_creation(
         &self,
         creation: &CalendarEventCreation,
@@ -434,7 +440,8 @@ where
     /// recovery after a calendar write. Returns
     /// [`CalendarWorkflowError::InvalidEditableEvent`]
     /// when the provider returns a snapshot for another event. Returns
-    /// [`CalendarWorkflowError::StateUnavailable`] when workflow state is poisoned.
+    /// [`CalendarWorkflowError::StateUnavailable`] when the account reservation
+    /// or shared recovery state cannot be accessed.
     pub async fn editable_event(
         &self,
         event: &CalendarOccurrence,
@@ -468,7 +475,8 @@ where
     /// [`CalendarWorkflowError::CalendarWriteSyncRequired`] when this view has
     /// not completed a successful sync or another view for the account needs
     /// recovery, or
-    /// [`CalendarWorkflowError::StateUnavailable`] when workflow state is poisoned. Returns
+    /// [`CalendarWorkflowError::StateUnavailable`] when the account reservation
+    /// or shared recovery state cannot be accessed,
     /// [`CalendarWorkflowError::InvalidUpdateConfirmation`] when the provider
     /// returns different event values. A cache failure after Graph confirmation
     /// is returned as [`CalendarEventUpdateOutcome::ConfirmedButNotCached`].
@@ -527,7 +535,9 @@ where
     /// [`CalendarWorkflowError::OperationInProgress`] when another operation
     /// owns the account, or [`CalendarWorkflowError::CalendarWriteSyncRequired`]
     /// when the source view has not completed a sync or another account view
-    /// needs recovery. A cache failure after Graph confirms deletion is returned as
+    /// needs recovery, or [`CalendarWorkflowError::StateUnavailable`] when the
+    /// account reservation or shared recovery state cannot be accessed. A cache
+    /// failure after Graph confirms deletion is returned as
     /// [`CalendarEventDeletionOutcome::DeletedButNotCached`].
     pub async fn delete_event(
         &self,
