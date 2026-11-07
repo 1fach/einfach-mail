@@ -1,17 +1,12 @@
 use std::fmt;
 
+use thiserror::Error;
+
 /// The mailbox address contains no non-whitespace characters.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("mailbox address must not be empty")]
 #[must_use]
 pub struct EmptyMailboxAddress;
-
-impl fmt::Display for EmptyMailboxAddress {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("mailbox address must not be empty")
-    }
-}
-
-impl std::error::Error for EmptyMailboxAddress {}
 
 /// A mailbox identity associated with an account.
 #[derive(Clone, Eq, PartialEq)]

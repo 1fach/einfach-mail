@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::{
@@ -40,16 +41,9 @@ impl CalendarEventVersion {
 }
 
 /// A provider version was missing or malformed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("calendar event version must be bounded and control-free")]
 pub struct InvalidCalendarEventVersion;
-
-impl fmt::Display for InvalidCalendarEventVersion {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("calendar event version must be bounded and control-free")
-    }
-}
-
-impl std::error::Error for InvalidCalendarEventVersion {}
 
 /// A timed event that the provider confirmed is safe to edit.
 #[derive(Clone, Eq, PartialEq)]
@@ -97,16 +91,9 @@ impl EditableCalendarEvent {
 }
 
 /// An edit snapshot contains an all-day event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("editable calendar event must use timed values")]
 pub struct InvalidEditableCalendarEvent;
-
-impl fmt::Display for InvalidEditableCalendarEvent {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("editable calendar event must use timed values")
-    }
-}
-
-impl std::error::Error for InvalidEditableCalendarEvent {}
 
 /// The changed subject and timed range submitted for an event update.
 #[derive(Clone, Eq, PartialEq)]
@@ -156,16 +143,9 @@ impl CalendarEventUpdateDraft {
 }
 
 /// An event update contains an invalid subject or time range.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("calendar event update must contain a title and ordered UTC times")]
 pub struct InvalidCalendarEventUpdateDraft;
-
-impl fmt::Display for InvalidCalendarEventUpdateDraft {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("calendar event update must contain a title and ordered UTC times")
-    }
-}
-
-impl std::error::Error for InvalidCalendarEventUpdateDraft {}
 
 /// A requested event update bound to the provider version used by the editor.
 #[derive(Clone, Eq, PartialEq)]
@@ -221,16 +201,9 @@ impl CalendarEventUpdate {
 }
 
 /// The requested values leave an event unchanged.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("calendar event update must change at least one value")]
 pub struct NoCalendarEventChanges;
-
-impl fmt::Display for NoCalendarEventChanges {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("calendar event update must change at least one value")
-    }
-}
-
-impl std::error::Error for NoCalendarEventChanges {}
 
 #[cfg(test)]
 mod tests {

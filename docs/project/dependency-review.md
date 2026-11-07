@@ -72,6 +72,12 @@ No direct replacement or audit suppression is added for M0. These maintenance wa
 
 ## Candidates
 
+### Domain validation errors — 2026-11-07
+
+| Candidate | Evidence | Decision |
+| --- | --- | --- |
+| `thiserror` 2.0.21 | [Upstream documentation](https://docs.rs/crate/thiserror/latest) describes the `Error` derive for unit structs and enums, with explicit `#[source]` fields. The package is MIT OR Apache-2.0, declares Rust 1.77, and uses only the Rust proc-macro implementation crate. Its `std` feature is enabled by default; it adds no native build tools or platform-specific dependencies. Version 2.0.21 is already locked and used directly by application and persistence; the Linux `cargo audit` reports no thiserror advisory. The domain manifest adds a direct edge to the existing version, with no new packages or version changes. | Use the derive for domain validation errors. It preserves their public error types and supports the existing source chain without handwritten `Display` and `Error` implementations. Keep domain messages on their types and variants. |
+
 ### Redacted domain Debug formatting — 2026-11-07
 
 | Candidate | Evidence | Decision |

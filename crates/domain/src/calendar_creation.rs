@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use thiserror::Error;
 use time::{OffsetDateTime, PrimitiveDateTime};
 use uuid::Uuid;
 
@@ -48,16 +49,9 @@ impl Default for CalendarEventCreationId {
 }
 
 /// A persisted creation identifier could not be parsed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("calendar creation identifier must be a UUID")]
 pub struct InvalidCalendarEventCreationId;
-
-impl fmt::Display for InvalidCalendarEventCreationId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("calendar creation identifier must be a UUID")
-    }
-}
-
-impl std::error::Error for InvalidCalendarEventCreationId {}
 
 /// A source time-zone identifier for the local schedule the user entered.
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -94,16 +88,9 @@ impl TryFrom<String> for CalendarTimeZoneId {
 }
 
 /// A local schedule used an invalid or empty time-zone identifier.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("calendar event time zone must be a non-empty identifier")]
 pub struct InvalidCalendarEventTimeZone;
-
-impl fmt::Display for InvalidCalendarEventTimeZone {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("calendar event time zone must be a non-empty identifier")
-    }
-}
-
-impl std::error::Error for InvalidCalendarEventTimeZone {}
 
 /// A single timed event's source local schedule and resolved UTC range.
 ///
@@ -329,28 +316,14 @@ fn draft_fits_view(draft: &CalendarEventDraft, range: &crate::CalendarViewRange)
 }
 
 /// A calendar event's local or resolved endpoints fall outside its selected view.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("calendar event endpoints must fit the selected view")]
 pub struct InvalidCalendarEventCreation;
 
-impl fmt::Display for InvalidCalendarEventCreation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("calendar event endpoints must fit the selected view")
-    }
-}
-
-impl std::error::Error for InvalidCalendarEventCreation {}
-
 /// A calendar event draft contains invalid title or local-time values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("calendar event draft must contain a title and ordered timed values")]
 pub struct InvalidCalendarEventDraft;
-
-impl fmt::Display for InvalidCalendarEventDraft {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("calendar event draft must contain a title and ordered timed values")
-    }
-}
-
-impl std::error::Error for InvalidCalendarEventDraft {}
 
 #[cfg(test)]
 mod tests {

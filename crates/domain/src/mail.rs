@@ -3,6 +3,7 @@
 use std::{fmt, str::FromStr, time::SystemTime};
 
 use addr_spec::AddrSpec;
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{AccountId, FolderId, Mailbox, MessageId};
@@ -44,17 +45,10 @@ impl fmt::Debug for MailRecipient {
 }
 
 /// The recipient is not one strict bare mail address.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("recipient must be one valid bare mail address")]
 #[must_use]
 pub struct InvalidMailRecipient;
-
-impl fmt::Display for InvalidMailRecipient {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("recipient must be one valid bare mail address")
-    }
-}
-
-impl std::error::Error for InvalidMailRecipient {}
 
 /// A non-empty, single-line mail subject.
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -96,25 +90,16 @@ impl fmt::Debug for MailSubject {
 }
 
 /// A subject value that cannot be sent as a single mail header line.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 #[must_use]
 pub enum InvalidMailSubject {
     /// The subject is empty after trimming surrounding whitespace.
+    #[error("the message subject is empty")]
     Empty,
     /// The subject contains a line break.
+    #[error("the message subject contains a line break")]
     Multiline,
 }
-
-impl fmt::Display for InvalidMailSubject {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Empty => "the message subject is empty",
-            Self::Multiline => "the message subject contains a line break",
-        })
-    }
-}
-
-impl std::error::Error for InvalidMailSubject {}
 
 /// The account-scoped cached message that determines a reply's recipients.
 #[derive(Clone, Eq, PartialEq)]
@@ -728,25 +713,16 @@ impl FolderReference {
 }
 
 /// The parent reference is invalid for this folder.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 #[must_use]
 pub enum FolderParentError {
     /// The parent folder belongs to another account.
+    #[error("parent folder must belong to the same account")]
     AccountMismatch,
     /// A folder cannot be its own parent.
+    #[error("a folder cannot be its own parent")]
     SelfParent,
 }
-
-impl fmt::Display for FolderParentError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::AccountMismatch => "parent folder must belong to the same account",
-            Self::SelfParent => "a folder cannot be its own parent",
-        })
-    }
-}
-
-impl std::error::Error for FolderParentError {}
 
 /// A mail folder and its account-scoped location in the folder tree.
 #[derive(Clone, Eq, PartialEq)]
