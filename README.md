@@ -1,6 +1,6 @@
 # Einfach Mail
 
-Einfach Mail is a Rust desktop mail and calendar client with Microsoft 365 integration. The native UI uses GPUI Kit. Linux is the sole development and validation target for the current milestones; Windows and macOS support follow later. `main` contains read-only mail sync, encrypted offline browsing, safe native message rendering, and a cached Linux weekly calendar agenda. PR #51 adds recovery for expired calendar cursors. M4 adds mail and timed-appointment actions with recoverable confirmation. Manual Linux accessibility review and live Microsoft 365 tenant verification remain open. See [project status](docs/project/status.md) and the [roadmap](docs/project/roadmap.md) for current review state.
+Einfach Mail is a Rust desktop mail and calendar client with Microsoft 365 integration. The native UI uses GPUI Kit. Linux is the sole development and validation target for the current milestones; Windows and macOS support follow later. `main` contains read-only mail sync, encrypted offline browsing, safe native message rendering, and a cached Linux weekly calendar agenda. Calendar sync implements bounded recovery for expired delta cursors; live Graph reset behavior remains unverified. M4 adds mail and timed-appointment actions with recoverable confirmation. Manual Linux accessibility review and live Microsoft 365 tenant verification remain open. See [project status](docs/project/status.md) and the [roadmap](docs/project/roadmap.md) for current review state.
 
 The first provider target is Exchange Online through Microsoft Graph. Exchange Server installed on premises is outside the first release scope. See the [product brief](docs/product/brief.md) and [Microsoft Graph research](docs/research/microsoft-graph.md).
 
@@ -30,7 +30,7 @@ The script checks dependency boundaries and bans, the Linux target graph, Rust 1
 
 `cargo audit` stores its advisory database under ignored `target/rustsec-advisory-db` and may fetch updates. If Perl lacks `FindBin.pm`, the script reports when it uses system OpenSSL. Workspace tests skip ignored live Secret Service checks; see [development setup](docs/project/setup.md) to run them separately.
 
-CI runs the build, dependency, and test gates in [its Linux workflow](.github/workflows/ci.yml). RustSec runs in [a separate workflow](.github/workflows/rustsec-audit.yml).
+The repository defines build, dependency, and test gates in [its Linux workflow](.github/workflows/ci.yml), with RustSec in [a separate workflow](.github/workflows/rustsec-audit.yml).
 
 ## Project map
 

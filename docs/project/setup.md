@@ -57,11 +57,11 @@ This repository already has a `main` branch and an `origin` remote. Do not initi
 git status --short --branch
 ```
 
-The private repository plan does not support required branch protection. Run the Linux project gate locally and review pull request checks before merging. Current CI checks are `Rust checks (Linux)`, `Rust MSRV check 1.95.0 (Linux)`, `Workspace dependency policy`, and `RustSec audit`.
+The private repository plan does not support required branch protection. Run the Linux project gate locally and review pull request checks before merging. The repository defines these GitHub Actions checks: `Rust checks (Linux)`, `Rust MSRV check 1.95.0 (Linux)`, `Workspace dependency policy`, and `RustSec audit`.
 
 ## Run the Linux desktop app
 
-To enable the account view's sign-in action, set `EINFACH_MAIL_ENTRA_CLIENT_ID` to the client ID of a public Microsoft Entra app registration. Set `EINFACH_MAIL_ENTRA_CALLBACK_PORT` to the nonzero port registered for `http://127.0.0.1/<port>/callback`. The app does not use a client secret. Initial sign-in requests delegated `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access`. It reads the signed-in profile through Graph `/me` and stores the refresh token in Linux Secret Service. The app requests `Mail.ReadWrite`, `Calendars.ReadWrite`, or `Mail.Send` only in a separate same-account permission review after Microsoft denies the related action. Each permission gives broader access than the app's current actions. The app explains the full Microsoft capability before opening the system browser. See the [Graph permission table](../research/microsoft-graph.md#permissions) and [ADR 0045](../decisions/0045-incremental-graph-permissions.md).
+To enable the account view's sign-in action, set `EINFACH_MAIL_ENTRA_CLIENT_ID` to the client ID of a public Microsoft Entra app registration. Set `EINFACH_MAIL_ENTRA_CALLBACK_PORT` to the nonzero port registered for `http://127.0.0.1:<port>/callback`. The app does not use a client secret. Initial sign-in requests delegated `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access`. It reads the signed-in profile through Graph `/me` and stores the refresh token in Linux Secret Service. The app requests `Mail.ReadWrite`, `Calendars.ReadWrite`, or `Mail.Send` only in a separate same-account permission review after Microsoft denies the related action. Each permission gives broader access than the app's current actions. The app explains the full Microsoft capability before opening the system browser. See the [Graph permission table](../research/microsoft-graph.md#permissions) and [ADR 0045](../decisions/0045-incremental-graph-permissions.md).
 
 Run the app from the repository root:
 
