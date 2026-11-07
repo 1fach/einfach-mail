@@ -632,6 +632,19 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
     let message = super::account_cache_open_error_message(AccountCacheOpenError::InvalidData);
     assert!(message.contains("account cache"));
     assert!(!message.contains("mail"));
+
+    click(context, "review-app-permissions");
+    assert!(
+        context
+            .cx
+            .update(|cx| { view.read(cx).pending_permission_review.is_some() })
+    );
+    click(context, "cancel-permission-review");
+    assert!(
+        context
+            .cx
+            .update(|cx| { view.read(cx).pending_permission_review.is_none() })
+    );
 }
 
 #[gpui_kit::test]
@@ -1009,7 +1022,7 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
-fn mail_return_reuses_the_retained_session_for_calendar(cx: &mut TestAppContext) {
+fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let session_open_attempts = Arc::new(AtomicUsize::new(0));
@@ -1046,6 +1059,38 @@ fn mail_return_reuses_the_retained_session_for_calendar(cx: &mut TestAppContext)
             .update(|cx| matches!(&view.read(cx).content, AccountContent::Mail { .. }))
     );
 
+    let mail_view = context.cx.update(|cx| match &view.read(cx).content {
+        AccountContent::Mail { view, .. } => view.clone(),
+        _ => panic!("mail view is open"),
+    });
+    context.cx.update(|cx| {
+        mail_view.update(cx, |_, cx| {
+            cx.emit(crate::mail_view::MailViewEvent::ReviewMailWritePermission);
+        });
+    });
+    context.run_until_parked();
+    draw_account_view(context);
+    assert!(context.cx.update(|cx| {
+        let account_view = view.read(cx);
+        matches!(&account_view.content, AccountContent::Account)
+            && matches!(
+                account_view.pending_permission_review,
+                Some(AccountPermissionRequest::MailReadWrite)
+            )
+    }));
+    click(context, "cancel-permission-review");
+    assert!(
+        context
+            .cx
+            .update(|cx| { view.read(cx).pending_permission_review.is_none() })
+    );
+
+    click(context, "open-mail");
+    assert!(
+        context
+            .cx
+            .update(|cx| matches!(&view.read(cx).content, AccountContent::Mail { .. }))
+    );
     click(context, "mail-account-navigation");
     assert!(
         context
@@ -1064,6 +1109,31 @@ fn mail_return_reuses_the_retained_session_for_calendar(cx: &mut TestAppContext)
         context
             .cx
             .update(|cx| matches!(&view.read(cx).content, AccountContent::Calendar { .. }))
+    );
+    let calendar_view = context.cx.update(|cx| match &view.read(cx).content {
+        AccountContent::Calendar { view, .. } => view.clone(),
+        _ => panic!("calendar view is open"),
+    });
+    context.cx.update(|cx| {
+        calendar_view.update(cx, |_, cx| {
+            cx.emit(crate::calendar_view::CalendarViewEvent::ReviewCalendarWritePermission);
+        });
+    });
+    context.run_until_parked();
+    draw_account_view(context);
+    assert!(context.cx.update(|cx| {
+        let account_view = view.read(cx);
+        matches!(&account_view.content, AccountContent::Account)
+            && matches!(
+                account_view.pending_permission_review,
+                Some(AccountPermissionRequest::CalendarReadWrite)
+            )
+    }));
+    click(context, "cancel-permission-review");
+    assert!(
+        context
+            .cx
+            .update(|cx| { view.read(cx).pending_permission_review.is_none() })
     );
     assert_eq!(session_open_attempts.load(Ordering::SeqCst), 1);
 }
