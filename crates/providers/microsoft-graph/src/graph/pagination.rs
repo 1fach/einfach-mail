@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use huskarl::token::AccessToken;
 use serde::Deserialize;
 
-use crate::{error::GraphError, graph_url::GraphUrl, transport::GraphOperation};
+use crate::{error::GraphError, graph_url::GraphUrl, transport::GraphReadOperation};
 
 use super::GraphApi;
 
@@ -32,7 +32,7 @@ pub(super) struct GraphDeltaPage<T> {
 
 pub(super) struct PageTraversal<'a> {
     api: &'a GraphApi,
-    operation: GraphOperation,
+    operation: GraphReadOperation,
     token: std::sync::Arc<AccessToken>,
     budget: PaginationBudget,
 }
@@ -40,7 +40,7 @@ pub(super) struct PageTraversal<'a> {
 impl<'a> PageTraversal<'a> {
     pub(super) fn new(
         api: &'a GraphApi,
-        operation: GraphOperation,
+        operation: GraphReadOperation,
         token: std::sync::Arc<AccessToken>,
     ) -> Self {
         Self {

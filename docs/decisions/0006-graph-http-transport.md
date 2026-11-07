@@ -18,6 +18,8 @@ Use `reqwest` and `serde` for HTTP and JSON in `crates/providers/microsoft-graph
 
 Send `Content-Type: application/json` on message-delta GET requests, including requests that follow an opaque continuation link, as required by the Graph v1.0 message-delta contract.
 
+Represent requests with a closed transport enum whose variants encode the operation and HTTP method. The handle accepts method-specific read, delta, JSON POST, and JSON PATCH operation types. Use the same request value to choose the HTTP builder, headers, retry behavior, uncertain write outcome, and response mapping. Do not pass a Graph operation and HTTP method separately.
+
 The application-facing provider port exposes provider-independent values and errors. It does not expose `reqwest`, Tokio, Graph JSON, or response-header types. The provider obtains credentials through the approved identity boundary. Views do not receive tokens.
 
 The adapter must preserve response headers so it can honor Graph's `Retry-After` value. Retry only operations whose semantics permit another request. Do not automatically retry a write until the operation's duplicate-request behavior is proven. If Graph omits `Retry-After`, use the documented exponential-backoff behavior.

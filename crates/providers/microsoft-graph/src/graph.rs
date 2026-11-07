@@ -7,7 +7,7 @@ use url::Url;
 use crate::{
     error::GraphError,
     graph_url::GraphAuthority,
-    transport::{GraphOperation, GraphTransportHandle},
+    transport::{GraphReadOperation, GraphTransportHandle},
 };
 use einfach_mail_domain::{AccountId, AccountProfile};
 
@@ -40,7 +40,7 @@ impl GraphApi {
         let profile_url = self.authority.profile_url(endpoint)?;
         let response = self
             .transport
-            .get(GraphOperation::Profile, profile_url, token)
+            .get(GraphReadOperation::Profile, profile_url, token)
             .await?;
         let profile = serde_json::from_slice::<GraphUserProfile>(&response)
             .map_err(|_| GraphError::InvalidResponse)?;
