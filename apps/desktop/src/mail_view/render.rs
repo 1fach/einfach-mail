@@ -396,8 +396,8 @@ impl MailView {
                                     .child(div().text_lg().font_bold().child(
                                         metadata.subject().unwrap_or("(No subject)").to_owned(),
                                     ))
-                                    .child(
-                                        div()
+                                    .child({
+                                        let actions = div()
                                             .flex()
                                             .items_center()
                                             .gap_2()
@@ -416,8 +416,11 @@ impl MailView {
                                                 WellKnownMailFolder::DeletedItems,
                                                 message_id,
                                                 cx,
-                                            )),
-                                    ),
+                                            ));
+                                        #[cfg(test)]
+                                        let actions = actions.id("message-actions").test_support();
+                                        actions
+                                    }),
                             )
                             .child(
                                 div()
@@ -441,45 +444,53 @@ impl MailView {
                 destination_folder,
                 destination_label,
                 open_action_label,
-            } => div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .id("message-move-completed")
-                .debug_selector(|| "message-move-completed".to_owned())
-                .role(Role::Status)
-                .child(format!("Moved to {destination_label}."))
-                .child(
-                    Button::new("open-moved-message-folder")
-                        .debug_selector(|| "open-moved-message-folder".to_owned())
-                        .label(*open_action_label)
-                        .on_click(cx.listener({
-                            let destination_folder = destination_folder.clone();
-                            move |view, _, _, cx| {
-                                view.select_folder(destination_folder.clone(), cx);
-                            }
-                        })),
-                )
-                .into_any_element(),
-            MessageDetailState::DeleteCompleted => div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .id("message-delete-completed")
-                .debug_selector(|| "message-delete-completed".to_owned())
-                .role(Role::Status)
-                .child("Moved to Deleted Items.")
-                .into_any_element(),
+            } => {
+                let completed = div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .id("message-move-completed")
+                    .debug_selector(|| "message-move-completed".to_owned())
+                    .role(Role::Status)
+                    .child(format!("Moved to {destination_label}."))
+                    .child(
+                        Button::new("open-moved-message-folder")
+                            .debug_selector(|| "open-moved-message-folder".to_owned())
+                            .label(*open_action_label)
+                            .on_click(cx.listener({
+                                let destination_folder = destination_folder.clone();
+                                move |view, _, _, cx| {
+                                    view.select_folder(destination_folder.clone(), cx);
+                                }
+                            })),
+                    );
+                #[cfg(test)]
+                let completed = completed.test_support();
+                completed.into_any_element()
+            }
+            MessageDetailState::DeleteCompleted => {
+                let completed = div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .id("message-delete-completed")
+                    .debug_selector(|| "message-delete-completed".to_owned())
+                    .role(Role::Status)
+                    .child("Moved to Deleted Items.");
+                #[cfg(test)]
+                let completed = completed.test_support();
+                completed.into_any_element()
+            }
         }
     }
 
@@ -657,25 +668,25 @@ impl MailView {
             .flex_col()
             .gap_2()
             .child(mail_error_message(error));
-        if error
+        let feedback = if error
             == MailWorkflowError::Provider(
                 einfach_mail_application::MailOperationError::AccessDenied,
+            ) {
+            feedback.child(
+                Button::new(permission_button_id)
+                    .ghost()
+                    .debug_selector(|| permission_button_id.to_owned())
+                    .label("Review permissions…")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(MailViewEvent::ReviewMailWritePermission);
+                    })),
             )
-        {
-            feedback
-                .child(
-                    Button::new(permission_button_id)
-                        .ghost()
-                        .debug_selector(|| permission_button_id.to_owned())
-                        .label("Review permissions…")
-                        .on_click(cx.listener(|_, _, _, cx| {
-                            cx.emit(MailViewEvent::ReviewMailWritePermission);
-                        })),
-                )
-                .into_any_element()
         } else {
-            feedback.into_any_element()
-        }
+            feedback
+        };
+        #[cfg(test)]
+        let feedback = feedback.test_support();
+        feedback.into_any_element()
     }
 
     fn render_move_recovery_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -691,7 +702,7 @@ impl MailView {
         reason: MoveRecoveryReason,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
+        let recovery = div()
             .id("message-move-recovery")
             .debug_selector(|| "message-move-recovery".to_owned())
             .role(Role::Alert)
@@ -706,8 +717,10 @@ impl MailView {
                     .label("Sync mail")
                     .disabled(self.sync_running)
                     .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
-            )
-            .into_any_element()
+            );
+        #[cfg(test)]
+        let recovery = recovery.test_support();
+        recovery.into_any_element()
     }
 
     fn render_read_state_action(
@@ -986,12 +999,14 @@ fn move_recovery_message(reason: MoveRecoveryReason) -> &'static str {
 }
 
 fn render_message_pending_feedback(selector: &'static str, message: String) -> AnyElement {
-    div()
+    let feedback = div()
         .id(selector)
         .debug_selector(|| selector.to_owned())
         .role(Role::Status)
-        .child(message)
-        .into_any_element()
+        .child(message);
+    #[cfg(test)]
+    let feedback = feedback.test_support();
+    feedback.into_any_element()
 }
 
 impl Render for MailView {

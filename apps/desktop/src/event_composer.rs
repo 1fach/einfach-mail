@@ -20,6 +20,8 @@ use gpui_kit::component::{
     input::{Input, InputState},
     time_field::TimePrecision,
 };
+#[cfg(test)]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, App, AsyncApp, Context, Entity, EventEmitter, IntoElement, KeyBinding, Render,
     Role, Task, Window, div, prelude::*,
@@ -678,7 +680,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     }
 
     fn render_fields(&self, colors: ColorTokens) -> impl IntoElement {
-        div()
+        let fields = div()
             .id("event-composer-fields")
             .debug_selector(|| "event-composer-fields".to_owned())
             .flex()
@@ -691,7 +693,10 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .when_some(
                 self.render_draft_validation(colors),
                 |element, validation| element.child(validation),
-            )
+            );
+        #[cfg(test)]
+        let fields = fields.test_support();
+        fields
     }
 
     fn render_subject_field(&self) -> impl IntoElement {
@@ -749,7 +754,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .creation
             .as_ref()
             .expect("pending status retains its staged creation");
-        div()
+        let pending = div()
             .id("event-creation-pending")
             .debug_selector(|| "event-creation-pending".to_owned())
             .role(Role::Status)
@@ -770,7 +775,10 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
                 ),
                 |element| element.child(render_creation_submitting(self.status, colors)),
             )
-            .child(render_pending_explanation(self.status, colors))
+            .child(render_pending_explanation(self.status, colors));
+        #[cfg(test)]
+        let pending = pending.test_support();
+        pending
     }
 
     fn render_status(&self, colors: ColorTokens, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -824,7 +832,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             return render_close_action();
         }
         if matches!(&self.mode, ComposerMode::Edit { .. }) {
-            div()
+            let actions = div()
                 .flex()
                 .items_center()
                 .justify_between()
@@ -839,8 +847,10 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
                             composer.confirm_deletion(window, cx);
                         })),
                 )
-                .child(self.render_submit_action(cx))
-                .into_any_element()
+                .child(self.render_submit_action(cx));
+            #[cfg(test)]
+            let actions = actions.id("event-composer-actions").test_support();
+            actions.into_any_element()
         } else {
             self.render_submit_action(cx)
         }
@@ -1086,7 +1096,7 @@ fn render_rejected_cleanup_failure(
     error: CalendarWorkflowError,
     colors: ColorTokens,
 ) -> impl IntoElement {
-    div()
+    let status = div()
         .id("event-creation-status")
         .debug_selector(|| "event-creation-status".to_owned())
         .role(Role::Alert)
@@ -1100,7 +1110,10 @@ fn render_rejected_cleanup_failure(
                 }
                 _ => "the calendar recovery action is unavailable.",
             }
-        ))
+        ));
+    #[cfg(test)]
+    let status = status.test_support();
+    status
 }
 
 fn rejected_cleanup_error_text(error: CalendarCacheError) -> &'static str {
@@ -1124,7 +1137,7 @@ fn render_pending_resolution_failure(
     error: CalendarWorkflowError,
     colors: ColorTokens,
 ) -> impl IntoElement {
-    div()
+    let status = div()
         .id("event-creation-status")
         .debug_selector(|| "event-creation-status".to_owned())
         .role(Role::Alert)
@@ -1133,7 +1146,10 @@ fn render_pending_resolution_failure(
         .child(format!(
             "{} Close this sheet, refresh the calendar, and retry.",
             pending_resolution_error_text(error)
-        ))
+        ));
+    #[cfg(test)]
+    let status = status.test_support();
+    status
 }
 
 fn pending_resolution_error_text(error: CalendarWorkflowError) -> &'static str {
@@ -1149,7 +1165,7 @@ fn pending_resolution_error_text(error: CalendarWorkflowError) -> &'static str {
 }
 
 fn render_pending_operation_missing(colors: ColorTokens) -> impl IntoElement {
-    div()
+    let status = div()
         .id("event-creation-status")
         .debug_selector(|| "event-creation-status".to_owned())
         .role(Role::Alert)
@@ -1157,7 +1173,10 @@ fn render_pending_operation_missing(colors: ColorTokens) -> impl IntoElement {
         .text_color(colors.destructive)
         .child(
             "Another event operation needs attention. Close this sheet, refresh the calendar, and resolve the saved operation.",
-        )
+        );
+    #[cfg(test)]
+    let status = status.test_support();
+    status
 }
 
 fn creation_status_text(status: ComposerStatus) -> Option<&'static str> {
@@ -1249,14 +1268,16 @@ fn render_status_message(
     } else {
         colors.destructive
     };
-    div()
+    let status = div()
         .id("event-creation-status")
         .debug_selector(|| "event-creation-status".to_owned())
         .role(status_role(status))
         .text_sm()
         .text_color(color)
-        .child(message)
-        .into_any_element()
+        .child(message);
+    #[cfg(test)]
+    let status = status.test_support();
+    status.into_any_element()
 }
 
 fn render_calendar_permission_review<S: CalendarSession + ?Sized + 'static>(
