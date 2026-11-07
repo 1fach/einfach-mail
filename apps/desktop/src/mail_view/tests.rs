@@ -3632,7 +3632,6 @@ async fn permission_review_requires_a_separate_send_action(cx: &mut TestAppConte
     assert_eq!(permission_requests.load(Ordering::Relaxed), 1);
     assert_eq!(send_calls.load(Ordering::Relaxed), 1);
     can_send.store(true, Ordering::Relaxed);
-    context.cx.executor().timer(Duration::from_millis(20)).await;
     context.run_until_parked();
     draw_mail_view(context);
     assert_eq!(send_calls.load(Ordering::Relaxed), 1);
