@@ -178,7 +178,7 @@ async fn open_database_with_key(
     let client = open_encrypted_client(&paths.database, &key).await?;
     schema::apply(&client)
         .await
-        .map_err(super::store::CacheFailure::public)?;
+        .map_err(super::store::CacheFailure::mail_public)?;
     let database_identity = DatabaseIdentity::read(&paths.database)?;
     Ok(OpenDatabase {
         client,

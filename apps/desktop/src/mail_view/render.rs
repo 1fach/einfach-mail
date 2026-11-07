@@ -985,9 +985,7 @@ fn message_move_menu_item(
 
 fn move_recovery_message(reason: MoveRecoveryReason) -> &'static str {
     match reason {
-        MoveRecoveryReason::InitialSyncRequired => {
-            "Sync mail successfully before archiving, moving, or deleting messages in this session."
-        }
+        MoveRecoveryReason::InitialSyncRequired => super::ACCOUNT_SYNC_REQUIRED_MESSAGE,
         MoveRecoveryReason::OutcomeUnknown => {
             "The message may have moved. Sync mail before trying again."
         }

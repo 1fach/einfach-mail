@@ -17,10 +17,54 @@ use einfach_mail_domain::{
     MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
     MessageDeltaProgress, MessageId, MessageMetadata, MessageOrigin, PendingMailSend, ReadState,
 };
+use thiserror::Error;
 use uuid::Uuid;
 
 use super::{CacheFailure, CacheResult, SqliteMailCache};
 use crate::schema;
+
+type MailCacheResult<T> = Result<T, MailCacheFailure>;
+
+#[derive(Debug, Error)]
+enum MailCacheFailure {
+    #[error(transparent)]
+    Store(#[from] CacheFailure),
+    #[error("the message is not cached")]
+    MessageNotCached,
+    #[error("the folder synchronization checkpoint changed")]
+    SyncStateChanged,
+    #[error("an unresolved send marker already exists")]
+    SendAlreadyPending,
+    #[error("the pending send belongs to another operation")]
+    PendingSendMismatch,
+    #[error("the pending send marker does not exist")]
+    PendingSendNotFound,
+}
+
+impl MailCacheFailure {
+    fn public(self) -> MailCacheError {
+        match self {
+            Self::Store(error) => error.mail_public(),
+            Self::MessageNotCached => MailCacheError::MessageNotCached,
+            Self::SyncStateChanged => MailCacheError::SyncStateChanged,
+            Self::SendAlreadyPending => MailCacheError::SendAlreadyPending,
+            Self::PendingSendMismatch => MailCacheError::PendingSendMismatch,
+            Self::PendingSendNotFound => MailCacheError::PendingSendNotFound,
+        }
+    }
+}
+
+impl From<async_sqlite::Error> for MailCacheFailure {
+    fn from(error: async_sqlite::Error) -> Self {
+        Self::Store(CacheFailure::from(error))
+    }
+}
+
+impl From<async_sqlite::rusqlite::Error> for MailCacheFailure {
+    fn from(error: async_sqlite::rusqlite::Error) -> Self {
+        Self::Store(CacheFailure::from(error))
+    }
+}
 
 impl SqliteMailCache {
     fn check_folder(&self, folder: &FolderReference) -> Result<(), MailCacheError> {
@@ -49,7 +93,7 @@ impl MailCache for SqliteMailCache {
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -89,7 +133,7 @@ impl MailCache for SqliteMailCache {
                     Ok(state)
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -131,7 +175,7 @@ impl MailCache for SqliteMailCache {
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -147,7 +191,7 @@ impl MailCache for SqliteMailCache {
             client
                 .conn_and_then(move |connection| read_sync_state(connection, &folder))
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -173,7 +217,7 @@ impl MailCache for SqliteMailCache {
                     let state =
                         read_sync_state(&transaction, &folder)?.ok_or(CacheFailure::InvalidData)?;
                     if state != expected_state {
-                        return Err(CacheFailure::SyncStateChanged);
+                        return Err(MailCacheFailure::SyncStateChanged);
                     }
                     let full_sync_generation = state
                         .full_sync_generation()
@@ -202,10 +246,10 @@ impl MailCache for SqliteMailCache {
                         checkpoint_revision,
                     )?;
                     transaction.commit()?;
-                    read_sync_state(connection, &folder)?.ok_or(CacheFailure::InvalidData)
+                    read_sync_state(connection, &folder)?.ok_or(CacheFailure::InvalidData.into())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(MailCacheFailure::public)
         }
     }
 
@@ -227,7 +271,7 @@ impl MailCache for SqliteMailCache {
                     begin_full_resync_transaction(connection, &folder, &expected_state, &reset_link)
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(MailCacheFailure::public)
         }
     }
 
@@ -243,7 +287,7 @@ impl MailCache for SqliteMailCache {
             client
                 .conn_and_then(move |connection| read_folders(connection, &account_id))
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -259,7 +303,7 @@ impl MailCache for SqliteMailCache {
             client
                 .conn_and_then(move |connection| read_messages(connection, &folder))
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -281,7 +325,7 @@ impl MailCache for SqliteMailCache {
                     read_cached_message(connection, &folder, &message_id)
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -313,7 +357,7 @@ impl MailCache for SqliteMailCache {
                     Ok(is_read.map(read_state_from_bool))
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -344,7 +388,7 @@ impl MailCache for SqliteMailCache {
                         ],
                     )?;
                     if changed == 0 {
-                        return Err(CacheFailure::MessageNotCached);
+                        return Err(MailCacheFailure::MessageNotCached);
                     }
                     transaction.execute(
                         "DELETE FROM mail_folder_write_sync_requirement
@@ -355,7 +399,7 @@ impl MailCache for SqliteMailCache {
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(MailCacheFailure::public)
         }
     }
 
@@ -384,7 +428,7 @@ impl MailCache for SqliteMailCache {
                     Ok(required)
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -413,7 +457,7 @@ impl MailCache for SqliteMailCache {
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -436,7 +480,7 @@ impl MailCache for SqliteMailCache {
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -467,7 +511,7 @@ impl MailCache for SqliteMailCache {
                         ],
                     )?;
                     if changed == 0 {
-                        return Err(CacheFailure::MessageNotCached);
+                        return Err(MailCacheFailure::MessageNotCached);
                     }
                     transaction.execute(
                         "DELETE FROM mail_folder_write_sync_requirement
@@ -478,7 +522,7 @@ impl MailCache for SqliteMailCache {
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(MailCacheFailure::public)
         }
     }
 
@@ -513,7 +557,7 @@ impl MailCache for SqliteMailCache {
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(MailCacheFailure::public)
         }
     }
 
@@ -546,12 +590,12 @@ impl MailCache for SqliteMailCache {
                         ],
                     )?;
                     if changed == 0 {
-                        return Err(CacheFailure::MessageNotCached);
+                        return Err(MailCacheFailure::MessageNotCached);
                     }
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(MailCacheFailure::public)
         }
     }
 
@@ -579,7 +623,7 @@ impl MailCache for SqliteMailCache {
             client
                 .conn_and_then(move |connection| read_pending_send(connection, &account_id))
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(CacheFailure::mail_public)
         }
     }
 
@@ -639,12 +683,12 @@ impl MailCache for SqliteMailCache {
                         ],
                     )?;
                     if changed == 0 {
-                        return Err(CacheFailure::SendAlreadyPending);
+                        return Err(MailCacheFailure::SendAlreadyPending);
                     }
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(MailCacheFailure::public)
         }
     }
 
@@ -676,9 +720,9 @@ impl MailCache for SqliteMailCache {
                         )
                         .optional()?;
                     match existing.as_deref() {
-                        None => return Err(CacheFailure::PendingSendNotFound),
+                        None => return Err(MailCacheFailure::PendingSendNotFound),
                         Some(existing) if existing != operation_id => {
-                            return Err(CacheFailure::PendingSendMismatch);
+                            return Err(MailCacheFailure::PendingSendMismatch);
                         }
                         Some(_) => {}
                     }
@@ -691,7 +735,7 @@ impl MailCache for SqliteMailCache {
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::public)
+                .map_err(MailCacheFailure::public)
         }
     }
 }
@@ -982,9 +1026,9 @@ fn move_cached_message(
     source_folder: &FolderReference,
     destination_folder: &FolderReference,
     message_id: &MessageId,
-) -> CacheResult<()> {
+) -> MailCacheResult<()> {
     if !folder_exists(transaction, destination_folder)? {
-        return Err(CacheFailure::InvalidData);
+        return Err(CacheFailure::InvalidData.into());
     }
     insert_or_merge_destination_message(
         transaction,
@@ -1000,7 +1044,7 @@ fn insert_or_merge_destination_message(
     source_folder: &FolderReference,
     destination_folder: &FolderReference,
     message_id: &MessageId,
-) -> CacheResult<()> {
+) -> MailCacheResult<()> {
     let inserted = transaction.execute(
         MOVE_CACHED_MESSAGE_SQL,
         params![
@@ -1011,7 +1055,7 @@ fn insert_or_merge_destination_message(
         ],
     )?;
     if inserted != 1 {
-        return Err(CacheFailure::MessageNotCached);
+        return Err(MailCacheFailure::MessageNotCached);
     }
     Ok(())
 }
@@ -1020,7 +1064,7 @@ fn remove_source_message(
     transaction: &Transaction<'_>,
     source_folder: &FolderReference,
     message_id: &MessageId,
-) -> CacheResult<()> {
+) -> MailCacheResult<()> {
     let removed = transaction.execute(
         "DELETE FROM mail_messages
          WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
@@ -1031,7 +1075,7 @@ fn remove_source_message(
         ],
     )?;
     if removed != 1 {
-        return Err(CacheFailure::MessageNotCached);
+        return Err(MailCacheFailure::MessageNotCached);
     }
     Ok(())
 }
@@ -1468,11 +1512,11 @@ fn begin_full_resync_transaction(
     folder: &FolderReference,
     expected_state: &MailSyncState,
     reset_link: &str,
-) -> CacheResult<MailSyncState> {
+) -> MailCacheResult<MailSyncState> {
     let transaction = begin_checkpoint_write(connection)?;
     let state = read_sync_state(&transaction, folder)?.ok_or(CacheFailure::InvalidData)?;
     if &state != expected_state {
-        return Err(CacheFailure::SyncStateChanged);
+        return Err(MailCacheFailure::SyncStateChanged);
     }
     let generation = state
         .full_sync_generation()
@@ -1499,10 +1543,10 @@ fn begin_full_resync_transaction(
         ],
     )?;
     if updated_rows != 1 {
-        return Err(CacheFailure::InvalidData);
+        return Err(CacheFailure::InvalidData.into());
     }
     transaction.commit()?;
-    read_sync_state(connection, folder)?.ok_or(CacheFailure::InvalidData)
+    read_sync_state(connection, folder)?.ok_or(CacheFailure::InvalidData.into())
 }
 
 /// Starts a write transaction that serializes checkpoint comparisons.

@@ -34,6 +34,7 @@ gpui_kit::actions!(
 
 const MESSAGE_LIST_CONTEXT: &str = "MailMessageList";
 const MESSAGE_ROW_HEIGHT: Pixels = px(72.);
+const ACCOUNT_SYNC_REQUIRED_MESSAGE: &str = "Complete a successful mail sync for this account before archiving, moving, or deleting messages.";
 
 pub(crate) fn bind_message_navigation_keys(cx: &mut App) {
     let context = Some(MESSAGE_LIST_CONTEXT);
@@ -1728,9 +1729,7 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
         MailWorkflowError::InvalidMoveDestination => {
             "The destination folder is unavailable. Sync mail and try again."
         }
-        MailWorkflowError::AccountSyncRequired => {
-            "Sync mail successfully before archiving, moving, or deleting messages in this session."
-        }
+        MailWorkflowError::AccountSyncRequired => ACCOUNT_SYNC_REQUIRED_MESSAGE,
         MailWorkflowError::AlreadyInWellKnownFolder(WellKnownMailFolder::Archive) => {
             "This message is already in Archive."
         }

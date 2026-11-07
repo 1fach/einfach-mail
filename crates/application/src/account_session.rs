@@ -148,7 +148,7 @@ pub trait MailSession: Send + Sync {
 
     /// Moves a cached message into a well-known folder in the signed-in account.
     ///
-    /// The workflow requires a successful account sync in this session and leaves the cached
+    /// The workflow requires a successful account sync and leaves the cached
     /// source untouched unless the provider confirms the move.
     ///
     /// # Errors
@@ -157,9 +157,9 @@ pub trait MailSession: Send + Sync {
     /// requested folder, [`MailWorkflowError::WellKnownFolderUnavailable`] when the destination
     /// is not visible in the active account, [`MailWorkflowError::InvalidMoveDestination`] when
     /// the source is no longer visible, [`MailWorkflowError::AccountSyncRequired`] before a
-    /// successful session sync, [`MailWorkflowError::FolderSyncRequired`] when either folder needs
-    /// reconciliation, or another provider, cache, or reservation error when the move cannot
-    /// complete.
+    /// successful sync for the account, [`MailWorkflowError::FolderSyncRequired`] when either
+    /// folder needs reconciliation, or another provider, cache, or reservation error when the
+    /// move cannot complete.
     fn move_message_to_well_known_folder<'a>(
         &'a self,
         source_folder: &'a FolderReference,
@@ -315,8 +315,8 @@ pub trait AccountSession: Send + Sync {
 pub trait AccountSessionFactory: Send + Sync {
     /// Opens a session over the account's shared mail and calendar cache.
     ///
-    /// Sessions opened by this factory for the same account share in-memory
-    /// write-recovery state.
+    /// Sessions opened by this factory for the same account share operation
+    /// reservations and in-memory write-recovery state.
     ///
     /// # Errors
     ///
