@@ -3056,7 +3056,7 @@ fn cached_html_mail_view_does_not_open_unsafe_links(cx: &mut TestAppContext) {
         .debug_bounds("mail-message-html-body")
         .expect("sanitized HTML body has a layout");
     context.simulate_click(
-        point(body_bounds.left() + px(12.), body_bounds.top() + px(12.)),
+        point(body_bounds.left() + px(36.), body_bounds.top() + px(36.)),
         Modifiers::default(),
     );
     assert_eq!(context.opened_url(), None);

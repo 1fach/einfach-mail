@@ -7,16 +7,16 @@ publish = false
 description = "Test-only proof for encrypted SQLite and Linux credential storage"
 
 [dev-dependencies]
-async-sqlite = { version = "0.6.0", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
-getrandom = "0.4.3"
-hex = "0.4.3"
-rusqlite_migration = "2.6.0"
+async-sqlite.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+rusqlite_migration.workspace = true
 smol = "2.0.2"
 tempfile = "3.27.0"
-zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
+zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
+keyring.workspace = true
 
 [lints]
 workspace = true
