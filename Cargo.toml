@@ -45,6 +45,10 @@ webbrowser = { version = "1.2.6", default-features = false, features = ["hardene
 xdg = "3.0.0"
 zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
 
+[patch.crates-io]
+# Expose the styled DatePicker's inner ComboBox name; see ADR 0050.
+gpui-component = { path = "vendor/gpui-component" }
+
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
