@@ -2,17 +2,12 @@
 
 use std::fmt;
 
+use thiserror::Error;
+
 /// The supplied provider identifier was empty.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("identifier must not be empty")]
 pub struct EmptyIdentifier;
-
-impl fmt::Display for EmptyIdentifier {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("identifier must not be empty")
-    }
-}
-
-impl std::error::Error for EmptyIdentifier {}
 
 fn validate_identifier(provider_identifier: String) -> Result<Box<str>, EmptyIdentifier> {
     if provider_identifier.is_empty() {

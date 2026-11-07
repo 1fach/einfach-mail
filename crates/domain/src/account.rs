@@ -2,19 +2,14 @@
 
 use std::fmt;
 
+use thiserror::Error;
+
 use crate::{AccountId, Mailbox};
 
 /// The profile has no non-empty field that can identify the account to a user.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("account profile has no display name or address")]
 pub struct MissingAccountLabel;
-
-impl fmt::Display for MissingAccountLabel {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("account profile has no display name or address")
-    }
-}
-
-impl std::error::Error for MissingAccountLabel {}
 
 /// Provider-independent identity details for one connected account.
 #[derive(Clone, Eq, PartialEq)]

@@ -1717,6 +1717,7 @@ name = "einfach-mail-domain"
 version = "0.1.0"
 dependencies = [
  "addr-spec",
+ "thiserror 2.0.21",
  "time",
  "uuid",
 ]

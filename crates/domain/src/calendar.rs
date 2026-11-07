@@ -2,21 +2,15 @@
 
 use std::fmt;
 
+use thiserror::Error;
 use time::{Date, OffsetDateTime, Time, UtcOffset};
 
 use crate::{AccountId, EventId};
 
 /// An invalid or empty calendar view range.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("calendar view bounds must be non-empty and ordered")]
 pub struct InvalidCalendarViewRange;
-
-impl fmt::Display for InvalidCalendarViewRange {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("calendar view bounds must be non-empty and ordered")
-    }
-}
-
-impl std::error::Error for InvalidCalendarViewRange {}
 
 /// A fixed calendar view's UTC instants and local date bounds.
 ///
@@ -123,16 +117,9 @@ impl CalendarViewReference {
 }
 
 /// An invalid timed or all-day occurrence range.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("calendar occurrence bounds must be non-empty and ordered")]
 pub struct InvalidCalendarOccurrenceTime;
-
-impl fmt::Display for InvalidCalendarOccurrenceTime {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("calendar occurrence bounds must be non-empty and ordered")
-    }
-}
-
-impl std::error::Error for InvalidCalendarOccurrenceTime {}
 
 /// The time values for one Graph-expanded calendar occurrence.
 #[derive(Clone, Eq, PartialEq)]
@@ -442,32 +429,14 @@ impl fmt::Debug for CalendarOccurrencePatch {
 }
 
 /// A new calendar occurrence lacks required time fields or has invalid time bounds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum NewCalendarOccurrenceError {
     /// The provider omitted the start, end, or all-day flag.
+    #[error("a new calendar occurrence is missing required time fields")]
     Incomplete,
     /// The complete time fields do not form a valid UTC range.
-    InvalidTime(InvalidCalendarOccurrenceTime),
-}
-
-impl fmt::Display for NewCalendarOccurrenceError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Incomplete => {
-                formatter.write_str("a new calendar occurrence is missing required time fields")
-            }
-            Self::InvalidTime(error) => fmt::Display::fmt(error, formatter),
-        }
-    }
-}
-
-impl std::error::Error for NewCalendarOccurrenceError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Incomplete => None,
-            Self::InvalidTime(error) => Some(error),
-        }
-    }
+    #[error("{0}")]
+    InvalidTime(#[source] InvalidCalendarOccurrenceTime),
 }
 
 /// One provider-independent occurrence in an account's primary calendar view.
