@@ -1,4 +1,4 @@
-use crate::calendar_time::to_offset_date_time;
+use crate::calendar_time::{to_offset_date_time, to_timestamp};
 use std::{sync::Arc, time::SystemTime};
 
 use crate::sync_age::relative_age_label;
@@ -1095,14 +1095,6 @@ fn domain_date(date: civil::Date) -> Option<Date> {
     .ok()
 }
 
-fn timestamp(date_time: OffsetDateTime) -> Option<Timestamp> {
-    Timestamp::new(
-        date_time.unix_timestamp(),
-        i32::try_from(date_time.nanosecond()).ok()?,
-    )
-    .ok()
-}
-
 struct CalendarDayRange {
     date: Date,
     start: Timestamp,
@@ -1135,8 +1127,8 @@ impl CalendarDayRange {
 
 impl TimedEventDisplayRange {
     fn new(start: OffsetDateTime, end: OffsetDateTime, day: &CalendarDayRange) -> Option<Self> {
-        let start = timestamp(start)?;
-        let end = timestamp(end)?;
+        let start = to_timestamp(start)?;
+        let end = to_timestamp(end)?;
         if start >= day.end || end <= day.start {
             return None;
         }
