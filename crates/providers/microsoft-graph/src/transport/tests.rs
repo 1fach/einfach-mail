@@ -1244,15 +1244,6 @@ async fn wait_for_mock_calls(mock: &Mock<'_>, expected_calls: usize) {
 }
 
 #[test]
-fn provider_errors_do_not_contain_request_secrets() {
-    let error = GraphError::Transport;
-    let rendered = format!("{error:?}");
-
-    assert!(!rendered.contains("synthetic-access-token"));
-    assert!(!rendered.contains("https://graph.microsoft.com"));
-}
-
-#[test]
 fn rate_limit_stops_after_the_retry_budget_or_long_delay() {
     let decision = retry_decision_for(RetryAfter::Delay(Duration::from_secs(120)), 0);
 

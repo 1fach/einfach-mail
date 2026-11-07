@@ -46,8 +46,8 @@ pub enum MailWorkflowError {
     /// The destination is not another visible folder in the same account.
     #[error("the selected destination folder is unavailable")]
     InvalidMoveDestination,
-    /// A previous successful sync is required in the current account session.
-    #[error("mail must sync successfully before moving messages in this session")]
+    /// A successful mail sync is required before moving messages for this account.
+    #[error("mail must sync successfully before moving messages for this account")]
     AccountSyncRequired,
     /// The message already belongs to the requested well-known folder.
     #[error("the message is already in the requested folder")]
@@ -866,7 +866,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     /// # Errors
     ///
     /// Returns [`MailWorkflowError::AccountSyncRequired`] before a successful
-    /// session sync, [`MailWorkflowError::AlreadyInWellKnownFolder`] when the
+    /// account sync, [`MailWorkflowError::AlreadyInWellKnownFolder`] when the
     /// source is already the requested folder,
     /// [`MailWorkflowError::WellKnownFolderUnavailable`] when the resolved
     /// destination is not visible in this account,
@@ -1123,7 +1123,7 @@ fn validate_move_folder_pair(
     }
 }
 
-/// Marks the session unsynchronized when a move ends without a definitive outcome.
+/// Requires another successful account sync when a move ends without a definitive outcome.
 #[must_use = "dropping an unresolved move guard blocks message moves until sync"]
 struct MoveReconciliationGuard<'a> {
     recovery: &'a AccountWorkflowRecovery,

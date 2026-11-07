@@ -29,18 +29,6 @@ pub(super) enum CacheFailure {
     Unavailable,
     #[error("the database value is invalid")]
     InvalidData,
-    #[error("the message is not cached")]
-    MessageNotCached,
-    #[error("the folder synchronization checkpoint changed")]
-    SyncStateChanged,
-    #[error("an unresolved send marker already exists")]
-    SendAlreadyPending,
-    #[error("the pending send belongs to another operation")]
-    PendingSendMismatch,
-    #[error("the pending send marker does not exist")]
-    PendingSendNotFound,
-    #[error("another calendar event creation is already pending")]
-    CreationAlreadyPending,
 }
 
 impl From<async_sqlite::Error> for CacheFailure {
@@ -56,43 +44,24 @@ impl From<async_sqlite::rusqlite::Error> for CacheFailure {
 }
 
 impl CacheFailure {
-    pub(super) fn public(self) -> MailCacheError {
+    pub(super) fn mail_public(self) -> MailCacheError {
         match self {
             Self::Unavailable => MailCacheError::Unavailable,
             Self::InvalidData => MailCacheError::InvalidData,
-            Self::MessageNotCached => MailCacheError::MessageNotCached,
-            Self::SyncStateChanged => MailCacheError::SyncStateChanged,
-            Self::SendAlreadyPending => MailCacheError::SendAlreadyPending,
-            Self::PendingSendMismatch => MailCacheError::PendingSendMismatch,
-            Self::PendingSendNotFound => MailCacheError::PendingSendNotFound,
-            Self::CreationAlreadyPending => MailCacheError::InvalidData,
         }
     }
 
     fn calendar_public(self) -> CalendarCacheError {
         match self {
             Self::Unavailable => CalendarCacheError::Unavailable,
-            Self::InvalidData | Self::MessageNotCached => CalendarCacheError::InvalidData,
-            Self::SyncStateChanged => CalendarCacheError::Unavailable,
-            Self::SendAlreadyPending => CalendarCacheError::InvalidData,
-            Self::PendingSendMismatch | Self::PendingSendNotFound => {
-                CalendarCacheError::InvalidData
-            }
-            Self::CreationAlreadyPending => CalendarCacheError::CreationAlreadyPending,
+            Self::InvalidData => CalendarCacheError::InvalidData,
         }
     }
 
     fn account_removal(self) -> AccountCacheRemovalError {
         match self {
-            Self::Unavailable | Self::MessageNotCached | Self::SyncStateChanged => {
-                AccountCacheRemovalError::Unavailable
-            }
+            Self::Unavailable => AccountCacheRemovalError::Unavailable,
             Self::InvalidData => AccountCacheRemovalError::InvalidData,
-            Self::SendAlreadyPending => AccountCacheRemovalError::PendingMailSend,
-            Self::CreationAlreadyPending => AccountCacheRemovalError::PendingCalendarEventCreation,
-            Self::PendingSendMismatch | Self::PendingSendNotFound => {
-                AccountCacheRemovalError::Unavailable
-            }
         }
     }
 }
@@ -265,7 +234,7 @@ impl SqliteMailCache {
                 Ok(())
             })
             .await
-            .map_err(CacheFailure::public)?;
+            .map_err(CacheFailure::mail_public)?;
         Ok(())
     }
 

@@ -1200,10 +1200,10 @@ fn update_status_text(status: ComposerStatus) -> Option<&'static str> {
         ComposerStatus::Failed(error) => Some(update_error_text(error)),
         ComposerStatus::Updated => Some("Event changes were saved to the calendar."),
         ComposerStatus::UpdatedButNotCached => Some(
-            "Microsoft confirmed the changes, but they could not be saved locally. Sync each calendar week you opened this session before editing another event.",
+            "Microsoft confirmed the changes, but they could not be saved locally. Sync every calendar week already synced for this account before editing another event.",
         ),
         ComposerStatus::UpdateOutcomeUnknown => Some(
-            "Microsoft may have applied these changes. Sync each calendar week you opened this session before editing another event.",
+            "Microsoft may have applied these changes. Sync every calendar week already synced for this account before editing another event.",
         ),
         _ => None,
     }
@@ -1214,10 +1214,10 @@ fn deletion_status_text(status: ComposerStatus) -> Option<&'static str> {
         ComposerStatus::Deleting => Some("Deleting the appointment…"),
         ComposerStatus::Deleted => Some("Appointment deleted from the calendar."),
         ComposerStatus::DeletedButNotCached => Some(
-            "Microsoft confirmed the deletion, but the local calendar could not be updated. Sync each calendar week you opened this session before making another calendar change.",
+            "Microsoft confirmed the deletion, but the local calendar could not be updated. Sync every calendar week already synced for this account before making another calendar change.",
         ),
         ComposerStatus::DeleteOutcomeUnknown => Some(
-            "Microsoft may have deleted this appointment. Sync each calendar week you opened this session before making another calendar change.",
+            "Microsoft may have deleted this appointment. Sync every calendar week already synced for this account before making another calendar change.",
         ),
         ComposerStatus::DeletionFailed(error) => Some(deletion_error_text(error)),
         _ => None,
@@ -1230,14 +1230,14 @@ fn deletion_error_text(error: CalendarWorkflowError) -> &'static str {
             "Microsoft rejected the deletion. The appointment was not removed."
         }
         CalendarWorkflowError::Provider(CalendarOperationError::EventChanged) => {
-            "This appointment changed while the editor was open. Sync each calendar week you opened this session, then review it again."
+            "This appointment changed while the editor was open. Sync every calendar week already synced for this account, then review it again."
         }
         CalendarWorkflowError::Provider(CalendarOperationError::EventNotEditable)
         | CalendarWorkflowError::InvalidEditableEvent => {
             "Microsoft did not confirm that this appointment can be deleted here."
         }
         CalendarWorkflowError::CalendarWriteSyncRequired => {
-            "Return to the calendar and sync each week you opened this session before deleting this appointment."
+            "Return to the calendar and sync every calendar week already synced for this account before deleting this appointment."
         }
         CalendarWorkflowError::Provider(CalendarOperationError::AccessDenied) => {
             "Microsoft denied access to delete this appointment. Review the requested permission or your organization's consent policy."
@@ -1526,16 +1526,16 @@ fn creation_error_text(error: CalendarWorkflowError) -> &'static str {
 fn update_error_text(error: CalendarWorkflowError) -> &'static str {
     match error {
         CalendarWorkflowError::CalendarWriteSyncRequired => {
-            "Return to the calendar and sync each week you opened this session before editing this event."
+            "Return to the calendar and sync every calendar week already synced for this account before editing this event."
         }
         CalendarWorkflowError::Provider(CalendarOperationError::EventNotEditable) => {
             "Microsoft did not confirm that this event is a standalone appointment that can be edited here."
         }
         CalendarWorkflowError::Provider(CalendarOperationError::EventChanged) => {
-            "This event changed while the editor was open. Close this sheet, sync each calendar week you opened this session, and open Edit again."
+            "This event changed while the editor was open. Close this sheet, sync every calendar week already synced for this account, and open Edit again."
         }
         CalendarWorkflowError::Provider(CalendarOperationError::UpdateOutcomeUnknown) => {
-            "Microsoft may have applied these changes. Sync each calendar week you opened this session before editing another event."
+            "Microsoft may have applied these changes. Sync every calendar week already synced for this account before editing another event."
         }
         CalendarWorkflowError::Provider(CalendarOperationError::AccessDenied) => {
             "Microsoft denied access to update this event. Review the requested permission or your organization's consent policy."
@@ -1556,7 +1556,7 @@ fn update_error_text(error: CalendarWorkflowError) -> &'static str {
             "The calendar service returned event details that cannot be edited safely."
         }
         CalendarWorkflowError::InvalidUpdateConfirmation => {
-            "Microsoft returned an update that did not match the requested changes. Sync each calendar week you opened this session before editing another event."
+            "Microsoft returned an update that did not match the requested changes. Sync every calendar week already synced for this account before editing another event."
         }
         _ => "The event could not be updated. Check the calendar and try again.",
     }

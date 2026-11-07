@@ -13,12 +13,44 @@ use einfach_mail_domain::{
     CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange, CalendarViewReference,
     EditableCalendarEvent, PendingCalendarEventCreation,
 };
+use thiserror::Error;
 use time::{Date, OffsetDateTime, PrimitiveDateTime};
 
 use super::{
     CacheFailure, CacheResult, SqliteMailCache,
     mail::{timestamp_from_parts, timestamp_parts},
 };
+
+type CalendarCacheResult<T> = Result<T, CalendarCacheFailure>;
+
+#[derive(Debug, Error)]
+enum CalendarCacheFailure {
+    #[error(transparent)]
+    Store(#[from] CacheFailure),
+    #[error("another calendar event creation is already pending")]
+    CreationAlreadyPending,
+}
+
+impl CalendarCacheFailure {
+    fn public(self) -> CalendarCacheError {
+        match self {
+            Self::Store(error) => error.calendar_public(),
+            Self::CreationAlreadyPending => CalendarCacheError::CreationAlreadyPending,
+        }
+    }
+}
+
+impl From<async_sqlite::Error> for CalendarCacheFailure {
+    fn from(error: async_sqlite::Error) -> Self {
+        Self::Store(CacheFailure::from(error))
+    }
+}
+
+impl From<async_sqlite::rusqlite::Error> for CalendarCacheFailure {
+    fn from(error: async_sqlite::rusqlite::Error) -> Self {
+        Self::Store(CacheFailure::from(error))
+    }
+}
 
 #[derive(Clone, Copy)]
 struct CalendarScope {
@@ -275,14 +307,14 @@ impl CalendarCache for SqliteMailCache {
                     match read_pending_event_creation(&transaction, &account_id)? {
                         Some(PendingCalendarEventCreation::Unresolved(existing))
                             if existing == creation => {}
-                        Some(_) => return Err(CacheFailure::CreationAlreadyPending),
+                        Some(_) => return Err(CalendarCacheFailure::CreationAlreadyPending),
                         None => write_pending_event_creation(&transaction, &creation)?,
                     }
                     transaction.commit()?;
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::calendar_public)
+                .map_err(CalendarCacheFailure::public)
         }
     }
 
@@ -326,7 +358,7 @@ impl CalendarCache for SqliteMailCache {
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::calendar_public)
+                .map_err(CalendarCacheFailure::public)
         }
     }
 
@@ -354,16 +386,16 @@ impl CalendarCache for SqliteMailCache {
                                 params![account_id, creation.id().as_uuid().to_string()],
                             )?;
                             if deleted != 1 {
-                                return Err(CacheFailure::InvalidData);
+                                return Err(CacheFailure::InvalidData.into());
                             }
                         }
-                        Some(_) => return Err(CacheFailure::CreationAlreadyPending),
+                        Some(_) => return Err(CalendarCacheFailure::CreationAlreadyPending),
                     }
                     transaction.commit()?;
                     Ok(())
                 })
                 .await
-                .map_err(CacheFailure::calendar_public)
+                .map_err(CalendarCacheFailure::public)
         }
     }
 
@@ -993,7 +1025,7 @@ fn read_pending_event_creation(
 fn mark_pending_event_creation_rejected(
     transaction: &Transaction<'_>,
     creation: &CalendarEventCreation,
-) -> CacheResult<()> {
+) -> CalendarCacheResult<()> {
     let account_id = creation.view().account_id().as_str();
     match read_pending_event_creation(transaction, account_id)? {
         None => Ok(()),
@@ -1007,10 +1039,10 @@ fn mark_pending_event_creation_rejected(
             if updated == 1 {
                 Ok(())
             } else {
-                Err(CacheFailure::InvalidData)
+                Err(CacheFailure::InvalidData.into())
             }
         }
-        Some(_) => Err(CacheFailure::CreationAlreadyPending),
+        Some(_) => Err(CalendarCacheFailure::CreationAlreadyPending),
     }
 }
 

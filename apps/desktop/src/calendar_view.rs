@@ -924,7 +924,7 @@ fn write_readiness_message(readiness: CalendarWriteReadiness) -> Option<&'static
             Some("Sync this calendar week before creating, editing, or deleting appointments.")
         }
         CalendarWriteReadiness::AccountSyncRequired => Some(
-            "Sync each calendar week already synced in this session before writing calendar changes.",
+            "Sync every calendar week already synced for this account before writing calendar changes.",
         ),
     }
 }
