@@ -56,6 +56,17 @@ impl MailView {
         } else {
             Role::Status
         };
+        let sync_status = div()
+            .id("mail-sync-status")
+            .text_sm()
+            .text_color(colors.muted_foreground)
+            .role(status_role)
+            .aria_label(status.clone())
+            .child(status);
+        #[cfg(test)]
+        let sync_status = sync_status
+            .debug_selector(|| "mail-sync-status".to_owned())
+            .test_support();
 
         div()
             .w_full()
@@ -73,15 +84,7 @@ impl MailView {
                     .items_center()
                     .gap_4()
                     .child(div().text_lg().font_bold().child("Mail"))
-                    .child(
-                        div()
-                            .id("mail-sync-status")
-                            .text_sm()
-                            .text_color(colors.muted_foreground)
-                            .role(status_role)
-                            .aria_label(status.clone())
-                            .child(status),
-                    ),
+                    .child(sync_status),
             )
             .child(
                 div()
@@ -172,17 +175,15 @@ impl MailView {
                 return loading.into_any_element();
             }
             MessageListState::Failed(error) => {
-                let role = if self.selected_folder.is_some() {
-                    Role::Alert
-                } else {
-                    Role::Status
-                };
+                if self.selected_folder.is_none() {
+                    return div().w(MESSAGE_LIST_WIDTH).min_h_0().into_any_element();
+                }
                 let list_error = div()
                     .w(MESSAGE_LIST_WIDTH)
                     .min_h_0()
                     .p_4()
                     .id("mail-list-error")
-                    .role(role)
+                    .role(Role::Alert)
                     .aria_label(mail_error_message(*error))
                     .child(mail_error_message(*error));
                 #[cfg(test)]

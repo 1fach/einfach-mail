@@ -3444,21 +3444,27 @@ fn initial_mail_snapshot_failure_renders_error_without_selected_folder(cx: &mut 
                 MessageListState::Failed(MailWorkflowError::Cache(MailCacheError::Unavailable))
             )
     }));
-    assert!(context.debug_bounds("mail-list-error").is_some());
+    assert!(context.debug_bounds("mail-list-error").is_none());
     assert!(context.debug_bounds("mail-list-empty-folders").is_none());
-    let error_status_count = context.update(|window, _| {
-        window
-            .find_all_by_role(gpui_kit::Role::Status)
-            .iter()
-            .filter(|status| {
-                status.label()
-                    == Some(mail_error_message(MailWorkflowError::Cache(
-                        MailCacheError::Unavailable,
-                    )))
-            })
-            .count()
+    let error_announcement_counts = context.update(|window, _| {
+        let message = mail_error_message(MailWorkflowError::Cache(MailCacheError::Unavailable));
+        let count_matching_message = |role| {
+            window
+                .find_all_by_role(role)
+                .iter()
+                .filter(|announcement| announcement.label() == Some(message))
+                .count()
+        };
+        (
+            count_matching_message(gpui_kit::Role::Alert),
+            count_matching_message(gpui_kit::Role::Status),
+        )
     });
-    assert_eq!(error_status_count, 1);
+    assert_eq!(
+        error_announcement_counts,
+        (1, 0),
+        "the initial cache error appears once in the header alert and not in the empty list"
+    );
 }
 
 #[gpui_kit::test]
