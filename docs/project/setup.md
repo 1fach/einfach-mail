@@ -73,7 +73,7 @@ cargo run --locked --package einfach-mail-desktop --bin einfach-mail
 
 If the client ID or callback port is missing or invalid, the account view explains how to configure sign-in and keeps account actions unavailable. The callback binds only to `127.0.0.1` and uses the registered port exactly. Microsoft documents that only `localhost` ignores port differences. RFC 8252 requires arbitrary ports for loopback IP redirects. This conflict needs tenant confirmation; see [ADR 0031](../decisions/0031-registered-loopback-port-for-entra.md).
 
-The account flow has synthetic provider and headless UI tests. No dedicated test tenant or public app registration is available, so do not use a personal or production account. Issue #3 tracks live callback, browser, MFA, Conditional Access, refresh, consent-revocation, and sign-out evidence. The app does not sync mail or calendar yet.
+The mail and calendar views load cached data and start synchronization. Synthetic provider, workflow, persistence, and headless UI tests cover these paths. Live Microsoft Graph behavior remains unverified because no dedicated Microsoft 365 test tenant or public app registration is available. Do not sign in with a personal or production account. Issue #3 tracks live callback, browser, MFA, Conditional Access, refresh, consent-revocation, and sign-out evidence.
 
 ## Resolve and review dependencies
 
