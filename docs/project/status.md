@@ -15,7 +15,7 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 ## Active risks
 
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep live sign-in, initial mail sync, read-state, flag, send, reply, move, and calendar verification open under their existing issues.
-- Issue #6 has synthetic recurrence coverage only. Graph's live recurrence, time-zone, and all-day behavior remain unverified until a Microsoft 365 tenant is available.
+- Issue #6 has synthetic coverage for expanded occurrences and UTC-midnight all-day inputs. Graph's docs do not say how a non-UTC all-day event appears in a UTC-default `calendarView` response. Live recurrence, time-zone, and all-day behavior remain unverified until a Microsoft 365 tenant is available.
 - Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
 - Windows and macOS support remain deferred.
 - Fedora GNOME Keyring evidence does not establish behavior for every Secret Service implementation.
