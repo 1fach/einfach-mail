@@ -10,7 +10,7 @@ use einfach_mail_domain::{AccountId, CalendarViewReference};
 pub enum CalendarWriteReadiness {
     /// This view has completed a sync, and no account view needs recovery.
     Ready,
-    /// This view has not completed a successful sync in the current workflow.
+    /// This view must sync successfully before it can accept an event write.
     ViewSyncRequired,
     /// An account view needs recovery or has an active replacement scan.
     AccountSyncRequired,
