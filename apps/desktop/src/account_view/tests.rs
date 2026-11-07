@@ -635,7 +635,7 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
-fn stale_content_open_failure_does_not_replace_account_state(cx: &mut TestAppContext) {
+fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let provider = TestProvider::default();
     let workflow = Arc::new(AccountWorkflow::new(provider));
@@ -660,6 +660,15 @@ fn stale_content_open_failure_does_not_replace_account_state(cx: &mut TestAppCon
         Some("ada@tenant.example.test".to_owned()),
     )
     .expect("synthetic account profile is valid");
+    let replacement_account_id = AccountId::try_from("replacement-account".to_owned())
+        .expect("replacement account ID is valid");
+    let replacement_profile = AccountProfile::try_new(
+        replacement_account_id.clone(),
+        Some("Lin Example".to_owned()),
+        Some("lin@example.test".to_owned()),
+        Some("lin@tenant.example.test".to_owned()),
+    )
+    .expect("replacement account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
             view.status = AccountStatus::Connected(profile);
@@ -674,8 +683,8 @@ fn stale_content_open_failure_does_not_replace_account_state(cx: &mut TestAppCon
         .expect("the account session open starts");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.content = AccountContent::Account;
-            view.status = AccountStatus::SigningOut;
+            view.content = AccountContent::Opening(super::OpeningContent::Mail);
+            view.status = AccountStatus::Connected(replacement_profile);
             cx.notify();
         });
     });
@@ -686,9 +695,13 @@ fn stale_content_open_failure_does_not_replace_account_state(cx: &mut TestAppCon
 
     let stale_error_ignored = context.cx.update(|cx| {
         let view = view.read(cx);
-        matches!(view.status, AccountStatus::SigningOut)
-            && matches!(view.content, AccountContent::Account)
-            && view.session_open_error.is_none()
+        matches!(
+            &view.status,
+            AccountStatus::Connected(profile) if profile.id() == &replacement_account_id
+        ) && matches!(
+            view.content,
+            AccountContent::Opening(super::OpeningContent::Mail)
+        ) && view.session_open_error.is_none()
     });
     assert!(stale_error_ignored);
 }

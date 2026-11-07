@@ -608,7 +608,11 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             };
             let _ = this.update(cx, move |view, cx| {
                 if view.content.opening_kind() != Some(opening)
-                    || !matches!(&view.status, AccountStatus::Connected(_))
+                    || !matches!(
+                        &view.status,
+                        AccountStatus::Connected(current_profile)
+                            if current_profile.id() == profile.id()
+                    )
                 {
                     return;
                 }
