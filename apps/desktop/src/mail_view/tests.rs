@@ -1690,6 +1690,75 @@ async fn cached_message_list_navigates_by_keyboard_and_keeps_one_tab_stop(cx: &m
 }
 
 #[gpui_kit::test]
+async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        bind_message_navigation_keys(cx);
+    });
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, _) = fixture(account);
+    let message_ids = append_synthetic_messages(&cache, 20);
+    let workflow = Arc::new(MailWorkflow::new(
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache,
+    ));
+    let mut mail_view = None;
+    let (_, context) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        mail_view = Some(view.clone());
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    let view = mail_view.expect("mail view is created with the test window");
+    wait_for_ui_condition(context, |_, app| !view.read(app).sync_running).await;
+    draw_mail_view(context);
+
+    let first_row = context
+        .debug_bounds("message-row-message-1")
+        .expect("the first cached message is visible");
+    assert_eq!(first_row.size.height, px(72.));
+    let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
+    assert_eq!(list_bounds.size.width, px(343.));
+
+    context.cx.update(|cx| {
+        gpui_kit::component::Theme::update(cx, |theme| theme.font_size = px(24.));
+    });
+    context.run_until_parked();
+    draw_mail_view(context);
+
+    let scaled_row = context
+        .debug_bounds("message-row-message-1")
+        .expect("the first cached message remains visible after zoom");
+    assert_eq!(scaled_row.size.height, px(108.));
+    let scaled_row_estimate = context
+        .cx
+        .update(|cx| view.read(cx).message_row_sizes[0].height);
+    assert_eq!(scaled_row_estimate, px(108.));
+    let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
+    assert_eq!(list_bounds.size.width, px(515.));
+
+    context.cx.update(|cx| {
+        view.update(cx, |view, _| {
+            view.message_list_scroll
+                .scroll_to_item(message_ids.len() - 1, ScrollStrategy::Top);
+        });
+    });
+    context.run_until_parked();
+    draw_mail_view(context);
+
+    let last_row = context
+        .debug_bounds("message-row-message-20")
+        .expect("the final message is rendered after scrolling at the new zoom");
+    let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
+    assert!(
+        last_row.top() >= list_bounds.top() && last_row.bottom() <= list_bounds.bottom(),
+        "virtual scrolling uses row estimates at the current rem size"
+    );
+}
+
+#[gpui_kit::test]
 async fn message_move_menu_moves_cached_message_and_opens_destination(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let account =

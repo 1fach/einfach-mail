@@ -18,11 +18,12 @@ use gpui_kit::component::{
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, App, AsyncApp, Context, Entity, EventEmitter, IntoElement, KeyBinding, Render,
-    Role, Task, Window, div, prelude::*, px,
+    AnyElement, App, AsyncApp, Context, Entity, EventEmitter, IntoElement, KeyBinding, Rems,
+    Render, Role, Task, Window, div, prelude::*, rems,
 };
 
 const MAIL_COMPOSER_WRITE_PENDING_CONTEXT: &str = "MailComposerWritePending";
+const MAIL_COMPOSER_BODY_HEIGHT: Rems = rems(13.75);
 
 pub(crate) fn bind_mail_composer_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new(
@@ -856,7 +857,7 @@ impl MailComposer {
                     Textarea::new(&self.body)
                         .aria_label(aria_label)
                         .disabled(fields_disabled)
-                        .h(px(220.))
+                        .h(MAIL_COMPOSER_BODY_HEIGHT)
                         .w_full(),
                 ),
         )
