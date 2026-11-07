@@ -78,7 +78,20 @@ enum GraphRequestOperation {
 
 impl GraphRequestOperation {
     fn requires_json_content_type(&self) -> bool {
-        matches!(self, Self::MessageDelta | Self::CalendarViewDelta(_))
+        match self {
+            Self::Get(
+                GraphReadOperation::Profile
+                | GraphReadOperation::Folders
+                | GraphReadOperation::Messages
+                | GraphReadOperation::MessageBody
+                | GraphReadOperation::CalendarEventRead,
+            )
+            | Self::SendMail(_)
+            | Self::PostJson { .. }
+            | Self::PatchJson { .. }
+            | Self::DeleteCalendarEvent(_) => false,
+            Self::MessageDelta | Self::CalendarViewDelta(_) => true,
+        }
     }
 
     fn uses_immutable_ids(&self) -> bool {
