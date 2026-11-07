@@ -816,12 +816,14 @@ fn workflows_sharing_account_state(
     let reservations = Arc::new(Mutex::new(ActiveOperations::default()));
     let recovery = Arc::new(AccountWorkflowRecovery::default());
     let first = Arc::new(CalendarWorkflow::with_reservations(
+        workflow_account_id(),
         provider.clone(),
         cache.clone(),
         Arc::clone(&reservations),
         Arc::clone(&recovery),
     ));
     let second = Arc::new(CalendarWorkflow::with_reservations(
+        workflow_account_id(),
         provider.clone(),
         cache.clone(),
         reservations,
@@ -926,6 +928,10 @@ fn view() -> CalendarViewReference {
     CalendarViewReference::new(account, range)
 }
 
+fn workflow_account_id() -> AccountId {
+    view().account_id().clone()
+}
+
 fn event_id() -> EventId {
     EventId::try_from("synthetic-event".to_owned()).expect("synthetic event ID is valid")
 }
@@ -1027,7 +1033,8 @@ fn sync_commits_pages_and_preserves_omitted_fields() {
             )),
         ]);
         let request_log = Arc::clone(&provider.requests);
-        let workflow = CalendarWorkflow::new(provider, FixtureCache::default());
+        let workflow =
+            CalendarWorkflow::new(workflow_account_id(), provider, FixtureCache::default());
 
         let report = workflow.sync_view(&view).await.expect("both pages commit");
         assert_eq!(report.page_count(), 2);
@@ -1079,7 +1086,7 @@ fn interrupted_sync_resumes_the_saved_next_link() {
         ]);
         let request_log = Arc::clone(&provider.requests);
         let cache = FixtureCache::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        let workflow = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
 
         assert_eq!(
             workflow.sync_view(&view).await,
@@ -1131,7 +1138,8 @@ fn repeated_delta_cursor_stops_before_committing_the_looping_page() {
                 CalendarDeltaProgress::Next(repeated_link),
             )),
         ]);
-        let workflow = CalendarWorkflow::new(provider, FixtureCache::default());
+        let workflow =
+            CalendarWorkflow::new(workflow_account_id(), provider, FixtureCache::default());
 
         assert_eq!(
             workflow.sync_view(&view).await,
@@ -1154,7 +1162,11 @@ fn a_completed_cursor_remains_available_for_the_next_round() {
             Vec::new(),
             CalendarDeltaProgress::Complete(delta_link.clone()),
         ))]);
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
 
         workflow
             .sync_view(&view)
@@ -1188,7 +1200,11 @@ fn event_creation_waits_for_a_successful_view_sync() {
         let view = view();
         let creation = creation(view.clone());
         let provider = FixtureProvider::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
 
         assert_eq!(
             workflow
@@ -1239,7 +1255,7 @@ fn event_creation_reuses_its_pending_id_after_an_uncertain_provider_failure() {
         let provider = FixtureProvider::default();
         provider.fail_next_creation(CalendarOperationError::ServiceUnavailable);
         let cache = FixtureCache::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        let workflow = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
         synchronize_empty_view(&workflow, &provider, &view, "create-retry-initial-sync").await;
 
         assert_eq!(
@@ -1291,7 +1307,8 @@ fn event_creation_recovers_when_cache_commit_fails_after_graph_confirmation() {
         let provider = FixtureProvider::default();
         let cache = FixtureCache::default();
         cache.fail_creation_commit(CalendarCacheError::Unavailable);
-        let workflow = CalendarWorkflow::new(provider.clone(), cache.clone());
+        let workflow =
+            CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache.clone());
         synchronize_empty_view(&workflow, &provider, &view, "create-cache-initial-sync").await;
 
         let first_outcome = workflow
@@ -1349,7 +1366,8 @@ fn event_creation_rejects_an_unrelated_pending_operation_for_the_account() {
         let new_creation = creation(view);
         let provider = FixtureProvider::default();
         let cache = FixtureCache::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), cache.clone());
+        let workflow =
+            CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache.clone());
         synchronize_empty_view(
             &workflow,
             &provider,
@@ -1386,7 +1404,7 @@ fn definitive_event_creation_rejection_clears_its_pending_operation() {
         let provider = FixtureProvider::default();
         provider.fail_next_creation(CalendarOperationError::EventCreationRejected);
         let cache = FixtureCache::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        let workflow = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
         synchronize_empty_view(&workflow, &provider, &view, "create-rejected-initial-sync").await;
 
         assert_eq!(
@@ -1420,7 +1438,7 @@ fn rejected_event_cleanup_can_resume_without_reposting_to_graph() {
         provider.fail_next_creation(CalendarOperationError::EventCreationRejected);
         let cache = FixtureCache::default();
         cache.fail_rejection_cleanup(CalendarCacheError::Unavailable);
-        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        let workflow = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
         synchronize_empty_view(&workflow, &provider, &view, "create-cleanup-initial-sync").await;
 
         assert_eq!(
@@ -1469,7 +1487,7 @@ fn rejected_event_can_be_resolved_after_persisting_the_rejection_recovers() {
         provider.fail_next_creation(CalendarOperationError::EventCreationRejected);
         let cache = FixtureCache::default();
         cache.fail_rejection_mark(CalendarCacheError::Unavailable);
-        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        let workflow = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
         synchronize_empty_view(
             &workflow,
             &provider,
@@ -1522,7 +1540,11 @@ fn event_creation_keeps_the_pending_operation_when_graph_confirms_another_event(
         let creation = creation(view.clone());
         let provider = FixtureProvider::default();
         provider.return_creation(mismatched_creation_event(&creation));
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
         synchronize_empty_view(&workflow, &provider, &view, "create-mismatch-initial-sync").await;
 
         assert_eq!(
@@ -1547,7 +1569,7 @@ fn event_update_confirms_and_replaces_the_cached_occurrence() {
         let view = view();
         let provider = FixtureProvider::default();
         let cache = FixtureCache::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        let workflow = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
         synchronize_empty_view(&workflow, &provider, &view, "event-update-initial-sync").await;
         let creation = creation(view.clone());
         let CalendarEventCreationOutcome::Cached(event) = workflow
@@ -1591,7 +1613,7 @@ fn event_update_reports_remote_confirmation_when_cache_commit_fails() {
         let provider = FixtureProvider::default();
         let cache = FixtureCache::default();
         cache.fail_update_commit(CalendarCacheError::Unavailable);
-        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        let workflow = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
         synchronize_empty_view(
             &workflow,
             &provider,
@@ -1672,7 +1694,11 @@ fn confirmed_event_deletion_removes_the_cached_event() {
     smol::block_on(async {
         let view = view();
         let provider = FixtureProvider::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
         synchronize_empty_view(&workflow, &provider, &view, "delete-initial-sync").await;
         let CalendarEventCreationOutcome::Cached(event) = workflow
             .create_event(&creation(view.clone()))
@@ -1714,7 +1740,11 @@ fn uncertain_event_deletion_requires_sync_and_is_not_replayed() {
     smol::block_on(async {
         let view = view();
         let provider = FixtureProvider::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
         synchronize_empty_view(&workflow, &provider, &view, "delete-unknown-initial-sync").await;
         let CalendarEventCreationOutcome::Cached(event) = workflow
             .create_event(&creation(view.clone()))
@@ -1781,7 +1811,11 @@ fn uncertain_event_deletion_requires_sync_for_each_previously_synced_account_vie
         let source_view = view();
         let overlapping_view = view_for_week(14);
         let provider = FixtureProvider::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
 
         for (view, cursor) in [
             (&source_view, "delete-cross-week-source-initial"),
@@ -1912,7 +1946,11 @@ fn changed_event_deletion_requires_sync_before_another_write() {
     smol::block_on(async {
         let view = view();
         let provider = FixtureProvider::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
         synchronize_empty_view(&workflow, &provider, &view, "delete-changed-initial-sync").await;
         let CalendarEventCreationOutcome::Cached(event) = workflow
             .create_event(&creation(view.clone()))
@@ -1963,7 +2001,7 @@ fn confirmed_event_deletion_with_a_cache_failure_requires_sync() {
         let provider = FixtureProvider::default();
         let cache = FixtureCache::default();
         cache.fail_deletion_commit(CalendarCacheError::Unavailable);
-        let workflow = CalendarWorkflow::new(provider.clone(), cache);
+        let workflow = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
         synchronize_empty_view(&workflow, &provider, &view, "delete-cache-initial-sync").await;
         let CalendarEventCreationOutcome::Cached(event) = workflow
             .create_event(&creation(view.clone()))
@@ -2028,6 +2066,7 @@ fn event_deletion_reserves_the_account_until_the_provider_returns() {
         let view = view();
         let provider = FixtureProvider::default();
         let workflow = std::sync::Arc::new(CalendarWorkflow::new(
+            workflow_account_id(),
             provider.clone(),
             FixtureCache::default(),
         ));
@@ -2123,7 +2162,11 @@ fn unknown_event_update_requires_successful_sync_before_another_write() {
     smol::block_on(async {
         let view = view();
         let provider = FixtureProvider::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
         synchronize_empty_view(
             &workflow,
             &provider,
@@ -2305,7 +2348,11 @@ fn changed_event_update_requires_sync_before_another_write() {
     smol::block_on(async {
         let view = view();
         let provider = FixtureProvider::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
         synchronize_empty_view(&workflow, &provider, &view, "update-changed-initial-sync").await;
         let CalendarEventCreationOutcome::Cached(event) = workflow
             .create_event(&creation(view.clone()))
@@ -2363,7 +2410,11 @@ fn uncertain_update_requires_sync_for_each_previously_synced_account_view() {
         let source_view = view();
         let overlapping_view = view_for_week(14);
         let provider = FixtureProvider::default();
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
 
         for (view, cursor) in [
             (&source_view, "cross-week-source-initial"),
@@ -2486,7 +2537,11 @@ fn event_update_reserves_the_whole_account_until_the_cache_commit_finishes() {
         let view = view();
         let provider = FixtureProvider::default();
         let cache = FixtureCache::default();
-        let workflow = std::sync::Arc::new(CalendarWorkflow::new(provider.clone(), cache));
+        let workflow = std::sync::Arc::new(CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            cache,
+        ));
         synchronize_empty_view(
             &workflow,
             &provider,
@@ -2582,6 +2637,7 @@ fn event_creation_reserves_the_account_while_another_view_sync_is_in_flight() {
         let another_view = view_for_week(6);
         let provider = FixtureProvider::default();
         let workflow = std::sync::Arc::new(CalendarWorkflow::new(
+            workflow_account_id(),
             provider.clone(),
             FixtureCache::default(),
         ));
@@ -2659,7 +2715,11 @@ fn replacement_sync_keeps_the_old_snapshot_visible_until_final_commit() {
             CalendarDeltaProgress::Complete(old_delta.clone()),
         ))]);
         let request_log = Arc::clone(&provider.requests);
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
 
         workflow
             .sync_view(&view)
@@ -2742,7 +2802,11 @@ fn a_second_reset_is_persisted_and_stops_the_current_attempt() {
             CalendarDeltaProgress::Complete(old_delta.clone()),
         ))]);
         let request_log = Arc::clone(&provider.requests);
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
         workflow
             .sync_view(&view)
             .await
@@ -2816,7 +2880,11 @@ fn event_writes_wait_for_an_interrupted_calendar_replacement_sync() {
                 CalendarDeltaProgress::Complete(link("synthetic-another-view")),
             )),
         ]);
-        let workflow = CalendarWorkflow::new(provider.clone(), FixtureCache::default());
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            FixtureCache::default(),
+        );
 
         workflow
             .sync_view(&view)

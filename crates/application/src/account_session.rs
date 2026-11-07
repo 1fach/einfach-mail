@@ -44,26 +44,25 @@ pub trait MailSession: Send + Sync {
     /// Returns provider, cache, synchronization-state, or resource-limit errors.
     fn synchronize_account<'a>(
         &'a self,
-        account_id: &'a AccountId,
         sync_started_at: SystemTime,
         progress_handler: &'a (dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> AccountSessionFuture<'a, Result<MailSyncReport, MailWorkflowError>>;
 
-    /// Returns the visible folders saved for `account_id`.
+    /// Returns the visible folders saved in this account's cache.
     ///
     /// # Errors
     ///
     /// Returns a cache error when the account cache is unavailable or invalid.
-    fn list_cached_folders<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<Vec<MailFolder>, MailWorkflowError>>;
+    fn list_cached_folders(
+        &self,
+    ) -> AccountSessionFuture<'_, Result<Vec<MailFolder>, MailWorkflowError>>;
 
     /// Returns cached message metadata in newest-first order.
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the folder is outside the account or stored data is invalid.
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the folder belongs
+    /// to another account, or a cache error when stored data is invalid.
     fn list_cached_messages<'a>(
         &'a self,
         folder: &'a FolderReference,
@@ -73,7 +72,8 @@ pub trait MailSession: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the folder is outside the account or stored state is invalid.
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the folder belongs
+    /// to another account, or a cache error when stored state is invalid.
     fn cached_sync_state<'a>(
         &'a self,
         folder: &'a FolderReference,
@@ -83,7 +83,8 @@ pub trait MailSession: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the folder marker cannot be read.
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the folder belongs
+    /// to another account, or a cache error when the marker cannot be read.
     fn folder_write_sync_required<'a>(
         &'a self,
         folder: &'a FolderReference,
@@ -95,7 +96,9 @@ pub trait MailSession: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns provider, cache, or synchronization-state errors when data is unavailable or the folder is busy.
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the folder belongs
+    /// to another account, or provider, cache, or synchronization-state errors
+    /// when data is unavailable or the folder is busy.
     fn open_message<'a>(
         &'a self,
         folder: &'a FolderReference,
@@ -106,7 +109,8 @@ pub trait MailSession: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns provider or cache errors when the requested state cannot be confirmed, or
+    /// Returns [`MailWorkflowError::AccountMismatch`] for a foreign folder,
+    /// provider or cache errors when the requested state cannot be confirmed, or
     /// [`MailWorkflowError::OperationInProgress`] when another operation owns the folder.
     fn set_message_read_state<'a>(
         &'a self,
@@ -119,7 +123,8 @@ pub trait MailSession: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a provider error when the status cannot be confirmed, a cache error when the
+    /// Returns [`MailWorkflowError::AccountMismatch`] for a foreign folder, a
+    /// provider error when the status cannot be confirmed, a cache error when the
     /// message or recovery marker cannot be stored, [`MailWorkflowError::FolderSyncRequired`]
     /// while an earlier update awaits synchronization, or
     /// [`MailWorkflowError::OperationInProgress`] when another operation owns the account or
@@ -135,7 +140,8 @@ pub trait MailSession: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a provider or cache error when the move cannot be confirmed,
+    /// Returns [`MailWorkflowError::AccountMismatch`] when a folder belongs to
+    /// another account, a provider or cache error when the move cannot be confirmed,
     /// [`MailWorkflowError::InvalidMoveDestination`] for a folder outside the
     /// cached visible tree, or [`MailWorkflowError::OperationInProgress`] when
     /// another operation owns either folder or the account.
@@ -170,7 +176,6 @@ pub trait MailSession: Send + Sync {
     /// Sends a plain-text message and saves a body-free marker before dispatch.
     fn send_message<'a>(
         &'a self,
-        account_id: &'a AccountId,
         draft: MailDraft,
         created_at: SystemTime,
     ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>>;
@@ -184,21 +189,18 @@ pub trait MailSession: Send + Sync {
     /// operation error when another send needs explicit resolution.
     fn reply_to_message<'a>(
         &'a self,
-        account_id: &'a AccountId,
         draft: MailReplyDraft,
         created_at: SystemTime,
     ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>>;
 
     /// Reads the unresolved send marker without contacting Graph.
-    fn load_pending_send<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<Option<PendingMailSend>, MailCacheError>>;
+    fn load_pending_send(
+        &self,
+    ) -> AccountSessionFuture<'_, Result<Option<PendingMailSend>, MailCacheError>>;
 
     /// Clears a marker after the user explicitly checks Sent Items.
     fn resolve_pending_send<'a>(
         &'a self,
-        account_id: &'a AccountId,
         operation_id: MailSendOperationId,
     ) -> AccountSessionFuture<'a, Result<(), MailSendResolutionError>>;
 }
@@ -305,10 +307,9 @@ pub trait AccountSession: Send + Sync {
     ///
     /// Returns an account-cache removal error when active work, an unresolved operation, or a
     /// cache failure prevents removal.
-    fn remove_account_cache<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>>;
+    fn remove_account_cache(
+        &self,
+    ) -> AccountSessionFuture<'_, Result<(), AccountCacheRemovalError>>;
 }
 
 /// Opens one account session and removes account caches when no session is open.
@@ -431,6 +432,7 @@ where
                 .await?;
             let recovery = self.recovery_for_account(&account_id)?;
             let mail_workflow: Arc<dyn MailSession> = Arc::new(MailWorkflow::with_reservations(
+                account_id.clone(),
                 self.provider.clone(),
                 cache.clone(),
                 Arc::clone(&self.reservations),
@@ -438,12 +440,14 @@ where
             ));
             let calendar_workflow: Arc<dyn CalendarSession> =
                 Arc::new(CalendarWorkflow::with_reservations(
+                    account_id.clone(),
                     self.provider.clone(),
                     cache.clone(),
                     Arc::clone(&self.reservations),
                     recovery,
                 ));
             Ok(Arc::new(AccountSessionWorkflow::new(
+                account_id,
                 mail_workflow,
                 calendar_workflow,
                 cache,
@@ -465,6 +469,7 @@ where
 }
 
 pub(crate) struct AccountSessionWorkflow<C> {
+    account_id: AccountId,
     mail: Arc<dyn MailSession>,
     calendar: Arc<dyn CalendarSession>,
     cache: C,
@@ -473,12 +478,14 @@ pub(crate) struct AccountSessionWorkflow<C> {
 
 impl<C> AccountSessionWorkflow<C> {
     pub(crate) fn new(
+        account_id: AccountId,
         mail: Arc<dyn MailSession>,
         calendar: Arc<dyn CalendarSession>,
         cache: C,
         reservations: Arc<Mutex<ActiveOperations>>,
     ) -> Self {
         Self {
+            account_id,
             mail,
             calendar,
             cache,
@@ -499,14 +506,13 @@ where
         Arc::clone(&self.calendar)
     }
 
-    fn remove_account_cache<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
+    fn remove_account_cache(
+        &self,
+    ) -> AccountSessionFuture<'_, Result<(), AccountCacheRemovalError>> {
         Box::pin(crate::account_cache::remove_reserved_account_cache(
             &self.cache,
             &self.reservations,
-            account_id,
+            &self.account_id,
         ))
     }
 }
@@ -518,23 +524,20 @@ where
 {
     fn synchronize_account<'a>(
         &'a self,
-        account_id: &'a AccountId,
         sync_started_at: SystemTime,
         progress_handler: &'a (dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> AccountSessionFuture<'a, Result<MailSyncReport, MailWorkflowError>> {
         Box::pin(MailWorkflow::synchronize_account(
             self,
-            account_id,
             sync_started_at,
             progress_handler,
         ))
     }
 
-    fn list_cached_folders<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<Vec<MailFolder>, MailWorkflowError>> {
-        Box::pin(MailWorkflow::list_cached_folders(self, account_id))
+    fn list_cached_folders(
+        &self,
+    ) -> AccountSessionFuture<'_, Result<Vec<MailFolder>, MailWorkflowError>> {
+        Box::pin(MailWorkflow::list_cached_folders(self))
     }
 
     fn list_cached_messages<'a>(
@@ -618,43 +621,31 @@ where
 
     fn send_message<'a>(
         &'a self,
-        account_id: &'a AccountId,
         draft: MailDraft,
         created_at: SystemTime,
     ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>> {
-        Box::pin(MailWorkflow::send_message(
-            self, account_id, draft, created_at,
-        ))
+        Box::pin(MailWorkflow::send_message(self, draft, created_at))
     }
 
     fn reply_to_message<'a>(
         &'a self,
-        account_id: &'a AccountId,
         draft: MailReplyDraft,
         created_at: SystemTime,
     ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>> {
-        Box::pin(MailWorkflow::reply_to_message(
-            self, account_id, draft, created_at,
-        ))
+        Box::pin(MailWorkflow::reply_to_message(self, draft, created_at))
     }
 
-    fn load_pending_send<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<Option<PendingMailSend>, MailCacheError>> {
-        Box::pin(MailWorkflow::load_pending_send(self, account_id))
+    fn load_pending_send(
+        &self,
+    ) -> AccountSessionFuture<'_, Result<Option<PendingMailSend>, MailCacheError>> {
+        Box::pin(MailWorkflow::load_pending_send(self))
     }
 
     fn resolve_pending_send<'a>(
         &'a self,
-        account_id: &'a AccountId,
         operation_id: MailSendOperationId,
     ) -> AccountSessionFuture<'a, Result<(), MailSendResolutionError>> {
-        Box::pin(MailWorkflow::resolve_pending_send(
-            self,
-            account_id,
-            operation_id,
-        ))
+        Box::pin(MailWorkflow::resolve_pending_send(self, operation_id))
     }
 }
 

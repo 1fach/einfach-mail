@@ -267,6 +267,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         let Some(workflow) = self.workflow.clone() else {
             return;
         };
+        self.account_session = None;
         self.status = AccountStatus::Restoring;
         self.session_open_error = None;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -1151,7 +1152,7 @@ async fn remove_account_cache(
     account_id: einfach_mail_domain::AccountId,
 ) -> Result<(), AccountCacheRemovalError> {
     match account_session {
-        Some(account_session) => account_session.remove_account_cache(&account_id).await,
+        Some(account_session) => account_session.remove_account_cache().await,
         None => {
             account_session_factory
                 .ok_or(AccountCacheRemovalError::Unavailable)?

@@ -33,6 +33,9 @@ pub enum CalendarWorkflowError {
     /// The encrypted local cache could not read or commit events.
     #[error("the local calendar cache is unavailable")]
     Cache(#[from] CalendarCacheError),
+    /// A calendar reference belongs to another account than this workflow.
+    #[error("the calendar operation belongs to another account")]
+    AccountMismatch,
     /// Another mail or calendar operation already owns this account.
     #[error("another mail or calendar operation is active for this account")]
     OperationInProgress,
@@ -247,6 +250,7 @@ where
     P: CalendarProvider,
     C: CalendarCache,
 {
+    account_id: AccountId,
     provider: P,
     cache: C,
     reservations: Arc<Mutex<ActiveOperations>>,
@@ -258,10 +262,11 @@ where
     P: CalendarProvider,
     C: CalendarCache,
 {
-    /// Creates a workflow from one provider and encrypted cache adapter.
+    /// Creates a workflow bound to one account, provider, and encrypted cache adapter.
     #[must_use]
-    pub fn new(provider: P, cache: C) -> Self {
+    pub fn new(account_id: AccountId, provider: P, cache: C) -> Self {
         Self::with_reservations(
+            account_id,
             provider,
             cache,
             Arc::new(Mutex::new(ActiveOperations::default())),
@@ -270,12 +275,14 @@ where
     }
 
     pub(crate) fn with_reservations(
+        account_id: AccountId,
         provider: P,
         cache: C,
         reservations: Arc<Mutex<ActiveOperations>>,
         recovery: Arc<AccountWorkflowRecovery>,
     ) -> Self {
         Self {
+            account_id,
             provider,
             cache,
             reservations,
@@ -287,13 +294,15 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the account or stored view cannot be read, or
+    /// Returns [`CalendarWorkflowError::AccountMismatch`] for a view from another account, a
+    /// cache error when the account or stored view cannot be read, or
     /// [`CalendarWorkflowError::StateUnavailable`] when shared recovery state
     /// cannot be read.
     pub async fn load_cached_view(
         &self,
         view: &CalendarViewReference,
     ) -> Result<CalendarSnapshot, CalendarWorkflowError> {
+        self.ensure_account(view.account_id())?;
         let sync_state = self.cache.ensure_view(view).await?;
         let events = self.cache.list_events(view).await?;
         let pending_creation = self.cache.pending_event_creation(view.account_id()).await?;
@@ -324,7 +333,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a provider or cache error when a page cannot be loaded or
+    /// Returns [`CalendarWorkflowError::AccountMismatch`] for a view from another account, a
+    /// provider or cache error when a page cannot be loaded or
     /// committed, [`CalendarWorkflowError::RepeatedCursor`] for a looped link,
     /// a page, response, or reset limit error while preserving resumable state,
     /// [`CalendarWorkflowError::OperationInProgress`] when another operation
@@ -334,6 +344,7 @@ where
         &self,
         view: &CalendarViewReference,
     ) -> Result<CalendarSyncReport, CalendarWorkflowError> {
+        self.ensure_account(view.account_id())?;
         let _reservation =
             reserve_calendar_view(&self.reservations, view).map_err(CalendarWorkflowError::from)?;
         let state = self.cache.ensure_view(view).await?;
@@ -358,7 +369,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a provider or cache error when staging fails or Graph cannot
+    /// Returns [`CalendarWorkflowError::AccountMismatch`] for a creation from another account,
+    /// a provider or cache error when staging fails or Graph cannot
     /// confirm the request, [`CalendarWorkflowError::OperationInProgress`]
     /// when another account operation owns the calendar,
     /// [`CalendarWorkflowError::CalendarWriteSyncRequired`] until this view and
@@ -371,6 +383,7 @@ where
         &self,
         creation: &CalendarEventCreation,
     ) -> Result<CalendarEventCreationOutcome, CalendarWorkflowError> {
+        self.ensure_account(creation.view().account_id())?;
         let _reservation = reserve_account(&self.reservations, creation.view().account_id())
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(creation.view()).await?;
@@ -409,7 +422,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a cache error if the matching operation cannot be removed,
+    /// Returns [`CalendarWorkflowError::AccountMismatch`] for a creation from another account,
+    /// a cache error if the matching operation cannot be removed,
     /// [`CalendarWorkflowError::OperationInProgress`] when another calendar
     /// operation owns the view, or
     /// [`CalendarWorkflowError::StateUnavailable`] when the account reservation
@@ -418,6 +432,7 @@ where
         &self,
         creation: &CalendarEventCreation,
     ) -> Result<(), CalendarWorkflowError> {
+        self.ensure_account(creation.view().account_id())?;
         let _reservation = reserve_calendar_view(&self.reservations, creation.view())
             .map_err(CalendarWorkflowError::from)?;
         self.cache.mark_event_creation_rejected(creation).await?;
@@ -432,7 +447,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a provider error when the event cannot be read or edited, a
+    /// Returns [`CalendarWorkflowError::AccountMismatch`] for an event from another account,
+    /// a provider error when the event cannot be read or edited, a
     /// [`CalendarWorkflowError::OperationInProgress`] when another calendar
     /// operation owns the account, or
     /// [`CalendarWorkflowError::CalendarWriteSyncRequired`] when this view has
@@ -447,6 +463,7 @@ where
         event: &CalendarOccurrence,
     ) -> Result<EditableCalendarEvent, CalendarWorkflowError> {
         let account_id = event.reference().account_id();
+        self.ensure_account(account_id)?;
         let _reservation =
             reserve_account(&self.reservations, account_id).map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(event.reference()).await?;
@@ -469,7 +486,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a provider error for a rejected, stale, or uncertain update,
+    /// Returns [`CalendarWorkflowError::AccountMismatch`] for an update from another account,
+    /// a provider error for a rejected, stale, or uncertain update,
     /// [`CalendarWorkflowError::OperationInProgress`] when another calendar
     /// operation owns the account, or
     /// [`CalendarWorkflowError::CalendarWriteSyncRequired`] when this view has
@@ -485,6 +503,7 @@ where
         update: &CalendarEventUpdate,
     ) -> Result<CalendarEventUpdateOutcome, CalendarWorkflowError> {
         let view = update.source().occurrence().reference();
+        self.ensure_account(view.account_id())?;
         let account_id = view.account_id().clone();
         let _reservation = reserve_account(&self.reservations, &account_id)
             .map_err(CalendarWorkflowError::from)?;
@@ -531,7 +550,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns a provider error for a rejected, stale, or uncertain deletion,
+    /// Returns [`CalendarWorkflowError::AccountMismatch`] for an event from another account,
+    /// a provider error for a rejected, stale, or uncertain deletion,
     /// [`CalendarWorkflowError::OperationInProgress`] when another operation
     /// owns the account, or [`CalendarWorkflowError::CalendarWriteSyncRequired`]
     /// when the source view has not completed a sync or another account view
@@ -544,6 +564,7 @@ where
         event: &EditableCalendarEvent,
     ) -> Result<CalendarEventDeletionOutcome, CalendarWorkflowError> {
         let view = event.occurrence().reference();
+        self.ensure_account(view.account_id())?;
         let account_id = view.account_id().clone();
         let _reservation = reserve_account(&self.reservations, &account_id)
             .map_err(CalendarWorkflowError::from)?;
@@ -569,6 +590,14 @@ where
                 reconciliation.require_sync()?;
                 Ok(CalendarEventDeletionOutcome::DeletedButNotCached { cache_error })
             }
+        }
+    }
+
+    fn ensure_account(&self, account_id: &AccountId) -> Result<(), CalendarWorkflowError> {
+        if account_id == &self.account_id {
+            Ok(())
+        } else {
+            Err(CalendarWorkflowError::AccountMismatch)
         }
     }
 

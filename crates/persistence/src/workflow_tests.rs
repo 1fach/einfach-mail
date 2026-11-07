@@ -919,9 +919,9 @@ fn read_state_write_reserves_folder_until_graph_confirmation_and_cache_commit() 
         let updates = Arc::clone(&provider.read_state_updates);
         let requests = Arc::clone(&provider.requests);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let workflow = Arc::new(MailWorkflow::new(account.clone(), provider, cache.clone()));
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic message is cached before its read-state action");
 
@@ -939,11 +939,7 @@ fn read_state_write_reserves_folder_until_graph_confirmation_and_cache_commit() 
                 .await
                 .expect("synthetic provider waits before confirming the write");
             let sync_result = workflow
-                .synchronize_account(
-                    &account,
-                    started_at + Duration::from_secs(1),
-                    &ignore_sync_progress,
-                )
+                .synchronize_account(started_at + Duration::from_secs(1), &ignore_sync_progress)
                 .await;
             release_update
                 .send(())
@@ -1013,9 +1009,9 @@ fn follow_up_flag_write_reserves_folder_until_confirmation_and_atomic_cache_comm
         let (update_started, release_update) = provider.hold_next_follow_up_flag();
         let updates = Arc::clone(&provider.follow_up_flag_updates);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let workflow = Arc::new(MailWorkflow::new(account.clone(), provider, cache.clone()));
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic message is cached before its flag action");
 
@@ -1041,11 +1037,7 @@ fn follow_up_flag_write_reserves_folder_until_confirmation_and_atomic_cache_comm
                 .await
                 .expect("recovery marker is readable while the PATCH is pending");
             let sync_result = workflow
-                .synchronize_account(
-                    &account,
-                    started_at + Duration::from_secs(1),
-                    &ignore_sync_progress,
-                )
+                .synchronize_account(started_at + Duration::from_secs(1), &ignore_sync_progress)
                 .await;
             release_update
                 .send(())
@@ -1117,9 +1109,9 @@ fn definite_follow_up_flag_rejection_clears_marker_without_changing_cached_statu
         );
         provider.follow_up_flag_response = FollowUpFlagResponse::Deny;
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic message is cached before its flag action");
 
@@ -1184,9 +1176,9 @@ fn unknown_follow_up_flag_outcome_survives_reopen_until_a_complete_delta_round()
         provider.follow_up_flag_response = FollowUpFlagResponse::Unknown;
         let updates = Arc::clone(&provider.follow_up_flag_updates);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic message is cached before its flag action");
 
@@ -1243,6 +1235,7 @@ fn unknown_follow_up_flag_outcome_survives_reopen_until_a_complete_delta_round()
             )),
         );
         let recovery_workflow = MailWorkflow::new(
+            account.clone(),
             FixtureProvider::new(
                 account.clone(),
                 vec![cached_folder],
@@ -1252,11 +1245,7 @@ fn unknown_follow_up_flag_outcome_survives_reopen_until_a_complete_delta_round()
             reopened.clone(),
         );
         recovery_workflow
-            .synchronize_account(
-                &account,
-                started_at + Duration::from_secs(1),
-                &ignore_sync_progress,
-            )
+            .synchronize_account(started_at + Duration::from_secs(1), &ignore_sync_progress)
             .await
             .expect("a complete delta round reconciles the unknown update");
         assert!(
@@ -1305,9 +1294,9 @@ fn failure_to_commit_flag_recovery_marker_prevents_provider_dispatch() {
         );
         let updates = Arc::clone(&provider.follow_up_flag_updates);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic message is cached before the flag action");
         cache
@@ -1377,11 +1366,11 @@ fn interrupted_sync_resumes_its_checkpoint_and_body_reopens_from_encrypted_cache
         let initial_requests = Arc::clone(&initial_provider.requests);
         let initial_body_fetches = Arc::clone(&initial_provider.body_fetches);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(initial_provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), initial_provider, cache.clone());
 
         assert_eq!(
             workflow
-                .synchronize_account(&account, started_at, &ignore_sync_progress)
+                .synchronize_account(started_at, &ignore_sync_progress)
                 .await,
             Err(MailWorkflowError::Provider(
                 MailOperationError::ServiceUnavailable
@@ -1427,10 +1416,9 @@ fn interrupted_sync_resumes_its_checkpoint_and_body_reopens_from_encrypted_cache
         );
         let resume_requests = Arc::clone(&resume_provider.requests);
         let body_fetches = Arc::clone(&resume_provider.body_fetches);
-        let resumed_workflow = MailWorkflow::new(resume_provider, cache.clone());
+        let resumed_workflow = MailWorkflow::new(account.clone(), resume_provider, cache.clone());
         let report = resumed_workflow
             .synchronize_account(
-                &account,
                 started_at + Duration::from_secs(86_400),
                 &ignore_sync_progress,
             )
@@ -1480,13 +1468,14 @@ fn interrupted_sync_resumes_its_checkpoint_and_body_reopens_from_encrypted_cache
 
         let reopened_cache = open_cache(&directory, account.clone()).await;
         let offline_provider = FixtureProvider::new(
-            account,
+            account.clone(),
             vec![folder(&account_id())],
             [],
             Err(MailOperationError::ServiceUnavailable),
         );
         let offline_fetches = Arc::clone(&offline_provider.body_fetches);
-        let offline_workflow = MailWorkflow::new(offline_provider, reopened_cache.clone());
+        let offline_workflow =
+            MailWorkflow::new(account.clone(), offline_provider, reopened_cache.clone());
         let reopened_message = offline_workflow
             .open_message(&folder_reference, &message_id())
             .await
@@ -1537,6 +1526,7 @@ fn opening_a_missing_body_reserves_its_folder_against_delta_sync() {
         );
         let cache = open_cache(&directory, account.clone()).await;
         let initial_workflow = MailWorkflow::new(
+            account.clone(),
             FixtureProvider::new(
                 account.clone(),
                 vec![cached_folder.clone()],
@@ -1546,7 +1536,7 @@ fn opening_a_missing_body_reserves_its_folder_against_delta_sync() {
             cache.clone(),
         );
         initial_workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("initial metadata sync completes");
 
@@ -1572,7 +1562,7 @@ fn opening_a_missing_body_reserves_its_folder_against_delta_sync() {
             started: started_sender,
             release: release_receiver,
         });
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let workflow = Arc::new(MailWorkflow::new(account.clone(), provider, cache.clone()));
         let executor = smol::Executor::new();
         let open_workflow = Arc::clone(&workflow);
         let open_folder = folder_reference.clone();
@@ -1589,11 +1579,7 @@ fn opening_a_missing_body_reserves_its_folder_against_delta_sync() {
                 .await
                 .expect("body fetch reaches the synchronization gate");
             let sync_result = workflow
-                .synchronize_account(
-                    &account,
-                    started_at + Duration::from_secs(1),
-                    &ignore_sync_progress,
-                )
+                .synchronize_account(started_at + Duration::from_secs(1), &ignore_sync_progress)
                 .await;
             release_sender
                 .send(())
@@ -1620,11 +1606,7 @@ fn opening_a_missing_body_reserves_its_folder_against_delta_sync() {
         );
 
         workflow
-            .synchronize_account(
-                &account,
-                started_at + Duration::from_secs(2),
-                &ignore_sync_progress,
-            )
+            .synchronize_account(started_at + Duration::from_secs(2), &ignore_sync_progress)
             .await
             .expect("delta sync completes after the open releases its reservation");
         let (updated_message, cached_body) = cache
@@ -1731,11 +1713,7 @@ fn factory_sessions_share_folder_reservations_during_body_fetch() {
                 .expect("body fetch reaches the synchronization gate");
             let sync_result = syncing_session
                 .mail_session()
-                .synchronize_account(
-                    &account,
-                    started_at + Duration::from_secs(1),
-                    &ignore_sync_progress,
-                )
+                .synchronize_account(started_at + Duration::from_secs(1), &ignore_sync_progress)
                 .await;
             release_sender
                 .send(())
@@ -1815,7 +1793,7 @@ fn factory_sessions_share_uncertain_message_move_recovery() {
             .expect("second account session opens");
         first
             .mail_session()
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("first account sync completes");
         *provider
@@ -1850,11 +1828,7 @@ fn factory_sessions_share_uncertain_message_move_recovery() {
 
         second
             .mail_session()
-            .synchronize_account(
-                &account,
-                started_at + Duration::from_secs(1),
-                &ignore_sync_progress,
-            )
+            .synchronize_account(started_at + Duration::from_secs(1), &ignore_sync_progress)
             .await
             .expect("second account sync restores shared mail readiness");
         *provider
@@ -1973,7 +1947,7 @@ fn calendar_sync_reservation_blocks_sign_out_cache_removal() {
                     .recv()
                     .await
                     .expect("calendar request reaches the synthetic gate");
-                let session_removal_result = sync_session.remove_account_cache(&account).await;
+                let session_removal_result = sync_session.remove_account_cache().await;
                 let factory_removal_result = factory.remove_account_cache(&account).await;
                 release_sender
                     .send(())
@@ -2031,8 +2005,78 @@ fn account_session_removes_cache_through_its_open_cache_handle() {
             .expect("account session opens");
 
         assert_removal_completed(
-            session.remove_account_cache(&account).await,
+            session.remove_account_cache().await,
             &directory.path().join("mail.sqlite3"),
+        );
+    });
+}
+
+#[test]
+fn account_session_rejects_foreign_references_before_cache_or_provider_access() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let other_account = AccountId::try_from("synthetic-other-account".to_owned())
+            .expect("synthetic account ID is valid");
+        let provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        )
+        .with_calendar_pages([completed_calendar_page("untouched-foreign-view")]);
+        let well_known_folder_calls = Arc::clone(&provider.well_known_folder_calls);
+        let calendar_pages = Arc::clone(&provider.calendar_pages);
+        let factory = AccountSessionWorkflowFactory::new(
+            provider,
+            FixtureCacheFactory {
+                database_directory: directory.path().to_path_buf(),
+            },
+        );
+        let session = factory
+            .open_session(account)
+            .await
+            .expect("account session opens");
+        let foreign_folder = folder(&other_account).reference().clone();
+        let foreign_view = calendar_view(&other_account);
+
+        assert_eq!(
+            session
+                .mail_session()
+                .list_cached_messages(&foreign_folder)
+                .await,
+            Err(MailWorkflowError::AccountMismatch)
+        );
+        assert_eq!(
+            session
+                .mail_session()
+                .move_message_to_well_known_folder(
+                    &foreign_folder,
+                    &message_id(),
+                    WellKnownMailFolder::Archive,
+                )
+                .await,
+            Err(MailWorkflowError::AccountMismatch)
+        );
+        assert_eq!(
+            session
+                .calendar_session()
+                .synchronize_view(&foreign_view)
+                .await,
+            Err(CalendarWorkflowError::AccountMismatch)
+        );
+        assert_eq!(
+            well_known_folder_calls.load(Ordering::Relaxed),
+            0,
+            "foreign mail references do not reach the provider"
+        );
+        assert_eq!(
+            calendar_pages
+                .lock()
+                .expect("synthetic calendar page queue is healthy")
+                .len(),
+            1,
+            "foreign calendar views do not reach the provider"
         );
     });
 }
@@ -2089,13 +2133,11 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
             .await
             .expect("second mail session opens");
         let executor = smol::Executor::new();
-        let first_account = account.clone();
-
         let (sync_result, competing_result) = smol::block_on(executor.run(async {
             let sync_task = executor.spawn(async move {
                 syncing_session
                     .mail_session()
-                    .synchronize_account(&first_account, started_at, &ignore_sync_progress)
+                    .synchronize_account(started_at, &ignore_sync_progress)
                     .await
             });
             started_receiver
@@ -2104,11 +2146,7 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
                 .expect("first delta request reaches its gate");
             let competing_result = competing_session
                 .mail_session()
-                .synchronize_account(
-                    &account,
-                    started_at + Duration::from_secs(1),
-                    &ignore_sync_progress,
-                )
+                .synchronize_account(started_at + Duration::from_secs(1), &ignore_sync_progress)
                 .await;
             release_sender
                 .send(())
@@ -2127,7 +2165,7 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
         assert_eq!(folder_list_calls.load(Ordering::Relaxed), 1);
         let folders = competing_session
             .mail_session()
-            .list_cached_folders(&account)
+            .list_cached_folders()
             .await
             .expect("saved folder snapshot remains readable");
         assert_eq!(folders.len(), 1);
@@ -2188,9 +2226,9 @@ fn confirmed_message_move_reconciles_duplicate_cache_rows_and_preserves_body() {
         );
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("duplicate message rows are cached in separate folders");
         cache
@@ -2297,9 +2335,9 @@ fn message_move_rejects_a_destination_outside_the_visible_folder_tree() {
         );
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic source message is cached");
 
@@ -2332,7 +2370,7 @@ fn delete_message_requires_a_current_sync_before_resolving_deleted_items() {
         );
         let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         let source = folder(&account).reference().clone();
 
         assert_eq!(
@@ -2382,9 +2420,9 @@ fn delete_message_uses_visible_deleted_items_id_and_preserves_cached_body() {
         let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic inbox and Deleted Items sync");
         cache
@@ -2490,9 +2528,9 @@ fn archive_action_resolves_visible_archive_and_preserves_cached_body() {
         let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic inbox and Archive sync");
         cache
@@ -2577,9 +2615,9 @@ fn archive_action_rejects_a_message_already_in_archive() {
         let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic Archive sync completes");
 
@@ -2654,9 +2692,9 @@ fn well_known_folder_rejects_a_resolved_folder_outside_the_visible_tree() {
             let folder_calls = Arc::clone(&provider.well_known_folder_calls);
             let move_calls = Arc::clone(&provider.message_moves);
             let cache = open_cache(&directory, account.clone()).await;
-            let workflow = MailWorkflow::new(provider, cache.clone());
+            let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
             workflow
-                .synchronize_account(&account, started_at, &ignore_sync_progress)
+                .synchronize_account(started_at, &ignore_sync_progress)
                 .await
                 .expect("synthetic account sync completes");
 
@@ -2713,9 +2751,9 @@ fn delete_message_rejects_a_message_already_in_deleted_items() {
         let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic Deleted Items sync completes");
 
@@ -2791,9 +2829,9 @@ fn unknown_delete_outcome_requires_sync_before_another_move_request() {
             Err(MailOperationError::MoveOutcomeUnknown);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider.clone(), cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider.clone(), cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic account sync completes");
 
@@ -2835,11 +2873,7 @@ fn unknown_delete_outcome_requires_sync_before_another_move_request() {
         );
 
         workflow
-            .synchronize_account(
-                &account,
-                started_at + Duration::from_secs(1),
-                &ignore_sync_progress,
-            )
+            .synchronize_account(started_at + Duration::from_secs(1), &ignore_sync_progress)
             .await
             .expect("a new complete account sync restores message writes");
         *provider
@@ -2900,9 +2934,9 @@ fn canceled_delete_request_requires_sync_before_another_move_request() {
         let (move_started_receiver, _release_move) = provider.hold_next_message_move();
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic account sync completes");
 
@@ -2990,9 +3024,9 @@ fn delete_message_keeps_the_source_reservation_while_resolving_deleted_items() {
         let (lookup_started, release_lookup) = provider.hold_next_well_known_folder_lookup();
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let workflow = Arc::new(MailWorkflow::new(account.clone(), provider, cache.clone()));
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic account sync completes");
         let executor = smol::Executor::new();
@@ -3079,9 +3113,9 @@ fn confirmed_delete_with_cache_failure_requires_sync_before_retry() {
         let folder_calls = Arc::clone(&provider.well_known_folder_calls);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic account sync completes");
         cache.set_message_move_failure_for_tests(true).await;
@@ -3163,9 +3197,9 @@ fn message_move_cache_failure_rolls_back_and_requests_sync() {
             Err(MailOperationError::ServiceUnavailable),
         );
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic source message is cached");
         cache.set_message_move_failure_for_tests(true).await;
@@ -3238,9 +3272,9 @@ fn unknown_message_move_does_not_change_the_cached_folder() {
             Err(MailOperationError::MoveOutcomeUnknown);
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic source message is cached");
 
@@ -3307,12 +3341,11 @@ fn account_sync_reservation_blocks_moves_before_folder_tree_replacement() {
         provider.folder_list_gate = Some((folder_list_started, release_folder_list));
         let move_calls = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let workflow = Arc::new(MailWorkflow::new(account.clone(), provider, cache.clone()));
         let sync_workflow = Arc::clone(&workflow);
         let sync_task = smol::spawn(async move {
             sync_workflow
                 .synchronize_account(
-                    &account,
                     UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                     &ignore_sync_progress,
                 )
@@ -3404,10 +3437,10 @@ fn sync_keeps_all_matching_messages_across_the_five_thousand_message_boundary() 
         );
         let requests = Arc::clone(&provider.requests);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
 
         let report = workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("both pages commit before the final cursor advances");
         let messages = workflow
@@ -3469,11 +3502,10 @@ fn response_budget_stops_before_committing_an_over_budget_page() {
         );
         let requests = Arc::clone(&provider.requests);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
 
         let error = workflow
             .synchronize_account(
-                &account,
                 UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                 &ignore_sync_progress,
             )
@@ -3522,6 +3554,7 @@ fn mail_page_limit_counts_pages_across_a_cursor_reset() {
         );
         let cache = open_cache(&directory, account.clone()).await;
         let baseline_workflow = MailWorkflow::new(
+            account.clone(),
             FixtureProvider::new(
                 account.clone(),
                 vec![cached_folder.clone()],
@@ -3534,7 +3567,7 @@ fn mail_page_limit_counts_pages_across_a_cursor_reset() {
             cache.clone(),
         );
         baseline_workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("baseline delta cursor is saved");
         drop(baseline_workflow);
@@ -3577,14 +3610,10 @@ fn mail_page_limit_counts_pages_across_a_cursor_reset() {
             Err(MailOperationError::ServiceUnavailable),
         );
         let requests = Arc::clone(&provider.requests);
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
 
         let error = workflow
-            .synchronize_account(
-                &account,
-                started_at + Duration::from_secs(1),
-                &ignore_sync_progress,
-            )
+            .synchronize_account(started_at + Duration::from_secs(1), &ignore_sync_progress)
             .await
             .expect_err("the attempt stops at its aggregate page limit");
         assert_eq!(error, MailWorkflowError::PageLimitExceeded);
@@ -3605,11 +3634,7 @@ fn mail_page_limit_counts_pages_across_a_cursor_reset() {
         assert!(interrupted_state.is_rebuilding());
 
         let report = workflow
-            .synchronize_account(
-                &account,
-                started_at + Duration::from_secs(2),
-                &ignore_sync_progress,
-            )
+            .synchronize_account(started_at + Duration::from_secs(2), &ignore_sync_progress)
             .await
             .expect("the next attempt resumes the replacement scan");
         assert_eq!(report.page_count(), 1);
@@ -3676,6 +3701,7 @@ fn expired_delta_cursor_rebuild_keeps_cached_mail_until_the_snapshot_commits() {
         );
         let cache = open_cache(&directory, account.clone()).await;
         let baseline_workflow = MailWorkflow::new(
+            account.clone(),
             FixtureProvider::new(
                 account.clone(),
                 vec![cached_folder.clone()],
@@ -3685,7 +3711,7 @@ fn expired_delta_cursor_rebuild_keeps_cached_mail_until_the_snapshot_commits() {
             cache.clone(),
         );
         baseline_workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("baseline snapshot completes");
         cache
@@ -3732,15 +3758,11 @@ fn expired_delta_cursor_rebuild_keeps_cached_mail_until_the_snapshot_commits() {
             Err(MailOperationError::ServiceUnavailable),
         );
         let requests = Arc::clone(&provider.requests);
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
 
         assert_eq!(
             workflow
-                .synchronize_account(
-                    &account,
-                    started_at + Duration::from_secs(1),
-                    &ignore_sync_progress,
-                )
+                .synchronize_account(started_at + Duration::from_secs(1), &ignore_sync_progress,)
                 .await,
             Err(MailWorkflowError::Provider(
                 MailOperationError::ServiceUnavailable
@@ -3811,13 +3833,9 @@ fn expired_delta_cursor_rebuild_keeps_cached_mail_until_the_snapshot_commits() {
             Err(MailOperationError::ServiceUnavailable),
         );
         let requests = Arc::clone(&provider.requests);
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(
-                &account,
-                started_at + Duration::from_secs(2),
-                &ignore_sync_progress,
-            )
+            .synchronize_account(started_at + Duration::from_secs(2), &ignore_sync_progress)
             .await
             .expect("replacement scan resumes from its saved page link");
 
@@ -3873,6 +3891,7 @@ fn a_second_delta_reset_is_checkpointed_for_the_next_attempt() {
         );
         let cache = open_cache(&directory, account.clone()).await;
         let workflow = MailWorkflow::new(
+            account.clone(),
             FixtureProvider::new(
                 account.clone(),
                 vec![cached_folder.clone()],
@@ -3888,7 +3907,6 @@ fn a_second_delta_reset_is_checkpointed_for_the_next_attempt() {
         assert_eq!(
             workflow
                 .synchronize_account(
-                    &account,
                     UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                     &ignore_sync_progress,
                 )
@@ -3921,10 +3939,9 @@ fn a_second_delta_reset_is_checkpointed_for_the_next_attempt() {
             Err(MailOperationError::ServiceUnavailable),
         );
         let requests = Arc::clone(&provider.requests);
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
             .synchronize_account(
-                &account,
                 UNIX_EPOCH + Duration::from_secs(1_800_000_001),
                 &ignore_sync_progress,
             )
@@ -4088,12 +4105,11 @@ fn response_budget_remains_cumulative_after_a_delta_reset() {
             Err(MailOperationError::ServiceUnavailable),
         );
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
 
         assert_eq!(
             workflow
                 .synchronize_account(
-                    &account,
                     UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                     &ignore_sync_progress,
                 )
@@ -4132,12 +4148,11 @@ fn stale_cache_handle_cannot_stage_a_send_after_account_cache_removal() {
         )
         .with_send_result(Ok(()));
         let send_calls = Arc::clone(&provider.send_calls);
-        let workflow = MailWorkflow::new(provider, stale_send_cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, stale_send_cache.clone());
 
         assert_eq!(
             workflow
                 .send_message(
-                    &account,
                     draft("Stale cache subject", "stale cache body"),
                     UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                 )
@@ -4165,10 +4180,9 @@ fn unknown_send_marker_survives_encrypted_restart_and_blocks_duplicate_send_and_
         .with_send_result(Err(MailSendProviderError::OutcomeUnknown));
         let send_calls = Arc::clone(&provider.send_calls);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider.clone(), cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider.clone(), cache.clone());
         let result = workflow
             .send_message(
-                &account,
                 draft("Synthetic subject", "synthetic-private-body"),
                 UNIX_EPOCH + Duration::from_secs(1_800_000_000),
             )
@@ -4180,7 +4194,7 @@ fn unknown_send_marker_survives_encrypted_restart_and_blocks_duplicate_send_and_
         };
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
-            workflow.load_pending_send(&account).await,
+            workflow.load_pending_send().await,
             Ok(Some(pending.clone()))
         );
         drop(workflow);
@@ -4200,10 +4214,9 @@ fn unknown_send_marker_survives_encrypted_restart_and_blocks_duplicate_send_and_
             reopened.load_pending_send(&account).await,
             Ok(Some(pending.clone()))
         );
-        let workflow = MailWorkflow::new(provider, reopened.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, reopened.clone());
         let duplicate = workflow
             .send_message(
-                &account,
                 draft("Another synthetic subject", "another-body"),
                 UNIX_EPOCH + Duration::from_secs(1_800_000_001),
             )
@@ -4220,10 +4233,10 @@ fn unknown_send_marker_survives_encrypted_restart_and_blocks_duplicate_send_and_
         );
 
         workflow
-            .resolve_pending_send(&account, pending.operation_id())
+            .resolve_pending_send(pending.operation_id())
             .await
             .expect("explicit resolution clears the old marker without resending");
-        assert_eq!(workflow.load_pending_send(&account).await, Ok(None));
+        assert_eq!(workflow.load_pending_send().await, Ok(None));
         drop(workflow);
         reopened.close_for_tests().await;
     });
@@ -4257,16 +4270,15 @@ fn unknown_reply_marker_survives_encrypted_restart_without_reply_body() {
         .with_send_result(Err(MailSendProviderError::OutcomeUnknown));
         let send_calls = Arc::clone(&provider.send_calls);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider.clone(), cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider.clone(), cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic reply source is cached");
         let source = MailReplySource::new(folder_reference.clone(), message_id());
         let reply_body = "Synthetic private reply body";
         let result = workflow
             .reply_to_message(
-                &account,
                 MailReplyDraft::new(source.clone(), reply_body.to_owned()),
                 started_at,
             )
@@ -4282,7 +4294,6 @@ fn unknown_reply_marker_survives_encrypted_restart_without_reply_body() {
         assert_eq!(
             workflow
                 .reply_to_message(
-                    &account,
                     MailReplyDraft::new(source.clone(), reply_body.to_owned()),
                     started_at,
                 )
@@ -4293,11 +4304,7 @@ fn unknown_reply_marker_survives_encrypted_restart_without_reply_body() {
         );
         assert_eq!(
             workflow
-                .send_message(
-                    &account,
-                    draft("Another subject", "another body"),
-                    started_at
-                )
+                .send_message(draft("Another subject", "another body"), started_at)
                 .await,
             Err(MailSendWorkflowError::PendingResolutionRequired(
                 pending.clone()
@@ -4328,11 +4335,10 @@ fn unknown_reply_marker_survives_encrypted_restart_without_reply_body() {
             reopened.load_pending_send(&account).await,
             Ok(Some(pending.clone()))
         );
-        let workflow = MailWorkflow::new(provider, reopened.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, reopened.clone());
         assert_eq!(
             workflow
                 .reply_to_message(
-                    &account,
                     MailReplyDraft::new(source, reply_body.to_owned()),
                     started_at,
                 )
@@ -4343,10 +4349,10 @@ fn unknown_reply_marker_survives_encrypted_restart_without_reply_body() {
         );
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
         workflow
-            .resolve_pending_send(&account, pending.operation_id())
+            .resolve_pending_send(pending.operation_id())
             .await
             .expect("explicit Sent Items reconciliation clears the marker");
-        assert_eq!(workflow.load_pending_send(&account).await, Ok(None));
+        assert_eq!(workflow.load_pending_send().await, Ok(None));
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
         drop(workflow);
         reopened.close_for_tests().await;
@@ -4374,9 +4380,9 @@ fn reply_requires_a_cached_source_owned_by_the_requested_account() {
         );
         let send_calls = Arc::clone(&provider.send_calls);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("the empty synthetic folder is cached");
 
@@ -4386,7 +4392,6 @@ fn reply_requires_a_cached_source_owned_by_the_requested_account() {
         assert_eq!(
             workflow
                 .reply_to_message(
-                    &account,
                     MailReplyDraft::new(
                         MailReplySource::new(other_folder, message_id()),
                         "Synthetic reply body".to_owned(),
@@ -4401,7 +4406,6 @@ fn reply_requires_a_cached_source_owned_by_the_requested_account() {
         assert_eq!(
             workflow
                 .reply_to_message(
-                    &account,
                     MailReplyDraft::new(
                         MailReplySource::new(folder_reference, message_id()),
                         "Synthetic reply body".to_owned(),
@@ -4432,22 +4436,19 @@ fn accepted_and_definitively_rejected_sends_clear_their_markers() {
         )
         .with_send_result(Ok(()));
         let accepted_calls = Arc::clone(&accepted_provider.send_calls);
-        let accepted_workflow = MailWorkflow::new(accepted_provider, cache.clone());
+        let accepted_workflow =
+            MailWorkflow::new(account.clone(), accepted_provider, cache.clone());
 
         assert_eq!(
             accepted_workflow
                 .send_message(
-                    &account,
                     draft("Accepted synthetic subject", "accepted synthetic body"),
                     UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                 )
                 .await,
             Ok(MailSendOutcome::Accepted)
         );
-        assert_eq!(
-            accepted_workflow.load_pending_send(&account).await,
-            Ok(None)
-        );
+        assert_eq!(accepted_workflow.load_pending_send().await, Ok(None));
         assert_eq!(accepted_calls.load(Ordering::Relaxed), 1);
         drop(accepted_workflow);
 
@@ -4459,12 +4460,12 @@ fn accepted_and_definitively_rejected_sends_clear_their_markers() {
         )
         .with_send_result(Err(MailSendProviderError::Rejected));
         let rejected_calls = Arc::clone(&rejected_provider.send_calls);
-        let rejected_workflow = MailWorkflow::new(rejected_provider, cache.clone());
+        let rejected_workflow =
+            MailWorkflow::new(account.clone(), rejected_provider, cache.clone());
 
         assert_eq!(
             rejected_workflow
                 .send_message(
-                    &account,
                     draft("Rejected synthetic subject", "rejected synthetic body"),
                     UNIX_EPOCH + Duration::from_secs(1_800_000_001),
                 )
@@ -4473,10 +4474,7 @@ fn accepted_and_definitively_rejected_sends_clear_their_markers() {
                 MailSendProviderError::Rejected
             ))
         );
-        assert_eq!(
-            rejected_workflow.load_pending_send(&account).await,
-            Ok(None)
-        );
+        assert_eq!(rejected_workflow.load_pending_send().await, Ok(None));
         assert_eq!(rejected_calls.load(Ordering::Relaxed), 1);
         drop(rejected_workflow);
         cache.close_for_tests().await;
@@ -4498,11 +4496,10 @@ fn rejected_send_with_marker_clear_failure_keeps_a_resolvable_known_rejection() 
         )
         .with_send_result(Err(MailSendProviderError::Rejected));
         let send_calls = Arc::clone(&provider.send_calls);
-        let workflow = MailWorkflow::new(provider, cache.clone());
+        let workflow = MailWorkflow::new(account.clone(), provider, cache.clone());
 
         let pending = match workflow
             .send_message(
-                &account,
                 draft("Rejected synthetic subject", "rejected synthetic body"),
                 UNIX_EPOCH + Duration::from_secs(1_800_000_000),
             )
@@ -4517,14 +4514,14 @@ fn rejected_send_with_marker_clear_failure_keeps_a_resolvable_known_rejection() 
         };
 
         assert_eq!(
-            workflow.load_pending_send(&account).await,
+            workflow.load_pending_send().await,
             Ok(Some((*pending).clone()))
         );
         workflow
-            .resolve_pending_send(&account, pending.operation_id())
+            .resolve_pending_send(pending.operation_id())
             .await
             .expect("explicit recovery clears the known rejection without resending");
-        assert_eq!(workflow.load_pending_send(&account).await, Ok(None));
+        assert_eq!(workflow.load_pending_send().await, Ok(None));
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
 
         drop(workflow);
@@ -4558,12 +4555,8 @@ fn account_removal_reservation_blocks_new_mail_work_before_provider_calls() {
         let (marker_check_finished, resume_removal) =
             cache.hold_removal_after_marker_check_for_tests();
         let removing_session = Arc::clone(&session);
-        let removing_account = account.clone();
-        let removal_task = smol::spawn(async move {
-            removing_session
-                .remove_account_cache(&removing_account)
-                .await
-        });
+        let removal_task =
+            smol::spawn(async move { removing_session.remove_account_cache().await });
         marker_check_finished
             .recv()
             .await
@@ -4572,7 +4565,6 @@ fn account_removal_reservation_blocks_new_mail_work_before_provider_calls() {
         assert_eq!(
             workflow
                 .synchronize_account(
-                    &account,
                     UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                     &ignore_sync_progress,
                 )
@@ -4594,7 +4586,6 @@ fn account_removal_reservation_blocks_new_mail_work_before_provider_calls() {
         assert_eq!(
             workflow
                 .send_message(
-                    &account,
                     draft("Synthetic subject", "Synthetic body"),
                     UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                 )
@@ -4643,11 +4634,9 @@ fn active_send_reservation_blocks_account_removal_before_marker_staging() {
         let workflow = session.mail_session();
         let (marker_read_started, release_marker_read) = cache.hold_pending_send_read_for_tests();
         let sending_workflow = Arc::clone(&workflow);
-        let sending_account = account.clone();
         let send_task = smol::spawn(async move {
             sending_workflow
                 .send_message(
-                    &sending_account,
                     draft("Synthetic subject", "Synthetic body"),
                     UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                 )
@@ -4661,12 +4650,12 @@ fn active_send_reservation_blocks_account_removal_before_marker_staging() {
         assert_eq!(cache.load_pending_send(&account).await, Ok(None));
         assert_eq!(
             workflow
-                .resolve_pending_send(&account, MailSendOperationId::new())
+                .resolve_pending_send(MailSendOperationId::new())
                 .await,
             Err(MailSendResolutionError::OperationInProgress)
         );
         assert_eq!(
-            session.remove_account_cache(&account).await,
+            session.remove_account_cache().await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         assert_eq!(send_calls.load(Ordering::Relaxed), 0);
@@ -4676,8 +4665,8 @@ fn active_send_reservation_blocks_account_removal_before_marker_staging() {
             .expect("synthetic send marker read is released");
         assert_eq!(send_task.await, Ok(MailSendOutcome::Accepted));
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(workflow.load_pending_send(&account).await, Ok(None));
-        let removal_result = session.remove_account_cache(&account).await;
+        assert_eq!(workflow.load_pending_send().await, Ok(None));
+        let removal_result = session.remove_account_cache().await;
         assert_removal_completed(removal_result, &directory.path().join("mail.sqlite3"));
     });
 }
@@ -4703,18 +4692,16 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
         let session = open_session_over_retained_cache(provider, &account, &cache).await;
         let workflow = session.mail_session();
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic reply source is cached");
 
         let (marker_read_started, release_marker_read) = cache.hold_pending_send_read_for_tests();
         let replying_workflow = Arc::clone(&workflow);
-        let replying_account = account.clone();
         let reply_source = MailReplySource::new(folder_reference, message_id());
         let reply_task = smol::spawn(async move {
             replying_workflow
                 .reply_to_message(
-                    &replying_account,
                     MailReplyDraft::new(reply_source, "Synthetic reply body".to_owned()),
                     started_at,
                 )
@@ -4727,7 +4714,7 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
 
         assert_eq!(cache.load_pending_send(&account).await, Ok(None));
         assert_eq!(
-            session.remove_account_cache(&account).await,
+            session.remove_account_cache().await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_marker_read
@@ -4739,7 +4726,7 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
             .await
             .expect("reply reaches the provider with its account reservation held");
         assert_eq!(
-            session.remove_account_cache(&account).await,
+            session.remove_account_cache().await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_submission
@@ -4752,7 +4739,7 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
         ));
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
-            session.remove_account_cache(&account).await,
+            session.remove_account_cache().await,
             Err(AccountCacheRemovalError::PendingMailSend)
         );
         assert!(
@@ -4787,11 +4774,9 @@ fn active_account_sync_blocks_cache_removal() {
         let session = open_session_over_retained_cache(provider, &account, &cache).await;
         let workflow = session.mail_session();
         let syncing_workflow = Arc::clone(&workflow);
-        let syncing_account = account.clone();
         let sync_task = smol::spawn(async move {
             syncing_workflow
                 .synchronize_account(
-                    &syncing_account,
                     UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                     &ignore_sync_progress,
                 )
@@ -4803,7 +4788,7 @@ fn active_account_sync_blocks_cache_removal() {
             .expect("account sync owns its reservation while listing folders");
 
         assert_eq!(
-            session.remove_account_cache(&account).await,
+            session.remove_account_cache().await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         assert!(directory.path().join("mail.sqlite3").exists());
@@ -4837,7 +4822,7 @@ fn active_folder_write_blocks_cache_removal() {
         let session = open_session_over_retained_cache(provider, &account, &cache).await;
         let workflow = session.mail_session();
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic message is cached before its update");
         let writing_workflow = Arc::clone(&workflow);
@@ -4853,7 +4838,7 @@ fn active_folder_write_blocks_cache_removal() {
             .expect("folder write owns its reservation while waiting for Graph");
 
         assert_eq!(
-            session.remove_account_cache(&account).await,
+            session.remove_account_cache().await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_write
@@ -4893,7 +4878,7 @@ fn uncached_message_body_fetch_blocks_cache_removal() {
         let session = open_session_over_retained_cache(provider, &account, &cache).await;
         let workflow = session.mail_session();
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("synthetic message is cached before opening");
         let opening_workflow = Arc::clone(&workflow);
@@ -4909,7 +4894,7 @@ fn uncached_message_body_fetch_blocks_cache_removal() {
             .expect("message body request owns its folder reservation");
 
         assert_eq!(
-            session.remove_account_cache(&account).await,
+            session.remove_account_cache().await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_fetch
@@ -4931,7 +4916,7 @@ fn uncached_message_body_fetch_blocks_cache_removal() {
                 .and_then(|(_, body)| body),
             Some(body)
         );
-        let removal_result = session.remove_account_cache(&account).await;
+        let removal_result = session.remove_account_cache().await;
         assert_removal_completed(removal_result, &directory.path().join("mail.sqlite3"));
     });
 }
@@ -4978,7 +4963,7 @@ fn active_message_move_blocks_cache_removal() {
         let session = open_session_over_retained_cache(provider, &account, &cache).await;
         let workflow = session.mail_session();
         workflow
-            .synchronize_account(&account, started_at, &ignore_sync_progress)
+            .synchronize_account(started_at, &ignore_sync_progress)
             .await
             .expect("source and destination folders are cached");
         let moving_workflow = Arc::clone(&workflow);
@@ -4993,7 +4978,7 @@ fn active_message_move_blocks_cache_removal() {
             .expect("message move holds its folder reservations during provider work");
 
         assert_eq!(
-            session.remove_account_cache(&account).await,
+            session.remove_account_cache().await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_move
@@ -5004,7 +4989,7 @@ fn active_message_move_blocks_cache_removal() {
             move_task.await,
             Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached)
         );
-        let removal_result = session.remove_account_cache(&account).await;
+        let removal_result = session.remove_account_cache().await;
         assert_removal_completed(removal_result, &directory.path().join("mail.sqlite3"));
     });
 }

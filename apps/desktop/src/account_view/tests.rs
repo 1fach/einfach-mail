@@ -41,6 +41,7 @@ struct TestProvider {
     pause_connection: Arc<AtomicBool>,
     pause_permission_update: Arc<AtomicBool>,
     restore_error: Arc<Mutex<Option<AccountOperationError>>>,
+    restore_profile: Arc<Mutex<Option<AccountProfile>>>,
     connect_error: Arc<Mutex<Option<AccountOperationError>>>,
     saved_account_id: Arc<Mutex<Option<AccountId>>>,
     sign_out_events: Arc<Mutex<Vec<&'static str>>>,
@@ -55,6 +56,7 @@ struct CommitGate {
 }
 
 struct TestAccountSession {
+    account_id: AccountId,
     removal_attempts: Arc<Mutex<Vec<AccountId>>>,
 }
 
@@ -67,12 +69,11 @@ impl AccountSession for TestAccountSession {
         Arc::new(TestCalendarSession)
     }
 
-    fn remove_account_cache<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
+    fn remove_account_cache(
+        &self,
+    ) -> AccountSessionFuture<'_, Result<(), AccountCacheRemovalError>> {
         let attempts = Arc::clone(&self.removal_attempts);
-        let account_id = account_id.clone();
+        let account_id = self.account_id.clone();
         Box::pin(async move {
             let mut attempts = attempts
                 .lock()
@@ -96,17 +97,15 @@ fn pending_mail_call<'a, Output: Send + 'a>() -> AccountSessionFuture<'a, Output
 impl MailSession for TestMailSession {
     fn synchronize_account<'a>(
         &'a self,
-        _: &'a AccountId,
         _: SystemTime,
         _: &'a (dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> AccountSessionFuture<'a, Result<MailSyncReport, MailWorkflowError>> {
         pending_mail_call()
     }
 
-    fn list_cached_folders<'a>(
-        &'a self,
-        _: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<Vec<MailFolder>, MailWorkflowError>> {
+    fn list_cached_folders(
+        &self,
+    ) -> AccountSessionFuture<'_, Result<Vec<MailFolder>, MailWorkflowError>> {
         pending_mail_call()
     }
 
@@ -178,7 +177,6 @@ impl MailSession for TestMailSession {
 
     fn send_message<'a>(
         &'a self,
-        _: &'a AccountId,
         _: MailDraft,
         _: SystemTime,
     ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>> {
@@ -187,23 +185,20 @@ impl MailSession for TestMailSession {
 
     fn reply_to_message<'a>(
         &'a self,
-        _: &'a AccountId,
         _: MailReplyDraft,
         _: SystemTime,
     ) -> AccountSessionFuture<'a, Result<MailSendOutcome, MailSendWorkflowError>> {
         pending_mail_call()
     }
 
-    fn load_pending_send<'a>(
-        &'a self,
-        _: &'a AccountId,
-    ) -> AccountSessionFuture<'a, Result<Option<PendingMailSend>, MailCacheError>> {
+    fn load_pending_send(
+        &self,
+    ) -> AccountSessionFuture<'_, Result<Option<PendingMailSend>, MailCacheError>> {
         pending_mail_call()
     }
 
     fn resolve_pending_send<'a>(
         &'a self,
-        _: &'a AccountId,
         _: MailSendOperationId,
     ) -> AccountSessionFuture<'a, Result<(), MailSendResolutionError>> {
         pending_mail_call()
@@ -281,6 +276,7 @@ struct TestAccountSessionFactory {
     session: Arc<dyn AccountSession>,
     fallback_removals: Arc<AtomicBool>,
     session_open_attempts: Arc<AtomicUsize>,
+    opened_account_ids: Arc<Mutex<Vec<AccountId>>>,
 }
 
 struct FailingOpenAccountSessionFactory {
@@ -298,9 +294,13 @@ struct OpenSessionGate {
 impl AccountSessionFactory for TestAccountSessionFactory {
     fn open_session(
         &self,
-        _: AccountId,
+        account_id: AccountId,
     ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, AccountCacheOpenError>> {
         self.session_open_attempts.fetch_add(1, Ordering::SeqCst);
+        self.opened_account_ids
+            .lock()
+            .expect("synthetic opened-account ID mutex is healthy")
+            .push(account_id);
         Box::pin(ready(Ok(Arc::clone(&self.session))))
     }
 
@@ -386,7 +386,12 @@ impl AccountProvider for TestProvider {
             .restore_error
             .lock()
             .expect("synthetic restore error mutex is healthy");
-        ready(restore_error.map_or(Ok(None), Err))
+        let restore_profile = self
+            .restore_profile
+            .lock()
+            .expect("synthetic restored profile mutex is healthy")
+            .clone();
+        ready(restore_error.map_or(Ok(restore_profile), Err))
     }
 
     fn saved_credential_account_id(
@@ -935,6 +940,152 @@ fn connect_mismatch_keeps_saved_sign_in_and_requires_restore(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let provider = TestProvider::default();
+    let signed_out = Arc::clone(&provider.signed_out);
+    let account_a_id = AccountId::try_from("account-a".to_owned()).expect("account ID is valid");
+    let account_b_id = AccountId::try_from("account-b".to_owned()).expect("account ID is valid");
+    let profile_a = AccountProfile::try_new(
+        account_a_id.clone(),
+        Some("Ada Example".to_owned()),
+        Some("ada@example.test".to_owned()),
+        Some("ada@tenant.example.test".to_owned()),
+    )
+    .expect("synthetic account profile is valid");
+    let profile_b = AccountProfile::try_new(
+        account_b_id.clone(),
+        Some("Lin Example".to_owned()),
+        Some("lin@example.test".to_owned()),
+        Some("lin@tenant.example.test".to_owned()),
+    )
+    .expect("synthetic account profile is valid");
+    let session_a_removals = Arc::new(Mutex::new(Vec::new()));
+    let session_b_removals = Arc::new(Mutex::new(Vec::new()));
+    let session_a: Arc<dyn AccountSession> = Arc::new(TestAccountSession {
+        account_id: account_a_id,
+        removal_attempts: Arc::clone(&session_a_removals),
+    });
+    let session_b: Arc<dyn AccountSession> = Arc::new(TestAccountSession {
+        account_id: account_b_id.clone(),
+        removal_attempts: Arc::clone(&session_b_removals),
+    });
+    let session_open_attempts = Arc::new(AtomicUsize::new(0));
+    let opened_account_ids = Arc::new(Mutex::new(Vec::new()));
+    let factory: Arc<dyn AccountSessionFactory> = Arc::new(TestAccountSessionFactory {
+        session: Arc::clone(&session_b),
+        fallback_removals: Arc::new(AtomicBool::new(false)),
+        session_open_attempts,
+        opened_account_ids: Arc::clone(&opened_account_ids),
+    });
+    let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
+    let (view, context) =
+        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    context.run_until_parked();
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::Connected(profile_a);
+            view.account_session = Some(Arc::clone(&session_a));
+            cx.notify();
+        });
+    });
+    draw_account_view(context);
+
+    click(context, "sign-out");
+
+    assert!(context.cx.update(|cx| matches!(
+        &view.read(cx).status,
+        AccountStatus::Failed {
+            error: AccountOperationError::SavedAccountIdentityUnavailable,
+            saved_credential_may_exist: true,
+        }
+    )));
+    assert!(context.cx.update(|cx| {
+        view.read(cx)
+            .account_session
+            .as_ref()
+            .is_some_and(|retained| Arc::ptr_eq(retained, &session_a))
+    }));
+
+    *provider
+        .saved_account_id
+        .lock()
+        .expect("synthetic saved account ID mutex is healthy") = Some(account_b_id.clone());
+    *provider
+        .restore_profile
+        .lock()
+        .expect("synthetic restored profile mutex is healthy") = Some(profile_b.clone());
+    click(context, "retry-account-restore");
+
+    assert!(context.cx.update(|cx| matches!(
+        &view.read(cx).status,
+        AccountStatus::Connected(profile) if profile.id() == &account_b_id
+    )));
+    assert!(
+        context
+            .cx
+            .update(|cx| view.read(cx).account_session.is_none())
+    );
+
+    click(context, "open-mail");
+
+    assert_eq!(
+        *opened_account_ids
+            .lock()
+            .expect("synthetic opened-account ID mutex is healthy"),
+        vec![account_b_id.clone()]
+    );
+    assert!(context.cx.update(|cx| {
+        view.read(cx)
+            .account_session
+            .as_ref()
+            .is_some_and(|retained| Arc::ptr_eq(retained, &session_b))
+    }));
+
+    click(context, "mail-account-navigation");
+    click(context, "sign-out");
+
+    let retry_state_is_bound_to_account_b = context.cx.update(|cx| {
+        let view = view.read(cx);
+        matches!(
+            &view.status,
+            AccountStatus::Connected(profile) if profile.id() == &account_b_id
+        ) && view
+            .account_session
+            .as_ref()
+            .is_some_and(|retained| Arc::ptr_eq(retained, &session_b))
+    });
+    assert!(retry_state_is_bound_to_account_b);
+    assert!(
+        session_a_removals
+            .lock()
+            .expect("synthetic account A removal log mutex is healthy")
+            .is_empty()
+    );
+    assert_eq!(
+        *session_b_removals
+            .lock()
+            .expect("synthetic account B removal log mutex is healthy"),
+        vec![account_b_id.clone()]
+    );
+
+    click(context, "sign-out");
+
+    assert!(
+        context
+            .cx
+            .update(|cx| matches!(&view.read(cx).status, AccountStatus::Disconnected))
+    );
+    assert!(signed_out.load(Ordering::SeqCst));
+    assert_eq!(
+        *session_b_removals
+            .lock()
+            .expect("synthetic account B removal log mutex is healthy"),
+        vec![account_b_id.clone(), account_b_id]
+    );
+}
+
+#[gpui_kit::test]
 fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let provider = TestProvider::default();
@@ -949,12 +1100,15 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
     let removal_attempts = Arc::new(Mutex::new(Vec::new()));
     let fallback_removals = Arc::new(AtomicBool::new(false));
     let session: Arc<dyn AccountSession> = Arc::new(TestAccountSession {
+        account_id: AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid"),
         removal_attempts: Arc::clone(&removal_attempts),
     });
     let factory: Arc<dyn AccountSessionFactory> = Arc::new(TestAccountSessionFactory {
         session: Arc::clone(&session),
         fallback_removals: Arc::clone(&fallback_removals),
         session_open_attempts: Arc::new(AtomicUsize::new(0)),
+        opened_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
     let (view, context) =
         cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
@@ -1040,12 +1194,15 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let session_open_attempts = Arc::new(AtomicUsize::new(0));
     let session: Arc<dyn AccountSession> = Arc::new(TestAccountSession {
+        account_id: AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid"),
         removal_attempts: Arc::new(Mutex::new(Vec::new())),
     });
     let factory: Arc<dyn AccountSessionFactory> = Arc::new(TestAccountSessionFactory {
         session: Arc::clone(&session),
         fallback_removals: Arc::new(AtomicBool::new(false)),
         session_open_attempts: Arc::clone(&session_open_attempts),
+        opened_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
     let (view, context) =
         cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
