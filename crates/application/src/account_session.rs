@@ -315,6 +315,9 @@ pub trait AccountSession: Send + Sync {
 pub trait AccountSessionFactory: Send + Sync {
     /// Opens a session over the account's shared mail and calendar cache.
     ///
+    /// Sessions opened by this factory for the same account share in-memory
+    /// write-recovery state.
+    ///
     /// # Errors
     ///
     /// Returns [`AccountCacheOpenError::Unavailable`] when cache initialization or shared recovery
