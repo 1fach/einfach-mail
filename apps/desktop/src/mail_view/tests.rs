@@ -31,9 +31,9 @@ use gpui_kit::{
 
 use super::{
     FollowUpFlagUpdateStatus, MailPermissionRequester, MailSyncProgress, MailView, MailViewEvent,
-    MessageMoveMenuAction, MessageNavigation, MessageState, MoveRecoveryReason,
-    ReadStateUpdateStatus, SyncStatus, WellKnownFolderActionStatus, bind_message_navigation_keys,
-    follow_up_flag_failure_message, mail_error_message, read_state_failure_message,
+    MessageMoveMenuAction, MessageState, MoveRecoveryReason, ReadStateUpdateStatus, SyncStatus,
+    WellKnownFolderActionStatus, bind_message_navigation_keys, follow_up_flag_failure_message,
+    mail_error_message, read_state_failure_message,
 };
 use crate::mail_composer::bind_mail_composer_keys;
 
@@ -1595,29 +1595,6 @@ async fn cached_message_list_navigates_by_keyboard_and_keeps_one_tab_stop(cx: &m
         message_ids.first(),
         FIRST_MESSAGE_LABEL,
     );
-}
-
-#[test]
-fn message_navigation_handles_empty_lists_and_stops_at_boundaries() {
-    let cases = [
-        (MessageNavigation::Previous, None, 0, None),
-        (MessageNavigation::Next, None, 0, None),
-        (MessageNavigation::First, None, 0, None),
-        (MessageNavigation::Last, None, 0, None),
-        (MessageNavigation::Previous, None, 3, Some(2)),
-        (MessageNavigation::Next, None, 3, Some(0)),
-        (MessageNavigation::Previous, Some(0), 3, Some(0)),
-        (MessageNavigation::Next, Some(2), 3, Some(2)),
-        (MessageNavigation::First, Some(1), 3, Some(0)),
-        (MessageNavigation::Last, Some(1), 3, Some(2)),
-    ];
-
-    for (navigation, selected_index, message_count, expected_index) in cases {
-        assert_eq!(
-            navigation.target_index(selected_index, message_count),
-            expected_index
-        );
-    }
 }
 
 #[gpui_kit::test]

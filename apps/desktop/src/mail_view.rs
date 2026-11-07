@@ -1,5 +1,6 @@
 use std::{rc::Rc, sync::Arc, time::SystemTime};
 
+use crate::list_navigation::ListNavigation;
 use crate::mail_composer::{
     ComposerTarget, MailComposer, MailComposerContext, MailComposerEvent, MailPermissionRequester,
 };
@@ -92,34 +93,6 @@ enum SyncStatus {
     Rebuilding,
     UpToDate,
     Failed(MailWorkflowError),
-}
-
-#[derive(Clone, Copy)]
-enum MessageNavigation {
-    Previous,
-    Next,
-    First,
-    Last,
-}
-
-impl MessageNavigation {
-    fn target_index(self, selected_index: Option<usize>, message_count: usize) -> Option<usize> {
-        if message_count == 0 {
-            return None;
-        }
-
-        let last_index = message_count - 1;
-        match self {
-            Self::Previous => Some(
-                selected_index.map_or(last_index, |index| index.min(last_index).saturating_sub(1)),
-            ),
-            Self::Next => Some(selected_index.map_or(0, |index| {
-                index.min(last_index).saturating_add(1).min(last_index)
-            })),
-            Self::First => Some(0),
-            Self::Last => Some(last_index),
-        }
-    }
 }
 
 enum MessageState {
@@ -610,7 +583,7 @@ impl MailView {
         cx.notify();
     }
 
-    fn navigate_message(&mut self, navigation: MessageNavigation, cx: &mut Context<Self>) {
+    fn navigate_message(&mut self, navigation: ListNavigation, cx: &mut Context<Self>) {
         if self.sync_running || self.message_update_in_progress() {
             return;
         }
@@ -654,7 +627,7 @@ impl MailView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_message(MessageNavigation::Previous, cx);
+        self.navigate_message(ListNavigation::Previous, cx);
     }
 
     fn on_select_next_message(
@@ -663,7 +636,7 @@ impl MailView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_message(MessageNavigation::Next, cx);
+        self.navigate_message(ListNavigation::Next, cx);
     }
 
     fn on_select_first_message(
@@ -672,7 +645,7 @@ impl MailView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_message(MessageNavigation::First, cx);
+        self.navigate_message(ListNavigation::First, cx);
     }
 
     fn on_select_last_message(
@@ -681,7 +654,7 @@ impl MailView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigate_message(MessageNavigation::Last, cx);
+        self.navigate_message(ListNavigation::Last, cx);
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
