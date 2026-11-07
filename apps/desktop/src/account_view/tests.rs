@@ -285,8 +285,14 @@ struct TestAccountSessionFactory {
 
 struct FailingOpenAccountSessionFactory {
     open_error: AccountCacheOpenError,
+    open_gate: Mutex<Option<OpenSessionGate>>,
     sign_out_events: Arc<Mutex<Vec<&'static str>>>,
     removal_account_ids: Arc<Mutex<Vec<AccountId>>>,
+}
+
+struct OpenSessionGate {
+    started: mpsc::Sender<()>,
+    release: oneshot::Receiver<()>,
 }
 
 impl AccountSessionFactory for TestAccountSessionFactory {
@@ -312,7 +318,23 @@ impl AccountSessionFactory for FailingOpenAccountSessionFactory {
         &self,
         _: AccountId,
     ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, AccountCacheOpenError>> {
-        Box::pin(ready(Err(self.open_error)))
+        let open_error = self.open_error;
+        let open_gate = self
+            .open_gate
+            .lock()
+            .expect("synthetic open-session gate mutex is healthy")
+            .take();
+        Box::pin(async move {
+            if let Some(gate) = open_gate {
+                gate.started
+                    .send(())
+                    .expect("the synthetic open-session test is waiting");
+                gate.release
+                    .await
+                    .expect("the synthetic open-session test releases the gate");
+            }
+            Err(open_error)
+        })
     }
 
     fn remove_account_cache<'a>(
@@ -574,6 +596,7 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
     let provider = TestProvider::default();
     let factory: Arc<dyn AccountSessionFactory> = Arc::new(FailingOpenAccountSessionFactory {
         open_error: AccountCacheOpenError::InvalidData,
+        open_gate: Mutex::new(None),
         sign_out_events: Arc::clone(&provider.sign_out_events),
         removal_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
@@ -612,6 +635,65 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+fn stale_content_open_failure_does_not_replace_account_state(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let provider = TestProvider::default();
+    let workflow = Arc::new(AccountWorkflow::new(provider));
+    let (open_started, open_started_receiver) = mpsc::channel();
+    let (release_open, open_release) = oneshot::channel();
+    let factory: Arc<dyn AccountSessionFactory> = Arc::new(FailingOpenAccountSessionFactory {
+        open_error: AccountCacheOpenError::Unavailable,
+        open_gate: Mutex::new(Some(OpenSessionGate {
+            started: open_started,
+            release: open_release,
+        })),
+        sign_out_events: Arc::new(Mutex::new(Vec::new())),
+        removal_account_ids: Arc::new(Mutex::new(Vec::new())),
+    });
+    let (view, context) =
+        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    context.run_until_parked();
+    let profile = AccountProfile::try_new(
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
+        Some("Ada Example".to_owned()),
+        Some("ada@example.test".to_owned()),
+        Some("ada@tenant.example.test".to_owned()),
+    )
+    .expect("synthetic account profile is valid");
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::Connected(profile);
+            cx.notify();
+        });
+    });
+    draw_account_view(context);
+
+    click(context, "open-mail");
+    open_started_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the account session open starts");
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.content = AccountContent::Account;
+            view.status = AccountStatus::SigningOut;
+            cx.notify();
+        });
+    });
+    release_open
+        .send(())
+        .expect("the synthetic account session open is waiting on this test");
+    context.run_until_parked();
+
+    let stale_error_ignored = context.cx.update(|cx| {
+        let view = view.read(cx);
+        matches!(view.status, AccountStatus::SigningOut)
+            && matches!(view.content, AccountContent::Account)
+            && view.session_open_error.is_none()
+    });
+    assert!(stale_error_ignored);
+}
+
+#[gpui_kit::test]
 fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let provider = TestProvider::default();
@@ -623,6 +705,7 @@ fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
     let workflow = Arc::new(AccountWorkflow::new(provider));
     let factory: Arc<dyn AccountSessionFactory> = Arc::new(FailingOpenAccountSessionFactory {
         open_error: AccountCacheOpenError::Unavailable,
+        open_gate: Mutex::new(None),
         sign_out_events: Arc::clone(&sign_out_events),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
@@ -698,6 +781,7 @@ fn failed_restore_removes_cache_before_the_verified_saved_credential(cx: &mut Te
     let workflow = Arc::new(AccountWorkflow::new(provider));
     let factory: Arc<dyn AccountSessionFactory> = Arc::new(FailingOpenAccountSessionFactory {
         open_error: AccountCacheOpenError::Unavailable,
+        open_gate: Mutex::new(None),
         sign_out_events: Arc::clone(&event_log),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
@@ -744,6 +828,7 @@ fn failed_restore_without_verified_identity_preserves_credential(cx: &mut TestAp
     let workflow = Arc::new(AccountWorkflow::new(provider));
     let factory: Arc<dyn AccountSessionFactory> = Arc::new(FailingOpenAccountSessionFactory {
         open_error: AccountCacheOpenError::Unavailable,
+        open_gate: Mutex::new(None),
         sign_out_events: Arc::clone(&event_log),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
