@@ -20,7 +20,7 @@ pub use account::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
     AccountWorkflow,
 };
-pub use account_cache::{AccountCache, AccountCacheRemovalError};
+pub use account_cache::{AccountCache, AccountCacheOpenError, AccountCacheRemovalError};
 pub use account_recovery::CalendarWriteReadiness;
 pub use account_session::{
     AccountCacheFactory, AccountSession, AccountSessionFactory, AccountSessionFuture,

@@ -17,14 +17,15 @@ use gpui_kit::{
 
 use super::{AccountContent, AccountStatus, AccountView, SetupIssue};
 use einfach_mail_application::{
-    AccountCacheRemovalError, AccountOperationCancellation, AccountOperationError,
-    AccountPermissionRequest, AccountProvider, AccountSession, AccountSessionFactory,
-    AccountSessionFuture, AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome,
-    CalendarEventDeletionOutcome, CalendarEventUpdateOutcome, CalendarSession, CalendarSnapshot,
-    CalendarSyncReport, CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCacheError,
-    MailSendOutcome, MailSendResolutionError, MailSendWorkflowError, MailSession, MailSyncProgress,
-    MailSyncReport, MailSyncState, MailWorkflowError, MessageMoveOutcome, ReadStateUpdateOutcome,
-    WellKnownFolderMoveOutcome, WellKnownMailFolder,
+    AccountCacheOpenError, AccountCacheRemovalError, AccountOperationCancellation,
+    AccountOperationError, AccountPermissionRequest, AccountProvider, AccountSession,
+    AccountSessionFactory, AccountSessionFuture, AccountWorkflow, CalendarCacheError,
+    CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
+    CalendarSession, CalendarSnapshot, CalendarSyncReport, CalendarWorkflowError,
+    FollowUpFlagUpdateOutcome, MailCacheError, MailSendOutcome, MailSendResolutionError,
+    MailSendWorkflowError, MailSession, MailSyncProgress, MailSyncReport, MailSyncState,
+    MailWorkflowError, MessageMoveOutcome, ReadStateUpdateOutcome, WellKnownFolderMoveOutcome,
+    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
@@ -282,7 +283,8 @@ struct TestAccountSessionFactory {
     session_open_attempts: Arc<AtomicUsize>,
 }
 
-struct SuccessfulAccountSessionFactory {
+struct FailingOpenAccountSessionFactory {
+    open_error: AccountCacheOpenError,
     sign_out_events: Arc<Mutex<Vec<&'static str>>>,
     removal_account_ids: Arc<Mutex<Vec<AccountId>>>,
 }
@@ -291,7 +293,7 @@ impl AccountSessionFactory for TestAccountSessionFactory {
     fn open_session(
         &self,
         _: AccountId,
-    ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
+    ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, AccountCacheOpenError>> {
         self.session_open_attempts.fetch_add(1, Ordering::SeqCst);
         Box::pin(ready(Ok(Arc::clone(&self.session))))
     }
@@ -305,12 +307,12 @@ impl AccountSessionFactory for TestAccountSessionFactory {
     }
 }
 
-impl AccountSessionFactory for SuccessfulAccountSessionFactory {
+impl AccountSessionFactory for FailingOpenAccountSessionFactory {
     fn open_session(
         &self,
         _: AccountId,
-    ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, MailCacheError>> {
-        Box::pin(ready(Err(MailCacheError::Unavailable)))
+    ) -> AccountSessionFuture<'_, Result<Arc<dyn AccountSession>, AccountCacheOpenError>> {
+        Box::pin(ready(Err(self.open_error)))
     }
 
     fn remove_account_cache<'a>(
@@ -548,8 +550,8 @@ fn cancelled_permission_review_has_permission_specific_copy() {
 }
 
 #[test]
-fn in_use_cache_message_explains_how_to_retry() {
-    let message = super::mail_cache_error_message(MailCacheError::InUse);
+fn in_use_account_cache_message_explains_how_to_retry() {
+    let message = super::account_cache_open_error_message(AccountCacheOpenError::InUse);
 
     assert!(message.contains("Another Einfach Mail operation"));
     assert!(message.contains("close the other account view"));
@@ -557,12 +559,56 @@ fn in_use_cache_message_explains_how_to_retry() {
 }
 
 #[test]
-fn unavailable_cache_message_covers_file_and_keyring_recovery() {
-    let message = super::mail_cache_error_message(MailCacheError::Unavailable);
+fn unavailable_account_cache_message_covers_file_and_keyring_recovery() {
+    let message = super::account_cache_open_error_message(AccountCacheOpenError::Unavailable);
 
     assert!(message.contains("cache files"));
     assert!(message.contains("Linux keyring"));
     assert!(message.contains("try again"));
+    assert!(!message.contains("removed"));
+}
+
+#[gpui_kit::test]
+fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let provider = TestProvider::default();
+    let factory: Arc<dyn AccountSessionFactory> = Arc::new(FailingOpenAccountSessionFactory {
+        open_error: AccountCacheOpenError::InvalidData,
+        sign_out_events: Arc::clone(&provider.sign_out_events),
+        removal_account_ids: Arc::new(Mutex::new(Vec::new())),
+    });
+    let workflow = Arc::new(AccountWorkflow::new(provider));
+    let (view, context) =
+        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    context.run_until_parked();
+
+    let profile = AccountProfile::try_new(
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
+        Some("Ada Example".to_owned()),
+        Some("ada@example.test".to_owned()),
+        Some("ada@tenant.example.test".to_owned()),
+    )
+    .expect("synthetic account profile is valid");
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::Connected(profile);
+            cx.notify();
+        });
+    });
+    draw_account_view(context);
+
+    click(context, "open-calendar");
+
+    assert!(context.debug_bounds("account-cache-error").is_some());
+    assert!(context.cx.update(|cx| matches!(
+        view.read(cx).session_open_error,
+        Some(super::AccountViewCacheError::Open(
+            AccountCacheOpenError::InvalidData
+        ))
+    )));
+    let message = super::account_cache_open_error_message(AccountCacheOpenError::InvalidData);
+    assert!(message.contains("account cache"));
+    assert!(!message.contains("mail"));
 }
 
 #[gpui_kit::test]
@@ -575,7 +621,8 @@ fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
     let removal_account_ids = Arc::new(Mutex::new(Vec::new()));
     provider.fail_next_sign_out.store(true, Ordering::SeqCst);
     let workflow = Arc::new(AccountWorkflow::new(provider));
-    let factory: Arc<dyn AccountSessionFactory> = Arc::new(SuccessfulAccountSessionFactory {
+    let factory: Arc<dyn AccountSessionFactory> = Arc::new(FailingOpenAccountSessionFactory {
+        open_error: AccountCacheOpenError::Unavailable,
         sign_out_events: Arc::clone(&sign_out_events),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
@@ -649,7 +696,8 @@ fn failed_restore_removes_cache_before_the_verified_saved_credential(cx: &mut Te
     let event_log = Arc::clone(&provider.sign_out_events);
     let removal_account_ids = Arc::new(Mutex::new(Vec::new()));
     let workflow = Arc::new(AccountWorkflow::new(provider));
-    let factory: Arc<dyn AccountSessionFactory> = Arc::new(SuccessfulAccountSessionFactory {
+    let factory: Arc<dyn AccountSessionFactory> = Arc::new(FailingOpenAccountSessionFactory {
+        open_error: AccountCacheOpenError::Unavailable,
         sign_out_events: Arc::clone(&event_log),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
@@ -694,7 +742,8 @@ fn failed_restore_without_verified_identity_preserves_credential(cx: &mut TestAp
     let event_log = Arc::clone(&provider.sign_out_events);
     let removal_account_ids = Arc::new(Mutex::new(Vec::new()));
     let workflow = Arc::new(AccountWorkflow::new(provider));
-    let factory: Arc<dyn AccountSessionFactory> = Arc::new(SuccessfulAccountSessionFactory {
+    let factory: Arc<dyn AccountSessionFactory> = Arc::new(FailingOpenAccountSessionFactory {
+        open_error: AccountCacheOpenError::Unavailable,
         sign_out_events: Arc::clone(&event_log),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });

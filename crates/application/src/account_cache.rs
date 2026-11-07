@@ -7,6 +7,55 @@ use thiserror::Error;
 use crate::MailCacheError;
 use crate::operation_reservations::{ActiveOperations, reserve_account};
 
+/// Errors returned while opening a cache shared by account features.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AccountCacheOpenError {
+    /// The cache, credentials, or shared account state are unavailable.
+    #[error("the account cache is unavailable")]
+    Unavailable,
+    /// Another cache handle or lifecycle operation owns an account lock.
+    #[error("the account cache is in use")]
+    InUse,
+    /// The account cache exists but its encryption key is missing or malformed.
+    #[error("the account cache encryption key is unavailable")]
+    MissingEncryptionKey,
+    /// Stored values do not satisfy the current cache contract.
+    #[error("the account cache contains invalid data")]
+    InvalidData,
+    /// The requested account does not own the cache.
+    #[error("the account cache belongs to another account")]
+    AccountMismatch,
+}
+
+impl From<MailCacheError> for AccountCacheOpenError {
+    fn from(error: MailCacheError) -> Self {
+        match error {
+            MailCacheError::Unavailable
+            | MailCacheError::MessageNotCached
+            | MailCacheError::SyncStateChanged
+            | MailCacheError::SendAlreadyPending
+            | MailCacheError::PendingSendMismatch
+            | MailCacheError::PendingSendNotFound => Self::Unavailable,
+            MailCacheError::InUse => Self::InUse,
+            MailCacheError::MissingEncryptionKey => Self::MissingEncryptionKey,
+            MailCacheError::InvalidData => Self::InvalidData,
+            MailCacheError::AccountMismatch => Self::AccountMismatch,
+        }
+    }
+}
+
+impl From<AccountCacheOpenError> for AccountCacheRemovalError {
+    fn from(error: AccountCacheOpenError) -> Self {
+        match error {
+            AccountCacheOpenError::Unavailable => Self::Unavailable,
+            AccountCacheOpenError::InUse => Self::InUse,
+            AccountCacheOpenError::MissingEncryptionKey => Self::MissingEncryptionKey,
+            AccountCacheOpenError::InvalidData => Self::InvalidData,
+            AccountCacheOpenError::AccountMismatch => Self::AccountMismatch,
+        }
+    }
+}
+
 /// Account-wide cache removal outcomes shared by mail and calendar data.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AccountCacheRemovalError {
@@ -39,16 +88,8 @@ pub enum AccountCacheRemovalError {
 impl From<MailCacheError> for AccountCacheRemovalError {
     fn from(error: MailCacheError) -> Self {
         match error {
-            MailCacheError::Unavailable
-            | MailCacheError::MessageNotCached
-            | MailCacheError::SyncStateChanged
-            | MailCacheError::PendingSendMismatch
-            | MailCacheError::PendingSendNotFound => Self::Unavailable,
-            MailCacheError::InUse => Self::InUse,
-            MailCacheError::MissingEncryptionKey => Self::MissingEncryptionKey,
-            MailCacheError::InvalidData => Self::InvalidData,
-            MailCacheError::AccountMismatch => Self::AccountMismatch,
             MailCacheError::SendAlreadyPending => Self::PendingMailSend,
+            error => AccountCacheOpenError::from(error).into(),
         }
     }
 }
