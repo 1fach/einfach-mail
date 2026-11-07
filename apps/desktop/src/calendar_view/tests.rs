@@ -702,7 +702,7 @@ fn calendar_view_bounds_follow_local_monday_across_a_dst_transition() {
 }
 
 #[test]
-fn unix_utc_fallback_uses_utc_week_and_labels_it_for_the_user() {
+fn utc_calendar_week_uses_monday_start_and_utc_offset() {
     let current = current_week_start(&TimeZone::UTC).expect("current timestamp fits Jiff");
     let account = einfach_mail_domain::AccountId::try_from("synthetic-account".to_owned())
         .expect("synthetic account ID is valid");
@@ -1031,6 +1031,20 @@ async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
     assert!(!sync_running && status_failed, "calendar refresh completes");
     assert!(context.debug_bounds("calendar-sync-error").is_some());
     assert!(context.debug_bounds("calendar-utc-fallback").is_some());
+    let status_labels = context.update(|window, _| {
+        window
+            .find_all_by_role(gpui_kit::Role::Status)
+            .iter()
+            .map(|status| status.label().map(str::to_owned))
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        status_labels.iter().any(|label| {
+            label.as_deref()
+                == Some("The system time zone is unavailable. Timed events are shown in UTC.")
+        }),
+        "the UTC fallback status label is accessible; found {status_labels:?}"
+    );
     assert!(
         context
             .debug_bounds("calendar-event-row-2030-01-07-synthetic-ui-event")

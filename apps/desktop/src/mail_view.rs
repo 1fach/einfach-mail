@@ -348,6 +348,12 @@ struct MailSnapshot {
     pending_send: Result<Option<PendingMailSend>, MailCacheError>,
 }
 
+struct MailFolderSnapshot {
+    messages: Vec<MailMessage>,
+    sync_state: Option<MailSyncState>,
+    folder_write_sync_required: bool,
+}
+
 impl MailView {
     pub(crate) fn new(
         profile: AccountProfile,
@@ -558,22 +564,21 @@ impl MailView {
         self.set_messages(Vec::new());
         let workflow = Arc::clone(&self.workflow);
         self.message_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let messages = workflow.list_cached_messages(&folder).await;
-            let sync_state = workflow.cached_sync_state(&folder).await;
-            let write_sync_required = workflow.folder_write_sync_required(&folder).await;
+            let snapshot = load_folder_snapshot(workflow.as_ref(), &folder).await;
             let _ = this.update(cx, |view, cx| {
                 if view.selected_folder.as_ref() != Some(&folder) {
                     return;
                 }
-                match (messages, sync_state, write_sync_required) {
-                    (Ok(messages), Ok(sync_state), Ok(write_sync_required)) => {
-                        view.set_messages(messages);
-                        view.sync_state = sync_state;
-                        view.selected_folder_write_sync_required = write_sync_required;
+                match snapshot {
+                    Ok(snapshot) => {
+                        view.set_messages(snapshot.messages);
+                        view.sync_state = snapshot.sync_state;
+                        view.selected_folder_write_sync_required =
+                            snapshot.folder_write_sync_required;
                         view.message_list_state = MessageListState::Ready;
                         view.message_detail_state = MessageDetailState::Empty;
                     }
-                    (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                    Err(error) => {
                         view.message_list_state = MessageListState::Failed(error);
                     }
                 }
@@ -1620,6 +1625,17 @@ fn follow_up_flag_failure_message(status: FollowUpFlagStatus, error: MailWorkflo
     }
 }
 
+async fn load_folder_snapshot(
+    workflow: &dyn MailSession,
+    folder: &FolderReference,
+) -> Result<MailFolderSnapshot, MailWorkflowError> {
+    Ok(MailFolderSnapshot {
+        messages: workflow.list_cached_messages(folder).await?,
+        sync_state: workflow.cached_sync_state(folder).await?,
+        folder_write_sync_required: workflow.folder_write_sync_required(folder).await?,
+    })
+}
+
 async fn load_snapshot(
     workflow: &dyn MailSession,
     account_id: &einfach_mail_domain::AccountId,
@@ -1637,10 +1653,11 @@ async fn load_snapshot(
         .or_else(|| preferred_folder(&folders));
     let (messages, sync_state, folder_write_sync_required) = if let Some(folder) = &selected_folder
     {
+        let snapshot = load_folder_snapshot(workflow, folder).await?;
         (
-            workflow.list_cached_messages(folder).await?,
-            workflow.cached_sync_state(folder).await?,
-            workflow.folder_write_sync_required(folder).await?,
+            snapshot.messages,
+            snapshot.sync_state,
+            snapshot.folder_write_sync_required,
         )
     } else {
         (Vec::new(), None, false)

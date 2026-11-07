@@ -40,6 +40,8 @@ gpui_kit::actions!(
 );
 
 const CALENDAR_EVENT_LIST_CONTEXT: &str = "CalendarEventList";
+const UTC_FALLBACK_STATUS_LABEL: &str =
+    "The system time zone is unavailable. Timed events are shown in UTC.";
 
 pub(crate) fn bind_calendar_event_navigation_keys(cx: &mut App) {
     let context = Some(CALENDAR_EVENT_LIST_CONTEXT);
@@ -967,13 +969,17 @@ where
 }
 
 fn render_utc_fallback(colors: ColorTokens) -> impl IntoElement {
-    div()
+    let status = div()
         .id("calendar-utc-fallback")
         .debug_selector(|| "calendar-utc-fallback".to_owned())
         .role(Role::Status)
+        .aria_label(UTC_FALLBACK_STATUS_LABEL)
         .text_sm()
         .text_color(colors.muted_foreground)
-        .child("The system time zone is unavailable. Timed events are shown in UTC.")
+        .child(UTC_FALLBACK_STATUS_LABEL);
+    #[cfg(test)]
+    let status = status.test_support();
+    status
 }
 
 fn primary_calendar_heading() -> impl IntoElement {
