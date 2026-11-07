@@ -798,6 +798,8 @@ struct FixtureData {
     account_id: Option<AccountId>,
     folders: Vec<MailFolder>,
     messages: Vec<MailMessage>,
+    list_folders_error: Option<MailCacheError>,
+    list_folders_gate: Option<FolderListGate>,
     body: Option<MessageBody>,
     list_messages_error: Option<MailCacheError>,
     sync_state: Option<MailSyncState>,
@@ -807,6 +809,31 @@ struct FixtureData {
     fail_next_pending_send_stage: bool,
     fail_next_pending_send_clear: bool,
     move_error: Option<MailCacheError>,
+}
+
+struct FolderListGate {
+    started: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl FixtureCache {
+    fn hold_next_folder_list(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (started, started_receiver) = tokio::sync::oneshot::channel();
+        let (release, release_receiver) = tokio::sync::oneshot::channel();
+        self.0
+            .lock()
+            .expect("fixture cache mutex is healthy")
+            .list_folders_gate = Some(FolderListGate {
+            started,
+            release: release_receiver,
+        });
+        (started_receiver, release)
+    }
 }
 
 impl MailCache for FixtureCache {
@@ -948,15 +975,29 @@ impl MailCache for FixtureCache {
     ) -> impl Future<Output = Result<Vec<MailFolder>, MailCacheError>> + Send + '_ {
         let account_id = account_id.clone();
         async move {
-            let data = self.0.lock().expect("fixture cache mutex is healthy");
-            if data
-                .account_id
-                .as_ref()
-                .is_some_and(|saved| saved != &account_id)
-            {
-                return Err(MailCacheError::AccountMismatch);
+            let (folders, error, gate) = {
+                let mut data = self.0.lock().expect("fixture cache mutex is healthy");
+                if data
+                    .account_id
+                    .as_ref()
+                    .is_some_and(|saved| saved != &account_id)
+                {
+                    return Err(MailCacheError::AccountMismatch);
+                }
+                (
+                    data.folders.clone(),
+                    data.list_folders_error,
+                    data.list_folders_gate.take(),
+                )
+            };
+            if let Some(gate) = gate {
+                let _ = gate.started.send(());
+                let _ = gate.release.await;
             }
-            Ok(data.folders.clone())
+            if let Some(error) = error {
+                return Err(error);
+            }
+            Ok(folders)
         }
     }
 
@@ -3219,6 +3260,113 @@ fn oversized_cached_html_shows_a_safe_reader_fallback(cx: &mut TestAppContext) {
             .debug_bounds("mail-message-body-too-large")
             .is_some()
     );
+}
+
+#[gpui_kit::test]
+async fn initial_mail_snapshot_renders_loading_without_selected_folder(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, _) = fixture(account);
+    let (started_receiver, release) = cache.hold_next_folder_list();
+    let workflow = Arc::new(MailWorkflow::new(
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache,
+    ));
+    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    started_receiver
+        .await
+        .expect("initial folder listing reaches its test gate");
+
+    assert!(context.cx.update(|cx| {
+        view.read(cx).selected_folder.is_none()
+            && matches!(&view.read(cx).message_list_state, MessageListState::Loading)
+    }));
+    draw_mail_view(context);
+
+    assert!(context.debug_bounds("mail-list-loading").is_some());
+    let _ = release.send(());
+    context.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn initial_mail_snapshot_failure_renders_error_without_selected_folder(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, _) = fixture(account);
+    cache
+        .0
+        .lock()
+        .expect("fixture cache mutex is healthy")
+        .list_folders_error = Some(MailCacheError::Unavailable);
+    let workflow = Arc::new(MailWorkflow::new(
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache,
+    ));
+    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+
+    context.run_until_parked();
+    draw_mail_view(context);
+
+    assert!(context.cx.update(|cx| {
+        view.read(cx).selected_folder.is_none()
+            && matches!(
+                &view.read(cx).message_list_state,
+                MessageListState::Failed(MailWorkflowError::Cache(MailCacheError::Unavailable))
+            )
+    }));
+    assert!(context.debug_bounds("mail-list-error").is_some());
+    assert!(context.debug_bounds("mail-list-empty-folders").is_none());
+    let error_status_count = context.update(|window, _| {
+        window
+            .find_all_by_role(gpui_kit::Role::Status)
+            .iter()
+            .filter(|status| {
+                status.label()
+                    == Some(mail_error_message(MailWorkflowError::Cache(
+                        MailCacheError::Unavailable,
+                    )))
+            })
+            .count()
+    });
+    assert_eq!(error_status_count, 1);
+}
+
+#[gpui_kit::test]
+fn successful_empty_mail_snapshot_renders_no_folders(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, _) = fixture(account);
+    cache
+        .0
+        .lock()
+        .expect("fixture cache mutex is healthy")
+        .folders
+        .clear();
+    let workflow = Arc::new(MailWorkflow::new(
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache,
+    ));
+    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+
+    context.run_until_parked();
+    draw_mail_view(context);
+
+    assert!(context.cx.update(|cx| {
+        view.read(cx).selected_folder.is_none()
+            && matches!(&view.read(cx).message_list_state, MessageListState::Ready)
+    }));
+    assert!(context.debug_bounds("mail-list-empty-folders").is_some());
+    assert!(context.debug_bounds("mail-list-loading").is_none());
+    assert!(context.debug_bounds("mail-list-error").is_none());
 }
 
 #[gpui_kit::test]
