@@ -60,6 +60,7 @@ pub(crate) struct MailView {
     folders: Vec<MailFolder>,
     selected_folder: Option<FolderReference>,
     messages: Vec<MailMessage>,
+    message_list_state: MessageListState,
     message_row_sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
     message_list_focus: FocusHandle,
     message_list_scroll: VirtualListScrollHandle,
@@ -68,7 +69,7 @@ pub(crate) struct MailView {
     sync_running: bool,
     sync_task: Option<Task<()>>,
     selected_message_id: Option<MessageId>,
-    message_state: MessageState,
+    message_detail_state: MessageDetailState,
     message_task: Option<Task<()>>,
     read_state_update: ReadStateUpdateStatus,
     read_state_task: Option<Task<()>>,
@@ -95,7 +96,13 @@ enum SyncStatus {
     Failed(MailWorkflowError),
 }
 
-enum MessageState {
+enum MessageListState {
+    Ready,
+    Loading,
+    Failed(MailWorkflowError),
+}
+
+enum MessageDetailState {
     Empty,
     Loading,
     Opened(Box<OpenedMessage>),
@@ -344,6 +351,7 @@ impl MailView {
             folders: Vec::new(),
             selected_folder: None,
             messages: Vec::new(),
+            message_list_state: MessageListState::Ready,
             message_row_sizes: Rc::new(Vec::new()),
             message_list_focus: cx.focus_handle().tab_stop(true),
             message_list_scroll: VirtualListScrollHandle::new(),
@@ -352,7 +360,7 @@ impl MailView {
             sync_running: true,
             sync_task: None,
             selected_message_id: None,
-            message_state: MessageState::Empty,
+            message_detail_state: MessageDetailState::Empty,
             message_task: None,
             read_state_update: ReadStateUpdateStatus::Idle,
             read_state_task: None,
@@ -435,7 +443,8 @@ impl MailView {
             }
         }
         self.selected_message_id = None;
-        self.message_state = MessageState::Empty;
+        self.message_list_state = MessageListState::Ready;
+        self.message_detail_state = MessageDetailState::Empty;
         self.message_task = None;
         self.read_state_update = ReadStateUpdateStatus::Idle;
         self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
@@ -491,7 +500,8 @@ impl MailView {
         self.sync_state = None;
         self.folders.clear();
         self.messages.clear();
-        self.message_state = MessageState::Empty;
+        self.message_list_state = MessageListState::Ready;
+        self.message_detail_state = MessageDetailState::Empty;
         self.read_state_update = ReadStateUpdateStatus::Idle;
         self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
         self.message_move_status = MessageMoveStatus::Idle;
@@ -513,7 +523,8 @@ impl MailView {
         self.selected_folder_write_sync_required = true;
         self.sync_state = None;
         self.selected_message_id = None;
-        self.message_state = MessageState::Loading;
+        self.message_list_state = MessageListState::Loading;
+        self.message_detail_state = MessageDetailState::Empty;
         self.read_state_update = ReadStateUpdateStatus::Idle;
         self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
         self.set_messages(Vec::new());
@@ -531,10 +542,11 @@ impl MailView {
                         view.set_messages(messages);
                         view.sync_state = sync_state;
                         view.selected_folder_write_sync_required = write_sync_required;
-                        view.message_state = MessageState::Empty;
+                        view.message_list_state = MessageListState::Ready;
+                        view.message_detail_state = MessageDetailState::Empty;
                     }
                     (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
-                        view.message_state = MessageState::Failed(error);
+                        view.message_list_state = MessageListState::Failed(error);
                     }
                 }
                 view.message_task = None;
@@ -559,7 +571,7 @@ impl MailView {
             return;
         };
         self.selected_message_id = Some(message_id.clone());
-        self.message_state = MessageState::Loading;
+        self.message_detail_state = MessageDetailState::Loading;
         let workflow = Arc::clone(&self.workflow);
         let request_message_id = message_id.clone();
         self.message_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -572,9 +584,9 @@ impl MailView {
                 if view.selected_message_id.as_ref() != Some(&message_id) {
                     return;
                 }
-                view.message_state = match opened {
-                    Ok(message) => MessageState::Opened(Box::new(message)),
-                    Err(error) => MessageState::Failed(error),
+                view.message_detail_state = match opened {
+                    Ok(message) => MessageDetailState::Opened(Box::new(message)),
+                    Err(error) => MessageDetailState::Failed(error),
                 };
                 view.message_task = None;
                 cx.notify();
@@ -664,7 +676,7 @@ impl MailView {
         self.sync_running = true;
         self.sync_status = SyncStatus::Syncing;
         self.selected_message_id = None;
-        self.message_state = MessageState::Empty;
+        self.message_detail_state = MessageDetailState::Empty;
         let workflow = Arc::clone(&self.workflow);
         let account_id = self.profile.id().clone();
         let selected_folder = self.selected_folder.clone();
@@ -1072,7 +1084,7 @@ impl MailView {
         destination_label: String,
         open_action_label: &'static str,
     ) {
-        self.message_state = MessageState::MoveCompleted {
+        self.message_detail_state = MessageDetailState::MoveCompleted {
             destination_folder,
             destination_label,
             open_action_label,
@@ -1080,7 +1092,7 @@ impl MailView {
     }
 
     fn require_move_sync(&mut self, reason: MoveRecoveryReason) {
-        self.message_state = MessageState::Empty;
+        self.message_detail_state = MessageDetailState::Empty;
         self.message_move_status = MessageMoveStatus::Idle;
         self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
         self.move_recovery_reason = Some(reason);
@@ -1143,7 +1155,7 @@ impl MailView {
                 "Open Archive",
             ),
             WellKnownMailFolder::DeletedItems => {
-                self.message_state = MessageState::DeleteCompleted;
+                self.message_detail_state = MessageDetailState::DeleteCompleted;
             }
         }
     }
@@ -1360,7 +1372,7 @@ impl MailView {
     }
 
     fn selected_reply_target(&self) -> Option<ComposerTarget> {
-        let MessageState::Opened(opened) = &self.message_state else {
+        let MessageDetailState::Opened(opened) = &self.message_detail_state else {
             return None;
         };
         let message = opened.message();

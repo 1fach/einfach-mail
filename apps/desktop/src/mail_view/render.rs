@@ -18,9 +18,9 @@ use gpui_kit::{
 };
 
 use super::{
-    FollowUpFlagUpdateStatus, MESSAGE_LIST_CONTEXT, MailView, MailViewEvent, MessageMoveMenuAction,
-    MessageMoveStatus, MessageState, MoveRecoveryReason, ReadStateFeedback, SyncStatus,
-    WellKnownFolderActionStatus, follow_up_flag_cache_sync_message,
+    FollowUpFlagUpdateStatus, MESSAGE_LIST_CONTEXT, MailView, MailViewEvent, MessageDetailState,
+    MessageListState, MessageMoveMenuAction, MessageMoveStatus, MoveRecoveryReason,
+    ReadStateFeedback, SyncStatus, WellKnownFolderActionStatus, follow_up_flag_cache_sync_message,
     follow_up_flag_confirmed_message, follow_up_flag_failure_message,
     follow_up_flag_progress_message, mail_error_message, message_sender,
 };
@@ -150,16 +150,6 @@ impl MailView {
     }
 
     fn render_message_list(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
-        if let MessageState::Failed(error) = &self.message_state {
-            return div()
-                .w(px(344.))
-                .min_h_0()
-                .p_4()
-                .id("mail-list-error")
-                .role(Role::Alert)
-                .child(mail_error_message(*error))
-                .into_any_element();
-        }
         let Some(folder) = self.selected_folder.as_ref() else {
             return div()
                 .w(px(344.))
@@ -169,18 +159,39 @@ impl MailView {
                 .child("No visible mail folders were found.")
                 .into_any_element();
         };
+        match &self.message_list_state {
+            MessageListState::Ready => {}
+            MessageListState::Loading => {
+                return div()
+                    .w(px(344.))
+                    .min_h_0()
+                    .p_4()
+                    .id("mail-list-loading")
+                    .role(Role::Status)
+                    .child("Loading messages…")
+                    .into_any_element();
+            }
+            MessageListState::Failed(error) => {
+                let list_error = div()
+                    .w(px(344.))
+                    .min_h_0()
+                    .p_4()
+                    .id("mail-list-error")
+                    .role(Role::Alert)
+                    .aria_label(mail_error_message(*error))
+                    .child(mail_error_message(*error));
+                #[cfg(test)]
+                let list_error = list_error.test_support();
+                return list_error.into_any_element();
+            }
+        }
         if self.messages.is_empty() {
-            let message = if matches!(self.message_state, MessageState::Loading) {
-                "Loading messages…"
-            } else {
-                "No messages in this folder."
-            };
             return div()
                 .w(px(344.))
                 .min_h_0()
                 .p_4()
                 .text_color(colors.muted_foreground)
-                .child(message)
+                .child("No messages in this folder.")
                 .into_any_element();
         }
 
@@ -307,8 +318,14 @@ impl MailView {
         colors: ColorTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        match &self.message_state {
-            MessageState::Empty => {
+        match &self.message_detail_state {
+            MessageDetailState::Empty => {
+                let empty_state = match &self.message_list_state {
+                    MessageListState::Ready => "Select a message to read it.",
+                    MessageListState::Loading | MessageListState::Failed(_) => {
+                        "No message selected."
+                    }
+                };
                 let panel = div()
                     .flex_1()
                     .min_w_0()
@@ -322,12 +339,10 @@ impl MailView {
                 if let Some(notice) = self.render_move_recovery_notice(cx) {
                     panel.child(notice).into_any_element()
                 } else {
-                    panel
-                        .child("Select a message to read it.")
-                        .into_any_element()
+                    panel.child(empty_state).into_any_element()
                 }
             }
-            MessageState::Loading => div()
+            MessageDetailState::Loading => div()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
@@ -336,17 +351,22 @@ impl MailView {
                 .text_color(colors.muted_foreground)
                 .child("Loading message…")
                 .into_any_element(),
-            MessageState::Failed(error) => div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .p_6()
-                .id("mail-message-error")
-                .role(Role::Alert)
-                .child(mail_error_message(*error))
-                .children(self.render_move_recovery_notice(cx))
-                .into_any_element(),
-            MessageState::Opened(opened) => {
+            MessageDetailState::Failed(error) => {
+                let detail_error = div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .p_6()
+                    .id("mail-message-error")
+                    .role(Role::Alert)
+                    .aria_label(mail_error_message(*error))
+                    .child(mail_error_message(*error))
+                    .children(self.render_move_recovery_notice(cx));
+                #[cfg(test)]
+                let detail_error = detail_error.test_support();
+                detail_error.into_any_element()
+            }
+            MessageDetailState::Opened(opened) => {
                 let metadata = opened.message().metadata();
                 let message_id = opened.message().id();
                 let body = render_message_body(opened.body(), colors);
@@ -414,7 +434,7 @@ impl MailView {
                     .child(body)
                     .into_any_element()
             }
-            MessageState::MoveCompleted {
+            MessageDetailState::MoveCompleted {
                 destination_folder,
                 destination_label,
                 open_action_label,
@@ -443,7 +463,7 @@ impl MailView {
                         })),
                 )
                 .into_any_element(),
-            MessageState::DeleteCompleted => div()
+            MessageDetailState::DeleteCompleted => div()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()

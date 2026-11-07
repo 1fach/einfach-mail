@@ -31,9 +31,9 @@ use gpui_kit::{
 
 use super::{
     FollowUpFlagUpdateStatus, MailPermissionRequester, MailSyncProgress, MailView, MailViewEvent,
-    MessageMoveMenuAction, MessageState, MoveRecoveryReason, ReadStateUpdateStatus, SyncStatus,
-    WellKnownFolderActionStatus, bind_message_navigation_keys, follow_up_flag_failure_message,
-    mail_error_message, read_state_failure_message,
+    MessageDetailState, MessageListState, MessageMoveMenuAction, MoveRecoveryReason,
+    ReadStateUpdateStatus, SyncStatus, WellKnownFolderActionStatus, bind_message_navigation_keys,
+    follow_up_flag_failure_message, mail_error_message, read_state_failure_message,
 };
 use crate::mail_composer::bind_mail_composer_keys;
 
@@ -752,6 +752,7 @@ struct FixtureData {
     folders: Vec<MailFolder>,
     messages: Vec<MailMessage>,
     body: Option<MessageBody>,
+    list_messages_error: Option<MailCacheError>,
     sync_state: Option<MailSyncState>,
     read_state_write_error: Option<MailCacheError>,
     folder_write_sync_required: bool,
@@ -917,10 +918,11 @@ impl MailCache for FixtureCache {
         folder: &FolderReference,
     ) -> impl Future<Output = Result<Vec<MailMessage>, MailCacheError>> + Send + '_ {
         let folder = folder.clone();
-        let messages = self
-            .0
-            .lock()
-            .expect("fixture cache mutex is healthy")
+        let data = self.0.lock().expect("fixture cache mutex is healthy");
+        if let Some(error) = data.list_messages_error {
+            return ready(Err(error));
+        }
+        let messages = data
             .messages
             .iter()
             .filter(|message| message.folder() == &folder)
@@ -1288,6 +1290,16 @@ fn draw_mail_view(context: &mut VisualTestContext) {
     });
 }
 
+fn accessible_alert_count(context: &mut VisualTestContext, expected_text: &str) -> usize {
+    context.update(|window, _| {
+        window
+            .find_all_by_role(gpui_kit::Role::Alert)
+            .iter()
+            .filter(|alert| alert.label() == Some(expected_text))
+            .count()
+    })
+}
+
 fn open_cached_message_and_click_read_state(context: &mut VisualTestContext) {
     context.run_until_parked();
     draw_mail_view(context);
@@ -1529,11 +1541,10 @@ async fn cached_message_list_navigates_by_keyboard_and_keeps_one_tab_stop(cx: &m
         message_ids.last(),
         LAST_MESSAGE_LABEL,
     );
-    assert!(
-        context
-            .cx
-            .update(|cx| matches!(&view.read(cx).message_state, MessageState::Opened(_)))
-    );
+    assert!(context.cx.update(|cx| matches!(
+        &view.read(cx).message_detail_state,
+        MessageDetailState::Opened(_)
+    )));
     let row = context
         .debug_bounds("message-row-message-20")
         .expect("End scrolls the selected message into view");
@@ -1670,8 +1681,8 @@ async fn message_move_menu_moves_cached_message_and_opens_destination(cx: &mut T
         draw_mail_view(context);
         if context.cx.update(|cx| {
             matches!(
-                view.read(cx).message_state,
-                MessageState::MoveCompleted { .. }
+                view.read(cx).message_detail_state,
+                MessageDetailState::MoveCompleted { .. }
             )
         }) {
             break;
@@ -2125,7 +2136,7 @@ async fn unknown_message_delete_requires_sync_and_keeps_source_cached(cx: &mut T
         matches!(
             view.move_recovery_reason,
             Some(MoveRecoveryReason::OutcomeUnknown)
-        ) && matches!(view.message_state, MessageState::Opened(_))
+        ) && matches!(view.message_detail_state, MessageDetailState::Opened(_))
             && !view.message_move_allowed()
     }));
     let source = FolderReference::new(
@@ -2299,7 +2310,8 @@ async fn unknown_message_move_shows_sync_recovery_and_keeps_source_cached(cx: &m
     assert!(context.debug_bounds("sync-after-message-move").is_some());
     assert!(context.cx.update(|cx| {
         let view = view.read(cx);
-        view.move_recovery_reason.is_some() && matches!(view.message_state, MessageState::Opened(_))
+        view.move_recovery_reason.is_some()
+            && matches!(view.message_detail_state, MessageDetailState::Opened(_))
     }));
     let source = FolderReference::new(
         account,
@@ -2388,7 +2400,7 @@ async fn confirmed_message_move_with_cache_failure_requests_sync(cx: &mut TestAp
     assert!(context.debug_bounds("message-move-recovery").is_some());
     assert!(context.cx.update(|cx| {
         let view = view.read(cx);
-        matches!(view.message_state, MessageState::Empty)
+        matches!(view.message_detail_state, MessageDetailState::Empty)
             && matches!(
                 view.move_recovery_reason,
                 Some(MoveRecoveryReason::CacheNeedsSync)
@@ -2405,6 +2417,137 @@ async fn confirmed_message_move_with_cache_failure_requests_sync(cx: &mut TestAp
             .expect("source cache lookup succeeds")
             .is_some()
     );
+}
+
+#[gpui_kit::test]
+async fn message_body_failure_keeps_the_cached_list_and_selection(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, message_id) = fixture(account);
+    cache.0.lock().expect("fixture cache mutex is healthy").body = None;
+    let provider = OfflineProvider {
+        body_fetches: Arc::new(AtomicUsize::new(0)),
+    };
+    let body_fetches = Arc::clone(&provider.body_fetches);
+    let workflow = Arc::new(MailWorkflow::new(provider, cache));
+    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+
+    for _ in 0..100 {
+        context.run_until_parked();
+        draw_mail_view(context);
+        if !context.cx.update(|cx| view.read(cx).sync_running) {
+            break;
+        }
+        context.cx.executor().timer(Duration::from_millis(10)).await;
+    }
+
+    let row = context
+        .debug_bounds("message-row-message-1")
+        .expect("cached message row is visible before opening");
+    context.simulate_click(row.center(), Modifiers::default());
+    for _ in 0..100 {
+        context.run_until_parked();
+        draw_mail_view(context);
+        if context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).message_detail_state,
+                MessageDetailState::Failed(_)
+            )
+        }) {
+            break;
+        }
+        context.cx.executor().timer(Duration::from_millis(10)).await;
+    }
+
+    assert!(context.debug_bounds("message-row-message-1").is_some());
+    assert_eq!(
+        accessible_alert_count(
+            context,
+            mail_error_message(MailWorkflowError::Provider(
+                MailOperationError::ServiceUnavailable
+            ))
+        ),
+        1,
+        "the body-fetch failure appears once in the accessible alerts"
+    );
+    assert!(context.cx.update(|cx| {
+        let view = view.read(cx);
+        matches!(&view.message_list_state, MessageListState::Ready)
+            && matches!(
+                &view.message_detail_state,
+                MessageDetailState::Failed(MailWorkflowError::Provider(_))
+            )
+            && view.selected_message_id.as_ref() == Some(&message_id)
+    }));
+    assert_selected_message_and_accessible_label(
+        context,
+        &view,
+        Some(&message_id),
+        "Ada Example <ada@example.test>. Synthetic subject",
+    );
+    assert_eq!(body_fetches.load(Ordering::Relaxed), 1);
+}
+
+#[gpui_kit::test]
+async fn folder_message_list_failure_does_not_claim_a_message_is_loading(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, _) = fixture(account);
+    let workflow = Arc::new(MailWorkflow::new(
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache.clone(),
+    ));
+    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+
+    for _ in 0..100 {
+        context.run_until_parked();
+        draw_mail_view(context);
+        if !context.cx.update(|cx| view.read(cx).sync_running) {
+            break;
+        }
+        context.cx.executor().timer(Duration::from_millis(10)).await;
+    }
+
+    cache
+        .0
+        .lock()
+        .expect("fixture cache mutex is healthy")
+        .list_messages_error = Some(MailCacheError::Unavailable);
+    let archive = context.update(|window, _| window.find_by_label("Archive"));
+    context.simulate_click(archive.bounds().center(), Modifiers::default());
+    for _ in 0..100 {
+        context.run_until_parked();
+        draw_mail_view(context);
+        if context.cx.update(|cx| {
+            matches!(
+                &view.read(cx).message_list_state,
+                MessageListState::Failed(_)
+            )
+        }) {
+            break;
+        }
+        context.cx.executor().timer(Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        accessible_alert_count(
+            context,
+            mail_error_message(MailWorkflowError::Cache(MailCacheError::Unavailable))
+        ),
+        1,
+        "the folder-list failure appears once in the accessible alerts"
+    );
+    assert!(context.cx.update(|cx| {
+        let view = view.read(cx);
+        matches!(
+            &view.message_list_state,
+            MessageListState::Failed(MailWorkflowError::Cache(MailCacheError::Unavailable))
+        ) && matches!(&view.message_detail_state, MessageDetailState::Empty)
+    }));
 }
 
 #[gpui_kit::test]
@@ -2431,8 +2574,8 @@ fn offline_mail_view_opens_cached_message_without_provider_body_request(cx: &mut
 
     let opened_offline = context.cx.update(|cx| {
         matches!(
-            &view.read(cx).message_state,
-            MessageState::Opened(opened)
+            &view.read(cx).message_detail_state,
+            MessageDetailState::Opened(opened)
                 if opened.message().id() == &message_id
                     && opened.loaded_from_cache()
                     && matches!(
@@ -2967,8 +3110,8 @@ fn cached_html_mail_view_sanitizes_content_and_opens_links_on_click(cx: &mut Tes
     draw_mail_view(context);
 
     let safe_html = context.cx.update(|cx| {
-        let state = &view.read(cx).message_state;
-        let MessageState::Opened(opened) = state else {
+        let state = &view.read(cx).message_detail_state;
+        let MessageDetailState::Opened(opened) = state else {
             return false;
         };
         let MessageBodyForDisplay::SanitizedHtml(html) = opened.body() else {
@@ -3027,7 +3170,7 @@ fn cached_html_mail_view_does_not_open_unsafe_links(cx: &mut TestAppContext) {
     draw_mail_view(context);
 
     let sanitized_body = context.cx.update(|cx| {
-        let MessageState::Opened(opened) = &view.read(cx).message_state else {
+        let MessageDetailState::Opened(opened) = &view.read(cx).message_detail_state else {
             return false;
         };
         let MessageBodyForDisplay::SanitizedHtml(html) = opened.body() else {
@@ -3138,8 +3281,8 @@ fn oversized_sanitized_html_shows_selectable_noninteractive_text(cx: &mut TestAp
 
     let contains_fallback_text = context.cx.update(|cx| {
         matches!(
-            &view.read(cx).message_state,
-            MessageState::Opened(opened)
+            &view.read(cx).message_detail_state,
+            MessageDetailState::Opened(opened)
                 if matches!(
                     opened.body(),
                     MessageBodyForDisplay::PlainTextFallback(content)
@@ -3196,8 +3339,8 @@ fn oversized_cached_html_shows_a_safe_reader_fallback(cx: &mut TestAppContext) {
 
     let is_over_limit = context.cx.update(|cx| {
         matches!(
-            view.read(cx).message_state,
-            MessageState::Opened(ref opened)
+            view.read(cx).message_detail_state,
+            MessageDetailState::Opened(ref opened)
                 if opened.body() == &MessageBodyForDisplay::HtmlTooLarge
         )
     });
