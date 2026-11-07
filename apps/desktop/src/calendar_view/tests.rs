@@ -890,6 +890,110 @@ async fn calendar_agenda_navigates_events_with_one_focus_stop_and_keeps_selectio
 }
 
 #[gpui_kit::test]
+async fn selecting_an_event_uses_its_current_row_after_agenda_rows_shift(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
+    let workflow = Arc::new(CalendarWorkflow::new(
+        TestProvider::default(),
+        TestCache::with_events(agenda_events(20)),
+    ));
+    let mut calendar_view = None;
+    let window = cx.open_window(size(px(1280.), px(480.)), |window, cx| {
+        let view = cx.new(|cx| {
+            CalendarView::new_for_week(
+                profile(),
+                workflow,
+                super::CalendarWeekSelection {
+                    week_start,
+                    time_zone: TimeZone::UTC,
+                    utc_fallback: false,
+                },
+                cx,
+            )
+        });
+        calendar_view = Some(view.clone());
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    cx.run_until_parked();
+    let context = VisualTestContext::from_window(*window.deref(), cx).into_mut();
+    let view = calendar_view.expect("calendar view is created with the test window");
+
+    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    draw_calendar_view(context);
+    assert!(
+        context
+            .debug_bounds("calendar-event-row-2030-01-07-synthetic-calendar-event-1")
+            .is_some(),
+        "the first event is rendered before the rows change"
+    );
+    let target_event = super::AgendaEventKey {
+        date: civil::Date::new(2030, 1, 7).expect("synthetic event date is valid"),
+        event_id: EventId::try_from("synthetic-calendar-event-1".to_owned())
+            .expect("synthetic event ID is valid"),
+    };
+    let old_scroll_index = context.cx.update(|cx| {
+        view.read(cx).agenda_rows().iter().position(
+            |row| matches!(row, super::AgendaRow::Event(event) if event.key == target_event),
+        )
+    });
+    let old_scroll_index = old_scroll_index.expect("the target event has an agenda row");
+    let date =
+        Date::from_calendar_date(2030, Month::January, 7).expect("synthetic event date is valid");
+    let earlier_start = date
+        .midnight()
+        .assume_utc()
+        .replace_time(time::Time::from_hms(6, 0, 0).expect("synthetic time is valid"));
+    let earlier_events = (0..24)
+        .map(|index| {
+            let minutes = i64::from(index);
+            let start = earlier_start + time::Duration::minutes(minutes);
+            let event_id = format!("synthetic-inserted-event-{index}");
+            timed_event_with_id(&event_id, start, start + time::Duration::minutes(15))
+        })
+        .collect::<Vec<_>>();
+
+    context.cx.update(|cx| {
+        view.update(cx, |view, _| {
+            view.events.extend(earlier_events);
+        });
+    });
+    let current_scroll_index = context.cx.update(|cx| {
+        view.read(cx).agenda_rows().iter().position(
+            |row| matches!(row, super::AgendaRow::Event(event) if event.key == target_event),
+        )
+    });
+    let current_scroll_index =
+        current_scroll_index.expect("the target event remains in the changed agenda");
+    assert_eq!(current_scroll_index, old_scroll_index + 24);
+    context.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.select_event_from_option(target_event, window, cx);
+        });
+    });
+    context.run_until_parked();
+    draw_calendar_view(context);
+
+    assert_selected_event(context, &view, "synthetic-calendar-event-1");
+    assert!(context.update(|window, cx| view.read(cx).event_list_focus.is_focused(window)));
+    let list_bounds = context
+        .debug_bounds("calendar-event-list")
+        .expect("event list remains rendered");
+    let selected_bounds = context
+        .debug_bounds("calendar-event-row-2030-01-07-synthetic-calendar-event-1")
+        .expect("the selected event remains rendered");
+    assert!(
+        selected_bounds.top() >= list_bounds.top()
+            && selected_bounds.bottom() <= list_bounds.bottom(),
+        "selecting after earlier rows are inserted scrolls the event into view; list={list_bounds:?}, selected={selected_bounds:?}"
+    );
+    let scroll_offset = context.cx.update(|cx| view.read(cx).agenda_scroll.offset());
+    assert!(
+        scroll_offset.y < px(0.),
+        "the shifted event row requires scrolling; offset={scroll_offset:?}"
+    );
+}
+
+#[gpui_kit::test]
 async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
     cx: &mut TestAppContext,
 ) {
