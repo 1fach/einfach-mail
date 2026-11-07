@@ -290,6 +290,15 @@ impl From<AccountReservationError> for MailSendWorkflowError {
     }
 }
 
+impl From<AccountReservationError> for MailSendResolutionError {
+    fn from(error: AccountReservationError) -> Self {
+        match error {
+            AccountReservationError::OperationInProgress => Self::OperationInProgress,
+            AccountReservationError::StateUnavailable => Self::StateUnavailable,
+        }
+    }
+}
+
 /// Coordinates provider reads with account-scoped encrypted cache workflows.
 pub struct MailWorkflow<P, C> {
     provider: P,
@@ -511,13 +520,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         account_id: &AccountId,
         operation_id: MailSendOperationId,
     ) -> Result<(), MailSendResolutionError> {
-        let _reservation = self.reserve_send(account_id).map_err(|error| match error {
-            MailSendWorkflowError::OperationInProgress => {
-                MailSendResolutionError::OperationInProgress
-            }
-            MailSendWorkflowError::StateUnavailable => MailSendResolutionError::StateUnavailable,
-            _ => MailSendResolutionError::StateUnavailable,
-        })?;
+        let _reservation = self.reserve_send(account_id)?;
         let Some(pending) = self.cache.load_pending_send(account_id).await? else {
             return Ok(());
         };
@@ -1093,8 +1096,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     fn reserve_send(
         &self,
         account: &AccountId,
-    ) -> Result<OperationReservation, MailSendWorkflowError> {
-        reserve_account(&self.reservations, account).map_err(MailSendWorkflowError::from)
+    ) -> Result<OperationReservation, AccountReservationError> {
+        reserve_account(&self.reservations, account)
     }
 }
 

@@ -13,16 +13,17 @@ use einfach_mail_application::{
     AccountSessionFactory, AccountSessionWorkflowFactory, CalendarDeltaRequest,
     CalendarDeltaResponse, CalendarOperationError, CalendarProvider, CalendarWorkflowError,
     MailCache, MailCacheError, MailOperationError, MailProvider, MailSendOutcome,
-    MailSendProviderError, MailSendWorkflowError, MailSyncProgress, MailWorkflow,
-    MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
-    MessageDeltaResponse, WellKnownMailFolder,
+    MailSendProviderError, MailSendResolutionError, MailSendWorkflowError, MailSyncProgress,
+    MailWorkflow, MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse,
+    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence, CalendarViewRange,
     CalendarViewReference, EditableCalendarEvent, FolderId, FolderReference, FollowUpFlagStatus,
     MailDraft, MailFolder, MailMessage, MailRecipient, MailReplyDraft, MailReplySource,
-    MailSubject, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink,
-    MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
+    MailSendOperationId, MailSubject, MessageBody, MessageBodyType, MessageDeltaChange,
+    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
+    ReadState,
 };
 use tempfile::TempDir;
 use time::{Date, Month};
@@ -4408,6 +4409,12 @@ fn active_send_reservation_blocks_account_removal_before_marker_staging() {
             .expect("send reserved the account before reading the marker");
 
         assert_eq!(cache.load_pending_send(&account).await, Ok(None));
+        assert_eq!(
+            workflow
+                .resolve_pending_send(&account, MailSendOperationId::new())
+                .await,
+            Err(MailSendResolutionError::OperationInProgress)
+        );
         assert_eq!(
             session.remove_account_cache(&account).await,
             Err(AccountCacheRemovalError::OperationInProgress)
