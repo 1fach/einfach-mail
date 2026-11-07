@@ -65,7 +65,7 @@ pub struct CalendarTimeZoneId(Box<str>);
 
 impl fmt::Debug for CalendarTimeZoneId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
+        formatter.write_str("CalendarTimeZoneId(<redacted>)")
     }
 }
 
@@ -385,6 +385,23 @@ mod tests {
         assert_eq!(restored.draft().subject(), "Planning");
         assert_eq!(restored.draft().local_start(), local_start);
         assert_eq!(restored.draft().time_zone().as_str(), "Europe/Berlin");
+    }
+
+    #[test]
+    fn time_zone_identifier_debug_output_is_redacted() {
+        let zone = time_zone("Pacific/Chatham");
+
+        let debug = format!("{zone:?}");
+
+        assert_eq!(zone.as_str(), "Pacific/Chatham");
+        assert!(
+            debug.contains("<redacted>"),
+            "missing redaction marker: {debug}"
+        );
+        assert!(
+            !debug.contains("Pacific/Chatham"),
+            "Debug output included a time-zone identifier: {debug}"
+        );
     }
 
     #[test]

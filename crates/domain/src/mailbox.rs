@@ -14,10 +14,20 @@ impl fmt::Display for EmptyMailboxAddress {
 impl std::error::Error for EmptyMailboxAddress {}
 
 /// A mailbox identity associated with an account.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Mailbox {
     display_name: Option<String>,
     address: String,
+}
+
+impl fmt::Debug for Mailbox {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Mailbox")
+            .field("display_name", &"<redacted>")
+            .field("address", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Mailbox {
@@ -62,5 +72,25 @@ mod tests {
         for address in [String::new(), " \t\n".to_owned()] {
             assert_eq!(Mailbox::try_new(address, None), Err(EmptyMailboxAddress));
         }
+    }
+
+    #[test]
+    fn mailbox_debug_output_redacts_address_and_display_name() {
+        let mailbox = Mailbox::try_new(
+            "mailbox-address-marker@example.test".to_owned(),
+            Some("mailbox-display-marker".to_owned()),
+        )
+        .expect("synthetic mailbox is valid");
+
+        let debug = format!("{mailbox:?}");
+
+        assert!(
+            !debug.contains("mailbox-address-marker"),
+            "Debug output included the mailbox address: {debug}"
+        );
+        assert!(
+            !debug.contains("mailbox-display-marker"),
+            "Debug output included the mailbox display name: {debug}"
+        );
     }
 }

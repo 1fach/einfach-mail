@@ -264,7 +264,7 @@ mod recipient_tests {
             .expect("synthetic subject is a single line");
         let draft = MailDraft::new(recipient, subject, "Synthetic body".to_owned());
         let pending = draft.pending_send(
-            AccountId::try_from("synthetic-account".to_owned())
+            AccountId::try_from("pending-account-id-marker".to_owned())
                 .expect("synthetic account ID is non-empty"),
             MailSendOperationId::new(),
             std::time::UNIX_EPOCH,
@@ -272,7 +272,12 @@ mod recipient_tests {
 
         let draft_debug = format!("{draft:?}");
         let pending_debug = format!("{pending:?}");
-        for value in ["ada@example.test", "Synthetic subject", "Synthetic body"] {
+        for value in [
+            "ada@example.test",
+            "Synthetic subject",
+            "Synthetic body",
+            "pending-account-id-marker",
+        ] {
             assert!(!draft_debug.contains(value));
             assert!(!pending_debug.contains(value));
         }
@@ -744,11 +749,22 @@ impl fmt::Display for FolderParentError {
 impl std::error::Error for FolderParentError {}
 
 /// A mail folder and its account-scoped location in the folder tree.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct MailFolder {
     reference: FolderReference,
     parent: Option<FolderReference>,
     display_name: String,
+}
+
+impl fmt::Debug for MailFolder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MailFolder")
+            .field("reference", &self.reference)
+            .field("parent", &self.parent)
+            .field("display_name", &"<redacted>")
+            .finish()
+    }
 }
 
 impl MailFolder {
@@ -845,13 +861,26 @@ pub enum FollowUpFlagStatus {
 }
 
 /// Metadata shown when browsing a message list.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct MessageMetadata {
     subject: Option<String>,
     origin: MessageOrigin,
     received_at: SystemTime,
     read_state: ReadState,
     follow_up_flag_status: Option<FollowUpFlagStatus>,
+}
+
+impl fmt::Debug for MessageMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessageMetadata")
+            .field("subject", &"<redacted>")
+            .field("origin", &self.origin)
+            .field("received_at", &"<redacted>")
+            .field("read_state", &self.read_state)
+            .field("follow_up_flag_status", &self.follow_up_flag_status)
+            .finish()
+    }
 }
 
 impl MessageMetadata {
@@ -993,11 +1022,20 @@ impl MessageMetadataPatch {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 enum FieldUpdate<T> {
     #[default]
     Unchanged,
     Set(T),
+}
+
+impl<T> fmt::Debug for FieldUpdate<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unchanged => formatter.write_str("Unchanged"),
+            Self::Set(_) => formatter.write_str("Set(<redacted>)"),
+        }
+    }
 }
 
 impl<T> FieldUpdate<T> {
@@ -1187,6 +1225,73 @@ mod tests {
 
         assert!(debug_output.contains("<redacted>"));
         assert!(!debug_output.contains("private synthetic body"));
+    }
+
+    #[test]
+    fn mail_debug_output_redacts_nested_account_and_message_values() {
+        let folder_reference = folder_reference("account-id-marker", "folder-id-marker");
+        let folder = MailFolder::new(
+            folder_reference.clone(),
+            None,
+            "folder-name-marker".to_owned(),
+        )
+        .expect("synthetic folder is valid");
+        let sender = Mailbox::try_new(
+            "sender-address-marker@example.test".to_owned(),
+            Some("sender-name-marker".to_owned()),
+        )
+        .expect("synthetic sender mailbox is valid");
+        let metadata = MessageMetadata::new(
+            Some("message-subject-marker".to_owned()),
+            MessageOrigin::new(Some(sender.clone()), Some(sender.clone())),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000),
+            ReadState::Read,
+            Some(FollowUpFlagStatus::Flagged),
+        );
+        let message = super::MailMessage::new(
+            folder_reference.clone(),
+            "message-id-marker"
+                .to_owned()
+                .try_into()
+                .expect("synthetic message ID is non-empty"),
+            metadata,
+        );
+        let mut patch = MessageMetadataPatch::new();
+        patch.set_subject(Some("patch-subject-marker".to_owned()));
+        patch.set_from(Some(sender));
+        patch.set_received_at(SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000));
+        let page = super::MessageDeltaPage::new(
+            vec![super::MessageDeltaChange::Upsert {
+                id: "delta-message-id-marker"
+                    .to_owned()
+                    .try_into()
+                    .expect("synthetic message ID is non-empty"),
+                patch: patch.clone(),
+            }],
+            super::MessageDeltaProgress::Next(super::MessageDeltaLink::from_opaque(
+                "https://graph.example.test/?cursor=cursor-marker".to_owned(),
+            )),
+        );
+        let debug = format!("{folder:?}{message:?}{patch:?}{page:?}");
+
+        for marker in [
+            "account-id-marker",
+            "folder-id-marker",
+            "message-id-marker",
+            "delta-message-id-marker",
+            "folder-name-marker",
+            "sender-address-marker",
+            "sender-name-marker",
+            "message-subject-marker",
+            "patch-subject-marker",
+            "cursor-marker",
+            "2000000000",
+        ] {
+            assert!(!debug.contains(marker), "Debug output included {marker:?}");
+        }
+        assert!(debug.contains("Read"));
+        assert!(debug.contains("Flagged"));
+        assert!(debug.contains("<redacted>"));
     }
 
     fn synthetic_metadata() -> MessageMetadata {
