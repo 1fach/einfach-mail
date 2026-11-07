@@ -16,9 +16,8 @@ use thiserror::Error;
 
 use crate::account_recovery::AccountWorkflowRecovery;
 use crate::{
-    AccountCache, AccountCacheRemovalError, MailCache, MailCacheError, MailOperationError,
-    MailProvider, MailSendProviderError, MessageBodyForDisplay, MessageDeltaResponse,
-    WellKnownMailFolder,
+    MailCache, MailCacheError, MailOperationError, MailProvider, MailSendProviderError,
+    MessageBodyForDisplay, MessageDeltaResponse, WellKnownMailFolder,
     operation_reservations::{
         AccountReservationError, ActiveOperations, OperationReservation, reserve_account,
         reserve_folders,
@@ -1096,30 +1095,6 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         account: &AccountId,
     ) -> Result<OperationReservation, MailSendWorkflowError> {
         reserve_account(&self.reservations, account).map_err(MailSendWorkflowError::from)
-    }
-}
-
-impl<P, C> MailWorkflow<P, C>
-where
-    P: MailProvider,
-    C: MailCache + AccountCache,
-{
-    /// Removes the shared account cache while holding the account reservation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an account cache removal error when active work, an unresolved operation, or a
-    /// cache failure prevents removal.
-    pub async fn remove_account_cache(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<(), AccountCacheRemovalError> {
-        crate::account_cache::remove_reserved_account_cache(
-            &self.cache,
-            &self.reservations,
-            account_id,
-        )
-        .await
     }
 }
 

@@ -9,13 +9,13 @@ use std::{
 };
 
 use einfach_mail_application::{
-    AccountCache, AccountCacheFactory, AccountCacheRemovalError, AccountSessionFactory,
-    AccountSessionWorkflowFactory, CalendarDeltaRequest, CalendarDeltaResponse,
-    CalendarOperationError, CalendarProvider, CalendarWorkflowError, MailCache, MailCacheError,
-    MailOperationError, MailProvider, MailSendOutcome, MailSendProviderError,
-    MailSendWorkflowError, MailSyncProgress, MailWorkflow, MailWorkflowError,
-    MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
-    WellKnownMailFolder,
+    AccountCache, AccountCacheFactory, AccountCacheRemovalError, AccountSession,
+    AccountSessionFactory, AccountSessionWorkflowFactory, CalendarDeltaRequest,
+    CalendarDeltaResponse, CalendarOperationError, CalendarProvider, CalendarWorkflowError,
+    MailCache, MailCacheError, MailOperationError, MailProvider, MailSendOutcome,
+    MailSendProviderError, MailSendWorkflowError, MailSyncProgress, MailWorkflow,
+    MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
+    MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence, CalendarViewRange,
@@ -79,6 +79,11 @@ struct FixtureCacheFactory {
     database_directory: std::path::PathBuf,
 }
 
+struct RetainedCacheFactory {
+    account_id: AccountId,
+    cache: SqliteMailCache,
+}
+
 impl AccountCacheFactory for FixtureCacheFactory {
     type Cache = SqliteMailCache;
 
@@ -93,6 +98,28 @@ impl AccountCacheFactory for FixtureCacheFactory {
                     .await,
             )
         }
+    }
+
+    fn remove_for_account<'a>(
+        &'a self,
+        _: &'a AccountId,
+    ) -> impl Future<Output = Result<(), AccountCacheRemovalError>> + Send + 'a {
+        ready(Err(AccountCacheRemovalError::Unavailable))
+    }
+}
+
+impl AccountCacheFactory for RetainedCacheFactory {
+    type Cache = SqliteMailCache;
+
+    fn open_for_account(
+        &self,
+        account_id: AccountId,
+    ) -> impl Future<Output = Result<Self::Cache, MailCacheError>> + Send + '_ {
+        ready(if account_id == self.account_id {
+            Ok(self.cache.clone())
+        } else {
+            Err(MailCacheError::AccountMismatch)
+        })
     }
 
     fn remove_for_account<'a>(
@@ -760,6 +787,24 @@ async fn open_cache(directory: &TempDir, account_id: AccountId) -> SqliteMailCac
         DATABASE_KEY_BYTE,
     )
     .await
+}
+
+async fn open_session_over_retained_cache(
+    provider: FixtureProvider,
+    account_id: &AccountId,
+    cache: &SqliteMailCache,
+) -> Arc<dyn AccountSession> {
+    let factory = AccountSessionWorkflowFactory::new(
+        provider,
+        RetainedCacheFactory {
+            account_id: account_id.clone(),
+            cache: cache.clone(),
+        },
+    );
+    factory
+        .open_session(account_id.clone())
+        .await
+        .expect("synthetic account session opens over its retained cache")
 }
 
 #[test]
@@ -4257,13 +4302,14 @@ fn account_removal_reservation_blocks_new_mail_work_before_provider_calls() {
         let read_state_updates = Arc::clone(&provider.read_state_updates);
         let message_moves = Arc::clone(&provider.message_moves);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let session = open_session_over_retained_cache(provider, &account, &cache).await;
+        let workflow = session.mail_session();
         let (marker_check_finished, resume_removal) =
             cache.hold_removal_after_marker_check_for_tests();
-        let removing_workflow = Arc::clone(&workflow);
+        let removing_session = Arc::clone(&session);
         let removing_account = account.clone();
         let removal_task = smol::spawn(async move {
-            removing_workflow
+            removing_session
                 .remove_account_cache(&removing_account)
                 .await
         });
@@ -4342,7 +4388,8 @@ fn active_send_reservation_blocks_account_removal_before_marker_staging() {
         provider.send_result = Ok(());
         let send_calls = Arc::clone(&provider.send_calls);
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let session = open_session_over_retained_cache(provider, &account, &cache).await;
+        let workflow = session.mail_session();
         let (marker_read_started, release_marker_read) = cache.hold_pending_send_read_for_tests();
         let sending_workflow = Arc::clone(&workflow);
         let sending_account = account.clone();
@@ -4362,7 +4409,7 @@ fn active_send_reservation_blocks_account_removal_before_marker_staging() {
 
         assert_eq!(cache.load_pending_send(&account).await, Ok(None));
         assert_eq!(
-            workflow.remove_account_cache(&account).await,
+            session.remove_account_cache(&account).await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         assert_eq!(send_calls.load(Ordering::Relaxed), 0);
@@ -4373,7 +4420,7 @@ fn active_send_reservation_blocks_account_removal_before_marker_staging() {
         assert_eq!(send_task.await, Ok(MailSendOutcome::Accepted));
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
         assert_eq!(workflow.load_pending_send(&account).await, Ok(None));
-        let removal_result = workflow.remove_account_cache(&account).await;
+        let removal_result = session.remove_account_cache(&account).await;
         assert_removal_completed(removal_result, &directory.path().join("mail.sqlite3"));
     });
 }
@@ -4396,7 +4443,8 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
         let send_calls = Arc::clone(&provider.send_calls);
         let (submission_started, release_submission) = provider.hold_next_submission();
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let session = open_session_over_retained_cache(provider, &account, &cache).await;
+        let workflow = session.mail_session();
         workflow
             .synchronize_account(&account, started_at, &ignore_sync_progress)
             .await
@@ -4422,7 +4470,7 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
 
         assert_eq!(cache.load_pending_send(&account).await, Ok(None));
         assert_eq!(
-            workflow.remove_account_cache(&account).await,
+            session.remove_account_cache(&account).await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_marker_read
@@ -4434,7 +4482,7 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
             .await
             .expect("reply reaches the provider with its account reservation held");
         assert_eq!(
-            workflow.remove_account_cache(&account).await,
+            session.remove_account_cache(&account).await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_submission
@@ -4447,7 +4495,7 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
         ));
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
-            workflow.remove_account_cache(&account).await,
+            session.remove_account_cache(&account).await,
             Err(AccountCacheRemovalError::PendingMailSend)
         );
         assert!(
@@ -4459,6 +4507,7 @@ fn reply_reservation_blocks_account_removal_before_and_during_submission() {
         );
         assert!(directory.path().join("mail.sqlite3").exists());
         drop(workflow);
+        drop(session);
         cache.close_for_tests().await;
     });
 }
@@ -4478,7 +4527,8 @@ fn active_account_sync_blocks_cache_removal() {
         let (release_sync, release_sync_receiver) = smol::channel::bounded(1);
         provider.folder_list_gate = Some((sync_started, release_sync_receiver));
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let session = open_session_over_retained_cache(provider, &account, &cache).await;
+        let workflow = session.mail_session();
         let syncing_workflow = Arc::clone(&workflow);
         let syncing_account = account.clone();
         let sync_task = smol::spawn(async move {
@@ -4496,7 +4546,7 @@ fn active_account_sync_blocks_cache_removal() {
             .expect("account sync owns its reservation while listing folders");
 
         assert_eq!(
-            workflow.remove_account_cache(&account).await,
+            session.remove_account_cache(&account).await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         assert!(directory.path().join("mail.sqlite3").exists());
@@ -4506,6 +4556,7 @@ fn active_account_sync_blocks_cache_removal() {
             .expect("synthetic folder listing gate is released");
         assert!(sync_task.await.is_ok());
         drop(workflow);
+        drop(session);
         cache.close_for_tests().await;
     });
 }
@@ -4526,7 +4577,8 @@ fn active_folder_write_blocks_cache_removal() {
         );
         let (write_started, release_write) = provider.hold_next_read_state();
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let session = open_session_over_retained_cache(provider, &account, &cache).await;
+        let workflow = session.mail_session();
         workflow
             .synchronize_account(&account, started_at, &ignore_sync_progress)
             .await
@@ -4544,7 +4596,7 @@ fn active_folder_write_blocks_cache_removal() {
             .expect("folder write owns its reservation while waiting for Graph");
 
         assert_eq!(
-            workflow.remove_account_cache(&account).await,
+            session.remove_account_cache(&account).await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_write
@@ -4553,6 +4605,7 @@ fn active_folder_write_blocks_cache_removal() {
             .expect("synthetic folder write is released");
         assert!(write_task.await.is_ok());
         drop(workflow);
+        drop(session);
         cache.close_for_tests().await;
     });
 }
@@ -4580,7 +4633,8 @@ fn uncached_message_body_fetch_blocks_cache_removal() {
             release: fetch_release_receiver,
         });
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let session = open_session_over_retained_cache(provider, &account, &cache).await;
+        let workflow = session.mail_session();
         workflow
             .synchronize_account(&account, started_at, &ignore_sync_progress)
             .await
@@ -4598,7 +4652,7 @@ fn uncached_message_body_fetch_blocks_cache_removal() {
             .expect("message body request owns its folder reservation");
 
         assert_eq!(
-            workflow.remove_account_cache(&account).await,
+            session.remove_account_cache(&account).await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_fetch
@@ -4620,7 +4674,7 @@ fn uncached_message_body_fetch_blocks_cache_removal() {
                 .and_then(|(_, body)| body),
             Some(body)
         );
-        let removal_result = workflow.remove_account_cache(&account).await;
+        let removal_result = session.remove_account_cache(&account).await;
         assert_removal_completed(removal_result, &directory.path().join("mail.sqlite3"));
     });
 }
@@ -4664,7 +4718,8 @@ fn active_message_move_blocks_cache_removal() {
         );
         let (move_started, release_move) = provider.hold_next_message_move();
         let cache = open_cache(&directory, account.clone()).await;
-        let workflow = Arc::new(MailWorkflow::new(provider, cache.clone()));
+        let session = open_session_over_retained_cache(provider, &account, &cache).await;
+        let workflow = session.mail_session();
         workflow
             .synchronize_account(&account, started_at, &ignore_sync_progress)
             .await
@@ -4681,7 +4736,7 @@ fn active_message_move_blocks_cache_removal() {
             .expect("message move holds its folder reservations during provider work");
 
         assert_eq!(
-            workflow.remove_account_cache(&account).await,
+            session.remove_account_cache(&account).await,
             Err(AccountCacheRemovalError::OperationInProgress)
         );
         release_move
@@ -4692,7 +4747,7 @@ fn active_message_move_blocks_cache_removal() {
             move_task.await,
             Ok(einfach_mail_application::MessageMoveOutcome::ConfirmedAndCached)
         );
-        let removal_result = workflow.remove_account_cache(&account).await;
+        let removal_result = session.remove_account_cache(&account).await;
         assert_removal_completed(removal_result, &directory.path().join("mail.sqlite3"));
     });
 }
