@@ -111,7 +111,6 @@ enum AgendaRow<'a> {
 
 #[derive(Clone, Copy)]
 struct AgendaOptionPosition {
-    scroll_index: usize,
     event_position: usize,
     event_count: usize,
     selected: bool,
@@ -559,17 +558,16 @@ where
     fn select_event_from_option(
         &mut self,
         selected_event: AgendaEventKey,
-        scroll_index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .agenda_rows()
+        let rows = self.agenda_rows();
+        let Some(scroll_index) = rows
             .iter()
-            .any(|row| matches!(row, AgendaRow::Event(event) if event.key == selected_event))
-        {
+            .position(|row| matches!(row, AgendaRow::Event(event) if event.key == selected_event))
+        else {
             return;
-        }
+        };
         self.agenda_scroll.scroll_to_item(scroll_index);
         self.event_list_focus.focus(window, cx);
         self.selected_agenda_event = Some(selected_event);
@@ -865,7 +863,7 @@ where
             .focus_visible(|style| style.border_1().border_color(colors.ring))
             .overflow_y_scroll();
 
-        for (scroll_index, row) in rows.iter().enumerate() {
+        for row in &rows {
             event_list = match row {
                 AgendaRow::DayHeading(date) => event_list.child(render_agenda_day_heading(*date)),
                 AgendaRow::EmptyDay => event_list.child(render_empty_day(colors)),
@@ -874,7 +872,6 @@ where
                     event_list.child(render_agenda_event(
                         event,
                         AgendaOptionPosition {
-                            scroll_index,
                             event_position,
                             event_count,
                             selected: self.selected_agenda_event.as_ref() == Some(&event.key),
@@ -1272,7 +1269,7 @@ where
     #[cfg(test)]
     let card = card.test_support();
     card.on_click(cx.listener(move |view, _, window, cx| {
-        view.select_event_from_option(event_key.clone(), position.scroll_index, window, cx);
+        view.select_event_from_option(event_key.clone(), window, cx);
     }))
 }
 
