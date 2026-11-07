@@ -8,7 +8,7 @@
 
 Calendar view synchronization stores a completed delta cursor and an interrupted page checkpoint for each account and exact UTC view range. When Graph expires a completed cursor, retrying it leaves the cached week stale. Clearing the cursor and applying a new scan directly to active rows can expose a mixed snapshot or leave that mixture after an interruption.
 
-Graph documents two reset responses for delta synchronization: `410 Gone` with a `Location` URL containing an empty `$deltatoken`, and a 4XX response with an error code such as `syncStateNotFound`. Calendar event delta uses a fixed view range. The precise Exchange Online response shape remains unverified; see [Microsoft Graph research](../research/microsoft-graph.md#mail-and-calendar-synchronization) and [issue #6](https://github.com/1fach/einfach-mail/issues/6).
+Microsoft's general delta guidance describes a reset response of `410 Gone` with a `Location` URL containing an empty `$deltatoken`. It lists `event` among Outlook delta resources and says an expired token can produce a 4XX error such as `syncStateNotFound`. The event-delta page does not specify which response Exchange Online returns. Keep issue #49 open for tenant confirmation. See [Microsoft Graph research](../research/microsoft-graph.md#mail-and-calendar-synchronization). Issue #6 tracks tenant verification for recurrence, time zones, and all-day events.
 
 Issue #49 is part of M3, which is read-only. Calendar provider writes are outside this decision. [ADR 0044](0044-block-calendar-actions-during-replacement-sync.md) defines how the existing M4 event actions interact with interrupted replacement scans.
 

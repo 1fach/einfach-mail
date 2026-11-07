@@ -1,6 +1,6 @@
 # Microsoft Graph research
 
-Research checked: 2026-10-31. Use official Microsoft documentation as the source of truth. API behavior can change; recheck these pages before implementing or releasing an integration.
+Research checked: 2026-10-31. Calendar delta-reset and date-time findings rechecked: 2026-11-07. Use official Microsoft documentation as the source of truth. API behavior can change; recheck these pages before implementing or releasing an integration.
 
 ## Findings
 
@@ -13,10 +13,15 @@ Microsoft recommends migrating Exchange Online EWS integrations to Microsoft Gra
 - Graph message delta queries track added, changed, and deleted messages within a mail folder. A sync can return multiple pages. The client must continue through `@odata.nextLink` and save the final `@odata.deltaLink` for the next round.
 - Graph event delta queries apply to a calendar view with a start and end time range. The delta link belongs to that view. Calendar delta behavior for the entire calendar collection is a different endpoint and must not be confused with event synchronization.
 - Store provider links as opaque values. Do not parse or synthesize skip tokens or delta tokens.
+- Microsoft's general delta guidance describes a reset as `410 Gone` with a `Location` URL containing an empty `$deltatoken`. It lists `event` among Outlook delta resources and says token lifetime depends on the internal cache. An expired token can produce a 4XX error such as `syncStateNotFound`. The event-delta page does not specify which response Exchange Online returns. Keep issue #49 open for tenant confirmation. Synthetic tests cover the general contract, not live service behavior.
+- The pinned Wino Mail [410 handler](../../repos/wino-mail/src/Wino.Core/Synchronizers/Errors/Outlook/DeltaTokenExpiredHandler.cs) clears folder or account-level Outlook delta identifiers. It has no calendar-specific reset path. Its [calendar sync](../../repos/wino-mail/src/Wino.Core/Synchronizers/OutlookSynchronizer.cs) starts an initial `calendarView/delta` query when no calendar token is stored and saves a new token only after event processing succeeds.
+- Thunderbird's [Graph test server](../../repos/thunderbird/mailnews/test/fakeserver/GraphServer.sys.mjs) covers token pagination but does not simulate expired tokens. Neither snapshot establishes an Exchange Online calendar reset response.
 
 ### Calendar date-time and time zones
 
 Graph's `dateTimeTimeZone` represents a local date and time together with a time-zone identifier. The identifier can be a Windows time-zone name or one of the additional zones supported by the calendar API; create and update methods may accept a narrower set. Keep the original identifier alongside the wall-clock value at the provider boundary. A fixed UTC offset cannot represent future daylight-saving changes. See the [dateTimeTimeZone resource](https://learn.microsoft.com/en-us/graph/api/resources/datetimetimezone?view=graph-rest-1.0) and the [Rust time-zone dependency review](../project/dependency-review.md#candidates) before implementing conversion or recurrence behavior.
+
+The v1.0 `calendarView` API returns event start and end values in UTC when the request omits `Prefer: outlook.timezone`. The event resource requires all-day event start and end values to be midnight in the same time zone. The docs do not explain how a non-UTC all-day event appears in the UTC-default response. Keep issue #6 open for tenant verification.
 
 ### Outlook item identifiers
 
@@ -66,7 +71,10 @@ Use these trees only for source inspection. Do not add them as application depen
 - [Deprecation of Exchange Web Services in Exchange Online](https://learn.microsoft.com/en-us/exchange/clients-and-mobile-in-exchange-online/deprecation-of-ews-exchange-online)
 - [Microsoft Graph message delta](https://learn.microsoft.com/en-us/graph/api/message-delta?view=graph-rest-1.0)
 - [Microsoft Graph immutable Outlook identifiers](https://learn.microsoft.com/en-us/graph/outlook-immutable-id)
+- [Microsoft Graph delta query overview and synchronization reset](https://learn.microsoft.com/en-us/graph/delta-query-overview#synchronization-reset)
 - [Get incremental changes to events in a calendar view](https://learn.microsoft.com/en-us/graph/delta-query-events?tabs=http)
+- [Microsoft Graph calendarView response time zone](https://learn.microsoft.com/en-us/graph/api/calendar-list-calendarview?view=graph-rest-1.0)
+- [Microsoft Graph event resource](https://learn.microsoft.com/en-us/graph/api/resources/event?view=graph-rest-1.0)
 - [Microsoft Graph dateTimeTimeZone resource and supported zones](https://learn.microsoft.com/en-us/graph/api/resources/datetimetimezone?view=graph-rest-1.0)
 - [Microsoft Graph throttling guidance](https://learn.microsoft.com/en-us/graph/throttling)
 - [Microsoft Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference?view=graph-rest-1.0)
