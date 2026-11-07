@@ -18,8 +18,8 @@ use gpui_kit::base::VirtualListScrollHandle;
 use gpui_kit::component::StyledExt;
 use gpui_kit::component::WindowExt;
 use gpui_kit::{
-    App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, KeyBinding, Pixels, Role,
-    ScrollStrategy, Subscription, Task, Window, div, prelude::*, px, size,
+    App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, KeyBinding, Pixels, Rems, Role,
+    ScrollStrategy, Subscription, Task, Window, div, prelude::*, rems, size,
 };
 
 gpui_kit::actions!(
@@ -33,7 +33,8 @@ gpui_kit::actions!(
 );
 
 const MESSAGE_LIST_CONTEXT: &str = "MailMessageList";
-const MESSAGE_ROW_HEIGHT: Pixels = px(72.);
+const MESSAGE_ROW_HEIGHT: Rems = rems(4.5);
+const MAIL_COMPOSER_SHEET_WIDTH: Rems = rems(30.);
 const ACCOUNT_SYNC_REQUIRED_MESSAGE: &str = "Complete a successful mail sync for this account before archiving, moving, or deleting messages.";
 
 pub(crate) fn bind_message_navigation_keys(cx: &mut App) {
@@ -64,6 +65,7 @@ pub(crate) struct MailView {
     messages: Vec<MailMessage>,
     message_list_state: MessageListState,
     message_row_sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
+    message_row_rem_size: Option<Pixels>,
     message_list_focus: FocusHandle,
     message_list_scroll: VirtualListScrollHandle,
     sync_state: Option<MailSyncState>,
@@ -366,6 +368,7 @@ impl MailView {
             messages: Vec::new(),
             message_list_state: MessageListState::Loading,
             message_row_sizes: Rc::new(Vec::new()),
+            message_row_rem_size: None,
             message_list_focus: cx.focus_handle().tab_stop(true),
             message_list_scroll: VirtualListScrollHandle::new(),
             sync_state: None,
@@ -469,8 +472,19 @@ impl MailView {
     fn set_messages(&mut self, messages: Vec<MailMessage>) {
         self.message_list_scroll
             .scroll_to_item(0, ScrollStrategy::Top);
-        self.message_row_sizes = Rc::new(vec![size(px(1.), MESSAGE_ROW_HEIGHT); messages.len()]);
         self.messages = messages;
+    }
+
+    fn update_message_row_sizes(&mut self, rem_size: Pixels) {
+        if self.message_row_rem_size == Some(rem_size)
+            && self.message_row_sizes.len() == self.messages.len()
+        {
+            return;
+        }
+
+        let row_height = MESSAGE_ROW_HEIGHT.to_pixels(rem_size);
+        self.message_row_sizes = Rc::new(vec![size(Pixels::ZERO, row_height); self.messages.len()]);
+        self.message_row_rem_size = Some(rem_size);
     }
 
     fn apply_sync_progress(&mut self, progress: MailSyncProgress) {
@@ -1465,7 +1479,7 @@ fn open_composer_sheet(
         sheet
             .overlay_closable(!composer.read(cx).operation_in_progress())
             .title(div().text_base().font_bold().child(title))
-            .size(px(480.))
+            .size(MAIL_COMPOSER_SHEET_WIDTH)
             .on_close(move |_, window, cx| {
                 if composer_for_close.read(cx).operation_in_progress() {
                     open_composer_sheet(window, cx, title, composer_for_close.clone());

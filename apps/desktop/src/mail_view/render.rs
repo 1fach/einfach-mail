@@ -13,8 +13,8 @@ use gpui_kit::component::{
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, Context, Div, IntoElement, Pixels, Render, Role, Stateful, WeakEntity, Window, div,
-    prelude::*, px,
+    AnyElement, Context, Div, IntoElement, Rems, Render, Role, Stateful, WeakEntity, Window, div,
+    prelude::*, rems,
 };
 
 use super::{
@@ -26,7 +26,9 @@ use super::{
     message_sender,
 };
 
-const MESSAGE_LIST_WIDTH: Pixels = px(344.);
+const MESSAGE_LIST_WIDTH: Rems = rems(21.5);
+const MAIL_HEADER_HEIGHT: Rems = rems(3.625);
+const FOLDER_SIDEBAR_WIDTH: Rems = rems(13.5);
 
 impl MailView {
     fn render_reply_action(&self, message_id: &MessageId, cx: &mut Context<Self>) -> AnyElement {
@@ -57,7 +59,7 @@ impl MailView {
 
         div()
             .w_full()
-            .h(px(58.))
+            .h(MAIL_HEADER_HEIGHT)
             .flex()
             .items_center()
             .justify_between()
@@ -141,7 +143,7 @@ impl MailView {
             );
         }
         div()
-            .w(px(216.))
+            .w(FOLDER_SIDEBAR_WIDTH)
             .min_h_0()
             .flex()
             .flex_col()
@@ -1023,7 +1025,8 @@ fn render_message_pending_feedback(selector: &'static str, message: String) -> A
 }
 
 impl Render for MailView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.update_message_row_sizes(window.rem_size());
         let colors = cx.theme().semantic_tokens().colors;
         div()
             .size_full()

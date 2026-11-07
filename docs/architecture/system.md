@@ -35,6 +35,8 @@ ADRs [0015](../decisions/0015-idempotent-message-read-state-update.md), [0017](.
 
 The dependency direction is desktop UI → application → domain, with Graph and persistence adapters implementing application-owned ports. Views never call Graph or access the database directly.
 
+Mail and calendar views use GPUI Kit rem units for ordinary layout dimensions, so configured UI scaling applies consistently. The message list derives its row-height estimates from `Window::rem_size()` and rebuilds them when the scale or message count changes.
+
 ## Data flow
 
 1. A GPUI view calls an application workflow to list cached folders/messages, synchronize mail, open a message, or load a calendar week.
