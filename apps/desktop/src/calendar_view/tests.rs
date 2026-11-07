@@ -612,6 +612,10 @@ fn profile() -> AccountProfile {
     .expect("synthetic account profile is valid")
 }
 
+fn workflow_account_id() -> AccountId {
+    profile().id().clone()
+}
+
 fn timed_event(start: OffsetDateTime, end: OffsetDateTime) -> CalendarOccurrence {
     timed_event_with_id("synthetic-timed-event", start, end)
 }
@@ -758,6 +762,7 @@ async fn calendar_agenda_navigates_events_with_one_focus_stop_and_keeps_selectio
     });
     let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
     let workflow = Arc::new(CalendarWorkflow::new(
+        workflow_account_id(),
         TestProvider::default(),
         TestCache::with_events(agenda_events(AGENDA_EVENT_COUNT)),
     ));
@@ -894,6 +899,7 @@ async fn selecting_an_event_uses_its_current_row_after_agenda_rows_shift(cx: &mu
     cx.update(gpui_kit::init);
     let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
     let workflow = Arc::new(CalendarWorkflow::new(
+        workflow_account_id(),
         TestProvider::default(),
         TestCache::with_events(agenda_events(20)),
     ));
@@ -1002,7 +1008,11 @@ async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
     let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
     let provider = TestProvider::default();
     let requests = Arc::clone(&provider.requests);
-    let workflow = Arc::new(CalendarWorkflow::new(provider, TestCache::default()));
+    let workflow = Arc::new(CalendarWorkflow::new(
+        workflow_account_id(),
+        provider,
+        TestCache::default(),
+    ));
     let (view, context) = cx.add_window_view(|_, cx| {
         CalendarView::new_for_week(
             profile(),
@@ -1087,7 +1097,11 @@ async fn native_event_composer_names_date_pickers_and_recovers_outcomes(cx: &mut
     cx.update(gpui_kit::init);
     let provider = TestProvider::default();
     let cache = TestCache::default();
-    let workflow = Arc::new(CalendarWorkflow::new(provider.clone(), cache.clone()));
+    let workflow = Arc::new(CalendarWorkflow::new(
+        workflow_account_id(),
+        provider.clone(),
+        cache.clone(),
+    ));
     let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
     let mut calendar_handle = None;
     let (_, context) = cx.add_window_view(|window, cx| {
@@ -1285,6 +1299,7 @@ async fn denied_calendar_write_emits_permission_review_request(cx: &mut TestAppC
     provider.allow_calendar_sync();
     provider.fail_next_event_creation(CalendarOperationError::AccessDenied);
     let workflow = Arc::new(CalendarWorkflow::new(
+        workflow_account_id(),
         provider.clone(),
         TestCache::default(),
     ));
@@ -1373,6 +1388,7 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
     let provider = TestProvider::default();
     provider.allow_calendar_sync();
     let workflow = Arc::new(CalendarWorkflow::new(
+        workflow_account_id(),
         provider.clone(),
         TestCache::default(),
     ));
@@ -1508,6 +1524,7 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
     let provider = TestProvider::default();
     provider.allow_calendar_sync();
     let workflow = Arc::new(CalendarWorkflow::new(
+        workflow_account_id(),
         provider.clone(),
         TestCache::default(),
     ));
@@ -1713,6 +1730,7 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
     let provider = TestProvider::default();
     provider.allow_calendar_sync();
     let workflow = Arc::new(CalendarWorkflow::new(
+        workflow_account_id(),
         provider.clone(),
         TestCache::default(),
     ));

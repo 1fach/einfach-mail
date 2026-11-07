@@ -1382,6 +1382,9 @@ fn calendar_error_text(error: CalendarWorkflowError) -> &'static str {
         CalendarWorkflowError::OperationInProgress => {
             "Another mail or calendar operation is active. Wait for it to finish, then sync again."
         }
+        CalendarWorkflowError::AccountMismatch => {
+            "This calendar view belongs to another account. Open the matching account and try again."
+        }
         CalendarWorkflowError::Provider(CalendarOperationError::ServiceUnavailable) => {
             "The calendar service is unavailable. Check your connection and sync again."
         }

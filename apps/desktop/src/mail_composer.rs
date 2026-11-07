@@ -162,19 +162,14 @@ impl PendingComposerState {
 
 async fn submit_composer_message(
     workflow: &dyn MailSession,
-    account_id: &AccountId,
     submission: ComposerSubmission,
 ) -> Result<MailSendOutcome, MailSendWorkflowError> {
     match submission {
         ComposerSubmission::NewMessage(draft) => {
-            workflow
-                .send_message(account_id, draft, SystemTime::now())
-                .await
+            workflow.send_message(draft, SystemTime::now()).await
         }
         ComposerSubmission::Reply(draft) => {
-            workflow
-                .reply_to_message(account_id, draft, SystemTime::now())
-                .await
+            workflow.reply_to_message(draft, SystemTime::now()).await
         }
     }
 }
@@ -294,12 +289,10 @@ impl MailComposer {
 
     fn start_submission(&mut self, submission: ComposerSubmission, cx: &mut Context<Self>) {
         let workflow = Arc::clone(&self.workflow);
-        let account_id = self.account_id.clone();
         self.status = ComposerStatus::Sending;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let submission_result =
-                submit_composer_message(workflow.as_ref(), &account_id, submission).await;
-            let pending_result = workflow.load_pending_send(&account_id).await;
+            let submission_result = submit_composer_message(workflow.as_ref(), submission).await;
+            let pending_result = workflow.load_pending_send().await;
             let _ = this.update(cx, |composer, cx| {
                 composer.apply_send_result(submission_result, pending_result, cx);
             });
@@ -436,16 +429,13 @@ impl MailComposer {
             return;
         }
         let workflow = Arc::clone(&self.workflow);
-        let account_id = self.account_id.clone();
         let operation_id = pending.operation_id();
         let certainty = self
             .pending_certainty
             .unwrap_or(PendingSendCertainty::Unknown);
         self.status = ComposerStatus::Sending;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let result = workflow
-                .resolve_pending_send(&account_id, operation_id)
-                .await;
+            let result = workflow.resolve_pending_send(operation_id).await;
             let _ = this.update(cx, |composer, cx| {
                 composer.apply_resolution_result(result, certainty, cx);
             });

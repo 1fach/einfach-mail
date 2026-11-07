@@ -43,6 +43,9 @@ pub enum MailWorkflowError {
     /// The encrypted local cache could not read or commit mail data.
     #[error("the local mail cache is unavailable")]
     Cache(#[from] MailCacheError),
+    /// A mail folder or reference belongs to another account than this workflow.
+    #[error("the mail operation belongs to another account")]
+    AccountMismatch,
     /// The destination is not another visible folder in the same account.
     #[error("the selected destination folder is unavailable")]
     InvalidMoveDestination,
@@ -301,6 +304,7 @@ impl From<AccountReservationError> for MailSendResolutionError {
 
 /// Coordinates provider reads with account-scoped encrypted cache workflows.
 pub struct MailWorkflow<P, C> {
+    account_id: AccountId,
     provider: P,
     cache: C,
     reservations: Arc<Mutex<ActiveOperations>>,
@@ -308,13 +312,15 @@ pub struct MailWorkflow<P, C> {
 }
 
 impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
-    /// Creates a standalone mail workflow backed by a provider and local cache.
+    /// Creates an account-bound mail workflow backed by a provider and local cache.
     ///
     /// Reservations are local to this workflow. When workflows share a persisted cache,
     /// checkpoint revisions reject delta responses built from older checkpoints.
+    /// Mail folders and references must belong to `account_id`.
     #[must_use]
-    pub fn new(provider: P, cache: C) -> Self {
+    pub fn new(account_id: AccountId, provider: P, cache: C) -> Self {
         Self::with_reservations(
+            account_id,
             provider,
             cache,
             Arc::new(Mutex::new(ActiveOperations::default())),
@@ -323,12 +329,14 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     }
 
     pub(crate) fn with_reservations(
+        account_id: AccountId,
         provider: P,
         cache: C,
         reservations: Arc<Mutex<ActiveOperations>>,
         recovery: Arc<AccountWorkflowRecovery>,
     ) -> Self {
         Self {
+            account_id,
             provider,
             cache,
             reservations,
@@ -342,11 +350,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// Returns a cache error when the account does not own the cache or the
     /// encrypted marker cannot be read.
-    pub async fn load_pending_send(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<Option<PendingMailSend>, MailCacheError> {
-        self.cache.load_pending_send(account_id).await
+    pub async fn load_pending_send(&self) -> Result<Option<PendingMailSend>, MailCacheError> {
+        self.cache.load_pending_send(&self.account_id).await
     }
 
     /// Stages and submits one message without retrying ambiguous outcomes.
@@ -363,16 +368,18 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     /// [`MailSendWorkflowError::OperationInProgress`] when the account is busy.
     pub async fn send_message(
         &self,
-        account_id: &AccountId,
         draft: MailDraft,
         created_at: SystemTime,
     ) -> Result<MailSendOutcome, MailSendWorkflowError> {
-        let _reservation = self.reserve_send(account_id)?;
-        self.ensure_no_pending_send(account_id).await?;
-        let pending =
-            draft.pending_send(account_id.clone(), MailSendOperationId::new(), created_at);
+        let _reservation = self.reserve_send(&self.account_id)?;
+        self.ensure_no_pending_send(&self.account_id).await?;
+        let pending = draft.pending_send(
+            self.account_id.clone(),
+            MailSendOperationId::new(),
+            created_at,
+        );
         self.stage_send_marker(&pending).await?;
-        self.submit_staged_send(account_id, MailSubmission::NewMessage(draft), pending)
+        self.submit_staged_send(&self.account_id, MailSubmission::NewMessage(draft), pending)
             .await
     }
 
@@ -389,17 +396,16 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     /// or the same unresolved-operation errors as [`Self::send_message`].
     pub async fn reply_to_message(
         &self,
-        account_id: &AccountId,
         draft: MailReplyDraft,
         created_at: SystemTime,
     ) -> Result<MailSendOutcome, MailSendWorkflowError> {
-        let _reservation = self.reserve_send(account_id)?;
-        if draft.source().account_id() != account_id {
+        if draft.source().account_id() != &self.account_id {
             return Err(MailSendProviderError::AccountMismatch.into());
         }
-        self.ensure_no_pending_send(account_id).await?;
+        let _reservation = self.reserve_send(&self.account_id)?;
+        self.ensure_no_pending_send(&self.account_id).await?;
         let pending = self.stage_reply_send(&draft, created_at).await?;
-        self.submit_staged_send(account_id, MailSubmission::Reply(draft), pending)
+        self.submit_staged_send(&self.account_id, MailSubmission::Reply(draft), pending)
             .await
     }
 
@@ -517,18 +523,17 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     /// while another mail operation owns the account.
     pub async fn resolve_pending_send(
         &self,
-        account_id: &AccountId,
         operation_id: MailSendOperationId,
     ) -> Result<(), MailSendResolutionError> {
-        let _reservation = self.reserve_send(account_id)?;
-        let Some(pending) = self.cache.load_pending_send(account_id).await? else {
+        let _reservation = self.reserve_send(&self.account_id)?;
+        let Some(pending) = self.cache.load_pending_send(&self.account_id).await? else {
             return Ok(());
         };
         if pending.operation_id() != operation_id {
             return Err(MailSendResolutionError::PendingResolutionRequired(pending));
         }
         self.cache
-            .clear_pending_send(account_id, operation_id)
+            .clear_pending_send(&self.account_id, operation_id)
             .await?;
         Ok(())
     }
@@ -546,25 +551,31 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns a provider, cache, synchronization-state, or resource-limit error. Returns
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the provider returns a folder for
+    /// another account, or a provider, cache, synchronization-state, or resource-limit error. Returns
     /// [`MailWorkflowError::OperationInProgress`] when another operation owns this account.
     pub async fn synchronize_account(
         &self,
-        account_id: &AccountId,
         sync_started_at: SystemTime,
         progress_handler: &(dyn Fn(MailSyncProgress) + Send + Sync),
     ) -> Result<MailSyncReport, MailWorkflowError> {
-        let _reservation = self.reserve_account(account_id)?;
+        let _reservation = self.reserve_account(&self.account_id)?;
         self.recovery.mark_mail_sync_required();
         let initial_cutoff = sync_started_at
             .checked_sub(INITIAL_SYNC_WINDOW)
             .ok_or(MailWorkflowError::ClockUnavailable)?;
-        let folders = self.provider.list_folders(account_id).await?;
+        let folders = self.provider.list_folders(&self.account_id).await?;
+        if folders
+            .iter()
+            .any(|folder| folder.reference().account_id() != &self.account_id)
+        {
+            return Err(MailWorkflowError::AccountMismatch);
+        }
         self.cache
-            .ensure_account_sync_scope(account_id, initial_cutoff)
+            .ensure_account_sync_scope(&self.account_id, initial_cutoff)
             .await?;
         self.cache
-            .replace_folders(account_id, folders.clone())
+            .replace_folders(&self.account_id, folders.clone())
             .await?;
         let page_count = self
             .sync_folders(&folders, initial_cutoff, progress_handler)
@@ -652,22 +663,21 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     /// # Errors
     ///
     /// Returns a cache error when the account or encrypted database is unavailable.
-    pub async fn list_cached_folders(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<Vec<MailFolder>, MailWorkflowError> {
-        Ok(self.cache.list_folders(account_id).await?)
+    pub async fn list_cached_folders(&self) -> Result<Vec<MailFolder>, MailWorkflowError> {
+        Ok(self.cache.list_folders(&self.account_id).await?)
     }
 
     /// Returns cached message metadata for one account-scoped folder.
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the folder is outside the account or stored data is invalid.
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the folder belongs
+    /// to another account, or a cache error when stored data is invalid.
     pub async fn list_cached_messages(
         &self,
         folder: &FolderReference,
     ) -> Result<Vec<MailMessage>, MailWorkflowError> {
+        self.ensure_folder_account(folder)?;
         Ok(self.cache.list_messages(folder).await?)
     }
 
@@ -675,11 +685,13 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the folder is outside the account or stored state is invalid.
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the folder belongs
+    /// to another account, or a cache error when stored state is invalid.
     pub async fn cached_sync_state(
         &self,
         folder: &FolderReference,
     ) -> Result<Option<crate::MailSyncState>, MailWorkflowError> {
+        self.ensure_folder_account(folder)?;
         Ok(self.cache.load_sync_state(folder).await?)
     }
 
@@ -687,11 +699,13 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns a cache error when the marker cannot be read.
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the folder belongs
+    /// to another account, or a cache error when the marker cannot be read.
     pub async fn folder_write_sync_required(
         &self,
         folder: &FolderReference,
     ) -> Result<bool, MailWorkflowError> {
+        self.ensure_folder_account(folder)?;
         Ok(self.cache.folder_write_sync_required(folder).await?)
     }
 
@@ -701,7 +715,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns provider or cache errors when message data is unavailable.
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the folder belongs
+    /// to another account, or provider and cache errors when message data is unavailable.
     ///
     /// Returns [`MailWorkflowError::OperationInProgress`] when another operation owns the account
     /// or folder, or [`MailWorkflowError::StateUnavailable`] when the reservation state cannot be
@@ -711,6 +726,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         folder: &FolderReference,
         message_id: &MessageId,
     ) -> Result<OpenedMessage, MailWorkflowError> {
+        self.ensure_folder_account(folder)?;
         let Some((message, cached_body)) = self.cache.read_message(folder, message_id).await?
         else {
             return Err(MailCacheError::MessageNotCached.into());
@@ -734,7 +750,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns a provider error when the request is rejected, a cache error when the message is
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the folder belongs to another account,
+    /// a provider error when the request is rejected, a cache error when the message is
     /// absent or the marker cannot be committed, [`MailWorkflowError::FolderSyncRequired`] while
     /// an earlier update awaits reconciliation, or [`MailWorkflowError::OperationInProgress`]
     /// when another operation owns the account or folder.
@@ -744,6 +761,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         message_id: &MessageId,
         requested: ReadState,
     ) -> Result<ReadStateUpdateOutcome, MailWorkflowError> {
+        self.ensure_folder_account(folder)?;
         let _reservation = self.prepare_message_write(folder, message_id).await?;
 
         let confirmed = self
@@ -785,7 +803,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns a provider error when the request is rejected, a cache error when the message is
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the folder belongs to another account,
+    /// a provider error when the request is rejected, a cache error when the message is
     /// absent or the marker cannot be committed, [`MailWorkflowError::FolderSyncRequired`] while
     /// an earlier update awaits reconciliation, or [`MailWorkflowError::OperationInProgress`]
     /// when another operation owns the account or folder.
@@ -795,6 +814,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         message_id: &MessageId,
         requested: FollowUpFlagStatus,
     ) -> Result<FollowUpFlagUpdateOutcome, MailWorkflowError> {
+        self.ensure_folder_account(folder)?;
         let _reservation = self.prepare_message_write(folder, message_id).await?;
         let confirmed = self
             .confirm_message_update(
@@ -826,7 +846,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns [`MailWorkflowError::InvalidMoveDestination`] for identical,
+    /// Returns [`MailWorkflowError::AccountMismatch`] when either folder belongs
+    /// to another account, [`MailWorkflowError::InvalidMoveDestination`] for identical,
     /// cross-account, or non-visible folders, a cache error when the folder
     /// tree or source message is unavailable, or a provider error when Graph
     /// does not confirm the move,
@@ -837,6 +858,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         message_id: &MessageId,
         destination_folder: &FolderReference,
     ) -> Result<MessageMoveOutcome, MailWorkflowError> {
+        self.ensure_folder_account(source_folder)?;
+        self.ensure_folder_account(destination_folder)?;
         validate_move_folder_pair(source_folder, destination_folder)?;
         let _reservation =
             self.reserve_folders(&[source_folder.clone(), destination_folder.clone()])?;
@@ -862,7 +885,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// # Errors
     ///
-    /// Returns [`MailWorkflowError::AccountSyncRequired`] before a successful
+    /// Returns [`MailWorkflowError::AccountMismatch`] when the source belongs to
+    /// another account, [`MailWorkflowError::AccountSyncRequired`] before a successful
     /// account sync, [`MailWorkflowError::AlreadyInWellKnownFolder`] when the
     /// source is already the requested folder,
     /// [`MailWorkflowError::WellKnownFolderUnavailable`] when the resolved
@@ -877,6 +901,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         message_id: &MessageId,
         destination: WellKnownMailFolder,
     ) -> Result<WellKnownFolderMoveOutcome, MailWorkflowError> {
+        self.ensure_folder_account(source_folder)?;
         let _source_reservation = self.reserve_folders(std::slice::from_ref(source_folder))?;
         self.ensure_account_sync_ready()?;
         self.ensure_cached_message(source_folder, message_id)
@@ -1026,6 +1051,14 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         }
         self.cache.require_folder_write_sync(folder).await?;
         Ok(reservation)
+    }
+
+    fn ensure_folder_account(&self, folder: &FolderReference) -> Result<(), MailWorkflowError> {
+        if folder.account_id() == &self.account_id {
+            Ok(())
+        } else {
+            Err(MailWorkflowError::AccountMismatch)
+        }
     }
 
     async fn confirm_message_update<T, F>(

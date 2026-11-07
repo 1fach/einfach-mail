@@ -11,8 +11,8 @@ use einfach_mail_application::{
     ReadStateUpdateOutcome, WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage,
-    MailReplySource, MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
+    AccountProfile, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, MailReplySource,
+    MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
 };
 use gpui_kit::base::VirtualListScrollHandle;
 use gpui_kit::component::StyledExt;
@@ -401,9 +401,8 @@ impl MailView {
 
     fn load_cache_and_sync(&mut self, cx: &mut Context<Self>) {
         let workflow = Arc::clone(&self.workflow);
-        let account_id = self.profile.id().clone();
         self.sync_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let initial_snapshot = load_snapshot(workflow.as_ref(), &account_id, None).await;
+            let initial_snapshot = load_snapshot(workflow.as_ref(), None).await;
             let has_snapshot = initial_snapshot.is_ok();
             let _ = this.update(cx, |view, cx| match initial_snapshot {
                 Ok(snapshot) => {
@@ -422,24 +421,19 @@ impl MailView {
                 return;
             }
 
-            let sync_result = synchronize_with_progress(
-                workflow.as_ref(),
-                &account_id,
-                SystemTime::now(),
-                |progress| {
+            let sync_result =
+                synchronize_with_progress(workflow.as_ref(), SystemTime::now(), |progress| {
                     let _ = this.update(cx, |view, cx| {
                         view.apply_sync_progress(progress);
                         cx.notify();
                     });
-                },
-            )
-            .await;
+                })
+                .await;
             let Ok(selected_folder) = this.read_with(cx, |view, _| view.selected_folder.clone())
             else {
                 return;
             };
-            let snapshot =
-                load_snapshot(workflow.as_ref(), &account_id, selected_folder.as_ref()).await;
+            let snapshot = load_snapshot(workflow.as_ref(), selected_folder.as_ref()).await;
             let _ = this.update(cx, |view, cx| {
                 view.sync_running = false;
                 view.sync_task = None;
@@ -711,23 +705,17 @@ impl MailView {
         self.selected_message_id = None;
         self.message_detail_state = MessageDetailState::Empty;
         let workflow = Arc::clone(&self.workflow);
-        let account_id = self.profile.id().clone();
         let selected_folder = self.selected_folder.clone();
         self.sync_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let sync_result = synchronize_with_progress(
-                workflow.as_ref(),
-                &account_id,
-                SystemTime::now(),
-                |progress| {
+            let sync_result =
+                synchronize_with_progress(workflow.as_ref(), SystemTime::now(), |progress| {
                     let _ = this.update(cx, |view, cx| {
                         view.apply_sync_progress(progress);
                         cx.notify();
                     });
-                },
-            )
-            .await;
-            let snapshot =
-                load_snapshot(workflow.as_ref(), &account_id, selected_folder.as_ref()).await;
+                })
+                .await;
+            let snapshot = load_snapshot(workflow.as_ref(), selected_folder.as_ref()).await;
             let _ = this.update(cx, |view, cx| {
                 view.sync_running = false;
                 view.sync_task = None;
@@ -1638,11 +1626,10 @@ async fn load_folder_snapshot(
 
 async fn load_snapshot(
     workflow: &dyn MailSession,
-    account_id: &einfach_mail_domain::AccountId,
     preferred: Option<&FolderReference>,
 ) -> Result<MailSnapshot, MailWorkflowError> {
-    let folders = workflow.list_cached_folders(account_id).await?;
-    let pending_send = workflow.load_pending_send(account_id).await;
+    let folders = workflow.list_cached_folders().await?;
+    let pending_send = workflow.load_pending_send().await;
     let selected_folder = preferred
         .filter(|preferred| {
             folders
@@ -1708,13 +1695,12 @@ fn mail_sync_progress_channel() -> (
 
 async fn synchronize_with_progress(
     workflow: &dyn MailSession,
-    account_id: &AccountId,
     sync_started_at: SystemTime,
     mut on_progress: impl FnMut(MailSyncProgress),
 ) -> Result<MailSyncReport, MailWorkflowError> {
     let (progress_handler, mut progress_receiver) = mail_sync_progress_channel();
     let mut sync_future =
-        Box::pin(workflow.synchronize_account(account_id, sync_started_at, &progress_handler));
+        Box::pin(workflow.synchronize_account(sync_started_at, &progress_handler));
     loop {
         let changed = tokio::select! {
             biased;
@@ -1754,6 +1740,9 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
         }
         MailWorkflowError::Cache(MailCacheError::MessageNotCached) => {
             "This message is no longer in the local cache. Sync the folder and try again."
+        }
+        MailWorkflowError::AccountMismatch => {
+            "This folder belongs to another account. Open the matching account and try again."
         }
         MailWorkflowError::OperationInProgress => {
             "Another mail operation is active. Try again shortly."
