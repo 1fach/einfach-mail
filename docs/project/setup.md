@@ -106,7 +106,7 @@ cargo depgraph-check check
 cargo deny check bans
 ```
 
-The strict allowlist in `depgraph-rules.toml` includes every workspace crate and its permitted direct internal dependencies, including dev-dependencies. Update it when adding a workspace crate or changing a crate boundary. The checker validates direct workspace edges; it does not inspect module-level boundaries inside a crate. `cargo deny check bans` enforces the explicit Tauri runtime and WebView crate bans in `deny.toml`. Run `bash scripts/check-no-tauri-target-dependencies.sh` to check the active Linux dependency graph. The target-disjoint `tauri-winrt-notification` lockfile entry is not part of a Linux app build.
+The strict allowlist in `depgraph-rules.toml` includes every workspace crate and its permitted direct internal dependencies, including dev-dependencies. Update it when adding a workspace crate or changing a crate boundary. The checker validates direct workspace edges; it does not inspect module-level boundaries inside a crate. `cargo deny check bans` enforces the exact `wry` and `gpui-webview` bans in `deny.toml`. These bans keep the optional WebView outside the application until the body-only renderer passes the security review in ADR 0007.
 
 ## Run project checks
 

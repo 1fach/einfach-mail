@@ -14,7 +14,6 @@ GPUI Kit's published docs state Rust 1.92 or newer, but the Einfach Mail lockfil
 
 The resolved workspace lockfile uses GPUI Kit 0.8.1 with `gpui-component` and `gpui-kit-assets` enabled by default, plus GPUI snapshot 0.3.10. The desktop shell uses `init` and `assets::Assets`, so both default layers are currently needed. `gpui-webview` and Wry are absent from the lockfile.
 
-The workspace has no Tauri framework, plugin, Wry, or `gpui-webview` dependency in its manifests or application source. `Cargo.lock` does contain one Tauri-named package: `tauri-winrt-notification` 0.8.1. The exact locked path is `gpui-pre-linux` 0.3.10 -> `notify-rust` 4.18.2 -> `tauri-winrt-notification`. `gpui-pre-linux` is a Linux/FreeBSD target dependency, while `notify-rust` declares `tauri-winrt-notification` only for Windows. These target conditions cannot be active together, so Cargo records the package in the cross-platform lockfile but no Einfach Mail target build selects it. The crate wraps WinRT toast notifications; it does not provide Tauri's app runtime or WebView. The CI script `scripts/check-no-tauri-target-dependencies.sh` verifies the active Linux host graph by default and accepts explicit target triples for future platform checks. Removing this lockfile entry would require changing or replacing the upstream notification dependency rather than changing Einfach Mail's direct manifest. Keep the distinction explicit: the app does not use Tauri, though the generated lockfile contains this inactive Tauri-named package.
 
 The Ubuntu setup does not directly cover this Fedora 44 development host; Fedora equivalents are listed in [development setup](../project/setup.md). On 2026-10-30, `cargo check --workspace --locked --offline` and `cargo build --locked --offline --package einfach-mail-desktop` both passed. That launch attempt did not verify the window because the sandbox rejected Wayland and GPUI could not connect through X11. Fedora shell startup was verified on 2026-10-31; see [project status](../project/status.md) and [issue #1](https://github.com/1fach/einfach-mail/issues/1).
 
@@ -53,7 +52,6 @@ The WebView remains a possible body-only renderer if native TextView fails suppo
 - [Rust issue #136873: stabilize `cold_path`](https://github.com/rust-lang/rust/issues/136873)
 - [Rust 1.93.0 release](https://blog.rust-lang.org/2026/01/22/Rust-1.93.0/)
 - [Rust 1.95.0 release](https://blog.rust-lang.org/2026/04/16/Rust-1.95.0/)
-- [`tauri-winrt-notification` 0.8.1 package metadata](https://docs.rs/crate/tauri-winrt-notification/0.8.1)
 - [Fedora `fontconfig-devel` package](https://packages.fedoraproject.org/pkgs/fontconfig/fontconfig-devel/)
 - [Fedora `gcc-c++` package](https://packages.fedoraproject.org/pkgs/gcc/gcc-c%2B%2B/)
 - [Fedora `freetype-devel` package](https://packages.fedoraproject.org/pkgs/freetype/freetype-devel/)

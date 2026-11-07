@@ -53,7 +53,6 @@ run() {
 
 run cargo depgraph-check check
 run cargo deny check bans
-run bash scripts/check-no-tauri-target-dependencies.sh
 run cargo +1.95.0 check --workspace --all-targets --locked
 run cargo fmt --all -- --check
 run cargo clippy --workspace --all-targets --locked -- -D warnings
