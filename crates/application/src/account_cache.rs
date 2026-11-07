@@ -1,9 +1,11 @@
 use std::future::Future;
+use std::sync::{Arc, Mutex};
 
 use einfach_mail_domain::AccountId;
 use thiserror::Error;
 
 use crate::MailCacheError;
+use crate::operation_reservations::{ActiveOperations, reserve_account};
 
 /// Account-wide cache removal outcomes shared by mail and calendar data.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -62,6 +64,17 @@ impl From<crate::operation_reservations::AccountReservationError> for AccountCac
             }
         }
     }
+}
+
+/// Holds the shared account reservation until cache removal completes.
+pub(crate) async fn remove_reserved_account_cache<C: AccountCache>(
+    cache: &C,
+    reservations: &Arc<Mutex<ActiveOperations>>,
+    account_id: &AccountId,
+) -> Result<(), AccountCacheRemovalError> {
+    let _reservation =
+        reserve_account(reservations, account_id).map_err(AccountCacheRemovalError::from)?;
+    cache.remove_account(account_id).await
 }
 
 /// Account-wide lifecycle operations for a cache shared by mail and calendar workflows.

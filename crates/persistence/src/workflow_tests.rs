@@ -1728,6 +1728,35 @@ fn calendar_sync_reservation_blocks_sign_out_cache_removal() {
 }
 
 #[test]
+fn account_session_removes_cache_through_its_open_cache_handle() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let provider = FixtureProvider::new(
+            account.clone(),
+            Vec::new(),
+            [],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let factory = AccountSessionWorkflowFactory::new(
+            provider,
+            FixtureCacheFactory {
+                database_directory: directory.path().to_path_buf(),
+            },
+        );
+        let session = factory
+            .open_session(account.clone())
+            .await
+            .expect("account session opens");
+
+        assert_removal_completed(
+            session.remove_account_cache(&account).await,
+            &directory.path().join("mail.sqlite3"),
+        );
+    });
+}
+
+#[test]
 fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
     smol::block_on(async {
         let directory = TempDir::new().expect("temporary directory is created");
