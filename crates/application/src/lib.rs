@@ -7,6 +7,8 @@ mod account_cache;
 mod account_recovery;
 mod account_session;
 mod calendar;
+mod calendar_cache;
+mod calendar_provider;
 mod email_html;
 mod mail;
 mod mail_cache;
@@ -25,11 +27,13 @@ pub use account_session::{
     AccountSessionWorkflowFactory, CalendarSession, MailSession,
 };
 pub use calendar::{
-    CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
-    CalendarDeltaResponse, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
-    CalendarEventUpdateOutcome, CalendarOperationError, CalendarProvider, CalendarSnapshot,
-    CalendarSyncMode, CalendarSyncReport, CalendarSyncState, CalendarWorkflow,
-    CalendarWorkflowError,
+    CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
+    CalendarSnapshot, CalendarSyncReport, CalendarWorkflow, CalendarWorkflowError,
+};
+pub use calendar_cache::{CalendarCache, CalendarCacheError, CalendarSyncMode, CalendarSyncState};
+pub use calendar_provider::{
+    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError,
+    CalendarProvider,
 };
 pub use email_html::{
     ExternalMessageLink, MessageBodyForDisplay, SanitizedEmailHtml, allowed_external_message_url,
