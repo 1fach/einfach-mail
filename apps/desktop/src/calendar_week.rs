@@ -98,12 +98,8 @@ impl CalendarWeek {
             .expect("a fixed UTC week can be represented by the calendar domain")
     }
 
-    pub(crate) fn with_start(
-        &self,
-        account_id: &einfach_mail_domain::AccountId,
-        week_start: civil::Date,
-    ) -> Option<Self> {
-        Self::new(account_id, week_start, self.time_zone.clone())
+    pub(crate) fn with_start(&self, week_start: civil::Date) -> Option<Self> {
+        Self::new(self.view.account_id(), week_start, self.time_zone.clone())
     }
 
     pub(crate) fn start(&self) -> civil::Date {
@@ -160,7 +156,7 @@ fn view_for_week(
 #[cfg(test)]
 mod tests {
     use einfach_mail_domain::AccountId;
-    use jiff::{civil, tz::TimeZone};
+    use jiff::{Span, civil, tz::TimeZone};
     use time::Duration;
 
     use super::{CalendarTimeZoneChoice, CalendarWeek, monday_start, view_for_week};
@@ -214,5 +210,23 @@ mod tests {
             AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID");
 
         assert!(CalendarWeek::in_utc_fallback(&account_id, week_start).is_none());
+    }
+
+    #[test]
+    fn navigating_calendar_week_preserves_account_identity() {
+        let week_start = civil::Date::new(2030, 1, 7).expect("synthetic Monday is valid");
+        let account_id =
+            AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID");
+        let week = CalendarWeek::in_utc_fallback(&account_id, week_start)
+            .expect("synthetic UTC week is valid");
+        let next_week_start = week_start
+            .checked_add(Span::new().weeks(1))
+            .expect("the next synthetic week is in range");
+
+        let next_week = week
+            .with_start(next_week_start)
+            .expect("the next synthetic UTC week is valid");
+
+        assert_eq!(next_week.view().account_id(), &account_id);
     }
 }
