@@ -1,8 +1,4 @@
-use std::{
-    collections::HashSet,
-    future::Future,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashSet, future::Future, time::SystemTime};
 
 #[cfg(test)]
 use std::sync::{Arc, atomic::Ordering};
@@ -20,7 +16,10 @@ use einfach_mail_domain::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::{CacheFailure, CacheResult, SqliteMailCache};
+use super::{
+    CacheFailure, CacheResult, SqliteMailCache,
+    system_time::{system_time_from_parts, system_time_parts},
+};
 use crate::schema;
 
 type MailCacheResult<T> = Result<T, MailCacheFailure>;
@@ -104,7 +103,7 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_ {
         let validation = self
             .check_folder(folder)
-            .and_then(|()| timestamp_parts(initial_cutoff));
+            .and_then(|()| system_time_parts(initial_cutoff).map_err(CacheFailure::mail_public));
         let folder = folder.clone();
         let client = self.client.clone();
         async move {
@@ -144,7 +143,7 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
         let validation = self
             .check_account(account_id)
-            .and_then(|()| timestamp_parts(initial_cutoff));
+            .and_then(|()| system_time_parts(initial_cutoff).map_err(CacheFailure::mail_public));
         let account_id = account_id.as_str().to_owned();
         let client = self.client.clone();
         async move {
@@ -204,7 +203,7 @@ impl MailCache for SqliteMailCache {
     ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_ {
         let validation = self
             .check_folder(folder)
-            .and_then(|()| timestamp_parts(completed_at));
+            .and_then(|()| system_time_parts(completed_at).map_err(CacheFailure::mail_public));
         let folder = folder.clone();
         let expected_state = expected_state.clone();
         let client = self.client.clone();
@@ -631,9 +630,9 @@ impl MailCache for SqliteMailCache {
         &self,
         pending: &PendingMailSend,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
-        let validation = self
-            .check_account(pending.account_id())
-            .and_then(|()| timestamp_parts(pending.created_at()));
+        let validation = self.check_account(pending.account_id()).and_then(|()| {
+            system_time_parts(pending.created_at()).map_err(CacheFailure::mail_public)
+        });
         let pending = pending.clone();
         let client = self.client.clone();
         let database_path = self.database_path.clone();
@@ -866,7 +865,7 @@ impl StoredPendingSend {
         let operation_id = Uuid::parse_str(&operation_id)
             .map(MailSendOperationId::from_uuid)
             .map_err(|_| CacheFailure::InvalidData)?;
-        let created_at = timestamp_from_parts(created_seconds, created_nanoseconds)?;
+        let created_at = system_time_from_parts(created_seconds, created_nanoseconds)?;
         match target_kind.as_str() {
             "new_message" => target.into_new_message(account_id, operation_id, created_at),
             "reply" => target.into_reply(account_id, operation_id, created_at),
@@ -1169,7 +1168,7 @@ struct RawMessage {
 
 fn decode_message(folder: &FolderReference, raw: RawMessage) -> CacheResult<MailMessage> {
     let id = MessageId::try_from(raw.message_id).map_err(|_| CacheFailure::InvalidData)?;
-    let received_at = timestamp_from_parts(raw.received_seconds, raw.received_nanoseconds)?;
+    let received_at = system_time_from_parts(raw.received_seconds, raw.received_nanoseconds)?;
     let from = decode_mailbox(raw.from_display_name, raw.from_address)?;
     let sender = decode_mailbox(raw.sender_display_name, raw.sender_address)?;
     let read_state = if raw.is_read {
@@ -1289,9 +1288,9 @@ fn decode_sync_state(raw: RawSyncState) -> CacheResult<MailSyncState> {
     if raw.query_version != schema::MESSAGE_QUERY_VERSION {
         return Err(CacheFailure::InvalidData);
     }
-    let cutoff = timestamp_from_parts(raw.cutoff_seconds, raw.cutoff_nanoseconds)?;
+    let cutoff = system_time_from_parts(raw.cutoff_seconds, raw.cutoff_nanoseconds)?;
     let last_synchronized_at = match (raw.sync_seconds, raw.sync_nanoseconds) {
-        (Some(seconds), Some(nanoseconds)) => Some(timestamp_from_parts(seconds, nanoseconds)?),
+        (Some(seconds), Some(nanoseconds)) => Some(system_time_from_parts(seconds, nanoseconds)?),
         (None, None) => None,
         _ => return Err(CacheFailure::InvalidData),
     };
@@ -1441,8 +1440,7 @@ fn store_message_metadata(
     let metadata = message.metadata();
     let (from_name, from_address) = mailbox_fields(metadata.origin().from_mailbox());
     let (sender_name, sender_address) = mailbox_fields(metadata.origin().sender());
-    let (received_seconds, received_nanoseconds) =
-        timestamp_parts(*metadata.received_at()).map_err(|_| CacheFailure::InvalidData)?;
+    let (received_seconds, received_nanoseconds) = system_time_parts(*metadata.received_at())?;
     connection.execute(
         "INSERT INTO mail_messages (
             account_id, folder_id, message_id, subject,
@@ -1656,45 +1654,4 @@ fn body_type_name(body_type: MessageBodyType) -> &'static str {
         MessageBodyType::Html => "html",
         MessageBodyType::Text => "text",
     }
-}
-
-pub(super) fn timestamp_parts(timestamp: SystemTime) -> Result<(i64, i64), MailCacheError> {
-    match timestamp.duration_since(UNIX_EPOCH) {
-        Ok(duration) => positive_timestamp_parts(duration),
-        Err(error) => negative_timestamp_parts(error.duration()),
-    }
-}
-
-fn positive_timestamp_parts(duration: Duration) -> Result<(i64, i64), MailCacheError> {
-    let seconds = i64::try_from(duration.as_secs()).map_err(|_| MailCacheError::InvalidData)?;
-    Ok((seconds, i64::from(duration.subsec_nanos())))
-}
-
-fn negative_timestamp_parts(duration: Duration) -> Result<(i64, i64), MailCacheError> {
-    let seconds = i64::try_from(duration.as_secs()).map_err(|_| MailCacheError::InvalidData)?;
-    let nanos = i64::from(duration.subsec_nanos());
-    if nanos == 0 {
-        return Ok((-seconds, 0));
-    }
-    let seconds = seconds
-        .checked_neg()
-        .and_then(|seconds| seconds.checked_sub(1))
-        .ok_or(MailCacheError::InvalidData)?;
-    Ok((seconds, 1_000_000_000 - nanos))
-}
-
-pub(super) fn timestamp_from_parts(seconds: i64, nanoseconds: i64) -> CacheResult<SystemTime> {
-    if !(0..1_000_000_000).contains(&nanoseconds) {
-        return Err(CacheFailure::InvalidData);
-    }
-    let subsecond = Duration::from_nanos(nanoseconds as u64);
-    let timestamp = if seconds >= 0 {
-        UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64) + subsecond)
-    } else {
-        let distance = Duration::from_secs(seconds.unsigned_abs())
-            .checked_sub(subsecond)
-            .ok_or(CacheFailure::InvalidData)?;
-        UNIX_EPOCH.checked_sub(distance)
-    };
-    timestamp.ok_or(CacheFailure::InvalidData)
 }
