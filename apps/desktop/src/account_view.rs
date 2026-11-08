@@ -529,9 +529,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             OpeningContent::Mail,
             move |profile, session, cx| {
                 let mail_view_session = session.mail_session();
-                let mail_view = cx.new(|cx| {
-                    MailView::new(profile, mail_view_session, Some(permission_requester), cx)
-                });
+                let mail_view = cx
+                    .new(|cx| MailView::new(profile, mail_view_session, permission_requester, cx));
                 let subscription = cx.subscribe(
                     &mail_view,
                     |view, _, event: &MailViewEvent, cx| match event {

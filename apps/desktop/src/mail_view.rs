@@ -55,7 +55,7 @@ pub(crate) enum MailViewEvent {
 pub(crate) struct MailView {
     profile: AccountProfile,
     workflow: Arc<dyn MailSession>,
-    permission_requester: Option<Arc<dyn MailPermissionRequester>>,
+    permission_requester: Arc<dyn MailPermissionRequester>,
     pending_send: Result<Option<PendingMailSend>, MailCacheError>,
     composer: Option<Entity<MailComposer>>,
     composer_subscription: Option<Subscription>,
@@ -365,7 +365,7 @@ impl MailView {
     pub(crate) fn new(
         profile: AccountProfile,
         workflow: Arc<dyn MailSession>,
-        permission_requester: Option<Arc<dyn MailPermissionRequester>>,
+        permission_requester: Arc<dyn MailPermissionRequester>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self {
@@ -1419,7 +1419,7 @@ impl MailView {
     fn composer_context(&self, target: ComposerTarget) -> MailComposerContext {
         MailComposerContext {
             workflow: Arc::clone(&self.workflow),
-            permission_requester: self.permission_requester.clone(),
+            permission_requester: Arc::clone(&self.permission_requester),
             account_id: self.profile.id().clone(),
             pending: self.pending_send.clone(),
             target,
