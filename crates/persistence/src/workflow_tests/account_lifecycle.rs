@@ -9,7 +9,7 @@ fn account_cache_removal_preserves_the_in_use_error() {
         let second = open_cache(&directory, account.clone()).await;
 
         assert_eq!(
-            <SqliteMailCache as AccountCache>::remove_account(&first, &account).await,
+            <SqliteAccountCache as AccountCache>::remove_account(&first, &account).await,
             Err(AccountCacheRemovalError::InUse)
         );
 

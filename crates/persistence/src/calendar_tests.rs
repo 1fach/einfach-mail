@@ -10,7 +10,7 @@ use einfach_mail_domain::{
 use tempfile::TempDir;
 use time::{Date, Month, OffsetDateTime, Time};
 
-use crate::store::SqliteMailCache;
+use crate::store::SqliteAccountCache;
 
 const DATABASE_KEY_BYTE: u8 = 0x39;
 
@@ -110,8 +110,8 @@ fn timed_range(
     (start, end)
 }
 
-async fn open_cache(directory: &TempDir, account: AccountId) -> SqliteMailCache {
-    SqliteMailCache::open_with_test_key(
+async fn open_cache(directory: &TempDir, account: AccountId) -> SqliteAccountCache {
+    SqliteAccountCache::open_with_test_key(
         directory.path().join("calendar.sqlite3"),
         account,
         DATABASE_KEY_BYTE,

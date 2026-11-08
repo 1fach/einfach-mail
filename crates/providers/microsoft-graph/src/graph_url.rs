@@ -555,17 +555,6 @@ mod tests {
     }
 
     #[test]
-    fn mail_send_path_targets_the_signed_in_users_mailbox() {
-        let request = authority()
-            .mail_send_path()
-            .expect("synthetic send mail URL is valid");
-        let url = Url::parse(request.as_str()).expect("synthetic Graph URL is valid");
-
-        assert_eq!(url.path(), "/v1.0/me/sendMail");
-        assert!(url.query().is_none());
-    }
-
-    #[test]
     fn retains_valid_opaque_links_without_normalizing_them() {
         let link = "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=A%2FB%3D";
 

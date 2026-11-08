@@ -9,7 +9,7 @@ use einfach_mail_application::{
     AccountSessionFactory, AccountSessionWorkflowFactory, AccountWorkflow,
 };
 use einfach_mail_microsoft_graph::{CallbackPort, MicrosoftGraphProvider};
-use einfach_mail_persistence::SqliteMailCacheFactory;
+use einfach_mail_persistence::SqliteAccountCacheFactory;
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -50,7 +50,7 @@ fn configured_account_services() -> Result<AccountServices<MicrosoftGraphProvide
     let provider = MicrosoftGraphProvider::new(client_id, callback_port);
     let account_workflow = Arc::new(AccountWorkflow::new(provider.clone()));
     let account_session_factory: Arc<dyn AccountSessionFactory> = Arc::new(
-        AccountSessionWorkflowFactory::new(provider, SqliteMailCacheFactory),
+        AccountSessionWorkflowFactory::new(provider, SqliteAccountCacheFactory),
     );
     Ok(AccountServices::new(
         account_workflow,

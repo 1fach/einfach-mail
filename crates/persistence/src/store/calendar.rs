@@ -17,7 +17,7 @@ use thiserror::Error;
 use time::{Date, OffsetDateTime, PrimitiveDateTime};
 
 use super::{
-    CacheFailure, CacheResult, SqliteMailCache,
+    CacheFailure, CacheResult, SqliteAccountCache,
     system_time::{system_time_from_parts, system_time_parts},
 };
 
@@ -163,7 +163,7 @@ impl CalendarScope {
     }
 }
 
-impl SqliteMailCache {
+impl SqliteAccountCache {
     fn check_calendar_view(
         &self,
         view: &CalendarViewReference,
@@ -175,7 +175,7 @@ impl SqliteMailCache {
     }
 }
 
-impl CalendarCache for SqliteMailCache {
+impl CalendarCache for SqliteAccountCache {
     fn ensure_view(
         &self,
         view: &CalendarViewReference,
