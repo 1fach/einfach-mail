@@ -437,7 +437,11 @@ impl MailView {
             let snapshot = load_snapshot(workflow.as_ref(), selected_folder.as_ref()).await;
             let _ = this.update(cx, |view, cx| {
                 view.sync_task = None;
-                view.finish_sync(sync_result.map(|_| ()), snapshot);
+                if let Some(message_id) =
+                    view.finish_sync(sync_result.map(|_| ()), snapshot, selected_folder)
+                {
+                    view.select_message(message_id, cx);
+                }
                 cx.notify();
             });
         }));
@@ -497,15 +501,30 @@ impl MailView {
         &mut self,
         sync_result: Result<(), MailWorkflowError>,
         snapshot: Result<MailSnapshot, MailWorkflowError>,
-    ) {
+        requested_folder: Option<FolderReference>,
+    ) -> Option<MessageId> {
         let sync_reconciled = sync_result.is_ok() && snapshot.is_ok();
         let (status, snapshot) = match (sync_result, snapshot) {
             (_, Err(error)) => (SyncStatus::Failed(error), None),
             (Err(error), Ok(snapshot)) => (SyncStatus::Failed(error), Some(snapshot)),
             (Ok(_), Ok(snapshot)) => (SyncStatus::UpToDate, Some(snapshot)),
         };
+        let snapshot =
+            snapshot.filter(|_| self.selected_folder.as_ref() == requested_folder.as_ref());
+        let message_to_reopen = snapshot.as_ref().and_then(|snapshot| {
+            let selected_message = self.selected_message_id.as_ref()?;
+            snapshot
+                .messages
+                .iter()
+                .any(|message| message.id() == selected_message)
+                .then(|| selected_message.clone())
+        });
         if let Some(snapshot) = snapshot {
             self.apply_snapshot(snapshot);
+            if let Some(message_id) = &message_to_reopen {
+                self.selected_message_id = Some(message_id.clone());
+                self.message_detail_state = MessageDetailState::Loading;
+            }
         }
         if sync_reconciled {
             self.move_recovery_reason = None;
@@ -513,6 +532,7 @@ impl MailView {
             self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
         }
         self.sync_status = status;
+        message_to_reopen
     }
 
     pub(crate) fn stop_pending_work(&mut self) {
@@ -536,7 +556,7 @@ impl MailView {
     }
 
     fn select_folder(&mut self, folder: FolderReference, cx: &mut Context<Self>) {
-        if self.sync_status.is_sync_active() || self.message_update_in_progress() {
+        if self.message_update_in_progress() {
             return;
         }
         if self.selected_folder.as_ref() == Some(&folder) {
@@ -620,7 +640,7 @@ impl MailView {
     }
 
     fn navigate_message(&mut self, navigation: ListNavigation, cx: &mut Context<Self>) {
-        if self.sync_status.is_sync_active() || self.message_update_in_progress() {
+        if self.message_update_in_progress() {
             return;
         }
         let selected_index = self.selected_message_id.as_ref().and_then(|selected| {
@@ -698,10 +718,7 @@ impl MailView {
             return;
         }
         self.sync_status = SyncStatus::Syncing;
-        self.selected_message_id = None;
-        self.message_detail_state = MessageDetailState::Empty;
         let workflow = Arc::clone(&self.workflow);
-        let selected_folder = self.selected_folder.clone();
         self.sync_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let sync_result =
                 synchronize_with_progress(workflow.as_ref(), SystemTime::now(), |progress| {
@@ -711,10 +728,18 @@ impl MailView {
                     });
                 })
                 .await;
+            let Ok(selected_folder) = this.read_with(cx, |view, _| view.selected_folder.clone())
+            else {
+                return;
+            };
             let snapshot = load_snapshot(workflow.as_ref(), selected_folder.as_ref()).await;
             let _ = this.update(cx, |view, cx| {
                 view.sync_task = None;
-                view.finish_sync(sync_result.map(|_| ()), snapshot);
+                if let Some(message_id) =
+                    view.finish_sync(sync_result.map(|_| ()), snapshot, selected_folder)
+                {
+                    view.select_message(message_id, cx);
+                }
                 cx.notify();
             });
         }));

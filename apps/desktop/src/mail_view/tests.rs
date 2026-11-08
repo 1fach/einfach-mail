@@ -250,7 +250,14 @@ struct ReadStateProvider {
     updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
     flag_updates: Arc<Mutex<Vec<(MessageId, FollowUpFlagStatus)>>>,
     sync_failure: bool,
+    folders: Option<Vec<MailFolder>>,
+    sync_gate: Mutex<Option<SyncGate>>,
     offline: OfflineProvider,
+}
+
+struct SyncGate {
+    started: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
 }
 
 impl ReadStateProvider {
@@ -263,10 +270,26 @@ impl ReadStateProvider {
             updates,
             flag_updates: Arc::new(Mutex::new(Vec::new())),
             sync_failure: false,
+            folders: None,
+            sync_gate: Mutex::new(None),
             offline: OfflineProvider {
                 body_fetches: Arc::new(AtomicUsize::new(0)),
             },
         }
+    }
+
+    fn with_folders(mut self, folders: Vec<MailFolder>) -> Self {
+        self.folders = Some(folders);
+        self
+    }
+
+    fn hold_sync_until_released(
+        mut self,
+        started: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Self {
+        self.sync_gate = Mutex::new(Some(SyncGate { started, release }));
+        self
     }
 
     fn with_flag_updates(
@@ -290,9 +313,22 @@ impl MailProvider for ReadStateProvider {
     ) -> impl Future<Output = Result<Vec<MailFolder>, MailOperationError>> + Send + '_ {
         let account_id = account_id.clone();
         let sync_failure = self.sync_failure;
+        let folders = self.folders.clone();
+        let sync_gate = self
+            .sync_gate
+            .lock()
+            .expect("fixture sync-gate mutex is healthy")
+            .take();
         async move {
             if sync_failure {
                 return Err(MailOperationError::ServiceUnavailable);
+            }
+            if let Some(sync_gate) = sync_gate {
+                let _ = sync_gate.started.send(());
+                let _ = sync_gate.release.await;
+            }
+            if let Some(folders) = folders {
+                return Ok(folders);
             }
             let reference = FolderReference::new(
                 account_id,
@@ -2603,6 +2639,159 @@ fn offline_mail_view_opens_cached_message_without_provider_body_request(cx: &mut
 }
 
 #[gpui_kit::test]
+async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        bind_message_navigation_keys(cx);
+    });
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, inbox_message_id) = fixture(account.clone());
+    let archive_reference = FolderReference::new(
+        account,
+        FolderId::try_from("archive".to_owned()).expect("synthetic folder ID is valid"),
+    );
+    let archive_message_id =
+        MessageId::try_from("archive-message".to_owned()).expect("synthetic message ID is valid");
+    {
+        let mut state = cache.0.lock().expect("fixture cache mutex is healthy");
+        let sender = Mailbox::try_new(
+            "ada@example.test".to_owned(),
+            Some("Ada Example".to_owned()),
+        )
+        .expect("synthetic mailbox is valid");
+        state.messages.push(MailMessage::new(
+            archive_reference.clone(),
+            archive_message_id.clone(),
+            einfach_mail_domain::MessageMetadata::new(
+                Some("Archived synthetic subject".to_owned()),
+                einfach_mail_domain::MessageOrigin::new(Some(sender), None),
+                UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                ReadState::Unread,
+                None,
+            ),
+        ));
+    }
+    let folders = cache
+        .0
+        .lock()
+        .expect("fixture cache mutex is healthy")
+        .folders
+        .clone();
+    let inbox_reference = folders
+        .iter()
+        .find(|folder| folder.display_name() == "Inbox")
+        .expect("fixture contains the inbox folder")
+        .reference()
+        .clone();
+    let (sync_started, sync_started_receiver) = tokio::sync::oneshot::channel();
+    let (resume_sync, sync_release) = tokio::sync::oneshot::channel();
+    let provider = ReadStateProvider::new(
+        ReadStateActionResponse::Confirm,
+        Arc::new(Mutex::new(Vec::new())),
+    )
+    .with_folders(folders.clone())
+    .hold_sync_until_released(sync_started, sync_release);
+    let workflow = Arc::new(MailWorkflow::new(
+        profile.id().clone(),
+        provider,
+        cache.clone(),
+    ));
+    let mut mail_view = None;
+    let (_, context) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        mail_view = Some(view.clone());
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    let view = mail_view.expect("mail view is created with the test window");
+
+    sync_started_receiver
+        .await
+        .expect("account sync reaches its provider gate after loading the cache");
+    assert!(context.cx.update(|app| {
+        matches!(view.read(app).sync_status, SyncStatus::Syncing)
+            && view.read(app).selected_folder.is_some()
+    }));
+
+    let archive_button = context.update(|window, _| window.find_by_label("Archive"));
+    context.simulate_click(archive_button.bounds().center(), Modifiers::default());
+    wait_for_ui_condition(context, |_, app| {
+        let view = view.read(app);
+        view.selected_folder.as_ref() == Some(&archive_reference)
+            && matches!(view.message_list_state, MessageListState::Ready)
+    })
+    .await;
+
+    context.update(gpui_kit::Window::focus_next);
+    let mut list_focused = false;
+    for _ in 0..20 {
+        press_window_key(context, "tab");
+        list_focused =
+            context.update(|window, app| view.read(app).message_list_focus.is_focused(window));
+        if list_focused {
+            break;
+        }
+    }
+    assert!(
+        list_focused,
+        "Tab reaches cached folders' message list during sync"
+    );
+    press_window_key(context, "home");
+    wait_for_ui_condition(context, |_, app| {
+        matches!(
+            view.read(app).selected_message_id.as_ref(),
+            Some(message_id) if message_id == &archive_message_id
+        ) && matches!(
+            &view.read(app).message_detail_state,
+            MessageDetailState::Opened(opened) if opened.loaded_from_cache()
+        )
+    })
+    .await;
+
+    let (snapshot_list_started, snapshot_list_release) = cache.hold_next_folder_list();
+    let _ = resume_sync.send(());
+    snapshot_list_started
+        .await
+        .expect("sync completion starts loading its selected-folder snapshot");
+
+    let inbox_button = context.update(|window, _| window.find_by_label("Inbox"));
+    context.simulate_click(inbox_button.bounds().center(), Modifiers::default());
+    wait_for_ui_condition(context, |_, app| {
+        let view = view.read(app);
+        view.selected_folder.as_ref() == Some(&inbox_reference)
+            && matches!(view.message_list_state, MessageListState::Ready)
+    })
+    .await;
+    let inbox_row = context
+        .debug_bounds("message-row-message-1")
+        .expect("the cached inbox message is visible");
+    context.simulate_click(inbox_row.center(), Modifiers::default());
+    wait_for_ui_condition(context, |_, app| {
+        matches!(
+            &view.read(app).message_detail_state,
+            MessageDetailState::Opened(opened)
+                if opened.message().id() == &inbox_message_id
+                    && opened.loaded_from_cache()
+        )
+    })
+    .await;
+    let _ = snapshot_list_release.send(());
+
+    wait_for_mail_sync_to_finish(context, &view).await;
+    wait_for_ui_condition(context, |_, app| {
+        let view = view.read(app);
+        view.selected_folder.as_ref() == Some(&inbox_reference)
+            && matches!(
+                &view.message_detail_state,
+                MessageDetailState::Opened(opened)
+                    if opened.message().id() == &inbox_message_id
+                        && opened.loaded_from_cache()
+            )
+    })
+    .await;
+}
+
+#[gpui_kit::test]
 async fn confirmed_read_state_updates_the_view_and_encrypted_cache(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let account =
@@ -3507,9 +3696,10 @@ fn cache_snapshot_failure_survives_a_successful_sync(cx: &mut TestAppContext) {
 
     context.cx.update(|cx| {
         view.update(cx, |view, _| {
-            view.finish_sync(
+            let _ = view.finish_sync(
                 Ok(()),
                 Err(MailWorkflowError::Cache(MailCacheError::Unavailable)),
+                None,
             );
         });
     });
