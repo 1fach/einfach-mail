@@ -177,8 +177,12 @@ impl CalendarProvider for FixtureProvider {
                 .expect("synthetic request log mutex is not poisoned")
                 .push(request);
             if let Some(gate) = gate {
-                let _ = gate.started.send(());
-                let _ = gate.release.await;
+                gate.started
+                    .send(())
+                    .expect("the calendar sync test is waiting at its delta gate");
+                gate.release
+                    .await
+                    .expect("the calendar sync test releases its delta gate");
             }
             pages
                 .lock()
@@ -270,7 +274,9 @@ impl CalendarProvider for FixtureProvider {
             .take();
         async move {
             if let Some(gate) = gate {
-                let _ = gate.started.send(());
+                gate.started
+                    .send(())
+                    .expect("the calendar update test is waiting at its provider gate");
                 gate.release
                     .await
                     .map_err(|_| CalendarOperationError::ServiceUnavailable)?;
@@ -302,7 +308,9 @@ impl CalendarProvider for FixtureProvider {
                 .lock()
                 .expect("synthetic deletion counter mutex is not poisoned") += 1;
             if let Some(gate) = gate {
-                let _ = gate.started.send(());
+                gate.started
+                    .send(())
+                    .expect("the calendar delete test is waiting at its provider gate");
                 gate.release
                     .await
                     .map_err(|_| CalendarOperationError::ServiceUnavailable)?;
@@ -2580,7 +2588,9 @@ fn event_update_reserves_the_whole_account_until_the_cache_commit_finishes() {
             workflow.sync_view(&another_week).await,
             Err(CalendarWorkflowError::OperationInProgress)
         );
-        let _ = release.send(());
+        release
+            .send(())
+            .expect("the synthetic update request is waiting for release");
         assert!(matches!(
             update_task.await,
             Ok(CalendarEventUpdateOutcome::Cached(_))

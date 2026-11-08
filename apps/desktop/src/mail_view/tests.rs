@@ -349,8 +349,14 @@ impl MailProvider for ReadStateProvider {
                 return Err(MailOperationError::ServiceUnavailable);
             }
             if let Some(sync_gate) = sync_gate {
-                let _ = sync_gate.started.send(());
-                let _ = sync_gate.release.await;
+                sync_gate
+                    .started
+                    .send(())
+                    .expect("the mail sync test is waiting at its provider gate");
+                sync_gate
+                    .release
+                    .await
+                    .expect("the mail sync test releases its provider gate");
             }
             if let Some(folders) = folders {
                 return Ok(folders);
@@ -744,8 +750,12 @@ impl MailProvider for PermissionProvider {
             }
             send_calls.fetch_add(1, Ordering::Relaxed);
             if let Some(gate) = send_gate {
-                let _ = gate.started.send(());
-                let _ = gate.release.await;
+                gate.started
+                    .send(())
+                    .expect("the mail send test is waiting at its provider gate");
+                gate.release
+                    .await
+                    .expect("the mail send test releases its provider gate");
             }
             if can_send.load(Ordering::Relaxed) {
                 Ok(())
@@ -789,8 +799,12 @@ impl MailProvider for PermissionProvider {
                 .expect("fixture reply-source mutex is healthy")
                 .push((account_id, folder_id, message_id));
             if let Some(gate) = send_gate {
-                let _ = gate.started.send(());
-                let _ = gate.release.await;
+                gate.started
+                    .send(())
+                    .expect("the mail reply test is waiting at its provider gate");
+                gate.release
+                    .await
+                    .expect("the mail reply test releases its provider gate");
             }
             if let Some(error) = reply_error {
                 Err(error)
@@ -832,8 +846,12 @@ impl MailPermissionRequester for FixturePermissionRequester {
             }
             requests.fetch_add(1, Ordering::Relaxed);
             if let Some(gate) = gate {
-                let _ = gate.started.send(());
-                let _ = gate.release.await;
+                gate.started
+                    .send(())
+                    .expect("the permission review test is waiting at its requester gate");
+                gate.release
+                    .await
+                    .expect("the permission review test releases its requester gate");
             }
             Ok(())
         })
@@ -1041,8 +1059,12 @@ impl MailCache for FixtureCache {
                 )
             };
             if let Some(gate) = gate {
-                let _ = gate.started.send(());
-                let _ = gate.release.await;
+                gate.started
+                    .send(())
+                    .expect("the folder-list test is waiting at its cache gate");
+                gate.release
+                    .await
+                    .expect("the folder-list test releases its cache gate");
             }
             if let Some(error) = error {
                 return Err(error);
@@ -2777,7 +2799,9 @@ async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut T
     .await;
 
     let (snapshot_list_started, snapshot_list_release) = cache.hold_next_folder_list();
-    let _ = resume_sync.send(());
+    resume_sync
+        .send(())
+        .expect("the test releases the held mail sync");
     snapshot_list_started
         .await
         .expect("sync completion starts loading its selected-folder snapshot");
@@ -2803,7 +2827,9 @@ async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut T
         )
     })
     .await;
-    let _ = snapshot_list_release.send(());
+    snapshot_list_release
+        .send(())
+        .expect("the test releases the selected-folder snapshot");
 
     wait_for_mail_sync_to_finish(context, &view).await;
     wait_for_ui_condition(context, |_, app| {
@@ -3616,7 +3642,9 @@ async fn initial_mail_snapshot_renders_loading_without_selected_folder(cx: &mut 
     draw_mail_view(context);
 
     assert!(context.debug_bounds("mail-list-loading").is_some());
-    let _ = release.send(());
+    release
+        .send(())
+        .expect("the initial folder listing is waiting for release");
     context.run_until_parked();
 }
 
@@ -4105,7 +4133,9 @@ async fn permission_review_requires_a_separate_send_action(cx: &mut TestAppConte
     click_composer_sheet_close(context);
     let remains_open_after_permission_close =
         context.update(|window, cx| window.has_active_sheet(cx));
-    let _ = permission_release.send(());
+    permission_release
+        .send(())
+        .expect("the permission requester is waiting for release");
 
     wait_for_ui_condition(context, |window, app| {
         !view
@@ -4204,7 +4234,9 @@ async fn pending_send_cannot_be_dismissed_by_escape_or_outside_click(cx: &mut Te
     let remains_open_after_escape = context.update(|window, cx| window.has_active_sheet(cx));
     click_composer_sheet_close(context);
     let remains_open_after_title_close = context.update(|window, cx| window.has_active_sheet(cx));
-    let _ = release_send.send(());
+    release_send
+        .send(())
+        .expect("the synthetic mail send is waiting for release");
 
     assert!(remains_open_after_click);
     assert!(remains_open_after_escape);
