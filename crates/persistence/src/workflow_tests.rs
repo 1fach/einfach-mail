@@ -2012,7 +2012,7 @@ fn account_session_removes_cache_through_its_open_cache_handle() {
 }
 
 #[test]
-fn account_session_rejects_foreign_references_before_cache_or_provider_access() {
+fn account_session_rejects_foreign_references_without_provider_access() {
     smol::block_on(async {
         let directory = TempDir::new().expect("temporary directory is created");
         let account = account_id();
