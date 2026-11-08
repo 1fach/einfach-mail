@@ -16,7 +16,7 @@ use time::{Date, Month, PrimitiveDateTime, Time};
 
 use super::{
     SqliteMailCache,
-    mail::{timestamp_from_parts, timestamp_parts},
+    system_time::{system_time_from_parts, system_time_parts},
 };
 const DATABASE_KEY_BYTE: u8 = 0x51;
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -462,12 +462,18 @@ fn system_time_parts_round_trip_around_the_unix_epoch() {
         UNIX_EPOCH,
         UNIX_EPOCH + Duration::from_secs(12) + Duration::from_nanos(345),
     ] {
-        let parts = timestamp_parts(timestamp).expect("synthetic time fits SQLite");
+        let parts = system_time_parts(timestamp).expect("synthetic time fits SQLite");
         assert_eq!(
-            timestamp_from_parts(parts.0, parts.1).expect("stored synthetic time is valid"),
+            system_time_from_parts(parts.0, parts.1).expect("stored synthetic time is valid"),
             timestamp
         );
     }
+}
+
+#[test]
+fn system_time_from_parts_rejects_invalid_nanoseconds() {
+    assert!(system_time_from_parts(0, -1).is_err());
+    assert!(system_time_from_parts(0, 1_000_000_000).is_err());
 }
 
 #[test]

@@ -18,7 +18,7 @@ use time::{Date, OffsetDateTime, PrimitiveDateTime};
 
 use super::{
     CacheFailure, CacheResult, SqliteMailCache,
-    mail::{timestamp_from_parts, timestamp_parts},
+    system_time::{system_time_from_parts, system_time_parts},
 };
 
 type CalendarCacheResult<T> = Result<T, CalendarCacheFailure>;
@@ -225,7 +225,7 @@ impl CalendarCache for SqliteMailCache {
         completed_at: SystemTime,
     ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_ {
         let validation = self.check_calendar_view(view);
-        let completion = timestamp_parts(completed_at).map_err(|_| CalendarCacheError::InvalidData);
+        let completion = system_time_parts(completed_at).map_err(CacheFailure::calendar_public);
         let view = view.clone();
         let client = self.client.clone();
         async move {
@@ -925,7 +925,7 @@ fn read_calendar_sync_state(
         .ok_or(CacheFailure::InvalidData)?;
     let last_synchronized_at = match (raw.last_sync_seconds, raw.last_sync_nanoseconds) {
         (None, None) => None,
-        (Some(seconds), Some(nanoseconds)) => Some(timestamp_from_parts(seconds, nanoseconds)?),
+        (Some(seconds), Some(nanoseconds)) => Some(system_time_from_parts(seconds, nanoseconds)?),
         _ => return Err(CacheFailure::InvalidData),
     };
     let mode = match raw.replacement_active {
