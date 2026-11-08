@@ -8,6 +8,7 @@ pub(crate) async fn wait_for_ui_condition(
     condition: impl FnMut(&mut Window, &mut App) -> bool,
 ) {
     let window = context.window_handle();
+    context.update(|_, app| app.set_reduce_motion(true));
     context
         .cx
         .wait_for(window, Duration::from_secs(1), condition)

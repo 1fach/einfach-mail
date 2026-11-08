@@ -1,0 +1,47 @@
+--- a/src/time/date_picker.rs
++++ b/src/time/date_picker.rs
+@@ -543,6 +543,7 @@
+     id: ElementId,
+     style: StyleRefinement,
+     state: Entity<DatePickerState>,
++    accessibility_label: Option<SharedString>,
+     cleanable: bool,
+     placeholder: Option<SharedString>,
+     size: Size,
+@@ -601,6 +602,7 @@
+         Self {
+             id: ("date-picker", state.entity_id()).into(),
+             state: state.clone(),
++            accessibility_label: None,
+             cleanable: false,
+             placeholder: None,
+             size: Size::default(),
+@@ -613,6 +615,12 @@
+         }
+     }
+-
++
++    /// Sets the name announced by assistive technology.
++    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
++        self.accessibility_label = Some(label.into());
++        self
++    }
++
+     /// Set the placeholder of the date picker, default: "".
+     pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
+         self.placeholder = Some(placeholder.into());
+@@ -693,8 +701,12 @@
+         let (bg, fg) = input_style(self.disabled, cx);
+-
++
+         let picker_state = self.state.clone();
++        let accessibility_label = self.accessibility_label;
+-
++
+         BaseDatePicker::new(self.id, &state.focus_handle)
++            .when_some(accessibility_label, |picker, label| {
++                picker.aria_label(label)
++            })
+             .open(state.open)
+             .when(state.date.is_some(), |this| {
+                 this.aria_value(display_title.clone())

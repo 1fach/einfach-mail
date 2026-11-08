@@ -19,7 +19,7 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 - Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
 - Windows and macOS support remain deferred.
 - The production-path cache-key lifecycle test passed on 2026-11-08 against a temporary GNOME Keyring service. This does not establish behavior for every Secret Service implementation.
-- The 2026-11-08 local RustSec audit loaded 1,422 advisories and scanned 921 locked dependencies. It found eight transitive `INFO Unmaintained` crates, with seven in the active Linux graph and `rustls-pemfile` cross-target only. It found no vulnerable or yanked versions. GPUI Kit 0.9.0, released on 2026-11-02, still contains all eight advisory packages in its lockfile; see the [dependency review](dependency-review.md) for paths and replacement checks.
+- The 2026-11-08 local RustSec audit loaded 1,422 advisories and scanned 947 locked dependencies. It found eight transitive `INFO Unmaintained` crates, with seven in the active Linux graph and `rustls-pemfile` cross-target only. It found no vulnerable or yanked versions. GPUI Kit 0.9.0, released on 2026-11-02, still contains all eight advisory packages in its lockfile; see the [dependency review](dependency-review.md) for paths and replacement checks.
 
 ## Next actions
 
