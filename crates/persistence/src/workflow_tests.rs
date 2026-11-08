@@ -488,8 +488,14 @@ impl MailProvider for FixtureProvider {
                 .expect("synthetic move gate mutex is healthy")
                 .take();
             if let Some((started, release)) = gate {
-                let _ = started.send(()).await;
-                let _ = release.recv().await;
+                started
+                    .send(())
+                    .await
+                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
+                release
+                    .recv()
+                    .await
+                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
             }
             *result
                 .lock()
@@ -552,8 +558,14 @@ impl MailProvider for FixtureProvider {
                 .expect("synthetic send gate mutex is healthy")
                 .take();
             if let Some((started, release)) = gate {
-                let _ = started.send(()).await;
-                let _ = release.recv().await;
+                started
+                    .send(())
+                    .await
+                    .map_err(|_| MailSendProviderError::ServiceUnavailable)?;
+                release
+                    .recv()
+                    .await
+                    .map_err(|_| MailSendProviderError::ServiceUnavailable)?;
             }
             result
         }
@@ -579,8 +591,14 @@ impl MailProvider for FixtureProvider {
                 .expect("synthetic send gate mutex is healthy")
                 .take();
             if let Some((started, release)) = gate {
-                let _ = started.send(()).await;
-                let _ = release.recv().await;
+                started
+                    .send(())
+                    .await
+                    .map_err(|_| MailSendProviderError::ServiceUnavailable)?;
+                release
+                    .recv()
+                    .await
+                    .map_err(|_| MailSendProviderError::ServiceUnavailable)?;
             }
             result
         }

@@ -75,13 +75,10 @@ pub(crate) struct MailView {
     message_detail_state: MessageDetailState,
     message_task: Option<Task<()>>,
     read_state_update: ReadStateUpdateStatus,
-    read_state_task: Option<Task<()>>,
+    message_update_task: Option<Task<()>>,
     follow_up_flag_update: FollowUpFlagUpdateStatus,
-    follow_up_flag_task: Option<Task<()>>,
     message_move_status: MessageMoveStatus,
-    message_move_task: Option<Task<()>>,
     well_known_folder_action_status: WellKnownFolderActionStatus,
-    well_known_folder_action_task: Option<Task<()>>,
     move_recovery_reason: Option<MoveRecoveryReason>,
     selected_folder_write_sync_required: bool,
 }
@@ -393,13 +390,10 @@ impl MailView {
             message_detail_state: MessageDetailState::Empty,
             message_task: None,
             read_state_update: ReadStateUpdateStatus::Idle,
-            read_state_task: None,
+            message_update_task: None,
             follow_up_flag_update: FollowUpFlagUpdateStatus::Idle,
-            follow_up_flag_task: None,
             message_move_status: MessageMoveStatus::Idle,
-            message_move_task: None,
             well_known_folder_action_status: WellKnownFolderActionStatus::Idle,
-            well_known_folder_action_task: None,
             move_recovery_reason: Some(MoveRecoveryReason::InitialSyncRequired),
             selected_folder_write_sync_required: true,
         };
@@ -524,10 +518,7 @@ impl MailView {
     pub(crate) fn stop_pending_work(&mut self) {
         drop(self.sync_task.take());
         drop(self.message_task.take());
-        drop(self.read_state_task.take());
-        drop(self.follow_up_flag_task.take());
-        drop(self.message_move_task.take());
-        drop(self.well_known_folder_action_task.take());
+        drop(self.message_update_task.take());
         self.sync_status = SyncStatus::Idle;
         self.selected_folder = None;
         self.selected_message_id = None;
@@ -742,7 +733,7 @@ impl MailView {
             message_id: request.message_id.clone(),
             requested: request.requested,
         };
-        self.read_state_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+        self.message_update_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let update_outcome = workflow
                 .set_message_read_state(&request.folder, &request.message_id, request.requested)
                 .await;
@@ -794,7 +785,7 @@ impl MailView {
         } else {
             ReadStateUpdateStatus::Idle
         };
-        self.read_state_task = None;
+        self.message_update_task = None;
     }
 
     fn apply_read_state_result(
@@ -850,7 +841,7 @@ impl MailView {
             message_id: request.message_id.clone(),
             requested: request.requested,
         };
-        self.follow_up_flag_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+        self.message_update_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let flag_update_outcome = workflow
                 .set_message_follow_up_flag_status(
                     &request.folder,
@@ -941,20 +932,19 @@ impl MailView {
         cx: &mut Context<Self>,
     ) {
         let workflow = Arc::clone(&self.workflow);
-        self.well_known_folder_action_task =
-            Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-                let action_result = workflow
-                    .move_message_to_well_known_folder(
-                        &request.source_folder,
-                        &request.message_id,
-                        request.destination,
-                    )
-                    .await;
-                let _ = this.update(cx, |view, cx| {
-                    view.finish_well_known_folder_action(request, action_result);
-                    cx.notify();
-                });
-            }));
+        self.message_update_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let action_result = workflow
+                .move_message_to_well_known_folder(
+                    &request.source_folder,
+                    &request.message_id,
+                    request.destination,
+                )
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.finish_well_known_folder_action(request, action_result);
+                cx.notify();
+            });
+        }));
         cx.notify();
     }
 
@@ -1033,10 +1023,7 @@ impl MailView {
     }
 
     fn message_update_in_progress(&self) -> bool {
-        self.read_state_task.is_some()
-            || self.follow_up_flag_task.is_some()
-            || self.message_move_task.is_some()
-            || self.well_known_folder_action_task.is_some()
+        self.message_update_task.is_some()
     }
 
     fn can_update_message_in(&self, folder: &FolderReference) -> bool {
@@ -1054,7 +1041,7 @@ impl MailView {
             destination_label: request.destination_label.clone(),
         };
         let operation_request = request.clone();
-        self.message_move_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+        self.message_update_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let move_result = workflow
                 .move_message(
                     &operation_request.source_folder,
@@ -1075,7 +1062,7 @@ impl MailView {
         request: MessageMoveRequest,
         move_result: Result<MessageMoveOutcome, MailWorkflowError>,
     ) {
-        self.message_move_task = None;
+        self.message_update_task = None;
         match move_result {
             Ok(outcome) => self.finish_confirmed_message_move(request, outcome),
             Err(error) => self.finish_failed_message_move(request.message_id, error),
@@ -1137,7 +1124,7 @@ impl MailView {
         request: WellKnownFolderActionRequest,
         action_result: Result<WellKnownFolderMoveOutcome, MailWorkflowError>,
     ) {
-        self.well_known_folder_action_task = None;
+        self.message_update_task = None;
         match action_result {
             Ok(outcome) => self.finish_confirmed_well_known_folder_action(request, outcome),
             Err(error) => self.finish_failed_well_known_folder_action(
@@ -1310,7 +1297,7 @@ impl MailView {
         } else {
             FollowUpFlagUpdateStatus::Idle
         };
-        self.follow_up_flag_task = None;
+        self.message_update_task = None;
     }
 
     fn apply_follow_up_flag_result(

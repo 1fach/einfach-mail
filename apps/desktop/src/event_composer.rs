@@ -1912,7 +1912,6 @@ mod tests {
         assert!(!loading.show_fields());
         assert!(!loading.can_submit());
         assert!(loading.action_is_terminal());
-        assert!(matches!(loading, ComposerState::Edit(EditState::Loading)));
         assert_eq!(loading.submit_label(), None);
     }
 

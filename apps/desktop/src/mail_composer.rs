@@ -65,10 +65,7 @@ pub(crate) struct MailComposer {
     recipient: Entity<InputState>,
     subject: Entity<InputState>,
     body: Entity<TextareaState>,
-    pending: Option<PendingMailSend>,
-    pending_certainty: Option<PendingSendCertainty>,
-    pending_state_available: bool,
-    duplicate_confirmation_required: bool,
+    pending_send: PendingSendState,
     status: ComposerStatus,
     task: Option<Task<()>>,
 }
@@ -96,11 +93,15 @@ struct ComposerFields {
     body: Entity<TextareaState>,
 }
 
-struct PendingComposerState {
-    pending: Option<PendingMailSend>,
-    certainty: Option<PendingSendCertainty>,
-    available: bool,
-    status: ComposerStatus,
+enum PendingSendState {
+    Available(Option<PendingSendMarker>),
+    Unavailable(Option<PendingSendMarker>),
+}
+
+#[derive(Clone)]
+struct PendingSendMarker {
+    pending: PendingMailSend,
+    certainty: PendingSendCertainty,
 }
 
 enum ComposerSubmission {
@@ -128,6 +129,27 @@ enum ComposerStatus {
     DuplicateConfirmation,
 }
 
+struct ComposerStatusPresentation {
+    role: Role,
+    text: String,
+    action: Option<ComposerStatusAction>,
+}
+
+impl ComposerStatusPresentation {
+    fn new(role: Role, text: impl Into<String>, action: Option<ComposerStatusAction>) -> Self {
+        Self {
+            role,
+            text: text.into(),
+            action,
+        }
+    }
+}
+
+enum ComposerStatusAction {
+    ReviewPermission,
+    ConfirmDuplicateRisk,
+}
+
 #[derive(Clone, Copy)]
 enum PendingSendCertainty {
     Accepted,
@@ -141,21 +163,65 @@ enum DraftError {
     InvalidSubject(InvalidMailSubject),
 }
 
-impl PendingComposerState {
+impl PendingSendState {
     fn from_result(pending: Result<Option<PendingMailSend>, MailCacheError>) -> Self {
-        let available = pending.is_ok();
-        let pending = pending.ok().flatten();
-        let certainty = pending.as_ref().map(|_| PendingSendCertainty::Unknown);
-        let status = if available {
-            ComposerStatus::Editing
-        } else {
-            ComposerStatus::CacheUnavailable
+        match pending {
+            Ok(pending) => Self::Available(pending.map(|pending| PendingSendMarker {
+                pending,
+                certainty: PendingSendCertainty::Unknown,
+            })),
+            Err(_) => Self::Unavailable(None),
+        }
+    }
+
+    fn marker(&self) -> Option<&PendingSendMarker> {
+        match self {
+            Self::Available(marker) | Self::Unavailable(marker) => marker.as_ref(),
+        }
+    }
+
+    fn pending(&self) -> Option<&PendingMailSend> {
+        self.marker().map(|marker| &marker.pending)
+    }
+
+    fn is_available(&self) -> bool {
+        matches!(self, Self::Available(_))
+    }
+
+    fn set_marker(&mut self, pending: PendingMailSend, certainty: PendingSendCertainty) {
+        let marker = Some(PendingSendMarker { pending, certainty });
+        *self = match self {
+            Self::Available(_) => Self::Available(marker),
+            Self::Unavailable(_) => Self::Unavailable(marker),
         };
-        Self {
-            pending,
-            certainty,
-            available,
-            status,
+    }
+
+    fn clear_marker(&mut self) {
+        *self = match self {
+            Self::Available(_) => Self::Available(None),
+            Self::Unavailable(_) => Self::Unavailable(None),
+        };
+    }
+
+    fn apply_snapshot(&mut self, pending_result: Result<Option<PendingMailSend>, MailCacheError>) {
+        match pending_result {
+            Ok(pending) => {
+                let marker = pending.map(|pending| {
+                    let certainty = self
+                        .marker()
+                        .filter(|marker| marker.pending.operation_id() == pending.operation_id())
+                        .map_or(PendingSendCertainty::Unknown, |marker| marker.certainty);
+                    PendingSendMarker { pending, certainty }
+                });
+                *self = Self::Available(marker);
+            }
+            Err(_) => {
+                let marker = self.marker().cloned().map(|mut marker| {
+                    marker.certainty = PendingSendCertainty::Unknown;
+                    marker
+                });
+                *self = Self::Unavailable(marker);
+            }
         }
     }
 }
@@ -185,7 +251,12 @@ impl MailComposer {
     }
 
     fn from_context(context: MailComposerContext, fields: ComposerFields) -> Self {
-        let pending = PendingComposerState::from_result(context.pending);
+        let pending_send = PendingSendState::from_result(context.pending);
+        let status = if pending_send.is_available() {
+            ComposerStatus::Editing
+        } else {
+            ComposerStatus::CacheUnavailable
+        };
         Self {
             workflow: context.workflow,
             permission_requester: context.permission_requester,
@@ -194,11 +265,8 @@ impl MailComposer {
             recipient: fields.recipient,
             subject: fields.subject,
             body: fields.body,
-            pending_certainty: pending.certainty,
-            pending: pending.pending,
-            pending_state_available: pending.available,
-            duplicate_confirmation_required: false,
-            status: pending.status,
+            pending_send,
+            status,
             task: None,
         }
     }
@@ -262,14 +330,15 @@ impl MailComposer {
     }
 
     fn can_send(&self) -> bool {
-        self.pending.is_none()
-            && self.pending_state_available
-            && !self.duplicate_confirmation_required
+        self.pending_send.pending().is_none()
+            && self.pending_send.is_available()
             && !matches!(
                 self.status,
-                ComposerStatus::Sending | ComposerStatus::RenewingPermission
+                ComposerStatus::Sending
+                    | ComposerStatus::RenewingPermission
+                    | ComposerStatus::Accepted
+                    | ComposerStatus::DuplicateConfirmation
             )
-            && !matches!(self.status, ComposerStatus::Accepted)
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
@@ -312,10 +381,12 @@ impl MailComposer {
             Err(MailSendWorkflowError::Cache(_) | MailSendWorkflowError::StateUnavailable)
         );
         self.apply_pending_snapshot(pending_result);
-        if self.pending_state_available || workflow_result_survives_missing_snapshot {
+        if self.pending_send.is_available() || workflow_result_survives_missing_snapshot {
             self.apply_send_workflow_result(result);
         }
-        cx.emit(MailComposerEvent::PendingSendChanged(self.pending.clone()));
+        cx.emit(MailComposerEvent::PendingSendChanged(
+            self.pending_send.pending().cloned(),
+        ));
         cx.notify();
     }
 
@@ -323,26 +394,9 @@ impl MailComposer {
         &mut self,
         pending_result: Result<Option<PendingMailSend>, MailCacheError>,
     ) {
-        match pending_result {
-            Ok(pending) => {
-                let previous_operation_id =
-                    self.pending.as_ref().map(PendingMailSend::operation_id);
-                let certainty_matches = pending
-                    .as_ref()
-                    .is_some_and(|pending| Some(pending.operation_id()) == previous_operation_id);
-                if !certainty_matches {
-                    self.pending_certainty =
-                        pending.as_ref().map(|_| PendingSendCertainty::Unknown);
-                }
-                self.pending_state_available = true;
-                self.pending = pending;
-            }
-            Err(_) => {
-                self.pending_state_available = false;
-                self.pending_certainty =
-                    self.pending.as_ref().map(|_| PendingSendCertainty::Unknown);
-                self.status = ComposerStatus::CacheUnavailable;
-            }
+        self.pending_send.apply_snapshot(pending_result);
+        if !self.pending_send.is_available() {
+            self.status = ComposerStatus::CacheUnavailable;
         }
     }
 
@@ -352,18 +406,17 @@ impl MailComposer {
     ) {
         self.status = match result {
             Ok(MailSendOutcome::Accepted) => {
-                self.pending = None;
-                self.pending_certainty = None;
+                self.pending_send.clear_marker();
                 ComposerStatus::Accepted
             }
             Ok(MailSendOutcome::AcceptedNeedsResolution(pending)) => {
-                self.pending = Some(pending);
-                self.pending_certainty = Some(PendingSendCertainty::Accepted);
+                self.pending_send
+                    .set_marker(pending, PendingSendCertainty::Accepted);
                 ComposerStatus::AcceptedNeedsResolution
             }
             Ok(MailSendOutcome::OutcomeUnknown(pending)) => {
-                self.pending = Some(pending);
-                self.pending_certainty = Some(PendingSendCertainty::Unknown);
+                self.pending_send
+                    .set_marker(pending, PendingSendCertainty::Unknown);
                 ComposerStatus::OutcomeUnknown
             }
             Err(MailSendWorkflowError::RejectedNeedsResolution {
@@ -371,8 +424,8 @@ impl MailComposer {
                 provider,
                 cache,
             }) => {
-                self.pending = Some(*pending);
-                self.pending_certainty = Some(PendingSendCertainty::Rejected(provider));
+                self.pending_send
+                    .set_marker(*pending, PendingSendCertainty::Rejected(provider));
                 ComposerStatus::RejectedNeedsResolution(cache)
             }
             Err(MailSendWorkflowError::Provider(MailSendProviderError::PermissionRequired)) => {
@@ -384,8 +437,8 @@ impl MailComposer {
                 ComposerStatus::ReplySourceUnavailable
             }
             Err(MailSendWorkflowError::PendingResolutionRequired(pending)) => {
-                self.pending = Some(pending);
-                self.pending_certainty = Some(PendingSendCertainty::Unknown);
+                self.pending_send
+                    .set_marker(pending, PendingSendCertainty::Unknown);
                 ComposerStatus::OutcomeUnknown
             }
             Err(MailSendWorkflowError::OperationInProgress) => {
@@ -422,17 +475,15 @@ impl MailComposer {
     }
 
     fn resolve_pending(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending.clone() else {
+        let Some(marker) = self.pending_send.marker() else {
             return;
         };
         if self.task.is_some() {
             return;
         }
         let workflow = Arc::clone(&self.workflow);
-        let operation_id = pending.operation_id();
-        let certainty = self
-            .pending_certainty
-            .unwrap_or(PendingSendCertainty::Unknown);
+        let operation_id = marker.pending.operation_id();
+        let certainty = marker.certainty;
         self.status = ComposerStatus::Sending;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let result = workflow.resolve_pending_send(operation_id).await;
@@ -453,8 +504,8 @@ impl MailComposer {
         match result {
             Ok(()) => self.finish_pending_resolution(certainty, cx),
             Err(MailSendResolutionError::PendingResolutionRequired(pending)) => {
-                self.pending = Some(pending);
-                self.pending_certainty = Some(PendingSendCertainty::Unknown);
+                self.pending_send
+                    .set_marker(pending, PendingSendCertainty::Unknown);
                 self.status = ComposerStatus::OutcomeUnknown;
             }
             Err(MailSendResolutionError::Cache(error)) => {
@@ -475,10 +526,7 @@ impl MailComposer {
         certainty: PendingSendCertainty,
         cx: &mut Context<Self>,
     ) {
-        self.pending = None;
-        self.pending_certainty = None;
-        self.pending_state_available = true;
-        self.duplicate_confirmation_required = matches!(certainty, PendingSendCertainty::Unknown);
+        self.pending_send = PendingSendState::Available(None);
         self.status = match certainty {
             PendingSendCertainty::Accepted => ComposerStatus::Accepted,
             PendingSendCertainty::Rejected(error) => status_after_rejection(error),
@@ -488,10 +536,9 @@ impl MailComposer {
     }
 
     fn confirm_duplicate_risk(&mut self, cx: &mut Context<Self>) {
-        if !self.duplicate_confirmation_required {
+        if !matches!(self.status, ComposerStatus::DuplicateConfirmation) {
             return;
         }
-        self.duplicate_confirmation_required = false;
         self.status = ComposerStatus::Editing;
         cx.notify();
     }
@@ -511,13 +558,11 @@ impl MailComposer {
     }
 
     fn render_pending(&self, colors: ColorTokens, cx: &mut Context<Self>) -> AnyElement {
-        let Some(pending) = &self.pending else {
+        let Some(marker) = self.pending_send.marker() else {
             return div().into_any_element();
         };
-        let certainty = self
-            .pending_certainty
-            .unwrap_or(PendingSendCertainty::Unknown);
-        let (copy, button_label) = match certainty {
+        let pending = &marker.pending;
+        let (copy, button_label) = match marker.certainty {
             PendingSendCertainty::Accepted => (
                 "Microsoft accepted this message for processing. The local send marker could not be cleared."
                     .to_owned(),
@@ -579,139 +624,106 @@ impl MailComposer {
     }
 
     fn render_status(&self, colors: ColorTokens, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (role, text) = self.status_copy()?;
+        let presentation = self.status_presentation()?;
+        let mut children = vec![presentation.text.into_any_element()];
+        match presentation.action {
+            Some(ComposerStatusAction::ReviewPermission) => {
+                children.push(" The request is limited to sending as the signed-in account. Microsoft may show a consent screen in your system browser; approval grants permission but does not send this message. Return here and press Send to submit it.".into_any_element());
+                children.push(self.permission_review_button(cx));
+            }
+            Some(ComposerStatusAction::ConfirmDuplicateRisk) => {
+                children.push(self.duplicate_confirmation_button(cx));
+            }
+            None => {}
+        }
         let feedback = div()
             .id("mail-composer-status")
             .debug_selector(|| "mail-composer-status".to_owned())
-            .role(role)
+            .role(presentation.role)
             .text_sm()
-            .text_color(if role == Role::Alert {
+            .text_color(if presentation.role == Role::Alert {
                 colors.destructive
             } else {
                 colors.muted_foreground
             })
-            .child(text);
-        match self.status {
-            ComposerStatus::PermissionRequired => {
-                let feedback = feedback
-                    .child(" The request is limited to sending as the signed-in account. Microsoft may show a consent screen in your system browser; approval grants permission but does not send this message. Return here and press Send to submit it.")
-                    .child(self.permission_review_button(cx));
-                #[cfg(test)]
-                let feedback = feedback.test_support();
-                Some(feedback.into_any_element())
-            }
-            ComposerStatus::DuplicateConfirmation => {
-                let feedback = feedback.child(self.duplicate_confirmation_button(cx));
-                #[cfg(test)]
-                let feedback = feedback.test_support();
-                Some(feedback.into_any_element())
-            }
-            _ => {
-                #[cfg(test)]
-                let feedback = feedback.test_support();
-                Some(feedback.into_any_element())
-            }
-        }
+            .children(children);
+        #[cfg(test)]
+        let feedback = feedback.test_support();
+        Some(feedback.into_any_element())
     }
 
-    fn status_copy(&self) -> Option<(Role, String)> {
-        self.validation_status_copy()
-            .or_else(|| self.send_progress_copy())
-            .or_else(|| self.send_failure_copy())
-            .or_else(|| self.permission_status_copy())
-            .or_else(|| self.cache_status_copy())
-    }
-
-    fn validation_status_copy(&self) -> Option<(Role, String)> {
-        match self.status {
-            ComposerStatus::InvalidDraft(error) => Some((Role::Alert, draft_error_text(error))),
-            _ => None,
-        }
-    }
-
-    fn send_progress_copy(&self) -> Option<(Role, String)> {
-        match self.status {
-            ComposerStatus::Sending => Some((Role::Status, "Sending message…".to_owned())),
-            ComposerStatus::Accepted => Some((
+    fn status_presentation(&self) -> Option<ComposerStatusPresentation> {
+        Some(match self.status {
+            ComposerStatus::Editing => return None,
+            ComposerStatus::InvalidDraft(error) => {
+                ComposerStatusPresentation::new(Role::Alert, draft_error_text(error), None)
+            }
+            ComposerStatus::Sending => {
+                ComposerStatusPresentation::new(Role::Status, "Sending message…", None)
+            }
+            ComposerStatus::Accepted => ComposerStatusPresentation::new(
                 Role::Status,
-                "Microsoft accepted the message for processing. This does not confirm delivery."
-                    .to_owned(),
-            )),
-            ComposerStatus::AcceptedNeedsResolution => Some((
+                "Microsoft accepted the message for processing. This does not confirm delivery.",
+                None,
+            ),
+            ComposerStatus::AcceptedNeedsResolution => ComposerStatusPresentation::new(
                 Role::Status,
-                "Microsoft accepted the message, but the local send marker remains. Clear it before sending another message."
-                    .to_owned(),
-            )),
-            ComposerStatus::OutcomeUnknown => Some((
-                Role::Alert,
-                "The send outcome is unknown. The app will not resend this message automatically. Check Sent Items."
-                    .to_owned(),
-            )),
-            _ => None,
-        }
-    }
-
-    fn send_failure_copy(&self) -> Option<(Role, String)> {
-        match self.status {
-            ComposerStatus::RejectedNeedsResolution(error) => Some((
+                "Microsoft accepted the message, but the local send marker remains. Clear it before sending another message.",
+                None,
+            ),
+            ComposerStatus::RejectedNeedsResolution(error) => ComposerStatusPresentation::new(
                 Role::Alert,
                 format!(
                     "Microsoft rejected this message, but the local send marker could not be cleared. {}",
                     cache_error_text(error)
                 ),
-            )),
-            ComposerStatus::ProviderFailed(error) => {
-                Some((Role::Alert, send_error_text(error).to_owned()))
-            }
-            ComposerStatus::ReplySourceUnavailable => Some((
+                None,
+            ),
+            ComposerStatus::OutcomeUnknown => ComposerStatusPresentation::new(
                 Role::Alert,
-                "The original message is no longer in the local cache. Reopen it before replying."
-                    .to_owned(),
-            )),
-            _ => None,
-        }
-    }
-
-    fn permission_status_copy(&self) -> Option<(Role, String)> {
-        match self.status {
-            ComposerStatus::PermissionRequired => Some((
+                "The send outcome is unknown. The app will not resend this message automatically. Check Sent Items.",
+                None,
+            ),
+            ComposerStatus::PermissionRequired => ComposerStatusPresentation::new(
                 Role::Alert,
-                "Microsoft denied send permission. Review the delegated Mail.Send request to continue."
-                    .to_owned(),
-            )),
-            ComposerStatus::RenewingPermission => Some((
+                "Microsoft denied send permission. Review the delegated Mail.Send request to continue.",
+                Some(ComposerStatusAction::ReviewPermission),
+            ),
+            ComposerStatus::RenewingPermission => ComposerStatusPresentation::new(
                 Role::Status,
-                "Waiting for Microsoft permission review…".to_owned(),
-            )),
-            ComposerStatus::PermissionUpdated => Some((
+                "Waiting for Microsoft permission review…",
+                None,
+            ),
+            ComposerStatus::PermissionUpdated => ComposerStatusPresentation::new(
                 Role::Status,
-                "Permission updated. No message was sent. Press Send to submit this message."
-                    .to_owned(),
-            )),
+                "Permission updated. No message was sent. Press Send to submit this message.",
+                None,
+            ),
             ComposerStatus::PermissionRenewalFailed(error) => {
-                Some((Role::Alert, permission_error_text(error).to_owned()))
+                ComposerStatusPresentation::new(Role::Alert, permission_error_text(error), None)
             }
-            _ => None,
-        }
-    }
-
-    fn cache_status_copy(&self) -> Option<(Role, String)> {
-        match self.status {
+            ComposerStatus::ProviderFailed(error) => {
+                ComposerStatusPresentation::new(Role::Alert, send_error_text(error), None)
+            }
+            ComposerStatus::ReplySourceUnavailable => ComposerStatusPresentation::new(
+                Role::Alert,
+                "The original message is no longer in the local cache. Reopen it before replying.",
+                None,
+            ),
             ComposerStatus::CacheFailed(error) => {
-                Some((Role::Alert, cache_error_text(error).to_owned()))
+                ComposerStatusPresentation::new(Role::Alert, cache_error_text(error), None)
             }
-            ComposerStatus::CacheUnavailable => Some((
+            ComposerStatus::CacheUnavailable => ComposerStatusPresentation::new(
                 Role::Alert,
-                "The local encrypted cache could not confirm send status. Resolve cache access before another send."
-                    .to_owned(),
-            )),
-            ComposerStatus::DuplicateConfirmation => Some((
+                "The local encrypted cache could not confirm send status. Resolve cache access before another send.",
+                None,
+            ),
+            ComposerStatus::DuplicateConfirmation => ComposerStatusPresentation::new(
                 Role::Alert,
-                "The earlier message may still arrive later. Sending again could create a duplicate."
-                    .to_owned(),
-            )),
-            _ => None,
-        }
+                "The earlier message may still arrive later. Sending again could create a duplicate.",
+                Some(ComposerStatusAction::ConfirmDuplicateRisk),
+            ),
+        })
     }
 
     fn permission_review_button(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -719,7 +731,7 @@ impl MailComposer {
             .ghost()
             .debug_selector(|| "review-send-permission".to_owned())
             .label("Review Microsoft send permission…")
-            .disabled(self.task.is_some() || self.pending.is_some())
+            .disabled(self.task.is_some() || self.pending_send.pending().is_some())
             .on_click(cx.listener(|composer, _, _, cx| composer.request_permission(cx)))
             .into_any_element()
     }
@@ -734,11 +746,13 @@ impl MailComposer {
     }
 
     fn fields_disabled(&self) -> bool {
-        self.pending.is_some()
-            || !self.pending_state_available
+        self.pending_send.pending().is_some()
+            || !self.pending_send.is_available()
             || self.task.is_some()
-            || self.duplicate_confirmation_required
-            || matches!(self.status, ComposerStatus::Accepted)
+            || matches!(
+                self.status,
+                ComposerStatus::Accepted | ComposerStatus::DuplicateConfirmation
+            )
     }
 
     fn render_composer_content(
