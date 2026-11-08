@@ -199,7 +199,7 @@ impl CalendarOccurrenceTime {
 
 /// A field value in a sparse provider update.
 #[derive(Clone, Default, Eq, PartialEq)]
-pub enum CalendarField<T> {
+enum CalendarField<T> {
     /// The provider omitted the field, so a cached value stays unchanged.
     #[default]
     Unchanged,
