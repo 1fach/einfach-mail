@@ -168,6 +168,43 @@ pub trait CalendarCache: Send + Sync {
         account_id: &AccountId,
     ) -> impl Future<Output = Result<bool, CalendarCacheError>> + Send + '_;
 
+    /// Marks every previously synchronized account view before an event write starts.
+    ///
+    /// The source view must have a completed sync. The cache keeps each marker
+    /// until that view syncs or the account's event write is reconciled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::AccountMismatch`] for another account,
+    /// [`CalendarCacheError::InvalidData`] when the source view has no completed
+    /// sync, or [`CalendarCacheError::Unavailable`] when the transaction fails.
+    fn mark_calendar_write_sync_required(
+        &self,
+        view: &CalendarViewReference,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
+
+    /// Reports whether any account view still needs sync after an event write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::AccountMismatch`] for another account or
+    /// [`CalendarCacheError::Unavailable`] when the database cannot be read.
+    fn account_has_calendar_write_sync_required(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<bool, CalendarCacheError>> + Send + '_;
+
+    /// Clears all event-write sync markers for an account after a definitive outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::AccountMismatch`] for another account or
+    /// [`CalendarCacheError::Unavailable`] when the database cannot be changed.
+    fn clear_calendar_write_sync_required(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
+
     /// Applies one event page and advances its checkpoint in the same transaction.
     ///
     /// Replacement pages remain staged until their final page commits. Sparse

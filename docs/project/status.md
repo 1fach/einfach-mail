@@ -12,6 +12,8 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 
 [PR #79](https://github.com/1fach/einfach-mail/pull/79) and [PR #80](https://github.com/1fach/einfach-mail/pull/80) added headless accessibility snapshots for the agenda and message list. [PR #81](https://github.com/1fach/einfach-mail/pull/81) merged into `main` at `54df53621d0bc4ac337cde88a68def0b2c5a9bd4` on 2026-11-07. It adds synthetic Graph coverage for recurring occurrences across a daylight-saving transition and completes issue #6's synthetic fixture criterion. Issue #6 remains open for live recurrence, time-zone, and all-day verification.
 
+[PR #246](https://github.com/1fach/einfach-mail/pull/246) implements issue #245's durable per-view recovery for calendar event writes. Local Linux checks pass, including SQLCipher reopen and partial-view recovery tests. Live Graph behavior remains unverified under issues #40 and #42.
+
 ## Active risks
 
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep live sign-in, initial mail sync, read-state, flag, send, reply, move, and calendar verification open under their existing issues.

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::{Future, ready},
     ops::Deref,
     sync::{
@@ -308,7 +308,9 @@ struct TestCache {
     pending_creation: Arc<Mutex<Option<PendingCalendarEventCreation>>>,
     fail_next_rejected_cleanup: Arc<AtomicBool>,
     updated_events: Arc<Mutex<HashMap<CalendarViewReference, HashMap<String, CalendarOccurrence>>>>,
-    deleted_event_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+    deleted_event_ids: Arc<Mutex<HashSet<String>>>,
+    write_sync_required: Arc<Mutex<HashSet<CalendarViewReference>>>,
+    synchronized_views: Arc<Mutex<HashSet<CalendarViewReference>>>,
 }
 
 impl TestCache {
@@ -340,13 +342,62 @@ impl CalendarCache for TestCache {
         ready(Ok(false))
     }
 
+    fn mark_calendar_write_sync_required(
+        &self,
+        view: &CalendarViewReference,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let views_to_mark = {
+            let synchronized_views = self
+                .synchronized_views
+                .lock()
+                .expect("synthetic synchronized view mutex is not poisoned");
+            if !synchronized_views.contains(view) {
+                return ready(Err(CalendarCacheError::InvalidData));
+            }
+            synchronized_views
+                .iter()
+                .filter(|candidate| candidate.account_id() == view.account_id())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        self.write_sync_required
+            .lock()
+            .expect("synthetic write recovery mutex is not poisoned")
+            .extend(views_to_mark);
+        ready(Ok(()))
+    }
+
+    fn account_has_calendar_write_sync_required(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<bool, CalendarCacheError>> + Send + '_ {
+        ready(Ok(self
+            .write_sync_required
+            .lock()
+            .expect("synthetic write recovery mutex is not poisoned")
+            .iter()
+            .any(|view| view.account_id() == account_id)))
+    }
+
+    fn clear_calendar_write_sync_required(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        self.write_sync_required
+            .lock()
+            .expect("synthetic write recovery mutex is not poisoned")
+            .retain(|view| view.account_id() != account_id);
+        ready(Ok(()))
+    }
+
     fn commit_delta_page(
         &self,
-        _: &CalendarViewReference,
+        view: &CalendarViewReference,
         page: CalendarDeltaPage,
         completed_at: std::time::SystemTime,
     ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_ {
         let (_, progress) = page.into_parts();
+        let completed_sync = matches!(&progress, CalendarDeltaProgress::Complete(_));
         let state = match progress {
             CalendarDeltaProgress::Next(link) => CalendarSyncState::from_checkpoint(
                 None,
@@ -361,6 +412,16 @@ impl CalendarCache for TestCache {
                 CalendarSyncMode::Incremental,
             ),
         };
+        if completed_sync && state.is_ok() {
+            self.synchronized_views
+                .lock()
+                .expect("synthetic synchronized view mutex is not poisoned")
+                .insert(view.clone());
+            self.write_sync_required
+                .lock()
+                .expect("synthetic write recovery mutex is not poisoned")
+                .remove(view);
+        }
         ready(state)
     }
 
@@ -581,6 +642,7 @@ impl CalendarCache for TestCache {
         event: &CalendarOccurrence,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
         let updated_events = Arc::clone(&self.updated_events);
+        let write_sync_required = Arc::clone(&self.write_sync_required);
         let update = update.clone();
         let event = event.clone();
         async move {
@@ -593,6 +655,12 @@ impl CalendarCache for TestCache {
                 .entry(event.reference().clone())
                 .or_default()
                 .insert(event.id().as_str().to_owned(), event);
+            write_sync_required
+                .lock()
+                .expect("synthetic write recovery mutex is not poisoned")
+                .retain(|view| {
+                    view.account_id() != update.source().occurrence().reference().account_id()
+                });
             Ok(())
         }
     }
@@ -602,12 +670,18 @@ impl CalendarCache for TestCache {
         event: &EditableCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
         let deleted_event_ids = Arc::clone(&self.deleted_event_ids);
+        let write_sync_required = Arc::clone(&self.write_sync_required);
+        let account_id = event.occurrence().reference().account_id().clone();
         let event_id = event.occurrence().id().as_str().to_owned();
         async move {
             deleted_event_ids
                 .lock()
                 .expect("synthetic deleted event set is not poisoned")
                 .insert(event_id);
+            write_sync_required
+                .lock()
+                .expect("synthetic write recovery mutex is not poisoned")
+                .retain(|view| view.account_id() != &account_id);
             Ok(())
         }
     }

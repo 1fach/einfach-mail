@@ -315,6 +315,102 @@ fn malformed_delta_page_does_not_commit_events_or_advance_the_cursor() {
 }
 
 #[test]
+fn event_write_recovery_markers_survive_restart_and_clear_per_completed_view() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id("synthetic-account");
+        let source_view = week(7);
+        let other_view = week(14);
+        let completed_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let cache = open_cache(&directory, account.clone()).await;
+        for (view, cursor) in [
+            (&source_view, link("synthetic-source")),
+            (&other_view, link("synthetic-other")),
+        ] {
+            cache
+                .commit_delta_page(
+                    view,
+                    CalendarDeltaPage::new(Vec::new(), CalendarDeltaProgress::Complete(cursor)),
+                    completed_at,
+                )
+                .await
+                .expect("completed calendar view is stored");
+        }
+        cache
+            .mark_calendar_write_sync_required(&source_view)
+            .await
+            .expect("event write marks every completed view");
+        assert!(
+            cache
+                .account_has_calendar_write_sync_required(&account)
+                .await
+                .expect("write recovery state is readable")
+        );
+        cache.close_for_tests().await;
+
+        let reopened = open_cache(&directory, account.clone()).await;
+        assert!(
+            reopened
+                .account_has_calendar_write_sync_required(&account)
+                .await
+                .expect("write recovery state survives reopening")
+        );
+        reopened
+            .commit_delta_page(
+                &source_view,
+                CalendarDeltaPage::new(
+                    Vec::new(),
+                    CalendarDeltaProgress::Next(link("synthetic-source-next")),
+                ),
+                completed_at + Duration::from_secs(1),
+            )
+            .await
+            .expect("partial sync checkpoint commits");
+        assert!(
+            reopened
+                .account_has_calendar_write_sync_required(&account)
+                .await
+                .expect("partial sync keeps the recovery gate")
+        );
+        reopened
+            .commit_delta_page(
+                &source_view,
+                CalendarDeltaPage::new(
+                    Vec::new(),
+                    CalendarDeltaProgress::Complete(link("synthetic-source-reconciled")),
+                ),
+                completed_at + Duration::from_secs(2),
+            )
+            .await
+            .expect("source view finishes reconciliation");
+        assert!(
+            reopened
+                .account_has_calendar_write_sync_required(&account)
+                .await
+                .expect("the other view still requires reconciliation")
+        );
+        reopened
+            .commit_delta_page(
+                &other_view,
+                CalendarDeltaPage::new(
+                    Vec::new(),
+                    CalendarDeltaProgress::Complete(link("synthetic-other-reconciled")),
+                ),
+                completed_at + Duration::from_secs(3),
+            )
+            .await
+            .expect("other view finishes reconciliation");
+        assert!(
+            !reopened
+                .account_has_calendar_write_sync_required(&account)
+                .await
+                .expect("all recovery markers clear after their view syncs")
+        );
+        reopened.close_for_tests().await;
+    });
+}
+
+#[test]
 fn confirmed_event_update_moves_the_cached_copy_between_overlapping_week_views() {
     smol::block_on(async {
         let directory = TempDir::new().expect("temporary directory is created");
@@ -374,9 +470,26 @@ fn confirmed_event_update_moves_the_cached_copy_between_overlapping_week_views()
             .expect("synthetic update values are valid");
 
         cache
+            .mark_calendar_write_sync_required(&source_view)
+            .await
+            .expect("event update marks previously completed views");
+        assert!(
+            cache
+                .account_has_calendar_write_sync_required(source_view.account_id())
+                .await
+                .expect("event write recovery state is readable")
+        );
+
+        cache
             .commit_event_update(&update, &updated_event)
             .await
             .expect("event rows move atomically to the overlapping view");
+        assert!(
+            !cache
+                .account_has_calendar_write_sync_required(source_view.account_id())
+                .await
+                .expect("confirmed update clears recovery markers atomically")
+        );
         assert!(
             cache
                 .list_events(&source_view)
@@ -440,9 +553,26 @@ fn confirmed_event_deletion_removes_every_cached_copy_and_preserves_view_cursors
         .expect("synthetic event uses timed values");
 
         cache
+            .mark_calendar_write_sync_required(&source_view)
+            .await
+            .expect("event deletion marks all completed views");
+        assert!(
+            cache
+                .account_has_calendar_write_sync_required(source_view.account_id())
+                .await
+                .expect("event write recovery state is readable")
+        );
+
+        cache
             .commit_event_deletion(&editable)
             .await
             .expect("deletion removes every account view copy atomically");
+        assert!(
+            !cache
+                .account_has_calendar_write_sync_required(source_view.account_id())
+                .await
+                .expect("confirmed deletion clears recovery markers atomically")
+        );
 
         for (view, cursor) in [
             (&source_view, &source_link),
@@ -562,9 +692,20 @@ fn invalid_event_update_leaves_all_cached_copies_unchanged() {
             .apply_to(&mut mismatched_event)
             .expect("subject update is valid");
 
+        cache
+            .mark_calendar_write_sync_required(&source_view)
+            .await
+            .expect("event update starts recovery tracking");
+
         assert_eq!(
             cache.commit_event_update(&update, &mismatched_event).await,
             Err(CalendarCacheError::InvalidData)
+        );
+        assert!(
+            cache
+                .account_has_calendar_write_sync_required(source_view.account_id())
+                .await
+                .expect("failed cache reconciliation keeps the recovery gate")
         );
         let source_events = cache
             .list_events(&source_view)
