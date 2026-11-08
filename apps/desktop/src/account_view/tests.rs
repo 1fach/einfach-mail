@@ -454,7 +454,10 @@ impl AccountProvider for TestProvider {
             }
             cancellation.begin_credential_commit()?;
             if let Some(commit_gate) = commit_gate {
-                let _ = commit_gate.started.send(());
+                commit_gate
+                    .started
+                    .send(())
+                    .expect("the account view test is waiting at credential commit");
                 commit_gate
                     .finish
                     .await
@@ -503,7 +506,10 @@ impl AccountProvider for TestProvider {
             }
             cancellation.begin_credential_commit()?;
             if let Some(commit_gate) = commit_gate {
-                let _ = commit_gate.started.send(());
+                commit_gate
+                    .started
+                    .send(())
+                    .expect("the account view test is waiting at permission commit");
                 commit_gate
                     .finish
                     .await
