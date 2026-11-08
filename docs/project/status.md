@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-11-07
+Last updated: 2026-11-08
 
 ## Current milestone
 
@@ -18,7 +18,7 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 - Issue #6 has synthetic coverage for expanded occurrences and UTC-midnight all-day inputs. Graph's docs do not say how a non-UTC all-day event appears in a UTC-default `calendarView` response. Live recurrence, time-zone, and all-day behavior remain unverified until a Microsoft 365 tenant is available.
 - Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
 - Windows and macOS support remain deferred.
-- Fedora GNOME Keyring evidence does not establish behavior for every Secret Service implementation.
+- The production-path cache-key lifecycle test passed on 2026-11-08 against a temporary GNOME Keyring service. This does not establish behavior for every Secret Service implementation.
 - The 2026-11-07 local RustSec audit reports eight transitive `INFO Unmaintained` crates. Seven are in the active Linux graph; `rustls-pemfile` is cross-target only. The audit found no vulnerable or yanked versions. GPUI Kit and its current Linux integration graph still use these crates; see the [dependency review](dependency-review.md) for paths and replacement checks.
 
 ## Next actions

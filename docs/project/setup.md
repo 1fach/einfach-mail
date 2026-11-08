@@ -45,7 +45,7 @@ sudo dnf install gcc gcc-c++ clang pkgconf-pkg-config \
   perl-FindBin perl-Text-Template
 ```
 
-The encrypted storage proof builds SQLCipher with vendored OpenSSL. Fedora packages Perl's `FindBin` and `Text::Template` modules separately, so install both packages before building the proof.
+The persistence crate builds SQLCipher with vendored OpenSSL. Fedora packages Perl's `FindBin` and `Text::Template` modules separately, so install both packages before building or testing the workspace.
 
 The package list follows GPUI Kit's Linux build requirements. It omits GTK and WebKitGTK because the desktop app does not include the optional email WebView.
 
@@ -118,18 +118,18 @@ bash scripts/check-linux-local.sh
 
 The script runs the Rust 1.95 check, dependency-boundary and ban checks, the active Linux target graph, formatting, Clippy, documentation, RustSec, and workspace tests. If Perl lacks `FindBin.pm` but `pkg-config` finds system OpenSSL, it reports that it uses system OpenSSL for the local run. The workspace test command skips tests marked `ignore`.
 
-Run the separate storage dependency proof when reviewing the Linux Secret Service and SQLCipher dependencies:
+Run the persistence tests with:
 
 ```sh
-cargo test --locked --package einfach-mail-storage-proof
+cargo test --locked --package einfach-mail-persistence
 ```
 
-This tool tests a synthetic encrypted SQLite cache and Linux credential access. It does not exercise production persistence or a backup workflow. Its default Linux run checks behavior when Secret Service is unavailable. The credential lifecycle tests require an unlocked desktop Secret Service and are ignored by default. Run them explicitly with:
+The default tests include a child-process check that verifies production cache opening leaves new and existing cache files unchanged when Secret Service is unavailable. The ignored lifecycle test uses the production cache API to create, encrypt, reopen, preserve through key loss, and remove a synthetic cache. It requires an unlocked Linux Secret Service and can be run explicitly with:
 
 ```sh
-cargo test --locked --package einfach-mail-storage-proof -- --ignored --test-threads=1
+cargo test --locked --package einfach-mail-persistence --lib security::production_tests::production_secret_service_cache_lifecycle -- --ignored --exact
 ```
 
-They use randomly named synthetic credentials and clean them up. The earlier Windows Credential Manager proof in PR #15 is platform-specific evidence; Windows support remains deferred.
+The test uses a random synthetic account ID, isolated XDG storage in a child process, and synthetic folder data. The earlier Windows Credential Manager proof in PR #15 is platform-specific evidence; Windows support remains deferred.
 
 Use `cargo fmt --all` to format Rust files. Fix Clippy findings instead of suppressing them. Add an `#[expect(..., reason = "...")]` only for a narrow lint that is demonstrably wrong.
