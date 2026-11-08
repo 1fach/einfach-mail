@@ -75,9 +75,7 @@ pub(crate) struct EventComposerSetup<S: CalendarSession + ?Sized + 'static> {
     pub(super) time_zone: TimeZone,
     /// User-facing label for the selected time zone.
     pub(super) time_zone_label: String,
-    /// Calendar action the composer should perform.
     pub(super) intent: EventComposerIntent,
-    /// First date in the displayed calendar week.
     pub(super) week_start: civil::Date,
 }
 
@@ -91,16 +89,57 @@ pub(crate) struct EventComposer<S: CalendarSession + ?Sized + 'static> {
     subject: Entity<InputState>,
     start: Entity<DatePickerState>,
     end: Entity<DatePickerState>,
-    mode: ComposerMode,
-    creation: Option<CalendarEventCreation>,
-    status: ComposerStatus,
+    state: ComposerState,
     task: Option<Task<()>>,
 }
 
-enum ComposerMode {
-    Create,
-    Edit {
-        editable_event: Option<Box<EditableCalendarEvent>>,
+enum ComposerState {
+    Create(CreateState),
+    Edit(EditState),
+}
+
+enum CreateState {
+    Draft,
+    InvalidDraft(DraftError),
+    Pending {
+        creation: CalendarEventCreation,
+        status: PendingCreationStatus,
+    },
+    PendingResolutionRequired,
+    PendingResolutionFailed(CalendarWorkflowError),
+    Completed(CreationOutcome),
+}
+
+#[derive(Clone, Copy)]
+enum PendingCreationStatus {
+    Ready,
+    Submitting,
+    Failed(CalendarWorkflowError),
+    ConfirmedButNotCached,
+    RejectedPendingCleanup,
+    RejectedCleanupFailed(CalendarWorkflowError),
+    DiscardingRejected,
+}
+
+#[derive(Clone, Copy)]
+enum CreationOutcome {
+    Confirmed,
+    Rejected,
+}
+
+#[derive(Clone, Copy)]
+enum StatusStyle {
+    Success,
+    DestructiveStatus,
+    Error,
+}
+
+enum EditState {
+    Loading,
+    LoadFailed(CalendarWorkflowError),
+    Ready {
+        editable_event: Box<EditableCalendarEvent>,
+        status: EditStatus,
     },
 }
 
@@ -111,19 +150,11 @@ struct EditableEventFormValues {
 }
 
 #[derive(Clone, Copy)]
-enum ComposerStatus {
+enum EditStatus {
     Editing,
-    Pending,
-    LoadingEditableEvent,
     InvalidDraft(DraftError),
     Submitting,
     Failed(CalendarWorkflowError),
-    PendingResolutionRequired(Option<CalendarWorkflowError>),
-    DiscardingRejected,
-    RejectedPendingCleanup(Option<CalendarWorkflowError>),
-    Rejected,
-    Confirmed,
-    ConfirmedButNotCached,
     Updated,
     UpdatedButNotCached,
     UpdateOutcomeUnknown,
@@ -144,6 +175,251 @@ enum DraftError {
     NoChanges,
 }
 
+impl CreateState {
+    fn from_pending_creation(pending_creation: Option<PendingCalendarEventCreation>) -> Self {
+        match pending_creation {
+            Some(PendingCalendarEventCreation::Unresolved(creation)) => Self::Pending {
+                creation,
+                status: PendingCreationStatus::Ready,
+            },
+            Some(PendingCalendarEventCreation::Rejected(creation)) => Self::Pending {
+                creation,
+                status: PendingCreationStatus::RejectedPendingCleanup,
+            },
+            None => Self::Draft,
+        }
+    }
+
+    fn submit_label(&self) -> Option<&'static str> {
+        match self {
+            Self::Draft | Self::InvalidDraft(_) => Some("Create event"),
+            Self::Pending { status, .. } => Some(status.submit_label()),
+            Self::PendingResolutionRequired
+            | Self::PendingResolutionFailed(_)
+            | Self::Completed(_) => None,
+        }
+    }
+
+    fn requires_calendar_write_permission_review(&self) -> bool {
+        matches!(
+            self,
+            Self::Pending {
+                status: PendingCreationStatus::Failed(error),
+                ..
+            } if is_access_denied(*error)
+        )
+    }
+}
+
+impl PendingCreationStatus {
+    fn submit_label(self) -> &'static str {
+        match self {
+            Self::DiscardingRejected => "Clearing draft…",
+            Self::RejectedPendingCleanup | Self::RejectedCleanupFailed(_) => "Clear rejected draft",
+            Self::Submitting => "Creating event…",
+            Self::Ready | Self::Failed(_) | Self::ConfirmedButNotCached => "Retry event creation",
+        }
+    }
+}
+
+impl EditStatus {
+    fn submit_label(self) -> &'static str {
+        if matches!(self, Self::Submitting) {
+            "Saving changes…"
+        } else {
+            "Save changes"
+        }
+    }
+}
+
+impl EditState {
+    fn submit_label(&self) -> Option<&'static str> {
+        match self {
+            Self::Ready { status, .. } => Some(status.submit_label()),
+            Self::Loading | Self::LoadFailed(_) => None,
+        }
+    }
+
+    fn requires_calendar_write_permission_review(&self) -> bool {
+        matches!(
+            self,
+            Self::LoadFailed(error)
+                | Self::Ready {
+                    status: EditStatus::Failed(error) | EditStatus::DeletionFailed(error),
+                    ..
+                } if is_access_denied(*error)
+        )
+    }
+}
+
+impl ComposerState {
+    fn pending_creation(&self) -> Option<(&CalendarEventCreation, PendingCreationStatus)> {
+        match self {
+            Self::Create(CreateState::Pending { creation, status }) => Some((creation, *status)),
+            Self::Create(
+                CreateState::Draft
+                | CreateState::InvalidDraft(_)
+                | CreateState::PendingResolutionRequired
+                | CreateState::PendingResolutionFailed(_)
+                | CreateState::Completed(_),
+            )
+            | Self::Edit(_) => None,
+        }
+    }
+
+    fn can_submit(&self) -> bool {
+        match self {
+            Self::Create(CreateState::Draft | CreateState::InvalidDraft(_)) => true,
+            Self::Create(CreateState::Pending { status, .. }) => !matches!(
+                status,
+                PendingCreationStatus::Submitting | PendingCreationStatus::DiscardingRejected
+            ),
+            Self::Create(
+                CreateState::PendingResolutionRequired
+                | CreateState::PendingResolutionFailed(_)
+                | CreateState::Completed(_),
+            )
+            | Self::Edit(EditState::Loading | EditState::LoadFailed(_)) => false,
+            Self::Edit(EditState::Ready { status, .. }) => {
+                !matches!(status, EditStatus::Submitting | EditStatus::Deleting)
+                    && !is_terminal_edit_status(*status)
+            }
+        }
+    }
+
+    fn can_delete(&self) -> bool {
+        match self {
+            Self::Edit(EditState::Ready { .. }) => self.can_submit(),
+            Self::Create(_) | Self::Edit(EditState::Loading | EditState::LoadFailed(_)) => false,
+        }
+    }
+
+    fn edit_write_in_progress(&self) -> bool {
+        matches!(
+            self,
+            Self::Edit(EditState::Ready {
+                status: EditStatus::Submitting | EditStatus::Deleting,
+                ..
+            })
+        )
+    }
+
+    fn action_is_terminal(&self) -> bool {
+        match self {
+            Self::Create(
+                CreateState::PendingResolutionRequired
+                | CreateState::PendingResolutionFailed(_)
+                | CreateState::Completed(_),
+            )
+            | Self::Edit(EditState::Loading | EditState::LoadFailed(_)) => true,
+            Self::Create(
+                CreateState::Draft | CreateState::InvalidDraft(_) | CreateState::Pending { .. },
+            ) => false,
+            Self::Edit(EditState::Ready { status, .. }) => is_terminal_edit_status(*status),
+        }
+    }
+
+    fn show_fields(&self) -> bool {
+        match self {
+            Self::Create(CreateState::Pending { .. }) => false,
+            Self::Create(
+                CreateState::Draft
+                | CreateState::InvalidDraft(_)
+                | CreateState::PendingResolutionRequired
+                | CreateState::PendingResolutionFailed(_)
+                | CreateState::Completed(_),
+            ) => true,
+            Self::Edit(EditState::Ready { status, .. }) => !is_terminal_edit_status(*status),
+            Self::Edit(EditState::Loading | EditState::LoadFailed(_)) => false,
+        }
+    }
+
+    fn submit_is_loading(&self) -> bool {
+        matches!(
+            self,
+            Self::Create(CreateState::Pending {
+                status: PendingCreationStatus::Submitting
+                    | PendingCreationStatus::DiscardingRejected,
+                ..
+            }) | Self::Edit(EditState::Ready {
+                status: EditStatus::Submitting,
+                ..
+            })
+        )
+    }
+
+    fn submit_label(&self) -> Option<&'static str> {
+        match self {
+            Self::Create(state) => state.submit_label(),
+            Self::Edit(state) => state.submit_label(),
+        }
+    }
+
+    fn validation_error(&self) -> Option<DraftError> {
+        match self {
+            Self::Create(CreateState::InvalidDraft(error))
+            | Self::Edit(EditState::Ready {
+                status: EditStatus::InvalidDraft(error),
+                ..
+            }) => Some(*error),
+            Self::Create(CreateState::Draft)
+            | Self::Create(
+                CreateState::Pending { .. }
+                | CreateState::PendingResolutionRequired
+                | CreateState::PendingResolutionFailed(_)
+                | CreateState::Completed(_),
+            )
+            | Self::Edit(EditState::Loading | EditState::LoadFailed(_))
+            | Self::Edit(EditState::Ready { .. }) => None,
+        }
+    }
+
+    fn status_text(&self) -> Option<&'static str> {
+        match self {
+            Self::Create(state) => creation_status_text(state),
+            Self::Edit(EditState::Loading) => None,
+            Self::Edit(EditState::LoadFailed(error)) => Some(update_error_text(*error)),
+            Self::Edit(EditState::Ready { status, .. }) => match status {
+                EditStatus::Deleting
+                | EditStatus::Deleted
+                | EditStatus::DeletedButNotCached
+                | EditStatus::DeleteOutcomeUnknown
+                | EditStatus::DeletionFailed(_) => deletion_status_text(*status),
+                _ => update_status_text(*status),
+            },
+        }
+    }
+
+    fn requires_calendar_write_permission_review(&self) -> bool {
+        match self {
+            Self::Create(state) => state.requires_calendar_write_permission_review(),
+            Self::Edit(state) => state.requires_calendar_write_permission_review(),
+        }
+    }
+
+    fn status_style(&self) -> StatusStyle {
+        match self {
+            Self::Create(CreateState::Completed(CreationOutcome::Confirmed))
+            | Self::Edit(EditState::Ready {
+                status: EditStatus::Updated,
+                ..
+            }) => StatusStyle::Success,
+            Self::Edit(EditState::Ready {
+                status: EditStatus::Deleted,
+                ..
+            }) => StatusStyle::DestructiveStatus,
+            _ => StatusStyle::Error,
+        }
+    }
+}
+
+fn is_access_denied(error: CalendarWorkflowError) -> bool {
+    matches!(
+        error,
+        CalendarWorkflowError::Provider(CalendarOperationError::AccessDenied)
+    )
+}
+
 impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     /// Creates a composer for event creation, recovery, or editing.
     ///
@@ -159,34 +435,16 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         let time_zone_id =
             CalendarTimeZoneId::try_from(setup.time_zone.iana_name().unwrap_or("UTC").to_owned())
                 .expect("the fixed time-zone identifier is valid");
-        let (mode, pending_creation, cached_event) = match setup.intent {
-            EventComposerIntent::Create { pending_creation } => {
-                (ComposerMode::Create, pending_creation, None)
-            }
-            EventComposerIntent::Edit { cached_event } => (
-                ComposerMode::Edit {
-                    editable_event: None,
-                },
+        let (state, cached_event) = match setup.intent {
+            EventComposerIntent::Create { pending_creation } => (
+                ComposerState::Create(CreateState::from_pending_creation(pending_creation)),
                 None,
-                Some(cached_event),
             ),
+            EventComposerIntent::Edit { cached_event } => {
+                (ComposerState::Edit(EditState::Loading), Some(cached_event))
+            }
         };
         let (subject, start, end) = new_composer_inputs(setup.week_start, window, cx);
-        let (creation, status) = match pending_creation {
-            Some(PendingCalendarEventCreation::Unresolved(creation)) => {
-                (Some(creation), ComposerStatus::Pending)
-            }
-            Some(PendingCalendarEventCreation::Rejected(creation)) => {
-                (Some(creation), ComposerStatus::RejectedPendingCleanup(None))
-            }
-            None if cached_event.is_some() => (None, ComposerStatus::LoadingEditableEvent),
-            None => (None, ComposerStatus::Editing),
-        };
-        let status = if cached_event.is_some() {
-            ComposerStatus::LoadingEditableEvent
-        } else {
-            status
-        };
         let mut composer = Self {
             session: setup.session,
             view: setup.view,
@@ -196,9 +454,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             subject,
             start,
             end,
-            mode,
-            status,
-            creation,
+            state,
             task: None,
         };
         if let Some(cached_event) = cached_event {
@@ -231,7 +487,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         self.task = None;
         match editable_result {
             Ok(editable_event) => self.load_edit_fields(editable_event, window, cx),
-            Err(error) => self.status = ComposerStatus::Failed(error),
+            Err(error) => self.state = ComposerState::Edit(EditState::LoadFailed(error)),
         }
         cx.notify();
     }
@@ -244,14 +500,16 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     ) {
         let Some(form_values) = editable_event_picker_values(&editable_event, &self.time_zone)
         else {
-            self.status = ComposerStatus::Failed(CalendarWorkflowError::InvalidEditableEvent);
+            self.state = ComposerState::Edit(EditState::LoadFailed(
+                CalendarWorkflowError::InvalidEditableEvent,
+            ));
             return;
         };
         self.set_edit_form_values(form_values, window, cx);
-        self.mode = ComposerMode::Edit {
-            editable_event: Some(Box::new(editable_event)),
-        };
-        self.status = ComposerStatus::Editing;
+        self.state = ComposerState::Edit(EditState::Ready {
+            editable_event: Box::new(editable_event),
+            status: EditStatus::Editing,
+        });
     }
 
     fn set_edit_form_values(
@@ -272,70 +530,76 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
-        if !self.can_submit() {
+        if !self.state.can_submit() {
             return;
         }
-        match &self.mode {
-            ComposerMode::Create
-                if matches!(self.status, ComposerStatus::RejectedPendingCleanup(_)) =>
-            {
-                self.discard_rejected_creation(cx);
-            }
-            ComposerMode::Create => match self.creation_for_submission(cx) {
-                Ok(creation) => self.submit_creation(creation, cx),
-                Err(error) => self.show_draft_error(error, cx),
-            },
-            ComposerMode::Edit {
-                editable_event: Some(editable_event),
-            } => match self.update_for_submission(editable_event, cx) {
-                Ok(update) => self.submit_update(update, cx),
-                Err(error) => self.show_draft_error(error, cx),
-            },
-            ComposerMode::Edit {
-                editable_event: None,
-            } => {}
-        }
-    }
-
-    fn can_submit(&self) -> bool {
         if matches!(
-            self.status,
-            ComposerStatus::Submitting
-                | ComposerStatus::DiscardingRejected
-                | ComposerStatus::LoadingEditableEvent
-                | ComposerStatus::Deleting
-                | ComposerStatus::Confirmed
-                | ComposerStatus::PendingResolutionRequired(_)
+            &self.state,
+            ComposerState::Create(CreateState::Pending {
+                status: PendingCreationStatus::RejectedPendingCleanup
+                    | PendingCreationStatus::RejectedCleanupFailed(_),
+                ..
+            })
         ) {
-            return false;
+            self.discard_rejected_creation(cx);
+            return;
         }
-        match &self.mode {
-            ComposerMode::Create => true,
-            ComposerMode::Edit { editable_event } => {
-                editable_event.is_some() && !is_terminal_edit_status(self.status)
+        match &self.state {
+            ComposerState::Create(_) => self.submit_create(cx),
+            ComposerState::Edit(EditState::Ready { .. }) => self.submit_edit(cx),
+            ComposerState::Edit(EditState::Loading | EditState::LoadFailed(_)) => {}
+        }
+    }
+
+    fn submit_create(&mut self, cx: &mut Context<Self>) {
+        let Some(creation) = self.creation_for_submission(cx) else {
+            return;
+        };
+        match creation {
+            Ok(creation) => self.submit_creation(creation, cx),
+            Err(error) => {
+                self.state = ComposerState::Create(CreateState::InvalidDraft(error));
+                cx.notify();
             }
         }
     }
 
-    fn show_draft_error(&mut self, draft_error: DraftError, cx: &mut Context<Self>) {
-        self.status = ComposerStatus::InvalidDraft(draft_error);
-        cx.notify();
+    fn submit_edit(&mut self, cx: &mut Context<Self>) {
+        let update = match self.editable_event() {
+            Some(editable_event) => self.update_for_submission(editable_event, cx),
+            None => return,
+        };
+        match update {
+            Ok(update) => self.submit_update(update, cx),
+            Err(error) => {
+                self.set_edit_status(EditStatus::InvalidDraft(error));
+                cx.notify();
+            }
+        }
     }
 
     fn submit_creation(&mut self, creation: CalendarEventCreation, cx: &mut Context<Self>) {
-        self.creation = Some(creation.clone());
-        self.status = ComposerStatus::Submitting;
+        self.state = ComposerState::Create(CreateState::Pending {
+            creation: creation.clone(),
+            status: PendingCreationStatus::Submitting,
+        });
         self.start_submission(creation, cx);
         cx.notify();
     }
 
     fn discard_rejected_creation(&mut self, cx: &mut Context<Self>) {
-        let Some(creation) = self.creation.clone() else {
-            self.status = ComposerStatus::PendingResolutionRequired(None);
-            cx.notify();
-            return;
+        let creation = match &self.state {
+            ComposerState::Create(CreateState::Pending {
+                creation,
+                status:
+                    PendingCreationStatus::RejectedPendingCleanup
+                    | PendingCreationStatus::RejectedCleanupFailed(_),
+            }) => creation.clone(),
+            _ => return,
         };
-        self.status = ComposerStatus::DiscardingRejected;
+        if let ComposerState::Create(CreateState::Pending { status, .. }) = &mut self.state {
+            *status = PendingCreationStatus::DiscardingRejected;
+        }
         let session = Arc::clone(&self.session);
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let result = session.discard_rejected_event_creation(&creation).await;
@@ -343,12 +607,22 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
                 composer.task = None;
                 match result {
                     Ok(()) => {
-                        composer.creation = None;
-                        composer.status = ComposerStatus::Rejected;
-                        cx.emit(EventComposerEvent::PendingOperationUpdated);
+                        if matches!(
+                            &composer.state,
+                            ComposerState::Create(CreateState::Pending { .. })
+                        ) {
+                            composer.state = ComposerState::Create(CreateState::Completed(
+                                CreationOutcome::Rejected,
+                            ));
+                            cx.emit(EventComposerEvent::PendingOperationUpdated);
+                        }
                     }
                     Err(error) => {
-                        composer.status = ComposerStatus::RejectedPendingCleanup(Some(error));
+                        if let ComposerState::Create(CreateState::Pending { status, .. }) =
+                            &mut composer.state
+                        {
+                            *status = PendingCreationStatus::RejectedCleanupFailed(error);
+                        }
                     }
                 }
                 cx.notify();
@@ -391,34 +665,19 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     }
 
     pub(crate) fn edit_write_in_progress(&self) -> bool {
-        matches!(
-            (&self.mode, self.status),
-            (
-                ComposerMode::Edit {
-                    editable_event: Some(_)
-                },
-                ComposerStatus::Submitting
-            )
-        ) || matches!(
-            (&self.mode, self.status),
-            (
-                ComposerMode::Edit {
-                    editable_event: Some(_)
-                },
-                ComposerStatus::Deleting
-            )
-        )
+        self.state.edit_write_in_progress()
     }
 
     fn editable_event(&self) -> Option<&EditableCalendarEvent> {
-        match &self.mode {
-            ComposerMode::Edit { editable_event } => editable_event.as_deref(),
-            ComposerMode::Create => None,
+        match &self.state {
+            ComposerState::Edit(EditState::Ready { editable_event, .. }) => Some(editable_event),
+            ComposerState::Create(_)
+            | ComposerState::Edit(EditState::Loading | EditState::LoadFailed(_)) => None,
         }
     }
 
     fn confirm_deletion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.can_delete() {
+        if !self.state.can_delete() {
             return;
         }
         let Some(event) = self.editable_event() else {
@@ -458,20 +717,16 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         });
     }
 
-    fn can_delete(&self) -> bool {
-        self.editable_event().is_some()
-            && !self.edit_write_in_progress()
-            && !is_terminal_edit_status(self.status)
-    }
-
     fn start_deletion(&mut self, cx: &mut Context<Self>) {
         let Some(event) = self.editable_event().cloned() else {
             return;
         };
-        if !self.can_delete() {
+        if !self.state.can_delete() {
             return;
         }
-        self.status = ComposerStatus::Deleting;
+        if let ComposerState::Edit(EditState::Ready { status, .. }) = &mut self.state {
+            *status = EditStatus::Deleting;
+        }
         let session = Arc::clone(&self.session);
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let outcome = session.delete_event(&event).await;
@@ -497,16 +752,17 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
                 ))
                 | Err(CalendarWorkflowError::CalendarWriteSyncRequired)
         );
-        self.status = match outcome {
-            Ok(CalendarEventDeletionOutcome::Deleted) => ComposerStatus::Deleted,
+        let status = match outcome {
+            Ok(CalendarEventDeletionOutcome::Deleted) => EditStatus::Deleted,
             Ok(CalendarEventDeletionOutcome::DeletedButNotCached { .. }) => {
-                ComposerStatus::DeletedButNotCached
+                EditStatus::DeletedButNotCached
             }
             Err(CalendarWorkflowError::Provider(CalendarOperationError::DeleteOutcomeUnknown)) => {
-                ComposerStatus::DeleteOutcomeUnknown
+                EditStatus::DeleteOutcomeUnknown
             }
-            Err(error) => ComposerStatus::DeletionFailed(error),
+            Err(error) => EditStatus::DeletionFailed(error),
         };
+        self.set_edit_status(status);
         if sync_required {
             cx.emit(EventComposerEvent::CalendarWriteSyncRequired);
         }
@@ -515,7 +771,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     }
 
     fn submit_update(&mut self, update: CalendarEventUpdate, cx: &mut Context<Self>) {
-        self.status = ComposerStatus::Submitting;
+        self.set_edit_status(EditStatus::Submitting);
         let session = Arc::clone(&self.session);
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let outcome = session.update_event(&update).await;
@@ -542,17 +798,18 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
                 | Err(CalendarWorkflowError::InvalidUpdateConfirmation)
                 | Err(CalendarWorkflowError::CalendarWriteSyncRequired)
         );
-        self.status = match outcome {
-            Ok(CalendarEventUpdateOutcome::Cached(_)) => ComposerStatus::Updated,
+        let status = match outcome {
+            Ok(CalendarEventUpdateOutcome::Cached(_)) => EditStatus::Updated,
             Ok(CalendarEventUpdateOutcome::ConfirmedButNotCached { .. }) => {
-                ComposerStatus::UpdatedButNotCached
+                EditStatus::UpdatedButNotCached
             }
             Err(CalendarWorkflowError::Provider(CalendarOperationError::UpdateOutcomeUnknown))
             | Err(CalendarWorkflowError::InvalidUpdateConfirmation) => {
-                ComposerStatus::UpdateOutcomeUnknown
+                EditStatus::UpdateOutcomeUnknown
             }
-            Err(error) => ComposerStatus::Failed(error),
+            Err(error) => EditStatus::Failed(error),
         };
+        self.set_edit_status(status);
         if update_sync_required {
             cx.emit(EventComposerEvent::CalendarWriteSyncRequired);
         }
@@ -582,62 +839,91 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             Result<Option<PendingCalendarEventCreation>, CalendarWorkflowError>,
         >,
     ) {
-        self.status = match creation_outcome {
+        let Some(creation) = self
+            .state
+            .pending_creation()
+            .map(|(creation, _)| creation.clone())
+        else {
+            return;
+        };
+        self.state = ComposerState::Create(match creation_outcome {
             Ok(CalendarEventCreationOutcome::Cached(_)) => {
-                self.creation = None;
-                ComposerStatus::Confirmed
+                CreateState::Completed(CreationOutcome::Confirmed)
             }
             Ok(CalendarEventCreationOutcome::ConfirmedButNotCached { .. }) => {
-                ComposerStatus::ConfirmedButNotCached
+                CreateState::Pending {
+                    creation,
+                    status: PendingCreationStatus::ConfirmedButNotCached,
+                }
             }
             Ok(CalendarEventCreationOutcome::Rejected) => {
-                self.creation = None;
-                ComposerStatus::Rejected
+                CreateState::Completed(CreationOutcome::Rejected)
             }
             Ok(CalendarEventCreationOutcome::RejectedButPending { cache_error }) => {
-                ComposerStatus::RejectedPendingCleanup(Some(CalendarWorkflowError::Cache(
-                    cache_error,
-                )))
+                CreateState::Pending {
+                    creation,
+                    status: PendingCreationStatus::RejectedCleanupFailed(
+                        CalendarWorkflowError::Cache(cache_error),
+                    ),
+                }
             }
             Err(CalendarWorkflowError::Cache(CalendarCacheError::CreationAlreadyPending)) => {
-                self.resolve_pending_conflict(conflict_recovery)
+                Self::resolve_pending_conflict(conflict_recovery)
             }
-            Err(error) => ComposerStatus::Failed(error),
-        };
+            Err(error) => CreateState::Pending {
+                creation,
+                status: PendingCreationStatus::Failed(error),
+            },
+        });
     }
 
     fn resolve_pending_conflict(
-        &mut self,
         conflict_recovery: Option<
             Result<Option<PendingCalendarEventCreation>, CalendarWorkflowError>,
         >,
-    ) -> ComposerStatus {
+    ) -> CreateState {
         match conflict_recovery {
             Some(Ok(Some(PendingCalendarEventCreation::Unresolved(creation)))) => {
-                self.creation = Some(creation);
-                ComposerStatus::Pending
+                CreateState::Pending {
+                    creation,
+                    status: PendingCreationStatus::Ready,
+                }
             }
             Some(Ok(Some(PendingCalendarEventCreation::Rejected(creation)))) => {
-                self.creation = Some(creation);
-                ComposerStatus::RejectedPendingCleanup(None)
+                CreateState::Pending {
+                    creation,
+                    status: PendingCreationStatus::RejectedPendingCleanup,
+                }
             }
-            Some(Ok(None)) => {
-                self.creation = None;
-                ComposerStatus::PendingResolutionRequired(None)
-            }
-            Some(Err(error)) => {
-                self.creation = None;
-                ComposerStatus::PendingResolutionRequired(Some(error))
-            }
-            None => ComposerStatus::PendingResolutionRequired(None),
+            Some(Ok(None)) | None => CreateState::PendingResolutionRequired,
+            Some(Err(error)) => CreateState::PendingResolutionFailed(error),
         }
     }
 
-    fn creation_for_submission(&self, cx: &App) -> Result<CalendarEventCreation, DraftError> {
-        if let Some(pending_creation) = &self.creation {
-            return Ok(pending_creation.clone());
+    fn set_edit_status(&mut self, new_status: EditStatus) {
+        if let ComposerState::Edit(EditState::Ready { status, .. }) = &mut self.state {
+            *status = new_status;
         }
-        self.build_creation(cx)
+    }
+
+    fn creation_for_submission(
+        &self,
+        cx: &App,
+    ) -> Option<Result<CalendarEventCreation, DraftError>> {
+        match &self.state {
+            ComposerState::Create(CreateState::Draft | CreateState::InvalidDraft(_)) => {
+                Some(self.build_creation(cx))
+            }
+            ComposerState::Create(CreateState::Pending { creation, .. }) => {
+                Some(Ok(creation.clone()))
+            }
+            ComposerState::Create(
+                CreateState::PendingResolutionRequired
+                | CreateState::PendingResolutionFailed(_)
+                | CreateState::Completed(_),
+            )
+            | ComposerState::Edit(_) => None,
+        }
     }
 
     fn build_creation(&self, cx: &App) -> Result<CalendarEventCreation, DraftError> {
@@ -751,17 +1037,16 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     }
 
     fn render_draft_validation(&self, colors: ColorTokens) -> Option<AnyElement> {
-        let ComposerStatus::InvalidDraft(draft_error) = self.status else {
-            return None;
-        };
+        let draft_error = self.state.validation_error()?;
         Some(render_draft_error(draft_error, colors).into_any_element())
     }
 
-    fn render_pending(&self, colors: ColorTokens) -> impl IntoElement {
-        let creation = self
-            .creation
-            .as_ref()
-            .expect("pending status retains its staged creation");
+    fn render_pending(
+        &self,
+        creation: &CalendarEventCreation,
+        status: PendingCreationStatus,
+        colors: ColorTokens,
+    ) -> impl IntoElement {
         let pending = div()
             .id("event-creation-pending")
             .debug_selector(|| "event-creation-pending".to_owned())
@@ -778,68 +1063,54 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .child(render_pending_range(creation))
             .when(
                 matches!(
-                    self.status,
-                    ComposerStatus::Submitting | ComposerStatus::DiscardingRejected
+                    status,
+                    PendingCreationStatus::Submitting | PendingCreationStatus::DiscardingRejected
                 ),
-                |element| element.child(render_creation_submitting(self.status, colors)),
+                |element| element.child(render_creation_submitting(status, colors)),
             )
-            .child(render_pending_explanation(self.status, colors));
+            .child(render_pending_explanation(status, colors));
         #[cfg(test)]
         let pending = pending.test_support();
         pending
     }
 
     fn render_status(&self, colors: ColorTokens, cx: &mut Context<Self>) -> Option<AnyElement> {
-        match self.status {
-            ComposerStatus::InvalidDraft(draft_error) => {
-                return Some(render_draft_error(draft_error, colors).into_any_element());
-            }
-            ComposerStatus::PendingResolutionRequired(Some(error)) => {
-                return Some(render_pending_resolution_failure(error, colors).into_any_element());
-            }
-            ComposerStatus::PendingResolutionRequired(None) => {
-                return Some(render_pending_operation_missing(colors).into_any_element());
-            }
-            ComposerStatus::RejectedPendingCleanup(Some(error)) => {
-                return Some(render_rejected_cleanup_failure(error, colors).into_any_element());
-            }
-            _ => {}
+        if let Some(status) = self
+            .render_draft_validation(colors)
+            .or_else(|| self.render_recovery_status(colors))
+        {
+            return Some(status);
         }
-        let status_text = match &self.mode {
-            ComposerMode::Create => creation_status_text(self.status),
-            ComposerMode::Edit { .. } => match self.status {
-                ComposerStatus::Deleting
-                | ComposerStatus::Deleted
-                | ComposerStatus::DeletedButNotCached
-                | ComposerStatus::DeleteOutcomeUnknown
-                | ComposerStatus::DeletionFailed(_) => deletion_status_text(self.status),
-                _ => update_status_text(self.status),
-            },
-        }?;
-        let message = render_status_message(status_text, self.status, colors);
-        if self.requires_calendar_write_permission_review() {
+        let status_text = self.state.status_text()?;
+        let message = render_status_message(status_text, self.state.status_style(), colors);
+        if self.state.requires_calendar_write_permission_review() {
             Some(render_calendar_permission_review(message, cx))
         } else {
             Some(message)
         }
     }
 
-    fn requires_calendar_write_permission_review(&self) -> bool {
-        matches!(
-            self.status,
-            ComposerStatus::Failed(CalendarWorkflowError::Provider(
-                CalendarOperationError::AccessDenied
-            )) | ComposerStatus::DeletionFailed(CalendarWorkflowError::Provider(
-                CalendarOperationError::AccessDenied
-            ))
-        )
+    fn render_recovery_status(&self, colors: ColorTokens) -> Option<AnyElement> {
+        match &self.state {
+            ComposerState::Create(CreateState::PendingResolutionFailed(error)) => {
+                Some(render_pending_resolution_failure(*error, colors).into_any_element())
+            }
+            ComposerState::Create(CreateState::PendingResolutionRequired) => {
+                Some(render_pending_operation_missing(colors).into_any_element())
+            }
+            ComposerState::Create(CreateState::Pending {
+                status: PendingCreationStatus::RejectedCleanupFailed(error),
+                ..
+            }) => Some(render_rejected_cleanup_failure(*error, colors).into_any_element()),
+            _ => None,
+        }
     }
 
     fn render_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.action_is_terminal() {
+        if self.state.action_is_terminal() {
             return render_close_action();
         }
-        if matches!(&self.mode, ComposerMode::Edit { .. }) {
+        if matches!(&self.state, ComposerState::Edit(_)) {
             let actions = div()
                 .flex()
                 .items_center()
@@ -850,7 +1121,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
                         .debug_selector(|| "event-composer-delete".to_owned())
                         .danger()
                         .label("Delete…")
-                        .disabled(!self.can_delete())
+                        .disabled(!self.state.can_delete())
                         .on_click(cx.listener(|composer, _, window, cx| {
                             composer.confirm_deletion(window, cx);
                         })),
@@ -864,50 +1135,18 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         }
     }
 
-    fn action_is_terminal(&self) -> bool {
-        matches!(
-            self.status,
-            ComposerStatus::Confirmed
-                | ComposerStatus::Rejected
-                | ComposerStatus::Updated
-                | ComposerStatus::UpdatedButNotCached
-                | ComposerStatus::UpdateOutcomeUnknown
-                | ComposerStatus::PendingResolutionRequired(_)
-        ) || matches!(
-            &self.mode,
-            ComposerMode::Edit {
-                editable_event: None
-            }
-        ) || matches!(&self.mode, ComposerMode::Edit { .. }) && is_terminal_edit_status(self.status)
-    }
-
     fn render_submit_action(&self, cx: &mut Context<Self>) -> AnyElement {
-        let submitting = matches!(
-            self.status,
-            ComposerStatus::Submitting | ComposerStatus::DiscardingRejected
-        );
+        let Some(label) = self.state.submit_label() else {
+            return render_close_action();
+        };
         Button::new("event-composer-submit")
             .debug_selector(|| "event-composer-submit".to_owned())
             .primary()
-            .label(self.submit_label())
-            .loading(submitting)
-            .disabled(submitting || !self.can_submit())
+            .label(label)
+            .loading(self.state.submit_is_loading())
+            .disabled(!self.state.can_submit())
             .on_click(cx.listener(|composer, _, _, cx| composer.submit(cx)))
             .into_any_element()
-    }
-
-    fn submit_label(&self) -> &'static str {
-        match (&self.mode, self.status) {
-            (ComposerMode::Edit { .. }, ComposerStatus::Submitting) => "Saving changes…",
-            (ComposerMode::Edit { .. }, _) => "Save changes",
-            (ComposerMode::Create, ComposerStatus::DiscardingRejected) => "Clearing draft…",
-            (ComposerMode::Create, ComposerStatus::RejectedPendingCleanup(_)) => {
-                "Clear rejected draft"
-            }
-            (ComposerMode::Create, ComposerStatus::Submitting) => "Creating event…",
-            (ComposerMode::Create, _) if self.creation.is_some() => "Retry event creation",
-            (ComposerMode::Create, _) => "Create event",
-        }
     }
 }
 
@@ -916,14 +1155,8 @@ impl<S: CalendarSession + ?Sized + 'static> EventEmitter<EventComposerEvent> for
 impl<S: CalendarSession + ?Sized + 'static> Render for EventComposer<S> {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().semantic_tokens().colors;
-        let has_pending_creation = self.creation.is_some();
         let write_in_progress = self.edit_write_in_progress();
-        let show_fields = match &self.mode {
-            ComposerMode::Create => !has_pending_creation,
-            ComposerMode::Edit { editable_event } => {
-                editable_event.is_some() && !is_terminal_edit_status(self.status)
-            }
-        };
+        let pending_creation = self.state.pending_creation();
         div()
             .id("calendar-event-composer")
             .when(write_in_progress, |element| {
@@ -933,16 +1166,16 @@ impl<S: CalendarSession + ?Sized + 'static> Render for EventComposer<S> {
             .flex_col()
             .gap_4()
             .p_4()
-            .when(has_pending_creation, |element| {
-                element.child(self.render_pending(colors))
+            .when_some(pending_creation, |element, (creation, status)| {
+                element.child(self.render_pending(creation, status, colors))
             })
-            .when(!has_pending_creation, |element| {
-                element.when(show_fields, |element| {
+            .when(pending_creation.is_none(), |element| {
+                element.when(self.state.show_fields(), |element| {
                     element.child(self.render_fields(colors))
                 })
             })
             .when(
-                matches!(self.status, ComposerStatus::LoadingEditableEvent),
+                matches!(&self.state, ComposerState::Edit(EditState::Loading)),
                 |element| element.child(render_edit_loading(colors)),
             )
             .when_some(self.render_status(colors, cx), |element, status| {
@@ -1068,15 +1301,18 @@ fn render_pending_range(creation: &CalendarEventCreation) -> impl IntoElement {
     div().text_sm().child(format_local_range(creation.draft()))
 }
 
-fn render_pending_explanation(status: ComposerStatus, colors: ColorTokens) -> impl IntoElement {
+fn render_pending_explanation(
+    status: PendingCreationStatus,
+    colors: ColorTokens,
+) -> impl IntoElement {
     let message = match status {
-        ComposerStatus::RejectedPendingCleanup(Some(_)) => {
+        PendingCreationStatus::RejectedCleanupFailed(_) => {
             "The rejected event stays saved until local cleanup succeeds."
         }
-        ComposerStatus::RejectedPendingCleanup(None) => {
+        PendingCreationStatus::RejectedPendingCleanup => {
             "Microsoft rejected this event. Clear the saved draft locally before submitting a corrected event."
         }
-        ComposerStatus::DiscardingRejected => "Clearing the rejected draft locally…",
+        PendingCreationStatus::DiscardingRejected => "Clearing the rejected draft locally…",
         _ => "This event may already exist in Microsoft. Retrying uses the same operation ID.",
     };
     div()
@@ -1085,8 +1321,11 @@ fn render_pending_explanation(status: ComposerStatus, colors: ColorTokens) -> im
         .child(message)
 }
 
-fn render_creation_submitting(status: ComposerStatus, colors: ColorTokens) -> impl IntoElement {
-    let message = if matches!(status, ComposerStatus::DiscardingRejected) {
+fn render_creation_submitting(
+    status: PendingCreationStatus,
+    colors: ColorTokens,
+) -> impl IntoElement {
+    let message = if matches!(status, PendingCreationStatus::DiscardingRejected) {
         "Clearing rejected event draft…"
     } else {
         "Creating event…"
@@ -1187,47 +1426,70 @@ fn render_pending_operation_missing(colors: ColorTokens) -> impl IntoElement {
     status
 }
 
-fn creation_status_text(status: ComposerStatus) -> Option<&'static str> {
-    match status {
-        ComposerStatus::Failed(error) => Some(creation_error_text(error)),
-        ComposerStatus::Confirmed => Some("Event created and saved to the calendar."),
-        ComposerStatus::ConfirmedButNotCached => Some(
+fn creation_status_text(state: &CreateState) -> Option<&'static str> {
+    match state {
+        CreateState::Pending {
+            status: PendingCreationStatus::Failed(error),
+            ..
+        } => Some(creation_error_text(*error)),
+        CreateState::Completed(CreationOutcome::Confirmed) => {
+            Some("Event created and saved to the calendar.")
+        }
+        CreateState::Pending {
+            status: PendingCreationStatus::ConfirmedButNotCached,
+            ..
+        } => Some(
             "Microsoft confirmed the event, but it could not be saved locally. Retry to recover it safely.",
         ),
-        ComposerStatus::Rejected => {
+        CreateState::Completed(CreationOutcome::Rejected) => {
             Some("Microsoft rejected this event. Correct the details and submit a new event.")
         }
-        ComposerStatus::RejectedPendingCleanup(_) => None,
-        ComposerStatus::DiscardingRejected => Some("Clearing the rejected event draft…"),
-        _ => None,
+        CreateState::Pending {
+            status:
+                PendingCreationStatus::RejectedPendingCleanup
+                | PendingCreationStatus::RejectedCleanupFailed(_),
+            ..
+        } => None,
+        CreateState::Pending {
+            status: PendingCreationStatus::DiscardingRejected,
+            ..
+        } => Some("Clearing the rejected event draft…"),
+        CreateState::Draft
+        | CreateState::InvalidDraft(_)
+        | CreateState::Pending {
+            status: PendingCreationStatus::Ready | PendingCreationStatus::Submitting,
+            ..
+        }
+        | CreateState::PendingResolutionRequired
+        | CreateState::PendingResolutionFailed(_) => None,
     }
 }
 
-fn update_status_text(status: ComposerStatus) -> Option<&'static str> {
+fn update_status_text(status: EditStatus) -> Option<&'static str> {
     match status {
-        ComposerStatus::Failed(error) => Some(update_error_text(error)),
-        ComposerStatus::Updated => Some("Event changes were saved to the calendar."),
-        ComposerStatus::UpdatedButNotCached => Some(
+        EditStatus::Failed(error) => Some(update_error_text(error)),
+        EditStatus::Updated => Some("Event changes were saved to the calendar."),
+        EditStatus::UpdatedButNotCached => Some(
             "Microsoft confirmed the changes, but they could not be saved locally. Sync every calendar week already synced for this account before editing another event.",
         ),
-        ComposerStatus::UpdateOutcomeUnknown => Some(
+        EditStatus::UpdateOutcomeUnknown => Some(
             "Microsoft may have applied these changes. Sync every calendar week already synced for this account before editing another event.",
         ),
         _ => None,
     }
 }
 
-fn deletion_status_text(status: ComposerStatus) -> Option<&'static str> {
+fn deletion_status_text(status: EditStatus) -> Option<&'static str> {
     match status {
-        ComposerStatus::Deleting => Some("Deleting the appointment…"),
-        ComposerStatus::Deleted => Some("Appointment deleted from the calendar."),
-        ComposerStatus::DeletedButNotCached => Some(
+        EditStatus::Deleting => Some("Deleting the appointment…"),
+        EditStatus::Deleted => Some("Appointment deleted from the calendar."),
+        EditStatus::DeletedButNotCached => Some(
             "Microsoft confirmed the deletion, but the local calendar could not be updated. Sync every calendar week already synced for this account before making another calendar change.",
         ),
-        ComposerStatus::DeleteOutcomeUnknown => Some(
+        EditStatus::DeleteOutcomeUnknown => Some(
             "Microsoft may have deleted this appointment. Sync every calendar week already synced for this account before making another calendar change.",
         ),
-        ComposerStatus::DeletionFailed(error) => Some(deletion_error_text(error)),
+        EditStatus::DeletionFailed(error) => Some(deletion_error_text(error)),
         _ => None,
     }
 }
@@ -1268,18 +1530,18 @@ fn deletion_error_text(error: CalendarWorkflowError) -> &'static str {
 
 fn render_status_message(
     message: &'static str,
-    status: ComposerStatus,
+    style: StatusStyle,
     colors: ColorTokens,
 ) -> AnyElement {
-    let color = if matches!(status, ComposerStatus::Confirmed | ComposerStatus::Updated) {
-        colors.foreground
-    } else {
-        colors.destructive
+    let (role, color) = match style {
+        StatusStyle::Success => (Role::Status, colors.foreground),
+        StatusStyle::DestructiveStatus => (Role::Status, colors.destructive),
+        StatusStyle::Error => (Role::Alert, colors.destructive),
     };
     let status = div()
         .id("event-creation-status")
         .debug_selector(|| "event-creation-status".to_owned())
-        .role(status_role(status))
+        .role(role)
         .text_sm()
         .text_color(color)
         .child(message);
@@ -1313,17 +1575,6 @@ fn render_calendar_permission_review<S: CalendarSession + ?Sized + 'static>(
         .into_any_element()
 }
 
-fn status_role(status: ComposerStatus) -> Role {
-    if matches!(
-        status,
-        ComposerStatus::Confirmed | ComposerStatus::Updated | ComposerStatus::Deleted
-    ) {
-        Role::Status
-    } else {
-        Role::Alert
-    }
-}
-
 fn render_close_action() -> AnyElement {
     Button::new("event-composer-close")
         .debug_selector(|| "event-composer-close".to_owned())
@@ -1334,16 +1585,16 @@ fn render_close_action() -> AnyElement {
         .into_any_element()
 }
 
-fn is_terminal_edit_status(status: ComposerStatus) -> bool {
+fn is_terminal_edit_status(status: EditStatus) -> bool {
     matches!(
         status,
-        ComposerStatus::Updated
-            | ComposerStatus::UpdatedButNotCached
-            | ComposerStatus::UpdateOutcomeUnknown
-            | ComposerStatus::Deleted
-            | ComposerStatus::DeletedButNotCached
-            | ComposerStatus::DeleteOutcomeUnknown
-            | ComposerStatus::DeletionFailed(
+        EditStatus::Updated
+            | EditStatus::UpdatedButNotCached
+            | EditStatus::UpdateOutcomeUnknown
+            | EditStatus::Deleted
+            | EditStatus::DeletedButNotCached
+            | EditStatus::DeleteOutcomeUnknown
+            | EditStatus::DeletionFailed(
                 CalendarWorkflowError::InvalidEditableEvent
                     | CalendarWorkflowError::CalendarWriteSyncRequired
                     | CalendarWorkflowError::Provider(
@@ -1352,7 +1603,7 @@ fn is_terminal_edit_status(status: ComposerStatus) -> bool {
                             | CalendarOperationError::DeleteOutcomeUnknown
                     )
             )
-            | ComposerStatus::Failed(
+            | EditStatus::Failed(
                 CalendarWorkflowError::InvalidEditableEvent
                     | CalendarWorkflowError::InvalidUpdateConfirmation
                     | CalendarWorkflowError::CalendarWriteSyncRequired
@@ -1593,14 +1844,17 @@ fn cache_creation_error_text(error: CalendarCacheError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use chrono::{NaiveDate, NaiveDateTime};
-    use einfach_mail_application::{CalendarCacheError, CalendarWorkflowError};
+    use einfach_mail_application::{
+        CalendarCacheError, CalendarOperationError, CalendarWorkflowError,
+    };
     use einfach_mail_domain::CalendarViewRange;
     use jiff::tz::TimeZone;
     use time::{Date, Month, PrimitiveDateTime, Time};
 
     use super::{
-        DraftError, creation_error_text, event_endpoints_within_view_week, picker_value_for_offset,
-        resolve_local_datetime, selected_event_time,
+        ComposerState, CreateState, DraftError, EditState, creation_error_text,
+        event_endpoints_within_view_week, picker_value_for_offset, resolve_local_datetime,
+        selected_event_time,
     };
 
     fn local_datetime(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> NaiveDateTime {
@@ -1608,6 +1862,58 @@ mod tests {
             .expect("synthetic date is valid")
             .and_hms_opt(hour, minute, 0)
             .expect("synthetic local time is valid")
+    }
+
+    #[test]
+    fn composer_state_keeps_draft_and_recovery_actions_distinct() {
+        let draft = ComposerState::Create(CreateState::Draft);
+        assert!(draft.show_fields());
+        assert!(draft.can_submit());
+        assert!(!draft.action_is_terminal());
+        assert_eq!(draft.submit_label(), Some("Create event"));
+
+        let invalid_draft =
+            ComposerState::Create(CreateState::InvalidDraft(DraftError::MissingSubject));
+        assert!(invalid_draft.show_fields());
+        assert!(invalid_draft.can_submit());
+        assert_eq!(
+            invalid_draft.validation_error(),
+            Some(DraftError::MissingSubject)
+        );
+
+        let unresolved = ComposerState::Create(CreateState::PendingResolutionRequired);
+        assert!(unresolved.show_fields());
+        assert!(!unresolved.can_submit());
+        assert!(unresolved.action_is_terminal());
+        assert_eq!(unresolved.submit_label(), None);
+    }
+
+    #[test]
+    fn failed_edit_load_keeps_the_error_and_permission_review_path() {
+        let error = CalendarWorkflowError::Provider(CalendarOperationError::AccessDenied);
+        let failed = ComposerState::Edit(EditState::LoadFailed(error));
+
+        assert!(!failed.show_fields());
+        assert!(!failed.can_submit());
+        assert!(failed.action_is_terminal());
+        assert!(failed.requires_calendar_write_permission_review());
+        assert_eq!(
+            failed.status_text(),
+            Some(
+                "Microsoft denied access to update this event. Review the requested permission or your organization's consent policy."
+            )
+        );
+    }
+
+    #[test]
+    fn edit_loading_hides_fields_and_only_allows_closing_the_sheet() {
+        let loading = ComposerState::Edit(EditState::Loading);
+
+        assert!(!loading.show_fields());
+        assert!(!loading.can_submit());
+        assert!(loading.action_is_terminal());
+        assert!(matches!(loading, ComposerState::Edit(EditState::Loading)));
+        assert_eq!(loading.submit_label(), None);
     }
 
     #[test]
