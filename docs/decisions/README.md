@@ -51,8 +51,9 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0044](0044-block-calendar-actions-during-replacement-sync.md) | Block calendar actions during replacement sync | Accepted |
 | [0045](0045-incremental-graph-permissions.md) | Request Graph permissions incrementally | Accepted; live consent verification remains open |
 | [0046](0046-account-cache-removal-port.md) | Use one account cache removal port | Accepted |
-| [0047](0047-share-write-recovery-across-account-sessions.md) | Share write recovery across account sessions | Accepted |
+| [0047](0047-share-write-recovery-across-account-sessions.md) | Share write readiness across account sessions | Accepted |
 | [0048](0048-redact-sensitive-debug-output.md) | Redact sensitive domain Debug output | Accepted |
 | [0049](0049-account-cache-open-errors.md) | Use account-scoped errors when opening the shared cache | Accepted |
 | [0050](0050-name-gpui-date-pickers-through-component-patch.md) | Name styled GPUI DatePickers through a local API patch | Accepted |
 | [0051](0051-defer-calendar-id.md) | Defer a calendar identifier until calendar selection exists | Accepted |
+| [0052](0052-persist-calendar-event-write-recovery.md) | Persist calendar event write recovery | Accepted |
