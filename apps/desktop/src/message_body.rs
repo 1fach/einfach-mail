@@ -1,11 +1,15 @@
 use std::sync::Arc;
 
 use einfach_mail_application::{
-    MessageBodyForDisplay, SanitizedEmailHtml, allowed_external_message_url,
+    ExternalMessageLink, MessageBodyForDisplay, SanitizedEmailHtml, allowed_external_message_url,
 };
-use gpui_kit::component::ColorTokens;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::text::TextView;
+use gpui_kit::component::{
+    ColorTokens,
+    button::{Button, ButtonVariants},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
+};
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, ImageSource, IntoElement, Role, SharedString, base::TextSelectionLayer, div,
@@ -88,6 +92,35 @@ fn render_sanitized_html_body(html: &SanitizedEmailHtml) -> AnyElement {
         .flex_1()
         .min_w_0()
         .min_h_0()
+        .flex()
+        .flex_col()
+        .children(render_message_links_tools(render_message_links_action(
+            html,
+        )))
+        .child(render_html_content_region(html))
+        .into_any_element()
+}
+
+fn render_message_links_tools(action: Option<AnyElement>) -> Option<AnyElement> {
+    action.map(|action| {
+        div()
+            .id("mail-message-html-tools")
+            .flex()
+            .justify_end()
+            .px_6()
+            .py_2()
+            .child(action)
+            .into_any_element()
+    })
+}
+
+fn render_html_content_region(html: &SanitizedEmailHtml) -> AnyElement {
+    div()
+        .id("mail-message-html-content-region")
+        .debug_selector(|| "mail-message-html-content-region".into())
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
         .overflow_y_scrollbar()
         .p_6()
         .child(TextSelectionLayer)
@@ -105,6 +138,47 @@ fn render_sanitized_html_body(html: &SanitizedEmailHtml) -> AnyElement {
                 }),
         )
         .into_any_element()
+}
+
+fn render_message_links_action(html: &SanitizedEmailHtml) -> Option<AnyElement> {
+    if html.external_links().is_empty() {
+        return None;
+    }
+    let html = html.clone();
+    Some(
+        Button::new("mail-message-links")
+            .debug_selector(|| "mail-message-links".to_owned())
+            .ghost()
+            .label("Links")
+            .accessibility_label("Message links")
+            .dropdown_menu(move |menu, _, _| build_message_links_menu(menu, &html))
+            .into_any_element(),
+    )
+}
+
+fn build_message_links_menu(menu: PopupMenu, html: &SanitizedEmailHtml) -> PopupMenu {
+    let menu = html
+        .external_links()
+        .iter()
+        .enumerate()
+        .fold(menu, |menu, (index, link)| {
+            menu.item(message_link_menu_item(index, link))
+        });
+    if html.external_links_omitted() {
+        menu.item(PopupMenuItem::label("Additional links omitted."))
+    } else {
+        menu
+    }
+}
+
+fn message_link_menu_item(index: usize, link: &ExternalMessageLink) -> PopupMenuItem {
+    let label = format!("Link {} — {}", index + 1, link.host());
+    let destination = link.as_str().to_owned();
+    PopupMenuItem::link(label, destination.clone()).on_click(move |event, _, cx| {
+        if !event.is_secondary() {
+            cx.open_url(&destination);
+        }
+    })
 }
 
 fn render_oversized_html_fallback(colors: ColorTokens) -> AnyElement {

@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use ammonia::{Builder, UrlRelative};
@@ -15,6 +15,7 @@ const MAX_HTML_FALLBACK_INPUT_BYTES: usize = MAX_HTML_BODY_BYTES / 8;
 // Ammonia can replace one-byte NUL characters with the eight-byte entity `&#65533;`.
 const MAX_HTML_FALLBACK_TEXT_BYTES: usize = MAX_HTML_BODY_BYTES / 128;
 const HTML_FALLBACK_WRAP_WIDTH: usize = 80;
+const MAX_EXTERNAL_MESSAGE_LINKS: usize = 100;
 
 const ALLOWED_TAGS: &[&str] = &[
     "a",
@@ -121,22 +122,40 @@ impl fmt::Debug for MessageBodyForDisplay {
 
 /// HTML sanitized for display by GPUI Kit's native text renderer.
 ///
-/// Its private field prevents callers from constructing this type from raw
+/// Its private fields prevent callers from constructing this type from raw
 /// provider or cache content.
 #[derive(Clone, Eq, PartialEq)]
-pub struct SanitizedEmailHtml(Arc<str>);
+pub struct SanitizedEmailHtml {
+    html: Arc<str>,
+    external_links: Arc<[ExternalMessageLink]>,
+    external_links_omitted: bool,
+}
 
 impl SanitizedEmailHtml {
     /// Returns the sanitized HTML fragment.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.html
     }
 
     /// Clones the immutable content without copying its bytes.
     #[must_use]
     pub fn shared_content(&self) -> Arc<str> {
-        Arc::clone(&self.0)
+        Arc::clone(&self.html)
+    }
+
+    /// Returns up to 100 distinct validated external links collected from the fragment.
+    ///
+    /// Check [`Self::external_links_omitted`] to learn whether the sanitizer found more.
+    #[must_use]
+    pub fn external_links(&self) -> &[ExternalMessageLink] {
+        &self.external_links
+    }
+
+    /// Reports whether the sanitizer found more safe links than the exposed limit.
+    #[must_use]
+    pub fn external_links_omitted(&self) -> bool {
+        self.external_links_omitted
     }
 }
 
@@ -148,13 +167,22 @@ impl fmt::Debug for SanitizedEmailHtml {
 
 /// A validated HTTP or HTTPS destination from a message link.
 #[derive(Clone, Eq, PartialEq)]
-pub struct ExternalMessageLink(Box<str>);
+pub struct ExternalMessageLink {
+    url: Arc<str>,
+    host: Arc<str>,
+}
 
 impl ExternalMessageLink {
     /// Returns the normalized destination that passed message-link policy.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.url
+    }
+
+    /// Returns the normalized host without a path, query, or fragment.
+    #[must_use]
+    pub fn host(&self) -> &str {
+        &self.host
     }
 }
 
@@ -180,12 +208,16 @@ pub fn prepare_message_body_for_display(body: &MessageBody) -> MessageBodyForDis
 }
 
 fn prepare_html_for_display(raw_html: &str) -> MessageBodyForDisplay {
-    let sanitized_html = sanitize_html(raw_html);
-    if sanitized_html.len() <= MAX_HTML_BODY_BYTES {
-        return MessageBodyForDisplay::SanitizedHtml(SanitizedEmailHtml(Arc::from(sanitized_html)));
+    let sanitized_fragment = sanitize_html(raw_html);
+    if sanitized_fragment.html.len() <= MAX_HTML_BODY_BYTES {
+        return MessageBodyForDisplay::SanitizedHtml(SanitizedEmailHtml {
+            html: Arc::from(sanitized_fragment.html),
+            external_links: sanitized_fragment.external_links,
+            external_links_omitted: sanitized_fragment.external_links_omitted,
+        });
     }
 
-    plain_text_fallback(&sanitized_html).map_or(
+    plain_text_fallback(&sanitized_fragment.html).map_or(
         MessageBodyForDisplay::HtmlTooLarge,
         MessageBodyForDisplay::PlainTextFallback,
     )
@@ -194,16 +226,64 @@ fn prepare_html_for_display(raw_html: &str) -> MessageBodyForDisplay {
 /// Parses and validates a message link before the desktop opens it externally.
 ///
 /// Returns a link only when it is absolute HTTP or HTTPS and contains no user
-/// information, so a username cannot appear before the actual host.
+/// information before the host.
 #[must_use]
 pub fn allowed_external_message_url(href: &str) -> Option<ExternalMessageLink> {
     let url = Url::parse(href).ok()?;
     let is_web_url = matches!(url.scheme(), "http" | "https");
     let has_no_user_info = url.username().is_empty() && url.password().is_none();
-    (is_web_url && has_no_user_info).then(|| ExternalMessageLink(url.as_str().into()))
+    if !is_web_url || !has_no_user_info {
+        return None;
+    }
+    let host = url.host_str()?;
+    Some(ExternalMessageLink {
+        url: Arc::from(url.as_str()),
+        host: Arc::from(host),
+    })
 }
 
-fn sanitize_html(raw_html: &str) -> String {
+struct SanitizedFragment {
+    html: String,
+    external_links: Arc<[ExternalMessageLink]>,
+    external_links_omitted: bool,
+}
+
+#[derive(Default)]
+struct ExternalMessageLinkCollector {
+    links: Vec<ExternalMessageLink>,
+    seen: HashSet<Arc<str>>,
+    omitted: bool,
+}
+
+impl ExternalMessageLinkCollector {
+    fn push(&mut self, link: ExternalMessageLink) {
+        if self.seen.contains(link.as_str()) {
+            return;
+        }
+        if self.links.len() == MAX_EXTERNAL_MESSAGE_LINKS {
+            self.omitted = true;
+            return;
+        }
+        self.seen.insert(Arc::clone(&link.url));
+        self.links.push(link);
+    }
+}
+
+fn sanitize_html(raw_html: &str) -> SanitizedFragment {
+    let collected_links = Arc::new(Mutex::new(ExternalMessageLinkCollector::default()));
+    let sanitized_html = clean_html(raw_html, Arc::clone(&collected_links));
+    let mut collected_links = collected_links
+        .lock()
+        .expect("sanitizer link collection remains unpoisoned");
+    let external_links_omitted = collected_links.omitted;
+    SanitizedFragment {
+        html: sanitized_html,
+        external_links: std::mem::take(&mut collected_links.links).into(),
+        external_links_omitted,
+    }
+}
+
+fn clean_html(raw_html: &str, collected_links: Arc<Mutex<ExternalMessageLinkCollector>>) -> String {
     let mut builder = Builder::default();
     builder
         .tags(ALLOWED_TAGS.iter().copied().collect())
@@ -211,8 +291,30 @@ fn sanitize_html(raw_html: &str) -> String {
         .generic_attributes(HashSet::new())
         .url_schemes(HashSet::from(["http", "https"]))
         .url_relative(UrlRelative::Deny)
-        .clean_content_tags(REMOVE_CONTENT_TAGS.iter().copied().collect());
+        .clean_content_tags(REMOVE_CONTENT_TAGS.iter().copied().collect())
+        .attribute_filter(move |tag, attribute, value| {
+            collect_external_message_link(&collected_links, tag, attribute, value);
+            Some(value.into())
+        });
     builder.clean(raw_html).to_string()
+}
+
+fn collect_external_message_link(
+    collected_links: &Mutex<ExternalMessageLinkCollector>,
+    tag: &str,
+    attribute: &str,
+    value: &str,
+) {
+    if tag != "a" || attribute != "href" {
+        return;
+    }
+    let Some(link) = allowed_external_message_url(value) else {
+        return;
+    };
+    collected_links
+        .lock()
+        .expect("sanitizer link collection remains unpoisoned")
+        .push(link);
 }
 
 fn plain_text_fallback(sanitized_html: &str) -> Option<SanitizedEmailHtml> {
@@ -228,7 +330,11 @@ fn plain_text_fallback(sanitized_html: &str) -> Option<SanitizedEmailHtml> {
 
     let escaped_text = ammonia::clean_text(plain_text);
     let safe_html = format!("<pre>{escaped_text}</pre>");
-    Some(SanitizedEmailHtml(Arc::from(safe_html)))
+    Some(SanitizedEmailHtml {
+        html: Arc::from(safe_html),
+        external_links: Vec::new().into(),
+        external_links_omitted: false,
+    })
 }
 
 fn bounded_prefix(content: &str, max_bytes: usize) -> &str {
@@ -244,8 +350,8 @@ mod tests {
     use einfach_mail_domain::{MessageBody, MessageBodyType};
 
     use super::{
-        MAX_HTML_BODY_BYTES, MAX_HTML_FALLBACK_TEXT_BYTES, MessageBodyForDisplay,
-        allowed_external_message_url, prepare_message_body_for_display,
+        MAX_EXTERNAL_MESSAGE_LINKS, MAX_HTML_BODY_BYTES, MAX_HTML_FALLBACK_TEXT_BYTES,
+        MessageBodyForDisplay, allowed_external_message_url, prepare_message_body_for_display,
     };
 
     fn sanitized_html_for_test(raw_html: &str) -> String {
@@ -286,6 +392,76 @@ mod tests {
         assert!(!html.as_str().contains("onclick"));
         assert!(!html.as_str().contains("tracker.example.test"));
         assert!(!html.as_str().contains("secret marker"));
+    }
+
+    #[test]
+    fn collects_only_distinct_safe_links_from_retained_content() {
+        let body = MessageBody::new(
+            MessageBodyType::Html,
+            concat!(
+                "<p><a href=\"https://mail.example.test/thread?tracking=marker\">first</a></p>",
+                "<p><a href=\"https://mail.example.test/thread?tracking=marker\">duplicate</a></p>",
+                "<a href=\"https://person@mail.example.test/private\">userinfo</a>",
+                "<svg><a href=\"https://hidden.example.test/removed\">hidden svg link</a></svg>",
+                "<script><a href=\"https://hidden.example.test/script\">hidden script link</a></script>",
+                "<a href=\"javascript:alert(1)\">unsafe</a>"
+            )
+            .to_owned(),
+        );
+
+        let MessageBodyForDisplay::SanitizedHtml(html) = prepare_message_body_for_display(&body)
+        else {
+            panic!("normal-sized HTML is sanitized");
+        };
+        let links = html.external_links();
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].as_str(),
+            "https://mail.example.test/thread?tracking=marker"
+        );
+        assert_eq!(links[0].host(), "mail.example.test");
+        assert!(!html.external_links_omitted());
+        assert!(
+            !format!("{links:?}").contains("tracking=marker"),
+            "link debug output must redact its destination"
+        );
+    }
+
+    #[test]
+    fn reports_when_the_distinct_safe_link_limit_is_exceeded() {
+        let build_body = |link_count: usize| {
+            let links = (0..link_count)
+                .map(|index| {
+                    format!(
+                        "<a href=\"https://link-{index}.example.test/private?tracking=marker-{index}\">link</a>"
+                    )
+                })
+                .collect::<String>();
+            MessageBody::new(MessageBodyType::Html, links)
+        };
+
+        let within_limit =
+            prepare_message_body_for_display(&build_body(MAX_EXTERNAL_MESSAGE_LINKS));
+        let MessageBodyForDisplay::SanitizedHtml(within_limit) = within_limit else {
+            panic!("normal-sized HTML remains sanitized");
+        };
+        assert_eq!(
+            within_limit.external_links().len(),
+            MAX_EXTERNAL_MESSAGE_LINKS
+        );
+        assert!(!within_limit.external_links_omitted());
+
+        let over_limit =
+            prepare_message_body_for_display(&build_body(MAX_EXTERNAL_MESSAGE_LINKS + 1));
+        let MessageBodyForDisplay::SanitizedHtml(over_limit) = over_limit else {
+            panic!("normal-sized HTML remains sanitized");
+        };
+        assert_eq!(
+            over_limit.external_links().len(),
+            MAX_EXTERNAL_MESSAGE_LINKS
+        );
+        assert!(over_limit.external_links_omitted());
     }
 
     #[test]
@@ -525,6 +701,7 @@ mod tests {
             "/relative/path",
             "//tracker.example.test/path",
             "https://person@mail.example.test/path",
+            "https://:password@mail.example.test/path",
         ] {
             assert!(
                 allowed_external_message_url(href).is_none(),
