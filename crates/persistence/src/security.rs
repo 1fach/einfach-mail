@@ -40,7 +40,7 @@ struct CachePaths {
 /// Holds the lifecycle gate while an open cache attempts account removal.
 pub(super) struct AccountRemovalLock {
     account_lock: Arc<File>,
-    _lifecycle_lock: File,
+    lifecycle_lock: Option<File>,
     restore_shared_on_drop: bool,
 }
 
@@ -59,7 +59,7 @@ impl AccountRemovalLock {
         let lifecycle_lock = lock_account_directory_exclusive(lifecycle_lock_path)?;
         let mut removal_lock = Self {
             account_lock,
-            _lifecycle_lock: lifecycle_lock,
+            lifecycle_lock: Some(lifecycle_lock),
             restore_shared_on_drop: true,
         };
         if let Err(error) = removal_lock.account_lock.try_lock() {
@@ -91,9 +91,23 @@ impl AccountRemovalLock {
 impl Drop for AccountRemovalLock {
     fn drop(&mut self) {
         if self.restore_shared_on_drop {
-            let _ = restore_shared_account_lock(&self.account_lock);
+            let restore_result = restore_shared_account_lock(&self.account_lock);
+            if let Some(lifecycle_lock) =
+                take_lifecycle_lock_if_restore_failed(restore_result, &mut self.lifecycle_lock)
+            {
+                // Block new opens and removals until process exit if shared ownership is lost.
+                std::mem::forget(lifecycle_lock);
+            }
         }
     }
+}
+
+fn take_lifecycle_lock_if_restore_failed(
+    restore_result: Result<(), MailCacheError>,
+    lifecycle_lock: &mut Option<File>,
+) -> Option<File> {
+    restore_result.err()?;
+    lifecycle_lock.take()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -454,8 +468,9 @@ mod tests {
     };
 
     use super::{
-        KeyLookup, MailCacheError, classify_key_lookup, open_test_database, remove_database_files,
-        with_suffix,
+        KeyLookup, MailCacheError, classify_key_lookup, lock_account_directory_exclusive,
+        lock_account_directory_shared, open_test_database, remove_database_files,
+        take_lifecycle_lock_if_restore_failed, with_suffix,
     };
     use keyring::Error as KeyringError;
 
@@ -680,6 +695,33 @@ mod tests {
                 .await
                 .expect("first synthetic database closes");
         });
+    }
+
+    #[test]
+    fn failed_shared_lock_restore_keeps_lifecycle_gate_held() {
+        let directory = tempfile::tempdir().expect("synthetic cache root is created");
+        let lifecycle_lock_path = directory.path().join("account/mail-cache.lifecycle.lock");
+        let mut lifecycle_lock = Some(
+            lock_account_directory_exclusive(&lifecycle_lock_path)
+                .expect("synthetic lifecycle lock is acquired"),
+        );
+
+        let retained_lifecycle_lock = take_lifecycle_lock_if_restore_failed(
+            Err(MailCacheError::Unavailable),
+            &mut lifecycle_lock,
+        )
+        .expect("failed restoration retains the lifecycle lock");
+
+        assert!(lifecycle_lock.is_none());
+        assert_eq!(
+            lock_account_directory_shared(&lifecycle_lock_path).err(),
+            Some(MailCacheError::InUse)
+        );
+
+        drop(retained_lifecycle_lock);
+        let shared_lock = lock_account_directory_shared(&lifecycle_lock_path)
+            .expect("a cache open can proceed after the retained lock is released");
+        drop(shared_lock);
     }
 
     #[test]
