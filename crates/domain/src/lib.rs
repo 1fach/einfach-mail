@@ -14,7 +14,7 @@ mod mailbox;
 pub use account::{AccountProfile, MissingAccountLabel};
 pub use calendar::{
     CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
-    CalendarField, CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
+    CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
     CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference,
     InvalidCalendarOccurrenceTime, InvalidCalendarViewRange, NewCalendarOccurrenceError,
 };
