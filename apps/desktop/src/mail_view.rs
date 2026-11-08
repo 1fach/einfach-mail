@@ -56,8 +56,7 @@ pub(crate) struct MailView {
     profile: AccountProfile,
     workflow: Arc<dyn MailSession>,
     permission_requester: Option<Arc<dyn MailPermissionRequester>>,
-    pending_send: Option<PendingMailSend>,
-    pending_send_error: Option<MailCacheError>,
+    pending_send: Result<Option<PendingMailSend>, MailCacheError>,
     composer: Option<Entity<MailComposer>>,
     composer_subscription: Option<Subscription>,
     folders: Vec<MailFolder>,
@@ -71,7 +70,6 @@ pub(crate) struct MailView {
     sync_state: Option<MailSyncState>,
     sync_status: SyncStatus,
     sync_task: Option<Task<()>>,
-    selected_message_id: Option<MessageId>,
     message_detail_state: MessageDetailState,
     message_task: Option<Task<()>>,
     read_state_update: ReadStateUpdateStatus,
@@ -125,7 +123,7 @@ fn empty_message_detail_copy(
 
 enum MessageDetailState {
     Empty,
-    Loading,
+    Loading(MessageId),
     Opened(Box<OpenedMessage>),
     MoveCompleted {
         destination_folder: FolderReference,
@@ -133,7 +131,10 @@ enum MessageDetailState {
         open_action_label: &'static str,
     },
     DeleteCompleted,
-    Failed(MailWorkflowError),
+    Failed {
+        message_id: MessageId,
+        error: MailWorkflowError,
+    },
 }
 
 enum MessageMoveStatus {
@@ -371,8 +372,7 @@ impl MailView {
             profile,
             workflow,
             permission_requester,
-            pending_send: None,
-            pending_send_error: Some(MailCacheError::Unavailable),
+            pending_send: Err(MailCacheError::Unavailable),
             composer: None,
             composer_subscription: None,
             folders: Vec::new(),
@@ -386,7 +386,6 @@ impl MailView {
             sync_state: None,
             sync_status: SyncStatus::LoadingCache,
             sync_task: None,
-            selected_message_id: None,
             message_detail_state: MessageDetailState::Empty,
             message_task: None,
             read_state_update: ReadStateUpdateStatus::Idle,
@@ -453,17 +452,7 @@ impl MailView {
         self.set_messages(snapshot.messages);
         self.sync_state = snapshot.sync_state;
         self.selected_folder_write_sync_required = snapshot.folder_write_sync_required;
-        match snapshot.pending_send {
-            Ok(pending) => {
-                self.pending_send = pending;
-                self.pending_send_error = None;
-            }
-            Err(error) => {
-                self.pending_send = None;
-                self.pending_send_error = Some(error);
-            }
-        }
-        self.selected_message_id = None;
+        self.pending_send = snapshot.pending_send;
         self.message_list_state = MessageListState::Ready;
         self.message_detail_state = MessageDetailState::Empty;
         self.message_task = None;
@@ -471,6 +460,17 @@ impl MailView {
         self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
         self.message_move_status = MessageMoveStatus::Idle;
         self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
+    }
+
+    fn selected_message_id(&self) -> Option<&MessageId> {
+        match &self.message_detail_state {
+            MessageDetailState::Loading(message_id)
+            | MessageDetailState::Failed { message_id, .. } => Some(message_id),
+            MessageDetailState::Opened(opened) => Some(opened.message().id()),
+            MessageDetailState::Empty
+            | MessageDetailState::MoveCompleted { .. }
+            | MessageDetailState::DeleteCompleted => None,
+        }
     }
 
     fn set_messages(&mut self, messages: Vec<MailMessage>) {
@@ -512,7 +512,7 @@ impl MailView {
         let snapshot =
             snapshot.filter(|_| self.selected_folder.as_ref() == requested_folder.as_ref());
         let message_to_reopen = snapshot.as_ref().and_then(|snapshot| {
-            let selected_message = self.selected_message_id.as_ref()?;
+            let selected_message = self.selected_message_id()?;
             snapshot
                 .messages
                 .iter()
@@ -522,8 +522,7 @@ impl MailView {
         if let Some(snapshot) = snapshot {
             self.apply_snapshot(snapshot);
             if let Some(message_id) = &message_to_reopen {
-                self.selected_message_id = Some(message_id.clone());
-                self.message_detail_state = MessageDetailState::Loading;
+                self.message_detail_state = MessageDetailState::Loading(message_id.clone());
             }
         }
         if sync_reconciled {
@@ -541,7 +540,6 @@ impl MailView {
         drop(self.message_update_task.take());
         self.sync_status = SyncStatus::Idle;
         self.selected_folder = None;
-        self.selected_message_id = None;
         self.sync_state = None;
         self.folders.clear();
         self.messages.clear();
@@ -567,7 +565,6 @@ impl MailView {
         self.selected_folder = Some(folder.clone());
         self.selected_folder_write_sync_required = true;
         self.sync_state = None;
-        self.selected_message_id = None;
         self.message_list_state = MessageListState::Loading;
         self.message_detail_state = MessageDetailState::Empty;
         self.read_state_update = ReadStateUpdateStatus::Idle;
@@ -614,8 +611,7 @@ impl MailView {
         let Some(folder) = self.selected_folder.clone() else {
             return;
         };
-        self.selected_message_id = Some(message_id.clone());
-        self.message_detail_state = MessageDetailState::Loading;
+        self.message_detail_state = MessageDetailState::Loading(message_id.clone());
         let workflow = Arc::clone(&self.workflow);
         let request_message_id = message_id.clone();
         self.message_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -625,12 +621,12 @@ impl MailView {
                 .spawn(async move { workflow.open_message(&folder, &request_message_id).await })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                if view.selected_message_id.as_ref() != Some(&message_id) {
+                if view.selected_message_id() != Some(&message_id) {
                     return;
                 }
                 view.message_detail_state = match opened {
                     Ok(message) => MessageDetailState::Opened(Box::new(message)),
-                    Err(error) => MessageDetailState::Failed(error),
+                    Err(error) => MessageDetailState::Failed { message_id, error },
                 };
                 view.message_task = None;
                 cx.notify();
@@ -643,7 +639,7 @@ impl MailView {
         if self.message_update_in_progress() {
             return;
         }
-        let selected_index = self.selected_message_id.as_ref().and_then(|selected| {
+        let selected_index = self.selected_message_id().and_then(|selected| {
             self.messages
                 .iter()
                 .position(|message| message.id() == selected)
@@ -655,7 +651,7 @@ impl MailView {
         let Some(message) = self.messages.get(target_index) else {
             return;
         };
-        if self.selected_message_id.as_ref() == Some(message.id()) {
+        if self.selected_message_id() == Some(message.id()) {
             return;
         }
         self.message_list_scroll
@@ -780,7 +776,7 @@ impl MailView {
             return None;
         }
         let folder = folder.clone();
-        let message_id = self.selected_message_id.clone()?;
+        let message_id = self.selected_message_id()?.clone();
         let current_state = self
             .messages
             .iter()
@@ -907,7 +903,7 @@ impl MailView {
         action: MessageMoveMenuAction,
         cx: &mut Context<Self>,
     ) {
-        if self.selected_message_id.as_ref() != Some(&action.selected_message_id) {
+        if self.selected_message_id() != Some(&action.selected_message_id) {
             return;
         }
         self.move_selected_message_to(action.destination_folder, action.destination_label, cx);
@@ -922,7 +918,7 @@ impl MailView {
             return None;
         }
         let source_folder = self.selected_folder.clone()?;
-        let message_id = self.selected_message_id.clone()?;
+        let message_id = self.selected_message_id()?.clone();
         if source_folder == destination_folder
             || source_folder.account_id() != destination_folder.account_id()
         {
@@ -982,7 +978,7 @@ impl MailView {
         }
         Some(WellKnownFolderActionRequest {
             source_folder: self.selected_folder.clone()?,
-            message_id: self.selected_message_id.clone()?,
+            message_id: self.selected_message_id()?.clone(),
             destination,
         })
     }
@@ -1217,7 +1213,6 @@ impl MailView {
 
     fn remove_confirmed_message(&mut self, message_id: &MessageId) {
         self.remove_message_from_current_folder(message_id);
-        self.selected_message_id = None;
     }
 
     fn remove_message_from_current_folder(&mut self, message_id: &MessageId) {
@@ -1290,7 +1285,7 @@ impl MailView {
             return None;
         }
         let folder = folder.clone();
-        let message_id = self.selected_message_id.clone()?;
+        let message_id = self.selected_message_id()?.clone();
         let current_status = self
             .messages
             .iter()
@@ -1374,7 +1369,7 @@ impl MailView {
         if self.sync_status.is_sync_active() {
             return;
         }
-        let title = if self.pending_send.is_some() {
+        let title = if matches!(&self.pending_send, Ok(Some(_))) {
             "Resolve pending send"
         } else {
             "New message"
@@ -1403,8 +1398,7 @@ impl MailView {
     fn can_open_reply(&self, window: &mut Window, cx: &mut App) -> bool {
         !self.sync_status.is_sync_active()
             && !self.message_update_in_progress()
-            && self.pending_send.is_none()
-            && self.pending_send_error.is_none()
+            && matches!(&self.pending_send, Ok(None))
             && !window.has_active_sheet(cx)
     }
 
@@ -1413,9 +1407,7 @@ impl MailView {
             return None;
         };
         let message = opened.message();
-        if self.selected_message_id.as_ref() != Some(message.id())
-            || self.selected_folder.as_ref() != Some(message.folder())
-        {
+        if self.selected_folder.as_ref() != Some(message.folder()) {
             return None;
         }
         Some(ComposerTarget::Reply {
@@ -1425,15 +1417,11 @@ impl MailView {
     }
 
     fn composer_context(&self, target: ComposerTarget) -> MailComposerContext {
-        let pending = match self.pending_send_error {
-            Some(error) => Err(error),
-            None => Ok(self.pending_send.clone()),
-        };
         MailComposerContext {
             workflow: Arc::clone(&self.workflow),
             permission_requester: self.permission_requester.clone(),
             account_id: self.profile.id().clone(),
-            pending,
+            pending: self.pending_send.clone(),
             target,
         }
     }
@@ -1461,8 +1449,7 @@ impl MailView {
             composer,
             |view, _, event: &MailComposerEvent, cx| match event {
                 MailComposerEvent::PendingSendChanged(pending) => {
-                    view.pending_send = pending.clone();
-                    view.pending_send_error = None;
+                    view.pending_send = Ok(pending.clone());
                     cx.notify();
                 }
             },

@@ -39,9 +39,8 @@ impl MailView {
             .disabled(
                 self.sync_status.is_sync_active()
                     || self.message_update_in_progress()
-                    || self.pending_send.is_some()
-                    || self.pending_send_error.is_some()
-                    || self.selected_message_id.as_ref() != Some(message_id),
+                    || !matches!(&self.pending_send, Ok(None))
+                    || self.selected_message_id() != Some(message_id),
             )
             .on_click(cx.listener(|view, _, window, cx| {
                 view.open_reply_composer(window, cx);
@@ -95,7 +94,7 @@ impl MailView {
                         Button::new("new-mail-message")
                             .debug_selector(|| "new-mail-message".to_owned())
                             .primary()
-                            .label(if self.pending_send.is_some() {
+                            .label(if matches!(&self.pending_send, Ok(Some(_))) {
                                 "Resolve send"
                             } else {
                                 "Compose"
@@ -255,7 +254,7 @@ impl MailView {
                                         let message = view.messages.get(index)?;
                                         let message_id = message.id().clone();
                                         let selected =
-                                            view.selected_message_id.as_ref() == Some(&message_id);
+                                            view.selected_message_id() == Some(&message_id);
                                         let sender = message_sender(message);
                                         let subject = message
                                             .metadata()
@@ -366,7 +365,7 @@ impl MailView {
                     panel.child(empty_state).into_any_element()
                 }
             }
-            MessageDetailState::Loading => div()
+            MessageDetailState::Loading(_) => div()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
@@ -375,7 +374,7 @@ impl MailView {
                 .text_color(colors.muted_foreground)
                 .child("Loading message…")
                 .into_any_element(),
-            MessageDetailState::Failed(error) => {
+            MessageDetailState::Failed { error, .. } => {
                 let detail_error = div()
                     .flex_1()
                     .min_w_0()
@@ -559,8 +558,7 @@ impl MailView {
             .label(if pending { pending_label } else { label })
             .loading(pending)
             .disabled(
-                !self.message_move_allowed()
-                    || self.selected_message_id.as_ref() != Some(message_id),
+                !self.message_move_allowed() || self.selected_message_id() != Some(message_id),
             )
             .on_click(cx.listener(move |view, _, _, cx| {
                 view.start_well_known_folder_action(destination, cx);
@@ -793,7 +791,7 @@ impl MailView {
     }
 
     fn follow_up_flag_action_disabled(&self, message_id: &MessageId) -> bool {
-        self.selected_message_id.as_ref() != Some(message_id)
+        self.selected_message_id() != Some(message_id)
             || self
                 .selected_folder
                 .as_ref()

@@ -28,7 +28,7 @@ pub use calendar_edit::{
     InvalidCalendarEventUpdateDraft, InvalidCalendarEventVersion, InvalidEditableCalendarEvent,
     NoCalendarEventChanges,
 };
-pub use identifiers::{AccountId, CalendarId, EmptyIdentifier, EventId, FolderId, MessageId};
+pub use identifiers::{AccountId, EmptyIdentifier, EventId, FolderId, MessageId};
 pub use mail::{
     FolderParentError, FolderReference, FollowUpFlagStatus, InvalidMailRecipient,
     InvalidMailSubject, MailDraft, MailFolder, MailMessage, MailRecipient, MailReplyDraft,

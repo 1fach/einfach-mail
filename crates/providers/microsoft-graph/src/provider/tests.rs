@@ -134,7 +134,9 @@ impl RefreshTokenStore for MemoryRefreshTokenStore {
             .map_err(|_| AccountOperationError::CredentialStoreUnavailable)?
             .take();
         if let Some((barrier, started_sender)) = save_pause {
-            let _ = started_sender.send(());
+            started_sender
+                .send(())
+                .expect("the credential-save test is waiting at the barrier");
             barrier.wait();
         }
         Ok(())
@@ -1016,8 +1018,8 @@ async fn mail_provider_reads_scoped_folders_delta_and_body() {
     let MessageDeltaResponse::Page(page) = response else {
         panic!("synthetic provider response is a page");
     };
-    assert!(page.response_bytes() > 0);
-    let (page, _) = page.into_parts();
+    let (page, response_bytes) = page.into_parts();
+    assert!(response_bytes > 0);
     let [MessageDeltaChange::Upsert { id: message_id, .. }] = page.changes() else {
         panic!("synthetic initial delta contains one message upsert");
     };

@@ -483,6 +483,10 @@ mod tests {
 
     #[test]
     fn requests_mail_write_scope_only_for_the_explicit_permission_update() {
+        assert_eq!(
+            authorization_scopes(AccountPermissionRequest::Current),
+            &BASE_AUTHORIZATION_SCOPES
+        );
         let requested = authorization_scopes(AccountPermissionRequest::MailReadWrite);
         assert_eq!(requested, &MAIL_READ_WRITE_AUTHORIZATION_SCOPES);
         assert!(requested.contains(&"Mail.ReadWrite"));
@@ -494,5 +498,9 @@ mod tests {
         assert!(requested.contains(&"Calendars.ReadWrite"));
         assert!(!requested.contains(&"Mail.ReadWrite"));
         assert!(!requested.contains(&"Mail.Send"));
+        assert_eq!(
+            authorization_scopes(AccountPermissionRequest::SendMail),
+            &SEND_MAIL_AUTHORIZATION_SCOPES
+        );
     }
 }

@@ -134,12 +134,6 @@ impl MessageDeltaPageResponse {
         }
     }
 
-    /// Returns the number of response-body bytes received from the provider.
-    #[must_use]
-    pub fn response_bytes(&self) -> usize {
-        self.response_bytes
-    }
-
     /// Returns the parsed page and its response size.
     #[must_use]
     pub fn into_parts(self) -> (MessageDeltaPage, usize) {

@@ -46,6 +46,23 @@ impl SetupIssue {
     }
 }
 
+pub(super) struct AccountServices<P> {
+    pub(super) workflow: Arc<AccountWorkflow<P>>,
+    pub(super) account_session_factory: Arc<dyn AccountSessionFactory>,
+}
+
+impl<P> AccountServices<P> {
+    pub(super) fn new(
+        workflow: Arc<AccountWorkflow<P>>,
+        account_session_factory: Arc<dyn AccountSessionFactory>,
+    ) -> Self {
+        Self {
+            workflow,
+            account_session_factory,
+        }
+    }
+}
+
 #[derive(Clone)]
 enum AccountStatus {
     Restoring,
@@ -166,10 +183,8 @@ impl AccountStatus {
 }
 
 pub(super) struct AccountView<P: AccountProvider + 'static> {
-    workflow: Option<Arc<AccountWorkflow<P>>>,
-    account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
+    services: Result<AccountServices<P>, SetupIssue>,
     account_session: Option<Arc<dyn AccountSession>>,
-    setup_issue: Option<SetupIssue>,
     status: AccountStatus,
     pending_permission_review: Option<AccountPermissionRequest>,
     content: AccountContent,
@@ -240,19 +255,17 @@ fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static s
 
 impl<P: AccountProvider + 'static> AccountView<P> {
     pub(super) fn new(
-        workflow: Result<Arc<AccountWorkflow<P>>, SetupIssue>,
-        account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
+        services: Result<AccountServices<P>, SetupIssue>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (workflow, setup_issue, status) = match workflow {
-            Ok(workflow) => (Some(workflow), None, AccountStatus::Restoring),
-            Err(issue) => (None, Some(issue), AccountStatus::Disconnected),
+        let status = if services.is_ok() {
+            AccountStatus::Restoring
+        } else {
+            AccountStatus::Disconnected
         };
         let mut view = Self {
-            workflow,
-            account_session_factory,
+            services,
             account_session: None,
-            setup_issue,
             status,
             pending_permission_review: None,
             content: AccountContent::Account,
@@ -264,9 +277,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn start_restore(&mut self, cx: &mut Context<Self>) {
-        let Some(workflow) = self.workflow.clone() else {
+        let Ok(services) = &self.services else {
             return;
         };
+        let workflow = Arc::clone(&services.workflow);
         self.account_session = None;
         self.status = AccountStatus::Restoring;
         self.session_open_error = None;
@@ -289,9 +303,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
-        let Some(workflow) = self.workflow.clone() else {
+        let Ok(services) = &self.services else {
             return;
         };
+        let workflow = Arc::clone(&services.workflow);
         if !matches!(
             &self.status,
             AccountStatus::Disconnected
@@ -387,9 +402,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn reauthorize(&mut self, request: AccountPermissionRequest, cx: &mut Context<Self>) {
-        let Some(workflow) = self.workflow.clone() else {
+        let Ok(services) = &self.services else {
             return;
         };
+        let workflow = Arc::clone(&services.workflow);
         let Some(profile) = self.status.connected_profile().cloned() else {
             return;
         };
@@ -450,9 +466,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn sign_out(&mut self, cx: &mut Context<Self>) {
-        let Some(workflow) = self.workflow.clone() else {
+        let Ok(services) = &self.services else {
             return;
         };
+        let workflow = Arc::clone(&services.workflow);
         if !self.status.saved_credential_may_exist()
             || self.content.opening_kind().is_some()
             || matches!(
@@ -468,7 +485,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         }
 
         let previous_status = self.status.clone();
-        let account_session_factory = self.account_session_factory.clone();
+        let account_session_factory = Arc::clone(&services.account_session_factory);
         let account_session = self
             .close_content_view(cx)
             .or_else(|| self.account_session.clone());
@@ -504,16 +521,17 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn open_mail(&mut self, cx: &mut Context<Self>) {
-        let permission_requester = self
-            .workflow
-            .clone()
-            .map(|workflow| -> Arc<dyn MailPermissionRequester> { workflow });
+        let Ok(services) = &self.services else {
+            return;
+        };
+        let permission_requester: Arc<dyn MailPermissionRequester> = services.workflow.clone();
         self.open_account_content(
             OpeningContent::Mail,
             move |profile, session, cx| {
                 let mail_view_session = session.mail_session();
-                let mail_view = cx
-                    .new(|cx| MailView::new(profile, mail_view_session, permission_requester, cx));
+                let mail_view = cx.new(|cx| {
+                    MailView::new(profile, mail_view_session, Some(permission_requester), cx)
+                });
                 let subscription = cx.subscribe(
                     &mail_view,
                     |view, _, event: &MailViewEvent, cx| match event {
@@ -588,9 +606,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         let AccountStatus::Connected(profile) = &self.status else {
             return;
         };
-        let Some(account_session_factory) = self.account_session_factory.clone() else {
+        let Ok(services) = &self.services else {
             return;
         };
+        let account_session_factory = Arc::clone(&services.account_session_factory);
         let profile = profile.clone();
         let retained_session = self.account_session.clone();
         self.content = AccountContent::Opening(opening);
@@ -638,7 +657,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         workflow: Arc<AccountWorkflow<P>>,
         previous_status: AccountStatus,
         account_session: Option<Arc<dyn AccountSession>>,
-        account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
+        account_session_factory: Arc<dyn AccountSessionFactory>,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -951,9 +970,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                         .label("Cancel sign-in")
                         .on_click(cx.listener(|view, _, _, cx| view.cancel_connect(cx))),
                 ),
-            AccountStatus::Connected(_) if self.account_session_factory.is_some() => {
-                self.render_open_content(cx)
-            }
+            AccountStatus::Connected(_) if self.services.is_ok() => self.render_open_content(cx),
             AccountStatus::Failed {
                 saved_credential_may_exist: true,
                 ..
@@ -1050,8 +1067,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn render_account_content(&self, colors: ColorTokens, cx: &mut Context<Self>) -> gpui_kit::Div {
         let content = self.render_header(colors);
-        if let Some(issue) = self.setup_issue {
-            return content.child(self.render_setup_status(issue));
+        if let Err(issue) = &self.services {
+            return content.child(self.render_setup_status(*issue));
         }
         let mut content = content.child(self.render_status());
         if let Some(error) = self.session_open_error {
@@ -1148,14 +1165,13 @@ impl<P: AccountProvider + 'static> Render for AccountView<P> {
 
 async fn remove_account_cache(
     account_session: Option<Arc<dyn AccountSession>>,
-    account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
+    account_session_factory: Arc<dyn AccountSessionFactory>,
     account_id: einfach_mail_domain::AccountId,
 ) -> Result<(), AccountCacheRemovalError> {
     match account_session {
         Some(account_session) => account_session.remove_account_cache().await,
         None => {
             account_session_factory
-                .ok_or(AccountCacheRemovalError::Unavailable)?
                 .remove_account_cache(&account_id)
                 .await
         }
@@ -1165,7 +1181,7 @@ async fn remove_account_cache(
 async fn remove_verified_account_cache_and_sign_out<P: AccountProvider>(
     workflow: Arc<AccountWorkflow<P>>,
     account_session: Option<Arc<dyn AccountSession>>,
-    account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
+    account_session_factory: Arc<dyn AccountSessionFactory>,
 ) -> Result<(), AccountSignOutError> {
     let account_id = workflow
         .saved_credential_account_id()

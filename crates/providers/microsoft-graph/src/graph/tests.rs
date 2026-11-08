@@ -1365,8 +1365,8 @@ async fn calendar_delta_uses_exact_week_bounds_and_maps_sparse_followup_changes(
     let CalendarDeltaResponse::Page(initial) = initial else {
         panic!("initial request returns a page");
     };
-    assert!(initial.response_bytes() > 0);
-    let (initial_page, _) = initial.into_parts();
+    let (initial_page, initial_response_bytes) = initial.into_parts();
+    assert!(initial_response_bytes > 0);
     let (mut changes, progress) = initial_page.into_parts();
     let next = match progress {
         CalendarDeltaProgress::Next(link) => link,

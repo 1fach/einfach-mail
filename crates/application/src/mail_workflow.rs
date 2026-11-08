@@ -32,6 +32,26 @@ const MAX_PAGES_PER_FOLDER_ATTEMPT: usize = 1_000;
 fn mail_folder_is_visible(folders: &[MailFolder], reference: &FolderReference) -> bool {
     folders.iter().any(|folder| folder.reference() == reference)
 }
+
+enum MissingMoveFolder {
+    Source,
+    Destination,
+}
+
+fn validate_visible_move_folders(
+    folders: &[MailFolder],
+    source: &FolderReference,
+    destination: &FolderReference,
+) -> Result<(), MissingMoveFolder> {
+    if !mail_folder_is_visible(folders, source) {
+        return Err(MissingMoveFolder::Source);
+    }
+    if !mail_folder_is_visible(folders, destination) {
+        return Err(MissingMoveFolder::Destination);
+    }
+    Ok(())
+}
+
 const MAX_DELTA_RESETS_PER_ATTEMPT: usize = 1;
 
 /// A user-safe category for a mail workflow failure.
@@ -865,11 +885,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             self.reserve_folders(&[source_folder.clone(), destination_folder.clone()])?;
         self.ensure_account_sync_ready()?;
         let visible_folders = self.cache.list_folders(source_folder.account_id()).await?;
-        if !mail_folder_is_visible(&visible_folders, source_folder)
-            || !mail_folder_is_visible(&visible_folders, destination_folder)
-        {
-            return Err(MailWorkflowError::InvalidMoveDestination);
-        }
+        validate_visible_move_folders(&visible_folders, source_folder, destination_folder)
+            .map_err(|_| MailWorkflowError::InvalidMoveDestination)?;
         self.ensure_move_folders_writable(source_folder, destination_folder)
             .await?;
         self.ensure_cached_message(source_folder, message_id)
@@ -914,12 +931,13 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         let _destination_reservation =
             self.reserve_folders(std::slice::from_ref(&destination_folder))?;
         let visible_folders = self.cache.list_folders(source_folder.account_id()).await?;
-        if !mail_folder_is_visible(&visible_folders, source_folder) {
-            return Err(MailWorkflowError::InvalidMoveDestination);
-        }
-        if !mail_folder_is_visible(&visible_folders, &destination_folder) {
-            return Err(MailWorkflowError::WellKnownFolderUnavailable(destination));
-        }
+        validate_visible_move_folders(&visible_folders, source_folder, &destination_folder)
+            .map_err(|missing| match missing {
+                MissingMoveFolder::Source => MailWorkflowError::InvalidMoveDestination,
+                MissingMoveFolder::Destination => {
+                    MailWorkflowError::WellKnownFolderUnavailable(destination)
+                }
+            })?;
         self.ensure_move_folders_writable(source_folder, &destination_folder)
             .await?;
         let cache_outcome = self

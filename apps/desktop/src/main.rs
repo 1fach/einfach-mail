@@ -26,33 +26,12 @@ mod sync_age;
 #[cfg(test)]
 mod test_support;
 
-use account_view::{AccountView, SetupIssue};
+use account_view::{AccountServices, AccountView, SetupIssue};
 
 const CLIENT_ID_ENV: &str = "EINFACH_MAIL_ENTRA_CLIENT_ID";
 const CALLBACK_PORT_ENV: &str = "EINFACH_MAIL_ENTRA_CALLBACK_PORT";
 
-type MicrosoftAccountWorkflow = Arc<AccountWorkflow<MicrosoftGraphProvider>>;
-
-struct AccountServices {
-    workflow: Result<MicrosoftAccountWorkflow, SetupIssue>,
-    account_session_factory: Option<Arc<dyn AccountSessionFactory>>,
-}
-
-fn account_services_from_environment() -> AccountServices {
-    match configured_account_services() {
-        Ok((workflow, account_session_factory)) => AccountServices {
-            workflow: Ok(workflow),
-            account_session_factory: Some(account_session_factory),
-        },
-        Err(issue) => AccountServices {
-            workflow: Err(issue),
-            account_session_factory: None,
-        },
-    }
-}
-
-fn configured_account_services()
--> Result<(MicrosoftAccountWorkflow, Arc<dyn AccountSessionFactory>), SetupIssue> {
+fn configured_account_services() -> Result<AccountServices<MicrosoftGraphProvider>, SetupIssue> {
     let client_id = match env::var(CLIENT_ID_ENV) {
         Ok(client_id_value) => {
             Uuid::parse_str(&client_id_value).map_err(|_| SetupIssue::InvalidClientId)?
@@ -72,7 +51,10 @@ fn configured_account_services()
     let account_session_factory: Arc<dyn AccountSessionFactory> = Arc::new(
         AccountSessionWorkflowFactory::new(provider, SqliteMailCacheFactory),
     );
-    Ok((account_workflow, account_session_factory))
+    Ok(AccountServices::new(
+        account_workflow,
+        account_session_factory,
+    ))
 }
 
 fn configured_callback_port(port_text: Option<&str>) -> Result<CallbackPort, SetupIssue> {
@@ -101,16 +83,10 @@ fn run_application() -> Result<(), std::io::Error> {
         mail_composer::bind_mail_composer_keys(cx);
         event_composer::bind_event_composer_keys(cx);
         calendar_view::bind_calendar_event_navigation_keys(cx);
-        let account_services = account_services_from_environment();
+        let account_services = configured_account_services();
 
         let window_open_attempt = open_window(WindowOptions::default(), cx, |_, cx| {
-            cx.new(|cx| {
-                AccountView::new(
-                    account_services.workflow,
-                    account_services.account_session_factory,
-                    cx,
-                )
-            })
+            cx.new(|cx| AccountView::new(account_services, cx))
         })
         .map(|_| ())
         .map_err(|error| {
