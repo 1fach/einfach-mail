@@ -309,7 +309,11 @@ where
             .cache
             .account_has_active_replacement(view.account_id())
             .await?;
-        let write_readiness = if account_has_active_replacement {
+        let account_has_write_sync_required = self
+            .cache
+            .account_has_calendar_write_sync_required(view.account_id())
+            .await?;
+        let write_readiness = if account_has_active_replacement || account_has_write_sync_required {
             CalendarWriteReadiness::AccountSyncRequired
         } else {
             self.recovery
@@ -481,7 +485,8 @@ where
     /// A changed event, uncertain provider result, or confirmed update that
     /// cannot be cached requires successful syncs for previously synchronized
     /// account views before another calendar write can start. Dropping this
-    /// future after the provider request starts also requires those syncs.
+    /// future after the durable recovery markers are written also requires
+    /// those syncs.
     ///
     /// # Errors
     ///
@@ -507,7 +512,9 @@ where
         let _reservation = reserve_account(&self.reservations, &account_id)
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
-        let mut reconciliation = CalendarWriteReconciliationGuard::new(&self.recovery, account_id);
+        self.cache.mark_calendar_write_sync_required(view).await?;
+        let mut reconciliation =
+            CalendarWriteReconciliationGuard::new(&self.recovery, account_id.clone());
         let event = match self.provider.update_event(update).await {
             Ok(event) => event,
             Err(error) => {
@@ -518,6 +525,9 @@ where
                 ) {
                     reconciliation.require_sync()?;
                 } else {
+                    self.cache
+                        .clear_calendar_write_sync_required(&account_id)
+                        .await?;
                     reconciliation.complete();
                 }
                 return Err(error.into());
@@ -545,7 +555,8 @@ where
     /// and cache transaction. A changed event, uncertain result, or cache
     /// failure requires successful syncs for previously synchronized account
     /// views before another calendar write can start. Dropping this future
-    /// after the provider request starts also requires those syncs.
+    /// after the durable recovery markers are written also requires those
+    /// syncs.
     ///
     /// # Errors
     ///
@@ -568,7 +579,9 @@ where
         let _reservation = reserve_account(&self.reservations, &account_id)
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
-        let mut reconciliation = CalendarWriteReconciliationGuard::new(&self.recovery, account_id);
+        self.cache.mark_calendar_write_sync_required(view).await?;
+        let mut reconciliation =
+            CalendarWriteReconciliationGuard::new(&self.recovery, account_id.clone());
         if let Err(error) = self.provider.delete_event(event).await {
             if matches!(
                 error,
@@ -576,6 +589,9 @@ where
             ) {
                 reconciliation.require_sync()?;
             } else {
+                self.cache
+                    .clear_calendar_write_sync_required(&account_id)
+                    .await?;
                 reconciliation.complete();
             }
             return Err(error.into());
@@ -604,11 +620,15 @@ where
         &self,
         view: &CalendarViewReference,
     ) -> Result<(), CalendarWorkflowError> {
-        if self
+        let write_sync_required = self
             .cache
             .account_has_active_replacement(view.account_id())
             .await?
-        {
+            || self
+                .cache
+                .account_has_calendar_write_sync_required(view.account_id())
+                .await?;
+        if write_sync_required {
             return Err(CalendarWorkflowError::CalendarWriteSyncRequired);
         }
         match self

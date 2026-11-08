@@ -463,6 +463,15 @@ fn migrations() -> Migrations<'static> {
                 ) ON DELETE CASCADE
             );",
         ),
+        M::up(
+            "ALTER TABLE calendar_view_sync_state
+                ADD COLUMN write_sync_required INTEGER NOT NULL DEFAULT 0
+                CHECK (write_sync_required IN (0, 1));
+
+            UPDATE calendar_view_sync_state
+            SET write_sync_required = 1
+            WHERE last_sync_seconds IS NOT NULL;",
+        ),
     ])
 }
 
@@ -1089,6 +1098,13 @@ mod tests {
                     'account', 100, 0, 200, 0, 2462500, 2462507,
                     'synthetic-delta', NULL, 300, 0
                  );
+                 INSERT INTO calendar_view_sync_state (
+                    account_id, range_start_seconds, range_start_nanoseconds,
+                    range_end_seconds, range_end_nanoseconds,
+                    local_start_julian_day, local_end_julian_day
+                 ) VALUES (
+                    'account', 300, 0, 400, 0, 2462510, 2462517
+                 );
                  INSERT INTO calendar_events (
                     account_id, range_start_seconds, range_start_nanoseconds,
                     range_end_seconds, range_end_nanoseconds,
@@ -1112,9 +1128,9 @@ mod tests {
         let sync_state = connection
             .query_row(
                 "SELECT delta_link, next_link, last_sync_seconds,
-                        last_sync_nanoseconds, replacement_active
+                        last_sync_nanoseconds, replacement_active, write_sync_required
                  FROM calendar_view_sync_state
-                 WHERE account_id = 'account'",
+                 WHERE account_id = 'account' AND range_start_seconds = 100",
                 [],
                 |row| {
                     Ok((
@@ -1123,6 +1139,7 @@ mod tests {
                         row.get::<_, Option<i64>>(2)?,
                         row.get::<_, Option<i64>>(3)?,
                         row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
                     ))
                 },
             )
@@ -1143,9 +1160,19 @@ mod tests {
                 None,
                 Some(300),
                 Some(0),
-                0
+                0,
+                1
             )
         );
+        let incomplete_view_marker = connection
+            .query_row(
+                "SELECT write_sync_required FROM calendar_view_sync_state
+                 WHERE account_id = 'account' AND range_start_seconds = 300",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("migration leaves an incomplete view unmarked");
+        assert_eq!(incomplete_view_marker, 0);
         assert_eq!(event, ("event".to_owned(), "Synthetic event".to_owned()));
     }
 }

@@ -218,6 +218,70 @@ impl CalendarCache for SqliteAccountCache {
         }
     }
 
+    fn mark_calendar_write_sync_required(
+        &self,
+        view: &CalendarViewReference,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self.check_calendar_view(view);
+        let account_id = view.account_id().as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            let scope = validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    mark_calendar_write_sync_required(&transaction, &account_id, scope)?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn account_has_calendar_write_sync_required(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<bool, CalendarCacheError>> + Send + '_ {
+        let validation = self
+            .check_account(account_id)
+            .map_err(|_| CalendarCacheError::AccountMismatch);
+        let account_id = account_id.as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_and_then(move |connection| {
+                    calendar_account_has_write_sync_required(connection, &account_id)
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn clear_calendar_write_sync_required(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+        let validation = self
+            .check_account(account_id)
+            .map_err(|_| CalendarCacheError::AccountMismatch);
+        let account_id = account_id.as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    clear_calendar_write_sync_required(&transaction, &account_id)?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
     fn commit_delta_page(
         &self,
         view: &CalendarViewReference,
@@ -518,6 +582,72 @@ fn calendar_account_has_active_replacement(
         [account_id],
         |row| row.get(0),
     )?)
+}
+
+fn calendar_account_has_write_sync_required(
+    connection: &Connection,
+    account_id: &str,
+) -> CacheResult<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(
+                SELECT 1 FROM calendar_view_sync_state
+                WHERE account_id = ?1 AND write_sync_required = 1
+            )",
+        [account_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn mark_calendar_write_sync_required(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    source_scope: CalendarScope,
+) -> CacheResult<()> {
+    let source_is_synchronized = transaction.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM calendar_view_sync_state
+            WHERE account_id = ?1
+              AND range_start_seconds = ?2
+              AND range_start_nanoseconds = ?3
+              AND range_end_seconds = ?4
+              AND range_end_nanoseconds = ?5
+              AND local_start_julian_day = ?6
+              AND local_end_julian_day = ?7
+              AND last_sync_seconds IS NOT NULL
+        )",
+        params![
+            account_id,
+            source_scope.start_seconds,
+            source_scope.start_nanoseconds,
+            source_scope.end_seconds,
+            source_scope.end_nanoseconds,
+            source_scope.local_start_julian_day,
+            source_scope.local_end_julian_day,
+        ],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !source_is_synchronized {
+        return Err(CacheFailure::InvalidData);
+    }
+    transaction.execute(
+        "UPDATE calendar_view_sync_state
+         SET write_sync_required = 1
+         WHERE account_id = ?1 AND last_sync_seconds IS NOT NULL",
+        [account_id],
+    )?;
+    Ok(())
+}
+
+fn clear_calendar_write_sync_required(
+    transaction: &Connection,
+    account_id: &str,
+) -> CacheResult<()> {
+    transaction.execute(
+        "UPDATE calendar_view_sync_state
+         SET write_sync_required = 0 WHERE account_id = ?1",
+        [account_id],
+    )?;
+    Ok(())
 }
 
 fn commit_calendar_page(
@@ -1276,6 +1406,7 @@ const UPDATE_CALENDAR_SYNC_PROGRESS: &str = "UPDATE calendar_view_sync_state
         next_link = ?9,
         last_sync_seconds = COALESCE(?10, last_sync_seconds),
         last_sync_nanoseconds = COALESCE(?11, last_sync_nanoseconds),
+        write_sync_required = CASE WHEN ?10 IS NOT NULL THEN 0 ELSE write_sync_required END,
         replacement_active = CASE WHEN ?12 = 1 THEN 0 ELSE replacement_active END
     WHERE account_id = ?1
       AND range_start_seconds = ?2
@@ -1334,7 +1465,8 @@ fn commit_calendar_event_update(
         "DELETE FROM calendar_events WHERE account_id = ?1 AND event_id = ?2",
         params![account_id, event.id().as_str()],
     )?;
-    write_event_to_cached_scopes(transaction, account_id, scopes, event)
+    write_event_to_cached_scopes(transaction, account_id, scopes, event)?;
+    clear_calendar_write_sync_required(transaction, account_id)
 }
 
 fn commit_calendar_event_deletion(
@@ -1348,7 +1480,7 @@ fn commit_calendar_event_deletion(
         "DELETE FROM calendar_events WHERE account_id = ?1 AND event_id = ?2",
         params![account_id, event.occurrence().id().as_str(),],
     )?;
-    Ok(())
+    clear_calendar_write_sync_required(transaction, account_id)
 }
 
 fn require_cached_source_view(
