@@ -17,7 +17,7 @@ Microsoft Graph v1.0 deletes an event with `DELETE /me/events/{id}` and returns 
 - Hold the account reservation from the final provider check through the delete request and cache transaction. After Graph confirms deletion, remove every cached row for that account and event ID in one SQLCipher transaction without changing calendar-view cursors.
 - After an unknown delete result or a confirmed deletion that cannot be cached, require each previously synchronized view for that account to complete a successful sync before another calendar write. A newly created workflow also requires a successful sync before it permits a calendar write.
 - Put Delete in the existing native editor and require a GPUI Kit `AlertDialog` naming the appointment with Cancel and Delete actions. Keep the editor open while the request is pending. Describe the existing delegated `Calendars.ReadWrite` permission accurately.
-- Add no dependency or schema migration. Keep tenant proof in [issue #42](https://github.com/1fach/einfach-mail/issues/42), blocked by local implementation [issue #41](https://github.com/1fach/einfach-mail/issues/41).
+- Add no dependency or deletion-specific event-data migration. ADR 0052 later adds the separate calendar write-recovery marker. Keep tenant proof in [issue #42](https://github.com/1fach/einfach-mail/issues/42), blocked by local implementation [issue #41](https://github.com/1fach/einfach-mail/issues/41).
 
 ## Alternatives
 
@@ -29,7 +29,7 @@ Microsoft Graph v1.0 deletes an event with `DELETE /me/events/{id}` and returns 
 
 ## Consequences
 
-- Application owns account reservation and recovery state; Graph owns event JSON, ETag validation, and HTTP status mapping; persistence owns the atomic multi-view cache removal; GPUI owns confirmation and visible pending or recovery states.
+- Application owns account reservations and decides when to require recovery; persistence owns the durable markers and atomic multi-view cache removal; Graph owns event JSON, ETag validation, and HTTP status mapping; GPUI owns confirmation and visible pending or recovery states.
 - Cache cursors remain unchanged after deletion. A subsequent sync reconciles the event's server-side removal.
 - Synthetic tests can prove request construction, ETag handling, status mapping, reservation, cache behavior, and UI states. They cannot prove tenant permission consent or Exchange Online's conditional-delete behavior; keep both under issue #42.
 

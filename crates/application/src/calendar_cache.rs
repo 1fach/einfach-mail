@@ -209,7 +209,9 @@ pub trait CalendarCache: Send + Sync {
     ///
     /// Replacement pages remain staged until their final page commits. Sparse
     /// updates apply only to known occurrences, and out-of-view events stay
-    /// staged for later pages but do not appear in the active view.
+    /// staged for later pages but do not appear in the active view. A completed
+    /// sync clears only this view's write-recovery marker in that transaction;
+    /// partial pages leave the marker unchanged.
     ///
     /// # Errors
     ///
@@ -328,6 +330,7 @@ pub trait CalendarCache: Send + Sync {
     ///
     /// The cache removes the old event from all ranges for its account, then
     /// writes it to every existing range that the updated occurrence overlaps.
+    /// The transaction also clears all write-recovery markers for the account.
     ///
     /// # Errors
     ///
@@ -344,6 +347,7 @@ pub trait CalendarCache: Send + Sync {
     /// Removes every cached copy of the provider-confirmed event atomically.
     ///
     /// The source view must still exist. Calendar-view cursors remain unchanged.
+    /// The transaction also clears all write-recovery markers for the account.
     ///
     /// # Errors
     ///

@@ -1,21 +1,21 @@
 use std::{
-    collections::HashMap,
+    collections::HashSet,
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use einfach_mail_domain::{AccountId, CalendarViewReference};
+use einfach_mail_domain::CalendarViewReference;
 
-/// Calendar write state for one view and its account.
+/// Calendar write readiness exposed with a cached view.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CalendarWriteReadiness {
-    /// This view has completed a sync, and no account view needs recovery.
+    /// This view completed a sync in the current workflow factory.
     Ready,
     /// This view must sync successfully before it can accept an event write.
     ViewSyncRequired,
-    /// An account view needs recovery or has an active replacement scan.
+    /// A persisted account view needs recovery or has an active replacement scan.
     AccountSyncRequired,
 }
 
@@ -23,7 +23,7 @@ pub enum CalendarWriteReadiness {
 #[derive(Default)]
 pub(crate) struct AccountWorkflowRecovery {
     mail_sync_ready: AtomicBool,
-    calendar_write: Mutex<CalendarWriteRecovery>,
+    calendar_views_synced: Mutex<HashSet<CalendarViewReference>>,
 }
 
 impl AccountWorkflowRecovery {
@@ -43,19 +43,15 @@ impl AccountWorkflowRecovery {
         &self,
         view: &CalendarViewReference,
     ) -> Result<CalendarWriteReadiness, RecoveryStateUnavailable> {
-        self.calendar_write
+        self.calendar_views_synced
             .lock()
-            .map(|recovery| recovery.readiness_for(view))
-            .map_err(|_| RecoveryStateUnavailable)
-    }
-
-    pub(crate) fn require_account_calendar_write_sync(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<(), RecoveryStateUnavailable> {
-        self.calendar_write
-            .lock()
-            .map(|mut recovery| recovery.require_account_sync(account_id))
+            .map(|views| {
+                if views.contains(view) {
+                    CalendarWriteReadiness::Ready
+                } else {
+                    CalendarWriteReadiness::ViewSyncRequired
+                }
+            })
             .map_err(|_| RecoveryStateUnavailable)
     }
 
@@ -63,49 +59,12 @@ impl AccountWorkflowRecovery {
         &self,
         view: &CalendarViewReference,
     ) -> Result<(), RecoveryStateUnavailable> {
-        self.calendar_write
+        self.calendar_views_synced
             .lock()
-            .map(|mut recovery| recovery.mark_view_synchronized(view))
+            .map(|mut views| {
+                views.insert(view.clone());
+            })
             .map_err(|_| RecoveryStateUnavailable)
-    }
-}
-
-#[derive(Default)]
-struct CalendarWriteRecovery {
-    views: HashMap<CalendarViewReference, CalendarViewWriteState>,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum CalendarViewWriteState {
-    Ready,
-    SyncRequired,
-}
-
-impl CalendarWriteRecovery {
-    fn readiness_for(&self, view: &CalendarViewReference) -> CalendarWriteReadiness {
-        if self.views.iter().any(|(required_view, state)| {
-            required_view.account_id() == view.account_id()
-                && *state == CalendarViewWriteState::SyncRequired
-        }) {
-            CalendarWriteReadiness::AccountSyncRequired
-        } else if self.views.get(view) == Some(&CalendarViewWriteState::Ready) {
-            CalendarWriteReadiness::Ready
-        } else {
-            CalendarWriteReadiness::ViewSyncRequired
-        }
-    }
-
-    fn require_account_sync(&mut self, account_id: &AccountId) {
-        for (view, state) in &mut self.views {
-            if view.account_id() == account_id && *state == CalendarViewWriteState::Ready {
-                *state = CalendarViewWriteState::SyncRequired;
-            }
-        }
-    }
-
-    fn mark_view_synchronized(&mut self, view: &CalendarViewReference) {
-        self.views
-            .insert(view.clone(), CalendarViewWriteState::Ready);
     }
 }
 

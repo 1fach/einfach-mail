@@ -513,37 +513,27 @@ where
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
         self.cache.mark_calendar_write_sync_required(view).await?;
-        let mut reconciliation =
-            CalendarWriteReconciliationGuard::new(&self.recovery, account_id.clone());
         let event = match self.provider.update_event(update).await {
             Ok(event) => event,
             Err(error) => {
-                if matches!(
+                if !matches!(
                     error,
                     CalendarOperationError::EventChanged
                         | CalendarOperationError::UpdateOutcomeUnknown
                 ) {
-                    reconciliation.require_sync()?;
-                } else {
                     self.cache
                         .clear_calendar_write_sync_required(&account_id)
                         .await?;
-                    reconciliation.complete();
                 }
                 return Err(error.into());
             }
         };
         if !update.confirms(&event) {
-            reconciliation.require_sync()?;
             return Err(CalendarWorkflowError::InvalidUpdateConfirmation);
         }
         match self.cache.commit_event_update(update, &event).await {
-            Ok(()) => {
-                reconciliation.complete();
-                Ok(CalendarEventUpdateOutcome::Cached(event))
-            }
+            Ok(()) => Ok(CalendarEventUpdateOutcome::Cached(event)),
             Err(cache_error) => {
-                reconciliation.require_sync()?;
                 Ok(CalendarEventUpdateOutcome::ConfirmedButNotCached { event, cache_error })
             }
         }
@@ -580,29 +570,20 @@ where
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
         self.cache.mark_calendar_write_sync_required(view).await?;
-        let mut reconciliation =
-            CalendarWriteReconciliationGuard::new(&self.recovery, account_id.clone());
         if let Err(error) = self.provider.delete_event(event).await {
-            if matches!(
+            if !matches!(
                 error,
                 CalendarOperationError::EventChanged | CalendarOperationError::DeleteOutcomeUnknown
             ) {
-                reconciliation.require_sync()?;
-            } else {
                 self.cache
                     .clear_calendar_write_sync_required(&account_id)
                     .await?;
-                reconciliation.complete();
             }
             return Err(error.into());
         }
         match self.cache.commit_event_deletion(event).await {
-            Ok(()) => {
-                reconciliation.complete();
-                Ok(CalendarEventDeletionOutcome::Deleted)
-            }
+            Ok(()) => Ok(CalendarEventDeletionOutcome::Deleted),
             Err(cache_error) => {
-                reconciliation.require_sync()?;
                 Ok(CalendarEventDeletionOutcome::DeletedButNotCached { cache_error })
             }
         }
@@ -697,46 +678,6 @@ where
                 }
                 Ok(false)
             }
-        }
-    }
-}
-
-#[must_use = "dropping an unresolved calendar write guard requires sync"]
-struct CalendarWriteReconciliationGuard<'a> {
-    recovery: &'a AccountWorkflowRecovery,
-    account_id: AccountId,
-    complete: bool,
-}
-
-impl<'a> CalendarWriteReconciliationGuard<'a> {
-    fn new(recovery: &'a AccountWorkflowRecovery, account_id: AccountId) -> Self {
-        Self {
-            recovery,
-            account_id,
-            complete: false,
-        }
-    }
-
-    fn complete(&mut self) {
-        self.complete = true;
-    }
-
-    fn require_sync(&mut self) -> Result<(), CalendarWorkflowError> {
-        self.recovery
-            .require_account_calendar_write_sync(&self.account_id)
-            .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
-        self.complete();
-        Ok(())
-    }
-}
-
-impl Drop for CalendarWriteReconciliationGuard<'_> {
-    fn drop(&mut self) {
-        if !self.complete {
-            // A poisoned recovery lock makes subsequent readiness checks fail closed.
-            let _ = self
-                .recovery
-                .require_account_calendar_write_sync(&self.account_id);
         }
     }
 }

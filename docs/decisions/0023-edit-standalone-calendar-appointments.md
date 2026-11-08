@@ -28,7 +28,7 @@ This decision supersedes the event-update exclusion in ADR 0016 only for the sta
 
 | Option | Benefits | Costs and risks |
 | --- | --- | --- |
-| Check eligibility on demand and keep the snapshot in the open editor | Avoids a schema migration and does not persist invitee or organizer metadata. A fresh read protects against a form left open after a server change. | Adds two Graph reads around the edit; the final read and PATCH still have a narrow race because Graph does not document conditional updates here. |
+| Check eligibility on demand and keep the snapshot in the open editor | Avoids an edit-eligibility schema migration and does not persist invitee or organizer metadata. A fresh read protects against a form left open after a server change. | Adds two Graph reads around the edit; the final read and PATCH still have a narrow race because Graph does not document conditional updates here. |
 | Persist edit eligibility in every calendar occurrence | Makes eligible actions immediately visible offline and avoids the first read. | Adds provider metadata and a persistence migration, exposes stale editability, and still requires a fresh read before writing. |
 | Update only the visible week cache | Smallest storage change. | Leaves stale or duplicate event rows in other cached weeks, especially when an event moves across a range boundary. |
 | Rebuild every cached range in one account transaction | Keeps all known cached weeks consistent and makes a confirmed update visible or absent atomically. | Requires short account-level exclusion while the remote write and cache transaction run. |
@@ -38,7 +38,7 @@ This decision supersedes the event-update exclusion in ADR 0016 only for the sta
 
 - The domain gains checked-edit and update values; the application provider and cache ports gain corresponding operations and account-level coordination.
 - The Graph adapter gains bounded event GET and non-retried PATCH operations. It validates editability at the network boundary and never stores attendee content in the domain or logs.
-- The encrypted store changes all known copies of a confirmed event transactionally. No table migration or new dependency is required.
+- The encrypted store changes all known copies of a confirmed event transactionally without adding edit-eligibility fields or a Graph dependency. ADR 0052 separately defines the calendar write-recovery migration.
 - Updating a schedule sends UTC instants, consistent with the calendar occurrence model. A changed event's source time-zone metadata may therefore become UTC; unchanged times are omitted from the PATCH and retain their server value.
 - A `changeKey` comparison is a best-effort stale-form check, not server-enforced optimistic concurrency. The remaining narrow race is accepted only for this restricted no-attendee, non-online, single-instance appointment flow and must be examined with tenant evidence.
 - Local acceptance covers synthetic provider contracts, workflow concurrency, encrypted multi-range cache behavior, and headless native UI states. No live Graph request is made.
