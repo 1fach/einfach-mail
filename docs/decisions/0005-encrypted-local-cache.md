@@ -1,6 +1,6 @@
 # ADR 0005: Use SQLCipher-backed SQLite for the local cache
 
-- Status: Accepted for Linux; production cache adapter implemented with synthetic verification
+- Status: Accepted for Linux; production cache adapter and key-lifecycle tests implemented
 - Date: 2026-10-31
 - Owners: Project maintainer
 
@@ -8,7 +8,7 @@
 
 ADR 0004 requires durable offline mail and calendar data, with Graph changes and their sync cursor committed atomically. That cache needs relational queries for folders, message lists, calendar ranges, and pending operations. Mailbox data requires encryption at rest and account-scoped removal.
 
-The app is a native Rust desktop application. A pure-Rust UI and application stack is preferred, but the database choice must also provide mature relational behavior and a maintained encryption implementation. Linux is the only current development target. The Linux Secret Service key lifecycle proof passed on Fedora on 2026-10-31. The production cache adapter now has synthetic tests for encryption, transactions, checkpoint recovery, offline body reads, and cache-file removal; these tests do not verify a real Graph mailbox or every Secret Service implementation. See [project status](../project/status.md).
+The app is a native Rust desktop application. A pure-Rust UI and application stack is preferred, but the database choice must also provide mature relational behavior and a maintained encryption implementation. Linux is the only current development target. The original Linux Secret Service key-lifecycle proof passed on Fedora on 2026-10-31. Production persistence now tests encryption, transactions, checkpoint recovery, offline body reads, cache removal, and the Secret Service-backed cache-key lifecycle. The key-lifecycle test passed in an isolated GNOME Keyring D-Bus session on 2026-11-08; it does not verify every Secret Service implementation or a real Graph mailbox. See [project status](../project/status.md).
 
 ## Decision
 
@@ -18,17 +18,17 @@ The production cache uses `async-sqlite` 0.6.0 with default features disabled an
 
 The reviewed migration and executor crates depend on rusqlite 0.40.x, so Cargo resolves `rusqlite` 0.40.2. `rusqlite` 0.41.1 is newer, but the current `async-sqlite` and `rusqlite_migration` releases do not accept that line. Revisit this constraint when either library supports rusqlite 0.41.
 
-`rusqlite_migration` uses SQLite's `user_version` and applies migrations atomically. It has a smaller SQLite-specific dependency surface than Refinery 0.10.0, which supports rusqlite 0.40.x and Rust 1.92 but also provides other database backends, macros, and a CLI. Use `rusqlite_migration` for the SQLite-only cache. `tools/storage-proof/` remains a separate test-only package and has no application API.
+`rusqlite_migration` uses SQLite's `user_version` and applies migrations atomically. It has a smaller SQLite-specific dependency surface than Refinery 0.10.0, which supports rusqlite 0.40.x and Rust 1.92 but also provides other database backends, macros, and a CLI. Use `rusqlite_migration` for the SQLite-only cache. Keep SQLCipher setup, schema migration, and key lifecycle in `crates/persistence`; tests exercise the production adapter rather than a second implementation.
 
 `async-rusqlite` 0.6.0 is an alternative wrapper for rusqlite 0.41. It declares no MSRV, depends on `asyncified` for its channel implementation, and its README describes those channels as naive. Its README recommends `tokio-rusqlite` when executor independence is not needed. Do not use it for the current candidate set.
 
 Use `keyring` 4.2.0 with its `v1` API for Linux credential storage. This selects the zbus Secret Service backend. Do not enable `keyring`'s `cli` feature. The earlier Windows x64 proof in [PR #15](https://github.com/1fach/einfach-mail/pull/15) exercised Windows Credential Manager, but Windows support remains deferred. Recheck the credential-store choice and run its platform proof when Windows or macOS support begins.
 
-The Linux test-only proof passed on 2026-10-31 in a Fedora desktop session with GNOME Keyring. At that time, it reopened an encrypted database and test backup, rejected missing or wrong keys, and removed temporary account data. The missing-key test confirmed that the database and backup stayed byte-for-byte unchanged, including when only the test backup remained. Both ignored lifecycle tests passed after `DatabaseKey::from_secret` began zeroizing an intermediate key copy. The backup-specific tests were removed on 2026-11-07 because production has no backup workflow, and those tests did not exercise production persistence. [PR #21](https://github.com/1fach/einfach-mail/pull/21) merged the original proof changes on 2026-10-31 and closed issue #20. See [project status](../project/status.md). Run the remaining live credential tests with `cargo test --locked -p einfach-mail-storage-proof -- --ignored --test-threads=1`.
+The original Linux test-only proof passed on 2026-10-31 in a Fedora desktop session with GNOME Keyring. It reopened an encrypted database, rejected missing or wrong keys, and removed temporary account data. Its backup-specific tests were removed on 2026-11-07 because production has no backup workflow, and the standalone code duplicated production key and encryption logic. [PR #21](https://github.com/1fach/einfach-mail/pull/21) merged the original proof and closed issue #20.
 
-A child-process test used an unavailable D-Bus address. Cache opening returned `NoDefaultStore` for a new cache and for an existing encrypted database, and preserved the existing file. A separate test injects `NoStorageAccess` and checks that the error propagates instead of being treated as a missing key. The live keyring was unlocked. Live locked-store behavior remains unverified. The tests do not establish behavior for every Secret Service implementation.
+The production-path tests now use `SqliteMailCache::open_for_account` and `remove_for_account`. The ignored lifecycle test passed on 2026-11-08 in a temporary GNOME Keyring D-Bus session. It proves cache creation, encrypted reopen, wrong and malformed key rejection, missing-key byte preservation, and idempotent removal of the cache and key. The default child-process test uses an unavailable D-Bus address and proves that new cache files are not created and existing encrypted files are unchanged. A unit test injects `NoStorageAccess` and verifies that this credential error is not treated as a missing key. Tests use random synthetic account IDs and folder data; they do not establish behavior for every Secret Service implementation.
 
-The test-only proof uses an OS-generated 32-byte key, stores it as binary credential data, and zeroizes Rust-owned copies. The production adapter recognizes `mail.sqlite3` and its `-wal` and `-shm` sidecars when it checks for existing encrypted data. If the credential is missing while one of those files exists, production must not create a replacement key or replay pending local actions. Account removal deletes those recognized files and the SQLCipher key. Production does not create, restore, or delete backup files. Portable backup recovery and backup-file removal remain open product decisions.
+The production adapter uses an OS-generated 32-byte key, stores it as binary credential data, and zeroizes Rust-owned copies. It recognizes `mail.sqlite3` and its `-wal` and `-shm` sidecars when it checks for existing encrypted data. If the credential is missing while one of those files exists, production must not create a replacement key or replay pending local actions. Account removal deletes those recognized files and the SQLCipher key. Production does not create, restore, or delete backup files. Portable backup recovery and backup-file removal remain open product decisions.
 
 ## Alternatives
 
@@ -46,7 +46,7 @@ The test-only proof uses an OS-generated 32-byte key, stores it as binary creden
 | `keyring` 4.2.0 | Preferred candidate. Its `v1` API provides synchronous binary secret operations and selects the zbus Secret Service backend on Linux. The same API has native store adapters for Windows and macOS when those support milestones begin. Keep the `cli` feature disabled. |
 | `oo7` 0.6.0 | Maintained Secret Service client with D-Bus and encrypted file backends, including portal integration for sandboxed applications. It is async-only and documents Tokio, async-std, or GLib runtime use. The current GPUI application is not sandboxed and uses `smol`; its file/portal support and runtime choices do not fit the present boundary as closely as `keyring`. |
 
-The Linux proof package uses only `keyring`'s Secret Service path. Its default test run verifies that an unavailable service neither creates a new cache nor changes existing encrypted files. The tests that create, retrieve, and remove synthetic credentials require a desktop Secret Service and remain opt-in.
+Production persistence tests use only `keyring`'s Secret Service path. The default test run verifies that an unavailable service neither creates new cache files nor changes existing encrypted files. The test that creates, retrieves, and removes synthetic credentials requires an unlocked Secret Service and remains opt-in.
 
 ### Migration library comparison
 
@@ -67,9 +67,9 @@ The Linux proof package uses only `keyring`'s Secret Service path. Its default t
 - Persistence owns SQL schemas, migrations, encryption setup, and transactions. The production Linux adapter commits Graph page changes and matching cursors together.
 - SQLCipher is a deliberate native-code dependency in an otherwise Rust-first application because the compared pure-Rust database options do not meet the current relational and encryption requirements.
 - The earlier Windows test-only proof in PR #15 built vendored SQLCipher and OpenSSL on Windows x64. It exercised Windows Credential Manager, migrations, encrypted reads and writes, wrong-key rejection, backup reopening, missing-key behavior, and account removal.
-- The two ignored Linux Secret Service lifecycle tests passed in Fedora GNOME Keyring on 2026-10-31, including the missing-key byte-preservation assertions. The service was unlocked. A synthetic `NoStorageAccess` error covers the locked-store branch.
-- The proof uses a synthetic pending action. Losing the key leaves the encrypted files intact but makes the action inaccessible. Production code must report that state and must not generate a replacement key or replay the action.
-- The Linux proof does not test backup creation or recovery. Production does not create, restore, or delete backup files. Portable backup recovery and backup-file removal remain open product decisions.
+- The production-path cache-key lifecycle test passed on 2026-11-08 in an isolated GNOME Keyring D-Bus session. A synthetic `NoStorageAccess` error covers the credential-store failure classification; behavior across other Secret Service implementations remains unverified.
+- Losing a cache key leaves the encrypted files intact but makes their contents inaccessible. Production reports that state and does not generate a replacement key or replay pending local actions.
+- Production tests do not test backup creation or recovery. The application does not create, restore, or delete backup files. Portable backup recovery and backup-file removal remain open product decisions.
 - Synthetic persistence tests cover account-scoped folders, fixed cutoffs, page/cursor atomicity, restart resume, opened-body caching, and 5,001-message pagination. They do not establish full Graph behavior; issue #3 and the tenant-only issue #8 acceptance criteria remain open.
 - Signing out a connected account removes its encrypted database, SQLite sidecars, and SQLCipher key before deleting the saved Microsoft sign-in. If cache cleanup fails, the desktop keeps the account connected so the user can retry.
 - Do not put mailbox content or OAuth tokens in test fixtures, logs, or the credential-store test evidence.

@@ -123,6 +123,12 @@ impl DatabaseIdentity {
 
 struct DatabaseKey(Zeroizing<[u8; KEY_BYTES]>);
 
+enum KeyLookup {
+    Existing(DatabaseKey),
+    Create,
+    Missing,
+}
+
 impl DatabaseKey {
     fn generate() -> Result<Self, MailCacheError> {
         let mut bytes = Zeroizing::new([0_u8; KEY_BYTES]);
@@ -194,10 +200,21 @@ fn load_or_create_key(
     credential: &Entry,
     database_exists: bool,
 ) -> Result<DatabaseKey, MailCacheError> {
-    match credential.get_secret() {
-        Ok(secret) => DatabaseKey::from_secret(secret),
-        Err(KeyringError::NoEntry) if database_exists => Err(MailCacheError::MissingEncryptionKey),
-        Err(KeyringError::NoEntry) => create_and_store_key(credential),
+    match classify_key_lookup(credential.get_secret(), database_exists)? {
+        KeyLookup::Existing(key) => Ok(key),
+        KeyLookup::Create => create_and_store_key(credential),
+        KeyLookup::Missing => Err(MailCacheError::MissingEncryptionKey),
+    }
+}
+
+fn classify_key_lookup(
+    secret_result: keyring::Result<Vec<u8>>,
+    database_exists: bool,
+) -> Result<KeyLookup, MailCacheError> {
+    match secret_result {
+        Ok(secret) => DatabaseKey::from_secret(secret).map(KeyLookup::Existing),
+        Err(KeyringError::NoEntry) if database_exists => Ok(KeyLookup::Missing),
+        Err(KeyringError::NoEntry) => Ok(KeyLookup::Create),
         Err(_) => Err(MailCacheError::Unavailable),
     }
 }
@@ -423,6 +440,10 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 #[cfg(test)]
+#[path = "security/production_tests.rs"]
+mod production_tests;
+
+#[cfg(test)]
 mod tests {
     use std::{
         fs,
@@ -432,7 +453,39 @@ mod tests {
         },
     };
 
-    use super::{MailCacheError, open_test_database, remove_database_files, with_suffix};
+    use super::{
+        KeyLookup, MailCacheError, classify_key_lookup, open_test_database, remove_database_files,
+        with_suffix,
+    };
+    use keyring::Error as KeyringError;
+
+    #[test]
+    fn keyring_lookup_distinguishes_new_existing_and_unavailable_states() {
+        assert!(matches!(
+            classify_key_lookup(Err(KeyringError::NoEntry), false),
+            Ok(KeyLookup::Create)
+        ));
+        assert!(matches!(
+            classify_key_lookup(Err(KeyringError::NoEntry), true),
+            Ok(KeyLookup::Missing)
+        ));
+        assert!(matches!(
+            classify_key_lookup(Ok(vec![0x31; super::KEY_BYTES]), true),
+            Ok(KeyLookup::Existing(_))
+        ));
+        assert_eq!(
+            classify_key_lookup(Ok(vec![0x31; super::KEY_BYTES - 1]), true).err(),
+            Some(MailCacheError::MissingEncryptionKey)
+        );
+
+        let locked_store_error = KeyringError::NoStorageAccess(Box::new(std::io::Error::other(
+            "synthetic locked Secret Service",
+        )));
+        assert_eq!(
+            classify_key_lookup(Err(locked_store_error), true).err(),
+            Some(MailCacheError::Unavailable)
+        );
+    }
 
     #[test]
     fn removing_a_cache_deletes_database_and_sidecars_idempotently() {

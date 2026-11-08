@@ -6,7 +6,6 @@ members = [
     "crates/domain",
     "crates/persistence",
     "crates/providers/microsoft-graph",
-    "tools/storage-proof",
 ]
 
 [workspace.package]
