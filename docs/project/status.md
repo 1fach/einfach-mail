@@ -23,11 +23,9 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 
 ## Next actions
 
-1. Keep issue #49 open until a Microsoft 365 tenant confirms the documented cursor-reset response shape.
-2. Keep issue #6 open until a tenant confirms recurring occurrence, time-zone, and all-day behavior.
-3. Keep issue #28 open until a dedicated Microsoft 365 test tenant is available for delegated consent and live Graph send verification.
-4. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
-5. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
+1. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
+2. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
+3. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
 
 ## Update rule
 
