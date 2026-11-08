@@ -28,6 +28,8 @@ bash scripts/check-linux-local.sh
 
 The script checks dependency boundaries and bans, the Linux target graph, Rust 1.95 compilation, formatting, Clippy, documentation, RustSec, and workspace tests. It checks for pinned tools first and prints install commands when any are missing. It does not invoke `gh` or start GitHub Actions.
 
+Run `python3 scripts/untangle-code-map.py` for a compact Rust source inventory and recent cross-component change map. Use `--declarations crates/application/src/calendar.rs` to print item declaration lines from one tracked Rust file.
+
 `cargo audit` uses its standard advisory database at `~/.cargo/advisory-db` and may fetch updates. For an offline audit, set `EINFACH_RUSTSEC_DB` to an existing advisory database path. The script passes `--no-fetch` when you set this variable, so refresh the database while online before relying on offline results. If Perl lacks `FindBin.pm`, the script reports when it uses system OpenSSL. Workspace tests skip ignored live Secret Service checks; see [development setup](docs/project/setup.md) to run them separately.
 
 The repository defines build, dependency, and test gates in [its Linux workflow](.github/workflows/ci.yml), with RustSec in [a separate workflow](.github/workflows/rustsec-audit.yml).
