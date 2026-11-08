@@ -145,7 +145,8 @@ struct BodyFetchGate {
 
 #[derive(Clone)]
 struct DeltaPageGate {
-    entered: Arc<AtomicUsize>,
+    request_count: Arc<AtomicUsize>,
+    request_index_to_block: usize,
     started: smol::channel::Sender<()>,
     release: smol::channel::Receiver<()>,
 }
@@ -331,7 +332,7 @@ impl MailProvider for FixtureProvider {
                 .expect("synthetic request log mutex is not poisoned")
                 .push(request);
             if let Some(gate) = delta_gate
-                && gate.entered.fetch_add(1, Ordering::Relaxed) == 0
+                && gate.request_count.fetch_add(1, Ordering::Relaxed) == gate.request_index_to_block
             {
                 gate.started
                     .send(())
@@ -1504,6 +1505,108 @@ fn interrupted_sync_resumes_its_checkpoint_and_body_reopens_from_encrypted_cache
 }
 
 #[test]
+fn cancelling_sync_with_a_pending_continuation_releases_reservation_and_resumes_checkpoint() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let cached_folder = folder(&account);
+        let folder_reference = cached_folder.reference().clone();
+        let started_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let cutoff = started_at - Duration::from_secs(90 * 24 * 60 * 60);
+        let next_link = MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/messages?$skiptoken=synthetic-pending".to_owned(),
+        );
+        let final_link = MessageDeltaLink::from_opaque(
+            "https://graph.microsoft.com/v1.0/messages?$deltatoken=synthetic-final".to_owned(),
+        );
+        let mut provider = FixtureProvider::new(
+            account.clone(),
+            vec![cached_folder],
+            [
+                Ok(page_response(first_page(cutoff, next_link.clone()))),
+                Ok(page_response(final_page(final_link.clone()))),
+            ],
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let requests = Arc::clone(&provider.requests);
+        let (started_sender, started_receiver) = smol::channel::bounded(1);
+        let (_release_sender, release_receiver) = smol::channel::bounded(1);
+        provider.delta_gate = Some(DeltaPageGate {
+            request_count: Arc::new(AtomicUsize::new(0)),
+            request_index_to_block: 1,
+            started: started_sender,
+            release: release_receiver,
+        });
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = Arc::new(MailWorkflow::new(account, provider, cache.clone()));
+        let executor = smol::Executor::new();
+        let (report, state) = smol::block_on(executor.run(async {
+            let syncing_workflow = Arc::clone(&workflow);
+            let sync_task = executor.spawn(async move {
+                syncing_workflow
+                    .synchronize_account(started_at, &ignore_sync_progress)
+                    .await
+            });
+            started_receiver
+                .recv()
+                .await
+                .expect("the continuation request reaches its gate");
+
+            let checkpoint = workflow
+                .cached_sync_state(&folder_reference)
+                .await
+                .expect("the first page checkpoint is readable")
+                .expect("the initial cutoff is stored");
+            assert_eq!(checkpoint.cutoff(), cutoff);
+            assert_eq!(checkpoint.next_link(), Some(&next_link));
+            assert_eq!(
+                workflow
+                    .list_cached_messages(&folder_reference)
+                    .await
+                    .expect("the first page remains cached")
+                    .len(),
+                1
+            );
+
+            assert!(sync_task.cancel().await.is_none());
+
+            let report = workflow
+                .synchronize_account(
+                    started_at + Duration::from_secs(86_400),
+                    &ignore_sync_progress,
+                )
+                .await
+                .expect("a later sync acquires the released reservation");
+            let state = workflow
+                .cached_sync_state(&folder_reference)
+                .await
+                .expect("the completed cursor is readable")
+                .expect("the folder cursor remains present");
+            (report, state)
+        }));
+
+        assert_eq!(report.page_count(), 1);
+        assert_eq!(state.cutoff(), cutoff);
+        assert_eq!(state.delta_link(), Some(&final_link));
+        assert!(state.next_link().is_none());
+        assert_eq!(
+            requests
+                .lock()
+                .expect("synthetic request log mutex is not poisoned")
+                .as_slice(),
+            [
+                MessageDeltaRequest::Initial,
+                MessageDeltaRequest::Continue(next_link.clone()),
+                MessageDeltaRequest::Continue(next_link),
+            ]
+        );
+
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
 fn opening_a_missing_body_reserves_its_folder_against_delta_sync() {
     smol::block_on(async {
         let directory = TempDir::new().expect("temporary directory is created");
@@ -2113,7 +2216,8 @@ fn factory_account_reservation_prevents_folder_snapshot_replacement_race() {
         let (started_sender, started_receiver) = smol::channel::unbounded();
         let (release_sender, release_receiver) = smol::channel::bounded(1);
         provider.delta_gate = Some(DeltaPageGate {
-            entered: Arc::new(AtomicUsize::new(0)),
+            request_count: Arc::new(AtomicUsize::new(0)),
+            request_index_to_block: 0,
             started: started_sender,
             release: release_receiver,
         });
