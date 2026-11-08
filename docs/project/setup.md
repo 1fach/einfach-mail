@@ -89,11 +89,10 @@ Install the pinned RustSec audit tool and check the lockfile against the current
 
 ```sh
 cargo install cargo-audit --version 0.22.2 --locked --no-default-features
-mkdir -p target
-cargo audit --db target/rustsec-advisory-db --deny yanked
+cargo audit --deny yanked
 ```
 
-`cargo audit` reads `Cargo.lock`, fails when a locked crate is yanked, and does not update the lockfile. It stores the advisory database under ignored `target/rustsec-advisory-db` and may fetch updates. Do not suppress advisories globally; resolve them or record a narrow, reviewed exception.
+`cargo audit` reads `Cargo.lock`, fails when a locked crate is yanked, and does not update the lockfile. By default, it uses `~/.cargo/advisory-db` and may fetch updates. To audit offline with an existing database, set `EINFACH_RUSTSEC_DB` when you run `scripts/check-linux-local.sh`; the script skips fetching for that run. Refresh the database while online before relying on offline results. Do not suppress advisories globally; resolve them or record a narrow, reviewed exception.
 
 The [RustSec audit workflow](../../.github/workflows/rustsec-audit.yml) runs on pull requests, pushes to `main`, and weekly.
 

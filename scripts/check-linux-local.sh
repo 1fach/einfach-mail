@@ -33,9 +33,6 @@ if (( missing_cargo_tool != 0 )); then
     exit 127
 fi
 
-rustsec_db="$repo_root/target/rustsec-advisory-db"
-mkdir -p -- "$(dirname -- "$rustsec_db")"
-
 if [[ -z "${OPENSSL_NO_VENDOR:-}" ]] && ! perl -MFindBin -e 1 >/dev/null 2>&1; then
     if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists openssl; then
         export OPENSSL_NO_VENDOR=1
@@ -57,7 +54,11 @@ run cargo +1.95.0 check --workspace --all-targets --locked
 run cargo fmt --all -- --check
 run cargo clippy --workspace --all-targets --locked -- -D warnings
 run cargo doc --workspace --no-deps --locked
-run cargo audit --db "$rustsec_db" --deny yanked
+if [[ -n "${EINFACH_RUSTSEC_DB:-}" ]]; then
+    run cargo audit --db "$EINFACH_RUSTSEC_DB" --no-fetch --deny yanked
+else
+    run cargo audit --deny yanked
+fi
 run cargo test --workspace --locked
 
 printf '\nLinux project checks passed.\n'
