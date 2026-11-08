@@ -575,7 +575,7 @@ where
         let Some(week_start) = self.week.start().checked_add(Span::new().weeks(weeks)).ok() else {
             return;
         };
-        let Some(week) = self.week.with_start(self.profile.id(), week_start) else {
+        let Some(week) = self.week.with_start(week_start) else {
             return;
         };
         drop(self.task.take());
