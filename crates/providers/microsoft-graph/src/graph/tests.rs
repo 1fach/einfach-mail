@@ -31,9 +31,9 @@ use super::{
     GraphApi,
     calendar::{WireCalendarEvent, calendar_event_update_body, create_calendar_event_body},
     mail::{
-        WireFolder, WireMessage, WireMessageChange, confirmed_follow_up_flag_status,
-        confirmed_message_move, confirmed_read_state, follow_up_flag_patch_body, mail_reply_body,
-        message_move_body, read_state_patch_body,
+        WireFolder, WireMessageChange, confirmed_follow_up_flag_status, confirmed_message_move,
+        confirmed_read_state, follow_up_flag_patch_body, mail_reply_body, message_move_body,
+        read_state_patch_body,
     },
     pagination::{MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget},
 };
@@ -294,7 +294,14 @@ async fn message_delta_page_maps_sparse_updates_and_removals() {
                 .header("content-type", "application/json")
                 .json_body(json!({
                     "value": [
-                        {"id": "synthetic-message", "subject": "Updated subject"},
+                        {
+                            "id": "synthetic-message",
+                            "subject": "Updated subject",
+                            "from": {"emailAddress": {"address": "sender@example.test", "name": "Sender"}},
+                            "sender": null,
+                            "receivedDateTime": "2026-10-30T12:00:00Z",
+                            "isRead": false
+                        },
                         {"id": "synthetic-cleared-message", "subject": null},
                         {"id": "removed-without-reason", "@removed": {}},
                         {"id": "removed-with-reason", "@removed": {"reason": "deleted"}}
@@ -335,10 +342,22 @@ async fn message_delta_page_maps_sparse_updates_and_removals() {
         ReadState::Read,
         Some(FollowUpFlagStatus::Flagged),
     );
+    let expected_received_at = SystemTime::from(
+        OffsetDateTime::parse("2026-10-30T12:00:00Z", &Rfc3339)
+            .expect("synthetic message time is valid"),
+    );
     metadata.apply_patch(patch);
     assert_eq!(metadata.subject(), Some("Updated subject"));
-    assert_eq!(metadata.read_state(), ReadState::Read);
-    assert_eq!(metadata.received_at(), &SystemTime::UNIX_EPOCH);
+    assert_eq!(
+        metadata
+            .origin()
+            .from_mailbox()
+            .map(|mailbox| mailbox.address()),
+        Some("sender@example.test")
+    );
+    assert!(metadata.origin().sender().is_none());
+    assert_eq!(metadata.read_state(), ReadState::Unread);
+    assert_eq!(metadata.received_at(), &expected_received_at);
     assert_eq!(
         metadata.follow_up_flag_status(),
         Some(FollowUpFlagStatus::Flagged)
@@ -349,8 +368,8 @@ async fn message_delta_page_maps_sparse_updates_and_removals() {
     assert_eq!(id.as_str(), "synthetic-cleared-message");
     metadata.apply_patch(patch);
     assert_eq!(metadata.subject(), None);
-    assert_eq!(metadata.read_state(), ReadState::Read);
-    assert_eq!(metadata.received_at(), &SystemTime::UNIX_EPOCH);
+    assert_eq!(metadata.read_state(), ReadState::Unread);
+    assert_eq!(metadata.received_at(), &expected_received_at);
     assert_eq!(
         metadata.follow_up_flag_status(),
         Some(FollowUpFlagStatus::Flagged)
@@ -452,12 +471,17 @@ async fn profile_read_does_not_follow_a_graph_redirect() {
 }
 
 #[test]
-fn message_delta_rejects_empty_ids_and_null_required_metadata() {
+fn message_delta_rejects_empty_ids_and_invalid_required_metadata() {
     for payload in [
         json!({"id": "", "subject": "Synthetic"}),
         json!({"id": "", "@removed": {}}),
         json!({"id": "synthetic-message", "receivedDateTime": null}),
         json!({"id": "synthetic-message", "isRead": null}),
+        json!({
+            "id": "synthetic-message",
+            "receivedDateTime": "not-a-timestamp",
+            "isRead": true
+        }),
     ] {
         let wire = serde_json::from_value::<WireMessageChange>(payload)
             .expect("synthetic Graph delta record deserializes");
@@ -1638,7 +1662,7 @@ fn missing_hidden_folder_flag_defaults_to_visible() {
 }
 
 #[test]
-fn maps_folder_and_message_payloads_to_account_scoped_domain_values() {
+fn maps_folder_payload_to_account_scoped_domain_values() {
     let account_id = AccountId::try_from("synthetic-account".to_owned())
         .expect("synthetic account ID is non-empty");
     let folder = WireFolder {
@@ -1649,38 +1673,11 @@ fn maps_folder_and_message_payloads_to_account_scoped_domain_values() {
     .into_domain(&account_id, None)
     .expect("synthetic folder maps to the domain")
     .expect("synthetic folder is visible");
-    let message: WireMessage = serde_json::from_value(json!({
-        "id": "message-1",
-        "subject": "Synthetic subject",
-        "from": {"emailAddress": {"address": "sender@example.test", "name": "Sender"}},
-        "sender": null,
-        "receivedDateTime": "2026-10-30T12:00:00Z",
-        "isRead": false
-    }))
-    .expect("synthetic message payload is valid");
-    let message = message
-        .into_domain(folder.reference().clone())
-        .expect("synthetic message maps to the domain");
-
-    assert_eq!(message.folder().account_id(), &account_id);
-    assert_eq!(message.metadata().subject(), Some("Synthetic subject"));
-    assert_eq!(
-        message
-            .metadata()
-            .origin()
-            .from_mailbox()
-            .map(|mailbox| mailbox.address()),
-        Some("sender@example.test")
-    );
-    assert!(message.metadata().origin().sender().is_none());
-    assert_eq!(
-        message.metadata().read_state(),
-        einfach_mail_domain::ReadState::Unread
-    );
+    assert_eq!(folder.reference().account_id(), &account_id);
 }
 
 #[test]
-fn rejects_empty_folder_ids_and_malformed_message_times() {
+fn rejects_empty_folder_ids() {
     let account_id = AccountId::try_from("synthetic-account".to_owned())
         .expect("synthetic account ID is non-empty");
     assert!(
@@ -1692,18 +1689,6 @@ fn rejects_empty_folder_ids_and_malformed_message_times() {
         .into_domain(&account_id, None)
         .is_err()
     );
-
-    let message: WireMessage = serde_json::from_value(json!({
-        "id": "message-1",
-        "receivedDateTime": "not-a-timestamp",
-        "isRead": true
-    }))
-    .expect("synthetic message payload has all required fields");
-    let folder_id =
-        FolderId::try_from("folder-1".to_owned()).expect("synthetic folder ID is non-empty");
-    let folder = FolderReference::new(account_id, folder_id);
-
-    assert_eq!(message.into_domain(folder), Err(GraphError::InvalidRecord));
 }
 
 #[test]

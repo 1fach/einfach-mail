@@ -23,6 +23,7 @@ Use this scope for the first read-only mail milestone:
 - Keep the cutoff fixed for this sync scope. Store it with the account and reuse it when resuming or rebuilding a delta cursor.
 - Keep visible folder metadata account-scoped: provider ID, display name, and optional parent-folder ID. Exclude hidden folders from the browsable tree.
 - Keep message-list metadata account- and folder-scoped: provider ID, optional subject, `from`, `sender`, received time, and read state. Keep `from` and `sender` distinct because Graph defines different semantics for delegated messages. Do not request `bodyPreview`, message bodies, or attachments in folder listing and delta responses.
+- Populate folder message lists from the encrypted cache after delta synchronization. Do not add a parallel provider operation that lists the same full-folder metadata.
 - Fetch a message body only after the user opens that message. Store the raw body in the encrypted cache so the user can reopen it offline. Sanitize it at display time. Do not download attachments in M2.
 - Keep synchronized message metadata until account removal. Clear an opened body's cached content when a message delta upsert updates its metadata, and clear retained bodies when a replacement scan completes. M2 does not add a rolling-retention setting or a separate history-import control. See [ADR 0034](0034-invalidate-cached-message-bodies-after-delta-updates.md).
 - Keep M2 read-only. Do not mark messages read, move, archive, flag, delete, or send mail from the app.

@@ -38,7 +38,8 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarEventCreation, CalendarEventDraft, CalendarOccurrenceTime,
     CalendarViewRange, CalendarViewReference, FolderId, FolderReference, MailReplyDraft,
-    MailReplySource, MessageBodyType, MessageDeltaLink, MessageDeltaProgress, MessageId,
+    MailReplySource, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaProgress,
+    MessageId,
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 
@@ -884,7 +885,7 @@ fn assert_saved_refresh_token(
 }
 
 #[tokio::test]
-async fn mail_provider_reads_scoped_folders_messages_delta_and_body() {
+async fn mail_provider_reads_scoped_folders_delta_and_body() {
     let server = MockServer::start_async().await;
     let token_refresh = server
         .mock_async(|when, then| {
@@ -931,19 +932,6 @@ async fn mail_provider_reads_scoped_folders_messages_delta_and_body() {
                 .body(r#"{"value":[]}"#);
         })
         .await;
-    let message_list = server
-        .mock_async(|when, then| {
-            when.method(GET)
-                .path("/v1.0/me/mailFolders/folder-inbox/messages")
-                .header("authorization", "Bearer synthetic-mail-access")
-                .header("prefer", "IdType=\"ImmutableId\"");
-            then.status(200)
-                .header("content-type", "application/json")
-                .body(
-                    r#"{"value":[{"id":"message-1","subject":"Synthetic message","receivedDateTime":"2026-10-31T12:00:00Z","isRead":false}]}"#,
-                );
-        })
-        .await;
     let next_link = format!(
         "{}/v1.0/me/mailFolders/folder-inbox/messages/delta?$skiptoken=opaque-next",
         server.base_url()
@@ -962,7 +950,12 @@ async fn mail_provider_reads_scoped_folders_messages_delta_and_body() {
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(serde_json::json!({
-                    "value": [],
+                    "value": [{
+                        "id": "message-1",
+                        "subject": "Synthetic message",
+                        "receivedDateTime": "2026-10-31T12:00:00Z",
+                        "isRead": false
+                    }],
                     "@odata.nextLink": next_link,
                 }));
         })
@@ -1016,13 +1009,6 @@ async fn mail_provider_reads_scoped_folders_messages_delta_and_body() {
         .expect("synthetic inbox is present")
         .reference()
         .clone();
-    let messages = provider
-        .list_messages(&folder)
-        .await
-        .expect("provider lists synthetic message metadata");
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].folder(), &folder);
-
     let response = provider
         .message_delta_page(&folder, MessageDeltaRequest::Initial)
         .await
@@ -1032,6 +1018,10 @@ async fn mail_provider_reads_scoped_folders_messages_delta_and_body() {
     };
     assert!(page.response_bytes() > 0);
     let (page, _) = page.into_parts();
+    let [MessageDeltaChange::Upsert { id: message_id, .. }] = page.changes() else {
+        panic!("synthetic initial delta contains one message upsert");
+    };
+    let message_id = message_id.clone();
     let MessageDeltaProgress::Next(next_link) = page.progress() else {
         panic!("synthetic initial response contains a continuation link");
     };
@@ -1052,7 +1042,7 @@ async fn mail_provider_reads_scoped_folders_messages_delta_and_body() {
         MessageDeltaProgress::Complete(_)
     ));
     let body = provider
-        .fetch_message_body(&folder, messages[0].id())
+        .fetch_message_body(&folder, &message_id)
         .await
         .expect("provider loads the requested synthetic body");
     assert_eq!(body.content_type(), MessageBodyType::Html);
@@ -1062,15 +1052,16 @@ async fn mail_provider_reads_scoped_folders_messages_delta_and_body() {
         .expect("synthetic account ID is non-empty");
     let another_folder = FolderReference::new(another_account, folder.folder_id().clone());
     assert_eq!(
-        provider.list_messages(&another_folder).await,
-        Err(MailOperationError::AccountMismatch)
+        provider
+            .message_delta_page(&another_folder, MessageDeltaRequest::Initial)
+            .await,
+        Err(MailOperationError::AccountMismatch),
     );
 
     token_refresh.assert_async().await;
     profile_request.assert_async().await;
     root_folders.assert_async().await;
     child_folders.assert_async().await;
-    message_list.assert_async().await;
     message_delta_initial.assert_async().await;
     message_delta_continuation.assert_async().await;
     message_body.assert_async().await;

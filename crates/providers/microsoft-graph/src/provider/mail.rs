@@ -9,8 +9,8 @@ use einfach_mail_application::{
     MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
-    MailReplyDraft, MessageBody, MessageId, ReadState,
+    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailReplyDraft,
+    MessageBody, MessageId, ReadState,
 };
 
 use super::{
@@ -74,21 +74,6 @@ impl MailProvider for MicrosoftGraphProvider {
                 .well_known_folder(&account_id, folder, Arc::clone(&token))
                 .await;
             map_mail_result(&config, &account_id, &token, folder_result).await
-        })
-    }
-
-    fn list_messages(
-        &self,
-        folder: &FolderReference,
-    ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_ {
-        let config = Arc::clone(&self.config);
-        let folder = folder.clone();
-        worker::run(move |_cancellation: CancellationToken| async move {
-            let account_id = folder.account_id();
-            let token = ensure_access_token(&config, account_id).await?;
-            let graph_api = config.graph_api().map_err(map_graph_error)?;
-            let messages = graph_api.list_messages(&folder, Arc::clone(&token)).await;
-            map_mail_result(&config, account_id, &token, messages).await
         })
     }
 
