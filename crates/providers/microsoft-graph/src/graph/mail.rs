@@ -16,10 +16,9 @@ use einfach_mail_application::{
     MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
+    AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
     MailReplyDraft, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink,
-    MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadata, MessageMetadataPatch,
-    MessageOrigin, ReadState,
+    MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
 };
 
 use super::{
@@ -81,22 +80,6 @@ impl GraphApi {
             .into_domain(account_id, None)?
             .map(|folder| folder.reference().clone())
             .ok_or(GraphError::InvalidResponse)
-    }
-
-    pub(crate) async fn list_messages(
-        &self,
-        folder: &FolderReference,
-        token: std::sync::Arc<AccessToken>,
-    ) -> Result<Vec<MailMessage>, GraphError> {
-        let mut traversal = PageTraversal::new(self, GraphReadOperation::Messages, token);
-        let folder = folder.clone();
-        traversal
-            .collect::<WireMessage, MailMessage>(
-                self.authority
-                    .folder_messages_path(folder.folder_id().as_str())?,
-                |message| message.into_domain(folder.clone()),
-            )
-            .await
     }
 
     pub(crate) async fn message_delta_page(
@@ -418,43 +401,6 @@ impl TryFrom<WireRecipient> for Mailbox {
             recipient.email_address.name,
         )
         .map_err(|_| GraphError::InvalidRecord)
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct WireMessage {
-    pub(super) id: String,
-    pub(super) subject: Option<String>,
-    pub(super) from: Option<WireRecipient>,
-    pub(super) sender: Option<WireRecipient>,
-    pub(super) received_date_time: String,
-    pub(super) is_read: bool,
-    pub(super) flag: Option<WireFollowUpFlag>,
-}
-
-impl WireMessage {
-    pub(super) fn into_domain(self, folder: FolderReference) -> Result<MailMessage, GraphError> {
-        let id = MessageId::try_from(self.id).map_err(|_| GraphError::InvalidRecord)?;
-        let received_at = OffsetDateTime::parse(&self.received_date_time, &Rfc3339)
-            .map(SystemTime::from)
-            .map_err(|_| GraphError::InvalidRecord)?;
-        let from = self.from.map(Mailbox::try_from).transpose()?;
-        let sender = self.sender.map(Mailbox::try_from).transpose()?;
-        let origin = MessageOrigin::new(from, sender);
-        let read_state = match self.is_read {
-            true => ReadState::Read,
-            false => ReadState::Unread,
-        };
-        let follow_up_flag_status = self.flag.and_then(|flag| flag.flag_status.map(Into::into));
-        let metadata = MessageMetadata::new(
-            self.subject,
-            origin,
-            received_at,
-            read_state,
-            follow_up_flag_status,
-        );
-        Ok(MailMessage::new(folder, id, metadata))
     }
 }
 

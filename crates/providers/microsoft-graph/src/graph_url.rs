@@ -75,12 +75,6 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub(super) fn folder_messages_path(&self, folder_id: &str) -> Result<GraphUrl, GraphError> {
-        let mut url = self.folder_path(folder_id, "messages")?;
-        url.query_pairs_mut().append_pair("$select", MESSAGE_SELECT);
-        self.validated_url(url)
-    }
-
     pub(super) fn folder_message_delta_path(
         &self,
         folder_id: &str,
@@ -629,11 +623,10 @@ mod tests {
     }
 
     #[test]
-    fn folder_ids_are_encoded_as_single_path_segments() {
-        let authority = authority();
-        let url = authority
-            .folder_messages_path("folder/id with space")
-            .expect("folder ID forms an encoded Graph path");
+    fn folder_delta_ids_are_encoded_as_single_path_segments() {
+        let url = authority()
+            .folder_message_delta_path("folder/id with space")
+            .expect("folder ID forms an encoded Graph delta path");
 
         assert!(url.as_str().contains("folder%2Fid%20with%20space"));
     }

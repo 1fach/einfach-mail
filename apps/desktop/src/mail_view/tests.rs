@@ -159,13 +159,6 @@ impl MailProvider for OfflineProvider {
         ready(Err(MailOperationError::ServiceUnavailable))
     }
 
-    fn list_messages(
-        &self,
-        _: &FolderReference,
-    ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_ {
-        ready(Err(MailOperationError::ServiceUnavailable))
-    }
-
     fn message_delta_page(
         &self,
         _: &FolderReference,
@@ -310,13 +303,6 @@ impl MailProvider for ReadStateProvider {
                     .expect("synthetic folder is valid"),
             ])
         }
-    }
-
-    fn list_messages(
-        &self,
-        _: &FolderReference,
-    ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_ {
-        ready(Ok(Vec::new()))
     }
 
     fn message_delta_page(
@@ -472,13 +458,6 @@ impl MailProvider for MessageMoveProvider {
         }
     }
 
-    fn list_messages(
-        &self,
-        folder: &FolderReference,
-    ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_ {
-        self.offline.list_messages(folder)
-    }
-
     fn message_delta_page(
         &self,
         folder: &FolderReference,
@@ -629,13 +608,6 @@ impl MailProvider for PermissionProvider {
         account_id: &AccountId,
     ) -> impl Future<Output = Result<Vec<MailFolder>, MailOperationError>> + Send + '_ {
         self.offline.list_folders(account_id)
-    }
-
-    fn list_messages(
-        &self,
-        folder: &FolderReference,
-    ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_ {
-        self.offline.list_messages(folder)
     }
 
     fn message_delta_page(

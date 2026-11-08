@@ -3,8 +3,8 @@
 use std::{future::Future, time::Duration};
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
-    MailReplyDraft, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId, ReadState,
+    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailReplyDraft,
+    MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId, ReadState,
 };
 use thiserror::Error;
 
@@ -174,22 +174,6 @@ pub trait MailProvider: Send + Sync {
         &self,
         account_id: &AccountId,
     ) -> impl Future<Output = Result<Vec<MailFolder>, MailOperationError>> + Send + '_;
-
-    /// Lists provider-independent message metadata for `folder`.
-    ///
-    /// The result does not include message bodies. The provider must reject a
-    /// folder reference scoped to another account.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MailOperationError::SignInRequired`] when no valid session
-    /// exists, [`MailOperationError::AccountMismatch`] when `folder` is
-    /// outside that session, or another error for access denial, throttling,
-    /// invalid provider data, unavailable services, or exceeded work limits.
-    fn list_messages(
-        &self,
-        folder: &FolderReference,
-    ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_;
 
     /// Loads one page of changes for `folder` or reports that its cursor expired.
     ///

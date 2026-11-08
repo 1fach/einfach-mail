@@ -22,8 +22,8 @@ use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation,
     CalendarEventUpdate, CalendarEventVersion, CalendarOccurrence, CalendarOccurrencePatch,
     CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference, EditableCalendarEvent,
-    EventId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
-    MailRecipient, MailReplyDraft, MailReplySource, MailSendOperationId, MailSubject, MessageBody,
+    EventId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailRecipient,
+    MailReplyDraft, MailReplySource, MailSendOperationId, MailSubject, MessageBody,
     MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
     MessageId, MessageMetadataPatch, ReadState,
 };
@@ -304,13 +304,6 @@ impl MailProvider for FixtureProvider {
                 Err(MailOperationError::AccountMismatch)
             }
         }
-    }
-
-    fn list_messages(
-        &self,
-        _folder: &FolderReference,
-    ) -> impl Future<Output = Result<Vec<MailMessage>, MailOperationError>> + Send + '_ {
-        ready(Ok(Vec::new()))
     }
 
     fn message_delta_page(

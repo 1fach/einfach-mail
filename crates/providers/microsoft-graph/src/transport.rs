@@ -37,7 +37,6 @@ const MAX_AUTOMATIC_RETRY_DELAY: Duration = Duration::from_secs(60);
 pub(super) enum GraphReadOperation {
     Profile,
     Folders,
-    Messages,
     MessageBody,
     CalendarEventRead,
 }
@@ -82,7 +81,6 @@ impl GraphRequestOperation {
             Self::Get(
                 GraphReadOperation::Profile
                 | GraphReadOperation::Folders
-                | GraphReadOperation::Messages
                 | GraphReadOperation::MessageBody
                 | GraphReadOperation::CalendarEventRead,
             )
@@ -98,11 +96,7 @@ impl GraphRequestOperation {
         match self {
             Self::Get(GraphReadOperation::Profile | GraphReadOperation::Folders)
             | Self::SendMail(_) => false,
-            Self::Get(
-                GraphReadOperation::Messages
-                | GraphReadOperation::MessageBody
-                | GraphReadOperation::CalendarEventRead,
-            )
+            Self::Get(GraphReadOperation::MessageBody | GraphReadOperation::CalendarEventRead)
             | Self::MessageDelta
             | Self::CalendarViewDelta(_)
             | Self::PostJson {
@@ -685,7 +679,6 @@ async fn response_result(
         GraphRequestOperation::Get(
             GraphReadOperation::Profile
             | GraphReadOperation::Folders
-            | GraphReadOperation::Messages
             | GraphReadOperation::MessageBody
             | GraphReadOperation::CalendarEventRead,
         )
