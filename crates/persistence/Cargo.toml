@@ -23,8 +23,8 @@ keyring.workspace = true
 xdg.workspace = true
 
 [dev-dependencies]
-smol = "2.0.2"
-tempfile = "3.27.0"
+smol.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
