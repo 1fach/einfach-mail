@@ -1,6 +1,6 @@
 # Microsoft Graph research
 
-Research checked: 2026-10-31. Calendar delta-reset and date-time findings rechecked: 2026-11-07. Use official Microsoft documentation as the source of truth. API behavior can change; recheck these pages before implementing or releasing an integration.
+Research checked: 2026-10-31. Calendar delta-reset and date-time findings rechecked: 2026-11-08. Use official Microsoft documentation as the source of truth. API behavior can change; recheck these pages before implementing or releasing an integration.
 
 ## Findings
 
@@ -21,7 +21,9 @@ Microsoft recommends migrating Exchange Online EWS integrations to Microsoft Gra
 
 Graph's `dateTimeTimeZone` represents a local date and time together with a time-zone identifier. The identifier can be a Windows time-zone name or one of the additional zones supported by the calendar API; create and update methods may accept a narrower set. Keep the original identifier alongside the wall-clock value at the provider boundary. A fixed UTC offset cannot represent future daylight-saving changes. See the [dateTimeTimeZone resource](https://learn.microsoft.com/en-us/graph/api/resources/datetimetimezone?view=graph-rest-1.0) and the [Rust time-zone dependency review](../project/dependency-review.md#candidates) before implementing conversion or recurrence behavior.
 
-The v1.0 `calendarView` API returns event start and end values in UTC when the request omits `Prefer: outlook.timezone`. The event resource requires all-day event start and end values to be midnight in the same time zone. The docs do not explain how a non-UTC all-day event appears in the UTC-default response. Keep issue #6 open for tenant verification.
+The v1.0 `calendarView` API says response start and end values default to UTC when the request omits `Prefer: outlook.timezone`. The event resource requires an all-day event's start and end to be midnight in the same time zone. Its `start` and `end` properties also default to UTC. Microsoft's current v1.0 OpenAPI schema repeats these rules. It does not define how `calendarView` serializes a non-UTC all-day event. It also does not explain how a client should recover its calendar date from a UTC response. `originalStartTimeZone` identifies the zone used when the event was created, but the docs do not say how it applies to those response values. Keep issue #6 open for tenant verification.
+
+The pinned Wino Mail [calendar sync](../../repos/wino-mail/src/Wino.Core/Synchronizers/OutlookSynchronizer.cs) requests `calendarView/delta` without setting `Prefer: outlook.timezone`. Its [event mapper](../../repos/wino-mail/src/Wino.Core/Integration/Processors/OutlookChangeProcessor.cs) parses `dateTime` as an unspecified wall-clock value and stores the returned `timeZone`; it describes all-day values as floating dates. This is an implementation reference, not evidence of Exchange Online's response. The pinned Thunderbird Graph source contains generated [event fields](../../repos/thunderbird/rust/ms_graph_tb/src/types/event.rs) and a calendar-view delta request builder. I found no response mapping or fixture for non-UTC all-day output.
 
 ### Outlook item identifiers
 
@@ -76,6 +78,7 @@ Use these trees only for source inspection. Do not add them as application depen
 - [Microsoft Graph calendarView response time zone](https://learn.microsoft.com/en-us/graph/api/calendar-list-calendarview?view=graph-rest-1.0)
 - [Microsoft Graph event resource](https://learn.microsoft.com/en-us/graph/api/resources/event?view=graph-rest-1.0)
 - [Microsoft Graph dateTimeTimeZone resource and supported zones](https://learn.microsoft.com/en-us/graph/api/resources/datetimetimezone?view=graph-rest-1.0)
+- [Microsoft Graph v1.0 OpenAPI event schema](https://github.com/microsoftgraph/msgraph-metadata/blob/19426105dd741181fffcd4972c8800b569360bed/openapi/v1.0/default.yaml#L883349-L883465)
 - [Microsoft Graph throttling guidance](https://learn.microsoft.com/en-us/graph/throttling)
 - [Microsoft Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference?view=graph-rest-1.0)
 - [Microsoft Entra guide to requesting permissions and consent](https://learn.microsoft.com/en-us/entra/identity-platform/consent-types-developer)
