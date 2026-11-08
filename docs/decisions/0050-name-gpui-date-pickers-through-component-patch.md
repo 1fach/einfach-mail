@@ -37,5 +37,4 @@ Keep the copied upstream license and source. Remove the local package patch when
 
 - [GPUI Kit 0.9.0 styled DatePicker source](https://github.com/longbridge/gpui-kit/blob/v0.9.0/crates/component/src/time/date_picker.rs)
 - [GPUI Kit 0.9.0 Base DatePicker source](https://github.com/longbridge/gpui-kit/blob/v0.9.0/crates/base/src/date_picker.rs)
-- [GPUI Kit 0.9.0 styled DatePicker source](https://github.com/longbridge/gpui-kit/blob/v0.9.0/crates/component/src/time/date_picker.rs)
 - [GPUI Kit v0.9.0 release notes](https://github.com/longbridge/gpui-kit/releases/tag/v0.9.0)
