@@ -70,7 +70,6 @@ pub(crate) struct MailView {
     message_list_scroll: VirtualListScrollHandle,
     sync_state: Option<MailSyncState>,
     sync_status: SyncStatus,
-    sync_running: bool,
     sync_task: Option<Task<()>>,
     selected_message_id: Option<MessageId>,
     message_detail_state: MessageDetailState,
@@ -93,11 +92,21 @@ struct MailComposerPresentation {
 }
 
 enum SyncStatus {
+    Idle,
     LoadingCache,
     Syncing,
     Rebuilding,
     UpToDate,
     Failed(MailWorkflowError),
+}
+
+impl SyncStatus {
+    fn is_sync_active(&self) -> bool {
+        match self {
+            Self::LoadingCache | Self::Syncing | Self::Rebuilding => true,
+            Self::Idle | Self::UpToDate | Self::Failed(_) => false,
+        }
+    }
 }
 
 enum MessageListState {
@@ -379,7 +388,6 @@ impl MailView {
             message_list_scroll: VirtualListScrollHandle::new(),
             sync_state: None,
             sync_status: SyncStatus::LoadingCache,
-            sync_running: true,
             sync_task: None,
             selected_message_id: None,
             message_detail_state: MessageDetailState::Empty,
@@ -411,7 +419,6 @@ impl MailView {
                     cx.notify();
                 }
                 Err(error) => {
-                    view.sync_running = false;
                     view.sync_status = SyncStatus::Failed(error);
                     view.message_list_state = MessageListState::Failed(error);
                     cx.notify();
@@ -435,7 +442,6 @@ impl MailView {
             };
             let snapshot = load_snapshot(workflow.as_ref(), selected_folder.as_ref()).await;
             let _ = this.update(cx, |view, cx| {
-                view.sync_running = false;
                 view.sync_task = None;
                 view.finish_sync(sync_result.map(|_| ()), snapshot);
                 cx.notify();
@@ -522,7 +528,7 @@ impl MailView {
         drop(self.follow_up_flag_task.take());
         drop(self.message_move_task.take());
         drop(self.well_known_folder_action_task.take());
-        self.sync_running = false;
+        self.sync_status = SyncStatus::Idle;
         self.selected_folder = None;
         self.selected_message_id = None;
         self.sync_state = None;
@@ -539,7 +545,7 @@ impl MailView {
     }
 
     fn select_folder(&mut self, folder: FolderReference, cx: &mut Context<Self>) {
-        if self.sync_running || self.message_update_in_progress() {
+        if self.sync_status.is_sync_active() || self.message_update_in_progress() {
             return;
         }
         if self.selected_folder.as_ref() == Some(&folder) {
@@ -623,7 +629,7 @@ impl MailView {
     }
 
     fn navigate_message(&mut self, navigation: ListNavigation, cx: &mut Context<Self>) {
-        if self.sync_running || self.message_update_in_progress() {
+        if self.sync_status.is_sync_active() || self.message_update_in_progress() {
             return;
         }
         let selected_index = self.selected_message_id.as_ref().and_then(|selected| {
@@ -697,10 +703,9 @@ impl MailView {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.sync_running || self.message_update_in_progress() {
+        if self.sync_status.is_sync_active() || self.message_update_in_progress() {
             return;
         }
-        self.sync_running = true;
         self.sync_status = SyncStatus::Syncing;
         self.selected_message_id = None;
         self.message_detail_state = MessageDetailState::Empty;
@@ -717,7 +722,6 @@ impl MailView {
                 .await;
             let snapshot = load_snapshot(workflow.as_ref(), selected_folder.as_ref()).await;
             let _ = this.update(cx, |view, cx| {
-                view.sync_running = false;
                 view.sync_task = None;
                 view.finish_sync(sync_result.map(|_| ()), snapshot);
                 cx.notify();
@@ -727,7 +731,7 @@ impl MailView {
     }
 
     fn update_selected_read_state(&mut self, cx: &mut Context<Self>) {
-        if self.sync_running || self.message_update_in_progress() {
+        if self.sync_status.is_sync_active() || self.message_update_in_progress() {
             return;
         }
         let Some(request) = self.selected_read_state_request() else {
@@ -835,7 +839,7 @@ impl MailView {
     }
 
     fn update_selected_follow_up_flag(&mut self, cx: &mut Context<Self>) {
-        if self.sync_running || self.message_update_in_progress() {
+        if self.sync_status.is_sync_active() || self.message_update_in_progress() {
             return;
         }
         let Some(request) = self.selected_follow_up_flag_request() else {
@@ -970,7 +974,6 @@ impl MailView {
 
     fn message_move_allowed(&self) -> bool {
         matches!(&self.sync_status, SyncStatus::UpToDate)
-            && !self.sync_running
             && !self.selected_folder_write_sync_required
             && !self.message_update_in_progress()
             && self.move_recovery_reason.is_none()
@@ -978,6 +981,7 @@ impl MailView {
 
     fn sync_status_label(&self) -> String {
         match &self.sync_status {
+            SyncStatus::Idle => "Mail is ready to sync".to_owned(),
             SyncStatus::LoadingCache => "Opening encrypted cache…".to_owned(),
             SyncStatus::Syncing => {
                 let label = if self
@@ -1036,7 +1040,7 @@ impl MailView {
     }
 
     fn can_update_message_in(&self, folder: &FolderReference) -> bool {
-        !self.sync_running
+        !self.sync_status.is_sync_active()
             && !self.message_update_in_progress()
             && !matches!(self.sync_status, SyncStatus::Failed(_))
             && self.selected_folder.as_ref() == Some(folder)
@@ -1355,7 +1359,7 @@ impl MailView {
     }
 
     fn open_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sync_running {
+        if self.sync_status.is_sync_active() {
             return;
         }
         let title = if self.pending_send.is_some() {
@@ -1385,7 +1389,7 @@ impl MailView {
     }
 
     fn can_open_reply(&self, window: &mut Window, cx: &mut App) -> bool {
-        !self.sync_running
+        !self.sync_status.is_sync_active()
             && !self.message_update_in_progress()
             && self.pending_send.is_none()
             && self.pending_send_error.is_none()

@@ -37,7 +37,7 @@ impl MailView {
             .ghost()
             .label("Reply")
             .disabled(
-                self.sync_running
+                self.sync_status.is_sync_active()
                     || self.message_update_in_progress()
                     || self.pending_send.is_some()
                     || self.pending_send_error.is_some()
@@ -100,7 +100,7 @@ impl MailView {
                             } else {
                                 "Compose"
                             })
-                            .disabled(self.sync_running)
+                            .disabled(self.sync_status.is_sync_active())
                             .on_click(cx.listener(|view, _, window, cx| {
                                 view.open_composer(window, cx);
                             })),
@@ -109,8 +109,11 @@ impl MailView {
                         Button::new("sync-mail")
                             .ghost()
                             .label("Sync")
-                            .loading(self.sync_running)
-                            .disabled(self.sync_running || self.message_update_in_progress())
+                            .loading(self.sync_status.is_sync_active())
+                            .disabled(
+                                self.sync_status.is_sync_active()
+                                    || self.message_update_in_progress(),
+                            )
                             .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
                     )
                     .child(
@@ -139,7 +142,9 @@ impl MailView {
                     .ghost()
                     .selected(self.selected_folder.as_ref() == Some(&reference))
                     .label(folder.display_name().to_owned())
-                    .disabled(self.sync_running || self.message_update_in_progress())
+                    .disabled(
+                        self.sync_status.is_sync_active() || self.message_update_in_progress(),
+                    )
                     .on_click(cx.listener(move |view, _, _, cx| {
                         view.select_folder(reference.clone(), cx);
                     })),
@@ -709,7 +714,9 @@ impl MailView {
 
     fn render_move_recovery_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let reason = self.move_recovery_reason?;
-        if self.sync_running && matches!(reason, MoveRecoveryReason::InitialSyncRequired) {
+        if self.sync_status.is_sync_active()
+            && matches!(reason, MoveRecoveryReason::InitialSyncRequired)
+        {
             return None;
         }
         Some(self.render_move_recovery_notice_element(reason, cx))
@@ -733,7 +740,7 @@ impl MailView {
                     .debug_selector(|| "sync-after-message-move".to_owned())
                     .ghost()
                     .label("Sync mail")
-                    .disabled(self.sync_running)
+                    .disabled(self.sync_status.is_sync_active())
                     .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
             );
         #[cfg(test)]

@@ -25,8 +25,8 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestQueryExt as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AppContext, Modifiers, MouseButton, ScrollStrategy, TestAppContext, VisualTestContext, point,
-    px,
+    AppContext, Entity, Modifiers, MouseButton, ScrollStrategy, TestAppContext, VisualTestContext,
+    point, px,
 };
 
 use super::{
@@ -38,6 +38,23 @@ use super::{
 };
 use crate::mail_composer::bind_mail_composer_keys;
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
+
+async fn wait_for_mail_sync_to_finish(context: &mut VisualTestContext, view: &Entity<MailView>) {
+    wait_for_ui_condition(context, |_, app| {
+        !view.read(app).sync_status.is_sync_active()
+    })
+    .await;
+}
+
+#[test]
+fn sync_activity_matches_mail_status() {
+    assert!(SyncStatus::LoadingCache.is_sync_active());
+    assert!(SyncStatus::Syncing.is_sync_active());
+    assert!(SyncStatus::Rebuilding.is_sync_active());
+    assert!(!SyncStatus::Idle.is_sync_active());
+    assert!(!SyncStatus::UpToDate.is_sync_active());
+    assert!(!SyncStatus::Failed(MailWorkflowError::AccountMismatch).is_sync_active());
+}
 
 #[test]
 fn active_mail_operation_explains_when_to_retry() {
@@ -1550,7 +1567,7 @@ async fn cached_message_list_navigates_by_keyboard_and_keeps_one_tab_stop(cx: &m
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
 
     assert_accessible_message_list(context);
     assert_eq!(accessible_message_list_focus(context), Some(false));
@@ -1714,7 +1731,7 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
         gpui_kit::base::Root::new(view, window, cx)
     });
     let view = mail_view.expect("mail view is created with the test window");
-    wait_for_ui_condition(context, |_, app| !view.read(app).sync_running).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     draw_mail_view(context);
 
     let first_row = context
@@ -1795,7 +1812,7 @@ async fn message_move_menu_moves_cached_message_and_opens_destination(cx: &mut T
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
@@ -1886,7 +1903,7 @@ async fn message_delete_action_moves_cached_message_to_deleted_items(cx: &mut Te
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
@@ -1966,7 +1983,7 @@ async fn denied_message_delete_shows_permission_recovery_and_keeps_source(cx: &m
         })
     });
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
@@ -2045,7 +2062,7 @@ async fn native_archive_action_moves_cached_message_to_archive(cx: &mut TestAppC
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
@@ -2125,7 +2142,7 @@ async fn pending_message_delete_keeps_the_native_action_busy(cx: &mut TestAppCon
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
@@ -2178,7 +2195,7 @@ async fn unknown_message_delete_requires_sync_and_keeps_source_cached(cx: &mut T
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
@@ -2255,7 +2272,7 @@ async fn folder_write_sync_requirement_disables_and_blocks_message_move(cx: &mut
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
@@ -2336,7 +2353,7 @@ async fn unknown_message_move_shows_sync_recovery_and_keeps_source_cached(cx: &m
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
@@ -2416,7 +2433,7 @@ async fn confirmed_message_move_with_cache_failure_requests_sync(cx: &mut TestAp
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("source message is visible in the cached inbox");
@@ -2472,7 +2489,7 @@ async fn message_body_failure_keeps_the_cached_list_and_selection(cx: &mut TestA
     let workflow = Arc::new(MailWorkflow::new(profile.id().clone(), provider, cache));
     let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
 
     let row = context
         .debug_bounds("message-row-message-1")
@@ -2530,7 +2547,7 @@ async fn folder_message_list_failure_does_not_claim_a_message_is_loading(cx: &mu
     ));
     let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
 
     cache
         .0
@@ -3638,7 +3655,7 @@ async fn reply_composer_uses_the_cached_source_and_requires_an_explicit_send(
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("cached source message is rendered");
@@ -3740,7 +3757,7 @@ async fn unknown_reply_requires_sent_items_review_and_duplicate_confirmation(
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let row = context
         .debug_bounds("message-row-message-1")
         .expect("cached source message is rendered");
@@ -3854,7 +3871,7 @@ async fn permission_review_requires_a_separate_send_action(cx: &mut TestAppConte
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let compose = context
         .debug_bounds("new-mail-message")
         .expect("mail view exposes the compose action");
@@ -3960,7 +3977,7 @@ async fn pending_send_cannot_be_dismissed_by_escape_or_outside_click(cx: &mut Te
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let compose = context
         .debug_bounds("new-mail-message")
         .expect("mail view exposes the compose action");
@@ -4045,7 +4062,7 @@ async fn send_staging_failure_skips_provider_and_accepted_cleanup_failure_can_be
     });
     let view = mail_view.expect("mail view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_mail_sync_to_finish(context, &view).await;
     let compose = context
         .debug_bounds("new-mail-message")
         .expect("mail view exposes the compose action");
