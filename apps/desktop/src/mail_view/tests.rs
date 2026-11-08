@@ -1450,6 +1450,35 @@ fn draw_mail_view(context: &mut VisualTestContext) {
     });
 }
 
+fn open_cached_html_message(cx: &mut TestAppContext, content: String) -> &mut VisualTestContext {
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, _) = fixture(account);
+    cache.0.lock().expect("fixture cache mutex is healthy").body =
+        Some(MessageBody::new(MessageBodyType::Html, content));
+    let workflow = Arc::new(MailWorkflow::new(
+        profile.id().clone(),
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache,
+    ));
+    let (_, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
+    open_first_cached_message(context);
+    context
+}
+
+fn open_first_cached_message(context: &mut VisualTestContext) {
+    context.run_until_parked();
+    draw_mail_view(context);
+    let message_row = context
+        .debug_bounds("message-row-message-1")
+        .expect("cached message row is rendered");
+    context.simulate_click(message_row.center(), Modifiers::default());
+    context.run_until_parked();
+    draw_mail_view(context);
+}
+
 fn accessible_alert_count(context: &mut VisualTestContext, expected_text: &str) -> usize {
     context.update(|window, _| {
         window
@@ -3384,7 +3413,7 @@ fn cached_html_mail_view_sanitizes_content_and_opens_links_on_click(cx: &mut Tes
     assert!(safe_html);
 
     let body_bounds = context
-        .debug_bounds("mail-message-html-body")
+        .debug_bounds("mail-message-html-content-region")
         .expect("sanitized HTML body has a layout");
     let link_position = point(body_bounds.left() + px(36.), body_bounds.top() + px(36.));
     context.simulate_mouse_down(link_position, MouseButton::Right, Modifiers::default());
@@ -3394,6 +3423,116 @@ fn cached_html_mail_view_sanitizes_content_and_opens_links_on_click(cx: &mut Tes
     assert_eq!(
         context.opened_url(),
         Some("https://mail.example.test/thread".to_owned())
+    );
+}
+
+#[gpui_kit::test]
+fn cached_html_links_can_be_opened_from_the_keyboard_accessible_menu(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let body = concat!(
+        "<p><a href=\"https://mail.example.test/private?tracking=marker\">Open safe link</a></p>",
+        "<p><a href=\"https://user%3Avalue@mail.example.test/account\">Userinfo link</a></p>",
+        "<svg><a href=\"https://hidden.example.test/removed\">Removed SVG link</a></svg>"
+    )
+    .to_owned();
+    let context = open_cached_html_message(cx, body);
+
+    let mut links_button_focused = false;
+    for _ in 0..32 {
+        context.update(gpui_kit::Window::focus_next);
+        draw_mail_view(context);
+        links_button_focused = context.update(|window, _| {
+            window
+                .find_all_by_role(gpui_kit::Role::Button)
+                .iter()
+                .any(|button| {
+                    button.label() == Some("Message links") && button.focused() == Some(true)
+                })
+        });
+        if links_button_focused {
+            break;
+        }
+    }
+    let button_states = context.update(|window, _| {
+        window
+            .find_all_by_role(gpui_kit::Role::Button)
+            .iter()
+            .map(|button| (button.label().map(str::to_owned), button.focused()))
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        links_button_focused,
+        "focus traversal reaches the message links button: {button_states:?}"
+    );
+    context.simulate_keystrokes("enter");
+    draw_mail_view(context);
+
+    let menu_labels = context.update(|window, _| {
+        window
+            .find_all_by_role(gpui_kit::Role::MenuItem)
+            .iter()
+            .map(|item| item.label().map(str::to_owned))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(menu_labels, [Some("Link 1 — mail.example.test".to_owned())]);
+    assert!(
+        !menu_labels
+            .iter()
+            .flatten()
+            .any(|label| label.contains("private") || label.contains("tracking=")),
+        "menu labels must not expose URL paths or queries"
+    );
+
+    context.simulate_keystrokes("down");
+    context.simulate_keystrokes("enter");
+    assert_eq!(
+        context.opened_url(),
+        Some("https://mail.example.test/private?tracking=marker".to_owned())
+    );
+}
+
+#[gpui_kit::test]
+fn cached_html_links_menu_reports_when_safe_links_are_omitted(cx: &mut TestAppContext) {
+    const SAFE_LINK_LIMIT: usize = 100;
+
+    cx.update(gpui_kit::init);
+    let body = (0..=SAFE_LINK_LIMIT)
+        .map(|index| {
+            format!("<a href=\"https://link-{index}.example.test/private?tracking=marker-{index}\">link</a>")
+        })
+        .collect::<String>();
+    let context = open_cached_html_message(cx, body);
+    let links_button = context
+        .debug_bounds("mail-message-links")
+        .expect("safe message links have a menu");
+    context.simulate_click(links_button.center(), Modifiers::default());
+    draw_mail_view(context);
+
+    let menu_labels = context.update(|window, _| {
+        window
+            .find_all_by_role(gpui_kit::Role::MenuItem)
+            .iter()
+            .map(|item| item.label().map(str::to_owned))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(menu_labels.len(), SAFE_LINK_LIMIT + 1);
+    assert_eq!(
+        menu_labels.last(),
+        Some(&Some("Additional links omitted.".to_owned()))
+    );
+    assert_eq!(
+        menu_labels
+            .iter()
+            .flatten()
+            .filter(|label| label.starts_with("Link "))
+            .count(),
+        SAFE_LINK_LIMIT
+    );
+    assert!(
+        menu_labels
+            .iter()
+            .flatten()
+            .all(|label| { !label.contains("private") && !label.contains("tracking=") })
     );
 }
 
@@ -3443,9 +3582,13 @@ fn cached_html_mail_view_does_not_open_unsafe_links(cx: &mut TestAppContext) {
             && html.as_str().contains("Unsafe synthetic link")
     });
     assert!(sanitized_body);
+    assert!(
+        context.debug_bounds("mail-message-links").is_none(),
+        "unsafe links do not create a message-links menu"
+    );
 
     let body_bounds = context
-        .debug_bounds("mail-message-html-body")
+        .debug_bounds("mail-message-html-content-region")
         .expect("sanitized HTML body has a layout");
     context.simulate_click(
         point(body_bounds.left() + px(36.), body_bounds.top() + px(36.)),
@@ -3483,7 +3626,7 @@ fn cached_html_mail_view_supports_selection_and_copy(cx: &mut TestAppContext) {
     draw_mail_view(context);
 
     let body_bounds = context
-        .debug_bounds("mail-message-html-body")
+        .debug_bounds("mail-message-html-content-region")
         .expect("sanitized HTML body has a layout");
     let start = point(body_bounds.left() + px(25.), body_bounds.top() + px(34.));
     let end = point(body_bounds.left() + px(285.), body_bounds.top() + px(34.));
