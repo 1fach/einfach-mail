@@ -1529,7 +1529,7 @@ fn assert_selected_message_and_accessible_label(
 ) {
     let selected = context
         .cx
-        .update(|cx| view.read(cx).selected_message_id.clone());
+        .update(|cx| view.read(cx).selected_message_id().cloned());
     assert_eq!(selected.as_ref(), expected_message_id);
 
     let options =
@@ -2506,7 +2506,7 @@ async fn message_body_failure_keeps_the_cached_list_and_selection(cx: &mut TestA
     wait_for_ui_condition(context, |_, app| {
         matches!(
             &view.read(app).message_detail_state,
-            MessageDetailState::Failed(_)
+            MessageDetailState::Failed { .. }
         )
     })
     .await;
@@ -2527,9 +2527,12 @@ async fn message_body_failure_keeps_the_cached_list_and_selection(cx: &mut TestA
         matches!(&view.message_list_state, MessageListState::Ready)
             && matches!(
                 &view.message_detail_state,
-                MessageDetailState::Failed(MailWorkflowError::Provider(_))
+                MessageDetailState::Failed {
+                    error: MailWorkflowError::Provider(_),
+                    ..
+                }
             )
-            && view.selected_message_id.as_ref() == Some(&message_id)
+            && view.selected_message_id() == Some(&message_id)
     }));
     assert_selected_message_and_accessible_label(
         context,
@@ -2739,7 +2742,7 @@ async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut T
     press_window_key(context, "home");
     wait_for_ui_condition(context, |_, app| {
         matches!(
-            view.read(app).selected_message_id.as_ref(),
+            view.read(app).selected_message_id(),
             Some(message_id) if message_id == &archive_message_id
         ) && matches!(
             &view.read(app).message_detail_state,
@@ -4256,7 +4259,11 @@ async fn send_staging_failure_skips_provider_and_accepted_cleanup_failure_can_be
     })
     .await;
     assert_eq!(send_calls.load(Ordering::Relaxed), 0);
-    assert!(context.cx.update(|cx| view.read(cx).pending_send.is_none()));
+    assert!(
+        context
+            .cx
+            .update(|cx| matches!(&view.read(cx).pending_send, Ok(None)))
+    );
     let send = context
         .debug_bounds("mail-send-button")
         .expect("staging failure leaves the draft available for another attempt");
@@ -4275,11 +4282,22 @@ async fn send_staging_failure_skips_provider_and_accepted_cleanup_failure_can_be
         .debug_bounds("resolve-pending-mail-send")
         .expect("accepted send with a failed cleanup exposes an explicit resolution");
     assert_eq!(send_calls.load(Ordering::Relaxed), 1);
-    assert!(context.cx.update(|cx| view.read(cx).pending_send.is_some()));
+    assert!(
+        context
+            .cx
+            .update(|cx| matches!(&view.read(cx).pending_send, Ok(Some(_))))
+    );
     context.simulate_click(resolve.center(), Modifiers::default());
 
-    wait_for_ui_condition(context, |_, app| view.read(app).pending_send.is_none()).await;
-    assert!(context.cx.update(|cx| view.read(cx).pending_send.is_none()));
+    wait_for_ui_condition(context, |_, app| {
+        matches!(&view.read(app).pending_send, Ok(None))
+    })
+    .await;
+    assert!(
+        context
+            .cx
+            .update(|cx| matches!(&view.read(cx).pending_send, Ok(None)))
+    );
     assert!(context.debug_bounds("resolve-pending-mail-send").is_none());
     assert_eq!(send_calls.load(Ordering::Relaxed), 1);
 }

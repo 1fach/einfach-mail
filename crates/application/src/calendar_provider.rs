@@ -99,12 +99,6 @@ impl CalendarDeltaPageResponse {
         }
     }
 
-    /// Returns the response body's byte length.
-    #[must_use]
-    pub fn response_bytes(&self) -> usize {
-        self.response_bytes
-    }
-
     /// Returns the parsed page and response size.
     #[must_use]
     pub fn into_parts(self) -> (CalendarDeltaPage, usize) {

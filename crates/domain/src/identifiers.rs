@@ -55,12 +55,11 @@ define_identifier!(
 );
 define_identifier!(FolderId, "An opaque identifier for a mail folder.");
 define_identifier!(MessageId, "An opaque identifier for a mail message.");
-define_identifier!(CalendarId, "An opaque identifier for a calendar.");
 define_identifier!(EventId, "An opaque identifier for a calendar event.");
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountId, CalendarId, EmptyIdentifier, EventId, FolderId, MessageId};
+    use super::{AccountId, EmptyIdentifier, EventId, FolderId, MessageId};
 
     #[test]
     fn rejects_empty_provider_identifiers() {
@@ -95,11 +94,6 @@ mod tests {
             ),
             format!(
                 "{:?}",
-                CalendarId::try_from("calendar-id-marker".to_owned())
-                    .expect("synthetic ID is non-empty")
-            ),
-            format!(
-                "{:?}",
                 EventId::try_from("event-id-marker".to_owned()).expect("synthetic ID is non-empty")
             ),
         ];
@@ -108,7 +102,6 @@ mod tests {
             "account-id-marker",
             "folder-id-marker",
             "message-id-marker",
-            "calendar-id-marker",
             "event-id-marker",
         ]) {
             assert!(

@@ -55,3 +55,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0048](0048-redact-sensitive-debug-output.md) | Redact sensitive domain Debug output | Accepted |
 | [0049](0049-account-cache-open-errors.md) | Use account-scoped errors when opening the shared cache | Accepted |
 | [0050](0050-name-gpui-date-pickers-through-component-patch.md) | Name styled GPUI DatePickers through a local API patch | Accepted |
+| [0051](0051-defer-calendar-id.md) | Defer a calendar identifier until calendar selection exists | Accepted |

@@ -332,8 +332,14 @@ impl SqliteMailCache {
             .expect("synthetic account-removal gate mutex is healthy")
             .take();
         if let Some((checked, release)) = gate {
-            let _ = checked.send(()).await;
-            let _ = release.recv().await;
+            checked
+                .send(())
+                .await
+                .expect("the account-removal test is waiting at the gate");
+            release
+                .recv()
+                .await
+                .expect("the account-removal test releases the gate");
         }
     }
 }

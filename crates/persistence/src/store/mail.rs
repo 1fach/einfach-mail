@@ -616,8 +616,14 @@ impl MailCache for SqliteMailCache {
                 .take();
             #[cfg(test)]
             if let Some((started, release)) = gate {
-                let _ = started.send(()).await;
-                let _ = release.recv().await;
+                started
+                    .send(())
+                    .await
+                    .expect("the pending-send test is waiting at the gate");
+                release
+                    .recv()
+                    .await
+                    .expect("the pending-send test releases the gate");
             }
             client
                 .conn_and_then(move |connection| read_pending_send(connection, &account_id))

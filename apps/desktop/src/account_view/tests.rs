@@ -15,7 +15,7 @@ use gpui_kit::{
     px, size,
 };
 
-use super::{AccountContent, AccountStatus, AccountView, SetupIssue};
+use super::{AccountContent, AccountServices, AccountStatus, AccountView, SetupIssue};
 use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountOperationCancellation,
     AccountOperationError, AccountPermissionRequest, AccountProvider, AccountSession,
@@ -311,6 +311,19 @@ impl AccountSessionFactory for TestAccountSessionFactory {
         self.fallback_removals.store(true, Ordering::SeqCst);
         Box::pin(ready(Err(AccountCacheRemovalError::Unavailable)))
     }
+}
+
+fn unused_account_session_factory() -> Arc<dyn AccountSessionFactory> {
+    Arc::new(TestAccountSessionFactory {
+        session: Arc::new(TestAccountSession {
+            account_id: AccountId::try_from("synthetic-account".to_owned())
+                .expect("synthetic account ID is valid"),
+            removal_attempts: Arc::new(Mutex::new(Vec::new())),
+        }),
+        fallback_removals: Arc::new(AtomicBool::new(false)),
+        session_open_attempts: Arc::new(AtomicUsize::new(0)),
+        opened_account_ids: Arc::new(Mutex::new(Vec::new())),
+    })
 }
 
 impl AccountSessionFactory for FailingOpenAccountSessionFactory {
@@ -619,8 +632,8 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
         removal_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
     let workflow = Arc::new(AccountWorkflow::new(provider));
-    let (view, context) =
-        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
 
     let profile = AccountProfile::try_new(
@@ -681,8 +694,8 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
         sign_out_events: Arc::new(Mutex::new(Vec::new())),
         removal_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
-    let (view, context) =
-        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
     let profile = AccountProfile::try_new(
         AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
@@ -753,8 +766,8 @@ fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
         sign_out_events: Arc::clone(&sign_out_events),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
-    let (view, context) =
-        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
 
     context.run_until_parked();
     draw_account_view(context);
@@ -829,8 +842,8 @@ fn failed_restore_removes_cache_before_the_verified_saved_credential(cx: &mut Te
         sign_out_events: Arc::clone(&event_log),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
-    let (view, context) =
-        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
 
     context.run_until_parked();
     draw_account_view(context);
@@ -876,8 +889,8 @@ fn failed_restore_without_verified_identity_preserves_credential(cx: &mut TestAp
         sign_out_events: Arc::clone(&event_log),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
-    let (view, context) =
-        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
 
     context.run_until_parked();
     click(context, "sign-out");
@@ -922,7 +935,15 @@ fn connect_mismatch_keeps_saved_sign_in_and_requires_restore(cx: &mut TestAppCon
         .expect("synthetic connection error mutex is healthy") =
         Some(AccountOperationError::AccountMismatch);
     let workflow = Arc::new(AccountWorkflow::new(provider));
-    let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| {
+        AccountView::new(
+            Ok(AccountServices::new(
+                workflow,
+                unused_account_session_factory(),
+            )),
+            cx,
+        )
+    });
 
     context.run_until_parked();
     draw_account_view(context);
@@ -979,8 +1000,8 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
         opened_account_ids: Arc::clone(&opened_account_ids),
     });
     let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
-    let (view, context) =
-        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
@@ -1110,8 +1131,8 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
         session_open_attempts: Arc::new(AtomicUsize::new(0)),
         opened_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
-    let (view, context) =
-        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
     let profile = AccountProfile::try_new(
         AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
@@ -1204,8 +1225,8 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
         session_open_attempts: Arc::clone(&session_open_attempts),
         opened_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
-    let (view, context) =
-        cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), Some(factory), cx));
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
     let profile = AccountProfile::try_new(
         AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
@@ -1316,7 +1337,15 @@ fn connection_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
     let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
     let mut account_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| AccountView::new(Ok(workflow), None, cx));
+        let view = cx.new(|cx| {
+            AccountView::new(
+                Ok(AccountServices::new(
+                    workflow,
+                    unused_account_session_factory(),
+                )),
+                cx,
+            )
+        });
         account_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -1380,7 +1409,15 @@ fn permission_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
     let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
     let mut account_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| AccountView::new(Ok(workflow), None, cx));
+        let view = cx.new(|cx| {
+            AccountView::new(
+                Ok(AccountServices::new(
+                    workflow,
+                    unused_account_session_factory(),
+                )),
+                cx,
+            )
+        });
         account_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -1453,7 +1490,15 @@ fn mail_write_scope_requires_review_before_the_browser_flow(cx: &mut TestAppCont
     let provider = TestProvider::default();
     let permission_request = Arc::clone(&provider.last_permission_request);
     let workflow = Arc::new(AccountWorkflow::new(provider));
-    let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(workflow), None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| {
+        AccountView::new(
+            Ok(AccountServices::new(
+                workflow,
+                unused_account_session_factory(),
+            )),
+            cx,
+        )
+    });
 
     context.run_until_parked();
     draw_account_view(context);
@@ -1531,14 +1576,16 @@ fn mail_write_scope_requires_review_before_the_browser_flow(cx: &mut TestAppCont
 fn missing_client_configuration_disables_account_actions(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let (view, context) = cx.add_window_view(|_, cx| {
-        AccountView::<TestProvider>::new(Err(SetupIssue::MissingClientId), None, cx)
+        AccountView::<TestProvider>::new(Err(SetupIssue::MissingClientId), cx)
     });
 
     draw_account_view(context);
 
     assert!(context.debug_bounds("connect-account").is_none());
     assert_eq!(
-        context.cx.update(|cx| view.read(cx).setup_issue),
+        context
+            .cx
+            .update(|cx| view.read(cx).services.as_ref().err().copied()),
         Some(SetupIssue::MissingClientId)
     );
 }
