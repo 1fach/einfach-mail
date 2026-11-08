@@ -37,6 +37,11 @@ struct CachePaths {
     credential_account: String,
 }
 
+struct CacheOpenLocks {
+    account_lock: Arc<File>,
+    _initialization_lock: File,
+}
+
 /// Holds the lifecycle gate while an open cache attempts account removal.
 pub(super) struct AccountRemovalLock {
     account_lock: Arc<File>,
@@ -172,12 +177,23 @@ impl DatabaseKey {
 
 pub(super) async fn open_database(account_id: &AccountId) -> Result<OpenDatabase, MailCacheError> {
     let paths = cache_paths(account_id)?;
+    let CacheOpenLocks {
+        account_lock,
+        _initialization_lock,
+    } = acquire_cache_open_locks(&paths)?;
+    open_locked_database(paths, account_lock).await
+}
+
+fn acquire_cache_open_locks(paths: &CachePaths) -> Result<CacheOpenLocks, MailCacheError> {
     let lifecycle_lock = lock_account_directory_shared(&paths.lifecycle_lock)?;
     let account_lock = Arc::new(lock_account_directory_shared(&paths.account_lock)?);
     drop(lifecycle_lock);
     let initialization_lock_path = with_suffix(&paths.account_lock, ".init");
-    let _initialization_lock = lock_account_directory_exclusive(&initialization_lock_path)?;
-    open_locked_database(paths, account_lock).await
+    let initialization_lock = lock_account_directory_exclusive(&initialization_lock_path)?;
+    Ok(CacheOpenLocks {
+        account_lock,
+        _initialization_lock: initialization_lock,
+    })
 }
 
 async fn open_locked_database(
@@ -274,11 +290,10 @@ pub(super) async fn open_test_database(
         lifecycle_lock: account_directory.join("mail-cache.lifecycle.lock"),
         credential_account: "synthetic-cache-key".to_owned(),
     };
-    let lifecycle_lock = lock_account_directory_shared(&paths.lifecycle_lock)?;
-    let account_lock = Arc::new(lock_account_directory_shared(&paths.account_lock)?);
-    drop(lifecycle_lock);
-    let initialization_lock_path = with_suffix(&paths.account_lock, ".init");
-    let _initialization_lock = lock_account_directory_exclusive(&initialization_lock_path)?;
+    let CacheOpenLocks {
+        account_lock,
+        _initialization_lock,
+    } = acquire_cache_open_locks(&paths)?;
     let key = DatabaseKey(Zeroizing::new([key_byte; KEY_BYTES]));
     open_database_with_key(paths, key, account_lock).await
 }
