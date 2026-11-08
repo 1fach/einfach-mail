@@ -142,9 +142,7 @@ impl MailView {
                     .ghost()
                     .selected(self.selected_folder.as_ref() == Some(&reference))
                     .label(folder.display_name().to_owned())
-                    .disabled(
-                        self.sync_status.is_sync_active() || self.message_update_in_progress(),
-                    )
+                    .disabled(self.message_update_in_progress())
                     .on_click(cx.listener(move |view, _, _, cx| {
                         view.select_folder(reference.clone(), cx);
                     })),
