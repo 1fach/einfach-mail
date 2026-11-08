@@ -10,9 +10,9 @@ use std::{
 
 use einfach_mail_application::{
     AccountCache, AccountCacheRemovalError, AccountOperationError, MailCache, MailCacheError,
-    MailOperationError, MailProvider, MailSendProviderError, MailSyncState, MailWorkflow,
-    MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
-    MessageDeltaResponse, WellKnownMailFolder,
+    MailOperationError, MailProvider, MailSendProviderError, MailSession, MailSyncState,
+    MailWorkflow, MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse,
+    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
@@ -38,6 +38,31 @@ use super::{
 };
 use crate::mail_composer::bind_mail_composer_keys;
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
+
+struct UnexpectedPermissionRequester;
+
+impl MailPermissionRequester for UnexpectedPermissionRequester {
+    fn request_send_permission<'a>(
+        &'a self,
+        _account_id: &'a AccountId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AccountOperationError>> + Send + 'a>> {
+        Box::pin(async {
+            panic!("test did not expect a send permission request");
+        })
+    }
+}
+
+fn unexpected_permission_requester() -> Arc<dyn MailPermissionRequester> {
+    Arc::new(UnexpectedPermissionRequester)
+}
+
+fn test_mail_view(
+    profile: AccountProfile,
+    workflow: Arc<dyn MailSession>,
+    cx: &mut gpui_kit::Context<MailView>,
+) -> MailView {
+    MailView::new(profile, workflow, unexpected_permission_requester(), cx)
+}
 
 async fn wait_for_mail_sync_to_finish(context: &mut VisualTestContext, view: &Entity<MailView>) {
     wait_for_ui_condition(context, |_, app| {
@@ -1569,7 +1594,7 @@ async fn cached_message_list_navigates_by_keyboard_and_keeps_one_tab_stop(cx: &m
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -1734,7 +1759,7 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -1814,7 +1839,7 @@ async fn message_move_menu_moves_cached_message_and_opens_destination(cx: &mut T
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -1905,7 +1930,7 @@ async fn message_delete_action_moves_cached_message_to_deleted_items(cx: &mut Te
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -1976,7 +2001,7 @@ async fn denied_message_delete_shows_permission_recovery_and_keeps_source(cx: &m
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -2064,7 +2089,7 @@ async fn native_archive_action_moves_cached_message_to_archive(cx: &mut TestAppC
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -2144,7 +2169,7 @@ async fn pending_message_delete_keeps_the_native_action_busy(cx: &mut TestAppCon
     let workflow = Arc::new(MailWorkflow::new(profile.id().clone(), provider, cache));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -2197,7 +2222,7 @@ async fn unknown_message_delete_requires_sync_and_keeps_source_cached(cx: &mut T
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -2274,7 +2299,7 @@ async fn folder_write_sync_requirement_disables_and_blocks_message_move(cx: &mut
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -2355,7 +2380,7 @@ async fn unknown_message_move_shows_sync_recovery_and_keeps_source_cached(cx: &m
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -2435,7 +2460,7 @@ async fn confirmed_message_move_with_cache_failure_requests_sync(cx: &mut TestAp
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -2495,7 +2520,7 @@ async fn message_body_failure_keeps_the_cached_list_and_selection(cx: &mut TestA
     };
     let body_fetches = Arc::clone(&provider.body_fetches);
     let workflow = Arc::new(MailWorkflow::new(profile.id().clone(), provider, cache));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     wait_for_mail_sync_to_finish(context, &view).await;
 
@@ -2556,7 +2581,7 @@ async fn folder_message_list_failure_does_not_claim_a_message_is_loading(cx: &mu
         },
         cache.clone(),
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     wait_for_mail_sync_to_finish(context, &view).await;
 
@@ -2607,7 +2632,7 @@ fn offline_mail_view_opens_cached_message_without_provider_body_request(cx: &mut
         provider,
         cache.clone(),
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     context.run_until_parked();
     draw_mail_view(context);
@@ -2702,7 +2727,7 @@ async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut T
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -2810,7 +2835,7 @@ async fn confirmed_read_state_updates_the_view_and_encrypted_cache(cx: &mut Test
         ReadStateProvider::new(ReadStateActionResponse::Confirm, Arc::clone(&updates)),
         cache.clone(),
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     open_cached_message_and_click_read_state(context);
 
@@ -2867,7 +2892,7 @@ async fn confirmed_follow_up_flag_updates_the_view_and_encrypted_cache(cx: &mut 
         .with_flag_updates(Arc::clone(&updates)),
         cache.clone(),
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     open_cached_message_and_click_follow_up_flag(context);
 
@@ -2926,7 +2951,7 @@ fn uncertain_follow_up_flag_blocks_a_second_write(cx: &mut TestAppContext) {
         .with_flag_updates(Arc::clone(&updates)),
         cache.clone(),
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     open_cached_message_and_click_follow_up_flag(context);
 
@@ -2983,7 +3008,7 @@ fn failed_initial_mail_sync_keeps_read_state_changes_disabled(cx: &mut TestAppCo
             .with_sync_failure(),
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     context.run_until_parked();
     draw_mail_view(context);
@@ -3044,7 +3069,7 @@ async fn confirmed_read_state_stays_visible_when_cache_write_fails(cx: &mut Test
         ),
         cache.clone(),
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     open_cached_message_and_click_read_state(context);
 
@@ -3092,7 +3117,7 @@ fn uncertain_read_state_shows_sync_guidance_and_blocks_another_write(cx: &mut Te
         ReadStateProvider::new(ReadStateActionResponse::Unconfirmed, Arc::clone(&updates)),
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     open_cached_message_and_click_read_state(context);
 
@@ -3143,7 +3168,7 @@ fn pending_read_state_keeps_account_navigation_open(cx: &mut TestAppContext) {
         ),
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
     let navigation_requested = Arc::new(AtomicBool::new(false));
     let observed_navigation = Arc::clone(&navigation_requested);
     let _subscription = context.cx.update(|cx| {
@@ -3198,7 +3223,7 @@ fn denied_read_state_offers_account_permission_review(cx: &mut TestAppContext) {
         ),
         cache.clone(),
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
     let permission_review_requested = Arc::new(AtomicBool::new(false));
     let observed_review = Arc::clone(&permission_review_requested);
     let _subscription = context.cx.update(|cx| {
@@ -3244,7 +3269,7 @@ fn offline_read_state_shows_retry_guidance(cx: &mut TestAppContext) {
         ),
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     open_cached_message_and_click_read_state(context);
 
@@ -3307,7 +3332,7 @@ fn cached_html_mail_view_sanitizes_content_and_opens_links_on_click(cx: &mut Tes
         },
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     context.run_until_parked();
     draw_mail_view(context);
@@ -3368,7 +3393,7 @@ fn cached_html_mail_view_does_not_open_unsafe_links(cx: &mut TestAppContext) {
         },
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     context.run_until_parked();
     draw_mail_view(context);
@@ -3420,7 +3445,7 @@ fn cached_html_mail_view_supports_selection_and_copy(cx: &mut TestAppContext) {
         },
         cache,
     ));
-    let (_, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (_, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     context.run_until_parked();
     draw_mail_view(context);
@@ -3472,7 +3497,7 @@ fn oversized_sanitized_html_shows_selectable_noninteractive_text(cx: &mut TestAp
         },
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     context.run_until_parked();
     draw_mail_view(context);
@@ -3539,7 +3564,7 @@ fn oversized_cached_html_shows_a_safe_reader_fallback(cx: &mut TestAppContext) {
         },
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     context.run_until_parked();
     draw_mail_view(context);
@@ -3579,7 +3604,7 @@ async fn initial_mail_snapshot_renders_loading_without_selected_folder(cx: &mut 
         },
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
     started_receiver
         .await
         .expect("initial folder listing reaches its test gate");
@@ -3613,7 +3638,7 @@ fn initial_mail_snapshot_failure_renders_error_without_selected_folder(cx: &mut 
         },
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     context.run_until_parked();
     draw_mail_view(context);
@@ -3667,7 +3692,7 @@ fn successful_empty_mail_snapshot_renders_no_folders(cx: &mut TestAppContext) {
         },
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
 
     context.run_until_parked();
     draw_mail_view(context);
@@ -3694,7 +3719,7 @@ fn cache_snapshot_failure_survives_a_successful_sync(cx: &mut TestAppContext) {
         },
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
     context.run_until_parked();
 
     context.cx.update(|cx| {
@@ -3729,7 +3754,7 @@ fn reset_progress_is_announced_in_the_mail_status(cx: &mut TestAppContext) {
         },
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
     context.run_until_parked();
 
     context.cx.update(|cx| {
@@ -3772,7 +3797,7 @@ fn failed_rebuild_status_explains_how_to_resume(cx: &mut TestAppContext) {
         },
         cache,
     ));
-    let (view, context) = cx.add_window_view(|_, cx| MailView::new(profile, workflow, None, cx));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
     context.run_until_parked();
 
     let status = context.cx.update(|cx| view.read(cx).sync_status_label());
@@ -3814,7 +3839,7 @@ async fn reply_composer_uses_the_cached_source_and_requires_an_explicit_send(
     let workflow = Arc::new(MailWorkflow::new(profile.id().clone(), provider, cache));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, Some(requester), cx));
+        let view = cx.new(|cx| MailView::new(profile, workflow, requester, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -3916,7 +3941,7 @@ async fn unknown_reply_requires_sent_items_review_and_duplicate_confirmation(
     let workflow = Arc::new(MailWorkflow::new(profile.id().clone(), provider, cache));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -4030,7 +4055,7 @@ async fn permission_review_requires_a_separate_send_action(cx: &mut TestAppConte
     let workflow = Arc::new(MailWorkflow::new(profile.id().clone(), provider, cache));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, Some(requester), cx));
+        let view = cx.new(|cx| MailView::new(profile, workflow, requester, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -4136,7 +4161,7 @@ async fn pending_send_cannot_be_dismissed_by_escape_or_outside_click(cx: &mut Te
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });
@@ -4221,7 +4246,7 @@ async fn send_staging_failure_skips_provider_and_accepted_cleanup_failure_can_be
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, None, cx));
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
         mail_view = Some(view.clone());
         gpui_kit::base::Root::new(view, window, cx)
     });

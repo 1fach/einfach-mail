@@ -59,7 +59,7 @@ impl<P: AccountProvider + 'static> MailPermissionRequester for AccountWorkflow<P
 
 pub(crate) struct MailComposer {
     workflow: Arc<dyn MailSession>,
-    permission_requester: Option<Arc<dyn MailPermissionRequester>>,
+    permission_requester: Arc<dyn MailPermissionRequester>,
     account_id: AccountId,
     target: ComposerTarget,
     recipient: Entity<InputState>,
@@ -81,7 +81,7 @@ pub(super) enum ComposerTarget {
 
 pub(super) struct MailComposerContext {
     pub(super) workflow: Arc<dyn MailSession>,
-    pub(super) permission_requester: Option<Arc<dyn MailPermissionRequester>>,
+    pub(super) permission_requester: Arc<dyn MailPermissionRequester>,
     pub(super) account_id: AccountId,
     pub(super) pending: Result<Option<PendingMailSend>, MailCacheError>,
     pub(super) target: ComposerTarget,
@@ -449,13 +449,7 @@ impl MailComposer {
     }
 
     fn request_permission(&mut self, cx: &mut Context<Self>) {
-        let Some(permission_requester) = self.permission_requester.clone() else {
-            self.status = ComposerStatus::PermissionRenewalFailed(
-                AccountOperationError::AccountStateUnavailable,
-            );
-            cx.notify();
-            return;
-        };
+        let permission_requester = Arc::clone(&self.permission_requester);
         let account_id = self.account_id.clone();
         self.status = ComposerStatus::RenewingPermission;
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
