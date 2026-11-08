@@ -9,6 +9,11 @@ if [[ "$(uname -s)" != "Linux" ]]; then
     exit 2
 fi
 
+if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "python3 is required to run the source-map tests." >&2
+    exit 127
+fi
+
 if ! command -v cargo >/dev/null 2>&1; then
     printf '%s\n' "cargo is not on PATH. Install Rust and add its bin directory to PATH." >&2
     exit 127
@@ -48,6 +53,7 @@ run() {
     "$@"
 }
 
+run python3 -B -m unittest discover -s scripts/tests
 run cargo depgraph-check check
 run cargo deny check bans
 run cargo +1.95.0 check --workspace --all-targets --locked

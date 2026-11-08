@@ -19,7 +19,9 @@ ITEM_DECLARATION = re.compile(
     r"^(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|const|unsafe)\s+)*"
     r"(?:fn|struct|enum|trait|type|mod|impl)\b"
 )
-TEST_ATTRIBUTE = re.compile(r"^\s*#\[(?:tokio::)?test(?:\s*\(|\])")
+TEST_ATTRIBUTE = re.compile(
+    r"^\s*#\[\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*test(?:\s*\(|\s*\])"
+)
 
 
 def git_output(*arguments):
@@ -35,6 +37,10 @@ def git_output(*arguments):
 def tracked_rust_files():
     paths = git_output("ls-files", "-z", "--", "apps", "crates").split("\0")
     return [REPOSITORY / path for path in paths if path.endswith(".rs")]
+
+
+def count_test_attributes(lines):
+    return sum(bool(TEST_ATTRIBUTE.match(line)) for line in lines)
 
 
 def component(path):
@@ -86,7 +92,7 @@ def source_inventory(files):
                 "items": sum(
                     bool(ITEM_DECLARATION.match(line.strip())) for line in lines
                 ),
-                "tests": sum(bool(TEST_ATTRIBUTE.match(line)) for line in lines),
+                "tests": count_test_attributes(lines),
             }
         )
     return inventory
