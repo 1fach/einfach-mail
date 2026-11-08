@@ -1,4 +1,5 @@
-use crate::calendar_time::{to_offset_date_time, to_timestamp};
+use crate::calendar_time::{to_calendar_date, to_timestamp};
+use crate::calendar_week::CalendarWeek;
 use crate::list_navigation::ListNavigation;
 use std::{sync::Arc, time::SystemTime};
 
@@ -7,8 +8,8 @@ use einfach_mail_application::{
     CalendarOperationError, CalendarSession, CalendarWorkflowError, CalendarWriteReadiness,
 };
 use einfach_mail_domain::{
-    AccountProfile, CalendarOccurrence, CalendarOccurrenceTime, CalendarViewRange,
-    CalendarViewReference, EventId, PendingCalendarEventCreation,
+    AccountProfile, CalendarOccurrence, CalendarOccurrenceTime, CalendarViewReference, EventId,
+    PendingCalendarEventCreation,
 };
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt, WindowExt,
@@ -22,7 +23,7 @@ use gpui_kit::{
     Render, Role, ScrollHandle, Subscription, Task, WeakEntity, Window, div, prelude::*,
 };
 use jiff::{Span, Timestamp, civil, tz::TimeZone};
-use time::{Date, Month, OffsetDateTime};
+use time::{Date, OffsetDateTime};
 
 use crate::event_composer::{
     EventComposer, EventComposerEvent, EventComposerIntent, EventComposerSetup,
@@ -62,10 +63,7 @@ pub(crate) enum CalendarViewEvent {
 pub(crate) struct CalendarView<S: CalendarSession + ?Sized = dyn CalendarSession> {
     profile: AccountProfile,
     session: Arc<S>,
-    time_zone: TimeZone,
-    utc_fallback: bool,
-    week_start: civil::Date,
-    view: CalendarViewReference,
+    week: CalendarWeek,
     events: Vec<CalendarOccurrence>,
     pending_creation: Option<PendingCalendarEventCreation>,
     event_list_focus: FocusHandle,
@@ -135,12 +133,6 @@ struct EventSortKey {
     original_index: usize,
 }
 
-struct CalendarWeekSelection {
-    week_start: civil::Date,
-    time_zone: TimeZone,
-    utc_fallback: bool,
-}
-
 struct CalendarRefreshRequest<S: CalendarSession + ?Sized> {
     session: Arc<S>,
     view: CalendarViewReference,
@@ -152,87 +144,36 @@ struct CalendarRefreshOutcome {
     snapshot_result: Result<einfach_mail_application::CalendarSnapshot, CalendarWorkflowError>,
 }
 
-impl CalendarWeekSelection {
-    fn for_system() -> Self {
-        let (mut time_zone, mut utc_fallback) = match TimeZone::try_system() {
-            Ok(time_zone) if time_zone.iana_name().is_some() => (time_zone, false),
-            Err(_) => (TimeZone::UTC, true),
-            Ok(_) => (TimeZone::UTC, true),
-        };
-        let week_start = match current_week_start(&time_zone) {
-            Some(week_start) => week_start,
-            None => {
-                time_zone = TimeZone::UTC;
-                utc_fallback = true;
-                fallback_week_start()
-            }
-        };
-        Self {
-            week_start,
-            time_zone,
-            utc_fallback,
-        }
-    }
-
-    fn resolve(self, account_id: &einfach_mail_domain::AccountId) -> (CalendarViewReference, Self) {
-        if let Some((view, week_start)) =
-            view_for_week(account_id, self.week_start, &self.time_zone)
-        {
-            return (view, Self { week_start, ..self });
-        }
-        Self::utc_fallback(account_id)
-    }
-
-    fn utc_fallback(account_id: &einfach_mail_domain::AccountId) -> (CalendarViewReference, Self) {
-        let time_zone = TimeZone::UTC;
-        let week_start = fallback_week_start();
-        let (view, week_start) = view_for_week(account_id, week_start, &time_zone)
-            .expect("a fixed UTC week can be represented by the calendar domain");
-        (
-            view,
-            Self {
-                week_start,
-                time_zone,
-                utc_fallback: true,
-            },
-        )
-    }
-}
-
 impl<S> CalendarView<S>
 where
     S: CalendarSession + ?Sized + 'static,
 {
     pub(crate) fn new(profile: AccountProfile, session: Arc<S>, cx: &mut Context<Self>) -> Self {
-        Self::new_for_week(profile, session, CalendarWeekSelection::for_system(), cx)
+        let week = CalendarWeek::for_system(profile.id());
+        Self::new_for_week(profile, session, week, cx)
     }
 
     fn new_for_week(
         profile: AccountProfile,
         session: Arc<S>,
-        selection: CalendarWeekSelection,
+        week: CalendarWeek,
         cx: &mut Context<Self>,
     ) -> Self {
-        let (view, selection) = selection.resolve(profile.id());
-        let mut calendar_view = Self::loading_for_selection(profile, session, view, selection, cx);
+        let mut calendar_view = Self::loading_for_week(profile, session, week, cx);
         calendar_view.refresh(cx);
         calendar_view
     }
 
-    fn loading_for_selection(
+    fn loading_for_week(
         profile: AccountProfile,
         session: Arc<S>,
-        view: CalendarViewReference,
-        selection: CalendarWeekSelection,
+        week: CalendarWeek,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             profile,
             session,
-            time_zone: selection.time_zone,
-            utc_fallback: selection.utc_fallback,
-            week_start: selection.week_start,
-            view,
+            week,
             events: Vec::new(),
             pending_creation: None,
             event_list_focus: cx.focus_handle().tab_stop(true),
@@ -255,7 +196,7 @@ where
         self.request_id = self.request_id.saturating_add(1);
         let request = CalendarRefreshRequest {
             session: Arc::clone(&self.session),
-            view: self.view.clone(),
+            view: self.week.view().clone(),
             request_id: self.request_id,
         };
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -387,7 +328,7 @@ where
         self.request_id = self.request_id.saturating_add(1);
         let request_id = self.request_id;
         let session = Arc::clone(&self.session);
-        let view = self.view.clone();
+        let view = self.week.view().clone();
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let snapshot = session.load_cached_view(&view).await;
             Self::finish_cache_reload(&this, cx, request_id, snapshot);
@@ -476,18 +417,10 @@ where
     }
 
     fn event_composer_setup(&self, intent: EventComposerIntent) -> EventComposerSetup<S> {
-        let time_zone_label = if self.utc_fallback {
-            "UTC".to_owned()
-        } else {
-            self.time_zone.iana_name().unwrap_or("UTC").to_owned()
-        };
         EventComposerSetup {
             session: Arc::clone(&self.session),
-            view: self.view.clone(),
-            time_zone: self.time_zone.clone(),
-            time_zone_label,
+            week: self.week.clone(),
             intent,
-            week_start: self.week_start,
         }
     }
 
@@ -512,12 +445,13 @@ where
 
     fn agenda_rows(&self) -> Vec<AgendaRow<'_>> {
         let mut rows = Vec::new();
+        let time_zone = self.week.time_zone();
         for offset in 0..7_i64 {
-            let Some(date) = self.week_start.checked_add(Span::new().days(offset)).ok() else {
+            let Some(date) = self.week.start().checked_add(Span::new().days(offset)).ok() else {
                 continue;
             };
             rows.push(AgendaRow::DayHeading(date));
-            let day_events = display_events(&self.events, date, &self.time_zone);
+            let day_events = display_events(&self.events, date, &time_zone);
             if day_events.is_empty() {
                 rows.push(AgendaRow::EmptyDay);
             } else {
@@ -638,19 +572,16 @@ where
     }
 
     fn change_week(&mut self, weeks: i64, cx: &mut Context<Self>) {
-        let Some(week_start) = self.week_start.checked_add(Span::new().weeks(weeks)).ok() else {
+        let Some(week_start) = self.week.start().checked_add(Span::new().weeks(weeks)).ok() else {
             return;
         };
-        let Some((view, selected_week)) =
-            view_for_week(self.profile.id(), week_start, &self.time_zone)
-        else {
+        let Some(week) = self.week.with_start(self.profile.id(), week_start) else {
             return;
         };
         drop(self.task.take());
         self.request_id = self.request_id.saturating_add(1);
         self.status = CalendarStatus::Idle;
-        self.week_start = selected_week;
-        self.view = view;
+        self.week = week;
         self.events.clear();
         self.write_readiness = CalendarWriteReadiness::ViewSyncRequired;
         self.agenda_scroll.scroll_to_item(0);
@@ -681,7 +612,7 @@ where
             .child(self.render_title_bar(cx))
             .child(self.render_week_navigation(cx))
             .child(self.render_status(colors))
-            .when(self.utc_fallback, |element| {
+            .when(self.week.is_utc_fallback(), |element| {
                 element.child(render_utc_fallback(colors))
             })
     }
@@ -766,7 +697,7 @@ where
                     .flex_1()
                     .text_base()
                     .font_bold()
-                    .child(week_label(self.week_start)),
+                    .child(week_label(self.week.start())),
             )
             .child(Self::next_week_button(cx))
     }
@@ -1039,49 +970,6 @@ fn render_empty_day(colors: ColorTokens) -> impl IntoElement {
         .child("No events")
 }
 
-fn current_week_start(time_zone: &TimeZone) -> Option<civil::Date> {
-    let now = Timestamp::try_from(SystemTime::now()).ok()?;
-    monday_start(now.to_zoned(time_zone.clone()).date())
-}
-
-fn monday_start(date: civil::Date) -> Option<civil::Date> {
-    date.checked_sub(Span::new().days(i64::from(date.weekday().to_monday_zero_offset())))
-        .ok()
-}
-
-fn fallback_week_start() -> civil::Date {
-    civil::Date::new(1970, 1, 5).expect("the Unix week baseline is a valid date")
-}
-
-fn view_for_week(
-    account_id: &einfach_mail_domain::AccountId,
-    week_start: civil::Date,
-    time_zone: &TimeZone,
-) -> Option<(CalendarViewReference, civil::Date)> {
-    let week_end = week_start.checked_add(Span::new().weeks(1)).ok()?;
-    let start_timestamp = week_start.to_zoned(time_zone.clone()).ok()?.timestamp();
-    let end_timestamp = week_end.to_zoned(time_zone.clone()).ok()?.timestamp();
-    let start = to_offset_date_time(start_timestamp)?;
-    let end = to_offset_date_time(end_timestamp)?;
-    let start_date = domain_date(week_start)?;
-    let end_date = domain_date(week_end)?;
-    let range = CalendarViewRange::new(start, end, start_date, end_date).ok()?;
-    Some((
-        CalendarViewReference::new(account_id.clone(), range),
-        week_start,
-    ))
-}
-
-fn domain_date(date: civil::Date) -> Option<Date> {
-    let month = Month::try_from(u8::try_from(date.month()).ok()?).ok()?;
-    Date::from_calendar_date(
-        i32::from(date.year()),
-        month,
-        u8::try_from(date.day()).ok()?,
-    )
-    .ok()
-}
-
 struct CalendarDayRange {
     date: Date,
     start: Timestamp,
@@ -1099,7 +987,7 @@ struct TimedEventDisplayRange {
 
 impl CalendarDayRange {
     fn new(date: civil::Date, time_zone: &TimeZone) -> Option<Self> {
-        let domain_date = domain_date(date)?;
+        let domain_date = to_calendar_date(date)?;
         let next_date = date.checked_add(Span::new().days(1)).ok()?;
         let start = date.to_zoned(time_zone.clone()).ok()?.timestamp();
         let end = next_date.to_zoned(time_zone.clone()).ok()?.timestamp();

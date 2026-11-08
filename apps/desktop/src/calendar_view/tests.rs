@@ -28,7 +28,8 @@ use jiff::{Span, civil, tz::TimeZone};
 use time::{Date, Month, OffsetDateTime};
 use tokio::sync::oneshot;
 
-use super::{CalendarStatus, CalendarView, current_week_start, view_for_week};
+use super::{CalendarStatus, CalendarView};
+use crate::calendar_week::CalendarWeek;
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
 
 #[test]
@@ -626,6 +627,22 @@ fn workflow_account_id() -> AccountId {
     profile().id().clone()
 }
 
+fn system_calendar_week(week_start: civil::Date, time_zone: TimeZone) -> CalendarWeek {
+    CalendarWeek::in_system_zone(profile().id(), week_start, time_zone)
+        .expect("synthetic system calendar week is valid")
+}
+
+fn utc_fallback_calendar_week(week_start: civil::Date) -> CalendarWeek {
+    CalendarWeek::in_utc_fallback(profile().id(), week_start)
+        .expect("synthetic UTC fallback calendar week is valid")
+}
+
+fn system_calendar_view(week_start: civil::Date) -> CalendarViewReference {
+    system_calendar_week(week_start, TimeZone::UTC)
+        .view()
+        .clone()
+}
+
 fn timed_event(start: OffsetDateTime, end: OffsetDateTime) -> CalendarOccurrence {
     timed_event_with_id("synthetic-timed-event", start, end)
 }
@@ -696,38 +713,6 @@ fn select_default_timed_event(context: &mut VisualTestContext) {
 }
 
 #[test]
-fn calendar_view_bounds_follow_local_monday_across_a_dst_transition() {
-    let time_zone = TimeZone::get("America/New_York")
-        .expect("the synthetic IANA zone exists in Linux zoneinfo");
-    let sunday = civil::Date::new(2030, 3, 10).expect("synthetic Sunday is valid");
-    let start = super::monday_start(sunday).expect("Monday is in range");
-    assert_eq!(start, civil::Date::new(2030, 3, 4).expect("valid date"));
-    let account = einfach_mail_domain::AccountId::try_from("synthetic-account".to_owned())
-        .expect("synthetic account ID is valid");
-    let (view, _) =
-        view_for_week(&account, start, &time_zone).expect("synthetic local week has UTC bounds");
-    let range = view.range();
-    assert_eq!(range.start_date().day(), 4);
-    assert_eq!(range.end_date_exclusive().day(), 11);
-    assert_eq!(
-        range.end() - range.start(),
-        time::Duration::days(7) - time::Duration::hours(1)
-    );
-}
-
-#[test]
-fn utc_calendar_week_uses_monday_start_and_utc_offset() {
-    let current = current_week_start(&TimeZone::UTC).expect("current timestamp fits Jiff");
-    let account = einfach_mail_domain::AccountId::try_from("synthetic-account".to_owned())
-        .expect("synthetic account ID is valid");
-    let (view, week_start) =
-        view_for_week(&account, current, &TimeZone::UTC).expect("synthetic UTC week is valid");
-
-    assert_eq!(week_start.weekday(), jiff::civil::Weekday::Monday);
-    assert_eq!(view.range().start().offset(), time::UtcOffset::UTC);
-}
-
-#[test]
 fn timed_events_that_cross_midnight_appear_on_each_occupied_day() {
     let event = timed_event(
         Date::from_calendar_date(2030, Month::January, 6)
@@ -782,11 +767,7 @@ async fn calendar_agenda_navigates_events_with_one_focus_stop_and_keeps_selectio
             CalendarView::new_for_week(
                 profile(),
                 workflow,
-                super::CalendarWeekSelection {
-                    week_start,
-                    time_zone: TimeZone::UTC,
-                    utc_fallback: false,
-                },
+                system_calendar_week(week_start, TimeZone::UTC),
                 cx,
             )
         });
@@ -798,6 +779,10 @@ async fn calendar_agenda_navigates_events_with_one_focus_stop_and_keeps_selectio
     let view = calendar_view.expect("calendar view is created with the test window");
 
     wait_for_ui_condition(context, |_, app| !view.read(app).status.is_sync_active()).await;
+    assert!(
+        context.debug_bounds("calendar-utc-fallback").is_none(),
+        "system UTC does not show the missing-time-zone fallback status"
+    );
     assert_accessible_agenda(context, AGENDA_EVENT_COUNT);
     assert!(context.debug_bounds("calendar-event-list").is_some());
     assert!(
@@ -919,11 +904,7 @@ async fn selecting_an_event_uses_its_current_row_after_agenda_rows_shift(cx: &mu
             CalendarView::new_for_week(
                 profile(),
                 workflow,
-                super::CalendarWeekSelection {
-                    week_start,
-                    time_zone: TimeZone::UTC,
-                    utc_fallback: false,
-                },
+                system_calendar_week(week_start, TimeZone::UTC),
                 cx,
             )
         });
@@ -1014,7 +995,6 @@ async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
     cx: &mut TestAppContext,
 ) {
     cx.update(gpui_kit::init);
-    let time_zone = TimeZone::UTC;
     let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
     let provider = TestProvider::default();
     let requests = Arc::clone(&provider.requests);
@@ -1027,11 +1007,7 @@ async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
         CalendarView::new_for_week(
             profile(),
             workflow,
-            super::CalendarWeekSelection {
-                week_start,
-                time_zone,
-                utc_fallback: true,
-            },
+            utc_fallback_calendar_week(week_start),
             cx,
         )
     });
@@ -1082,9 +1058,13 @@ async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
     context.run_until_parked();
     draw_calendar_view(context);
 
-    let (selected_week, range) = context.cx.update(|cx| {
+    let (selected_week, range, utc_fallback) = context.cx.update(|cx| {
         let view = view.read(cx);
-        (view.week_start, view.view.range().clone())
+        (
+            view.week.start(),
+            view.week.view().range().clone(),
+            view.week.is_utc_fallback(),
+        )
     });
     assert_eq!(
         selected_week,
@@ -1096,6 +1076,23 @@ async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
         range.start_date(),
         Date::from_calendar_date(2030, Month::January, 14).expect("valid date")
     );
+    assert!(
+        utc_fallback,
+        "navigation keeps the selected time-zone choice"
+    );
+    let composer_week = context.cx.update(|cx| {
+        view.read(cx)
+            .event_composer_setup(crate::event_composer::EventComposerIntent::Create {
+                pending_creation: None,
+            })
+            .week
+    });
+    assert_eq!(composer_week.start(), selected_week);
+    assert_eq!(
+        composer_week.view().range().start_date(),
+        range.start_date()
+    );
+    assert_eq!(composer_week.is_utc_fallback(), utc_fallback);
     assert_eq!(
         requests
             .lock()
@@ -1122,11 +1119,7 @@ async fn native_event_composer_names_date_pickers_and_recovers_outcomes(cx: &mut
             CalendarView::new_for_week(
                 profile(),
                 Arc::clone(&workflow),
-                super::CalendarWeekSelection {
-                    week_start,
-                    time_zone: TimeZone::UTC,
-                    utc_fallback: true,
-                },
+                utc_fallback_calendar_week(week_start),
                 cx,
             )
         });
@@ -1269,11 +1262,7 @@ async fn native_event_composer_names_date_pickers_and_recovers_outcomes(cx: &mut
     assert!(context.debug_bounds("event-creation-pending").is_some());
     assert!(context.debug_bounds("event-creation-status").is_some());
     let rejected_marker = workflow
-        .load_cached_view(
-            &view_for_week(profile().id(), week_start, &TimeZone::UTC)
-                .expect("synthetic calendar week is valid")
-                .0,
-        )
+        .load_cached_view(&system_calendar_view(week_start))
         .await
         .expect("rejected operation remains available for cleanup");
     assert!(matches!(
@@ -1295,11 +1284,7 @@ async fn native_event_composer_names_date_pickers_and_recovers_outcomes(cx: &mut
     assert!(context.debug_bounds("event-composer-close").is_some());
     assert_eq!(provider.event_creation_count.load(Ordering::SeqCst), 3);
     let cleared_marker = workflow
-        .load_cached_view(
-            &view_for_week(profile().id(), week_start, &TimeZone::UTC)
-                .expect("synthetic calendar week is valid")
-                .0,
-        )
+        .load_cached_view(&system_calendar_view(week_start))
         .await
         .expect("calendar view can read its cache");
     assert!(cleared_marker.pending_creation().is_none());
@@ -1326,11 +1311,7 @@ async fn denied_calendar_write_emits_permission_review_request(cx: &mut TestAppC
             CalendarView::new_for_week(
                 profile(),
                 workflow,
-                super::CalendarWeekSelection {
-                    week_start,
-                    time_zone: TimeZone::UTC,
-                    utc_fallback: true,
-                },
+                utc_fallback_calendar_week(week_start),
                 cx,
             )
         });
@@ -1412,11 +1393,7 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
             CalendarView::new_for_week(
                 profile(),
                 workflow,
-                super::CalendarWeekSelection {
-                    week_start,
-                    time_zone: TimeZone::UTC,
-                    utc_fallback: true,
-                },
+                utc_fallback_calendar_week(week_start),
                 cx,
             )
         });
@@ -1548,11 +1525,7 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
             CalendarView::new_for_week(
                 profile(),
                 workflow,
-                super::CalendarWeekSelection {
-                    week_start,
-                    time_zone: TimeZone::UTC,
-                    utc_fallback: true,
-                },
+                utc_fallback_calendar_week(week_start),
                 cx,
             )
         });
@@ -1754,11 +1727,7 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
             CalendarView::new_for_week(
                 profile(),
                 workflow,
-                super::CalendarWeekSelection {
-                    week_start,
-                    time_zone: TimeZone::UTC,
-                    utc_fallback: true,
-                },
+                utc_fallback_calendar_week(week_start),
                 cx,
             )
         });
