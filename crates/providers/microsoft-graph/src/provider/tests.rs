@@ -2118,9 +2118,10 @@ async fn create_event_renews_delegated_access_and_posts_one_timed_primary_calend
                 .body_includes(format!("\"transactionId\":\"{}\"", creation.id().as_uuid()));
             then.status(201)
                 .header("content-type", "application/json")
-                .body(
-                    r#"{"id":"synthetic-created-event","subject":"Synthetic planning meeting","start":{"dateTime":"2030-01-08T09:30:00","timeZone":"UTC"},"end":{"dateTime":"2030-01-08T10:00:00","timeZone":"UTC"},"isAllDay":false}"#,
-                );
+                .body(format!(
+                    r#"{{"id":"synthetic-created-event","subject":"Synthetic planning meeting","start":{{"dateTime":"2030-01-08T09:30:00","timeZone":"UTC"}},"end":{{"dateTime":"2030-01-08T10:00:00","timeZone":"UTC"}},"isAllDay":false,"transactionId":"{}"}}"#,
+                    creation.id().as_uuid()
+                ));
         })
         .await;
     let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
