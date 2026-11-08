@@ -63,6 +63,8 @@ GPUI Kit [v0.9.0](https://github.com/longbridge/gpui-kit/releases/tag/v0.9.0) wa
 
 The [v0.9.0 lockfile](https://github.com/longbridge/gpui-kit/blob/v0.9.0/Cargo.lock) still contains all eight advisory package names. It resolves `instant` 0.1.13, `paste` 1.0.15, `rustls-pemfile` 2.2.0, `rustybuzz` 0.20.1, `ttf-parser` 0.25.1, `zbus_names` 4.3.4, `zvariant` 5.15.0, and `zvariant_derive` 5.15.0. It still uses `resvg` 0.46.0 and the zbus 5 stack. GPUI Kit 0.9.0 therefore does not remove any of the eight findings. This advisory review alone did not justify an upgrade; issue #214 separately evaluated 0.9.0 for its accessibility, text-rendering, virtual-list, and shutdown fixes.
 
+The 2026-11-08 check found no GPUI Kit update that resolves these findings. GPUI Kit's [latest release](https://github.com/longbridge/gpui-kit/releases/latest) remains v0.9.0. At upstream [commit `137070d`](https://github.com/longbridge/gpui-kit/commit/137070d7c4e5c7525fb3af5ac260b9c3fe700919), the [manifest](https://github.com/longbridge/gpui-kit/blob/137070d7c4e5c7525fb3af5ac260b9c3fe700919/Cargo.toml) still pins GPUI to `gpui-pre` 0.3.11, and the [lockfile](https://github.com/longbridge/gpui-kit/blob/137070d7c4e5c7525fb3af5ac260b9c3fe700919/Cargo.lock) still contains all eight advisory crate names. Recheck when GPUI Kit releases an update to its renderer, HTTP stack, or zbus stack.
+
 | Crate | Linux dependency path | Replacement and disposition |
 | --- | --- | --- |
 | `instant` 0.1.13 | `gpui-base` and `gpui-component` | RustSec recommends [`web-time`](https://rustsec.org/advisories/RUSTSEC-2024-0384.html). GPUI Kit 0.9.0 still depends on `instant`; replace it when GPUI Kit changes the owning dependency. |
