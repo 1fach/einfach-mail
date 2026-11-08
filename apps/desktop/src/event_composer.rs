@@ -40,7 +40,7 @@ pub(crate) fn bind_event_composer_keys(cx: &mut App) {
     )]);
 }
 
-/// Reports a change made through the event composer.
+/// Reports composer outcomes and requests for calendar-view actions.
 pub(crate) enum EventComposerEvent {
     /// Reloads cached occurrences after an event write.
     CalendarChanged,

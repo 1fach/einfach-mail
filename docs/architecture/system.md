@@ -58,6 +58,7 @@ Mail and calendar views use GPUI Kit rem units for ordinary layout dimensions, s
 
 ## Synchronization rules
 
+- Limit each message-folder attempt and calendar-view round to 1,000 delta pages and one cursor reset.
 - Enumerate visible, non-hidden folders for the signed-in account. Keep folders, messages, and cursors scoped to that account and folder.
 - Start each folder with an unfiltered message-delta round, follow every page, then apply the fixed 90-day cutoff locally. This avoids Graph's 5,000-result cap for filtered delta responses.
 - Follow `@odata.nextLink` and `@odata.deltaLink` as opaque values. Before attaching a bearer token, require HTTPS and the configured Graph authority. Disable redirects for authorized requests.
@@ -65,9 +66,9 @@ Mail and calendar views use GPUI Kit rem units for ordinary layout dimensions, s
 - Scope each calendar cursor to the signed-in account and exact UTC view bounds. Graph expands recurrences; preserve source-zone IDs as opaque metadata. Do not set a response-time-zone preference.
 - Commit each calendar page and its range cursor atomically. Apply sparse changes only to cached occurrences and remove records that no longer overlap the fixed view.
 - Treat only a continuation `410 Gone` with a validated `Location`, or the exact Graph error code `syncStateNotFound`, as an expired calendar cursor. Validate the reset URL against the configured authority, calendar-view path, exact range, and bounded reset query before sending it with the user's token.
-- Stage replacement events, including out-of-view records needed for later sparse updates. Keep removals as tombstones during the scan. On completion, replace active rows and install the new cursor in one SQLCipher transaction; allow one cursor reset per attempt and retain the page, byte, and cursor-loop bounds.
+- Stage replacement events, including out-of-view records needed for later sparse updates. Keep removals as tombstones during the scan. On completion, replace active rows and install the new cursor in one SQLCipher transaction. Keep the response-byte and cursor-loop bounds.
 - Use Jiff at the Linux desktop boundary to format timed instants. Display all-day half-open date ranges as dates without time-zone conversion.
-- Commit each page and its restart checkpoint atomically. Keep each attempt within 1,000 pages and 64 MiB of response data per folder.
+- Commit each mail page and its restart checkpoint atomically. Limit each mail-folder attempt to 64 MiB of response data.
 - Share account, mail-folder, and calendar-view reservations among sessions from one workflow factory. Account-level sync, send, and removal fail with an active-operation result while folder or calendar-view work is in flight. Acquire account reservations before listing or replacing folders and hold them through delta sync. Persist a checkpoint revision and accept a page or reset only when its request started from the current revision.
 - Permit event creation, updates, and deletions only after the shared account recovery state records a successful sync of the target view. After a stale event, uncertain write, or confirmed write that cannot be cached, require every previously synchronized calendar view for that account to sync successfully before another event write. Do not retry uncertain writes.
 - Keep the account session and its cache client alive across Mail and Calendar view transitions. On sign-out, reuse that session for cache removal so a second database worker cannot overtake queued work. Use the factory removal path only when no account session has been opened. See [ADR 0027](../decisions/0027-serialize-mail-account-removal-with-mail-operations.md).

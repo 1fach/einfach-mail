@@ -23,11 +23,12 @@ use crate::{
         reserve_folders,
     },
     prepare_message_body_for_display,
-    sync_budget::response_bytes_after,
+    sync_budget::{
+        MAX_DELTA_PAGES_PER_ATTEMPT, MAX_DELTA_RESETS_PER_ATTEMPT, response_bytes_after,
+    },
 };
 
 const INITIAL_SYNC_WINDOW: Duration = Duration::from_secs(90 * 24 * 60 * 60);
-const MAX_PAGES_PER_FOLDER_ATTEMPT: usize = 1_000;
 
 fn mail_folder_is_visible(folders: &[MailFolder], reference: &FolderReference) -> bool {
     folders.iter().any(|folder| folder.reference() == reference)
@@ -51,8 +52,6 @@ fn validate_visible_move_folders(
     }
     Ok(())
 }
-
-const MAX_DELTA_RESETS_PER_ATTEMPT: usize = 1;
 
 /// A user-safe category for a mail workflow failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -670,7 +669,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
                     if state.next_link().is_none() {
                         return Ok(page_count);
                     }
-                    if page_count == MAX_PAGES_PER_FOLDER_ATTEMPT {
+                    if page_count == MAX_DELTA_PAGES_PER_ATTEMPT {
                         return Err(MailWorkflowError::PageLimitExceeded);
                     }
                 }

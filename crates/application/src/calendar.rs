@@ -21,7 +21,9 @@ use crate::{
     operation_reservations::{
         AccountReservationError, ActiveOperations, reserve_account, reserve_calendar_view,
     },
-    sync_budget::response_bytes_after,
+    sync_budget::{
+        MAX_DELTA_PAGES_PER_ATTEMPT, MAX_DELTA_RESETS_PER_ATTEMPT, response_bytes_after,
+    },
 };
 
 /// A user-safe category for a calendar workflow failure.
@@ -173,9 +175,6 @@ pub enum CalendarEventDeletionOutcome {
     },
 }
 
-const MAX_PAGES_PER_VIEW_ROUND: usize = 1_000;
-const MAX_DELTA_RESETS_PER_VIEW_ROUND: usize = 1;
-
 struct CalendarSyncRound {
     state: CalendarSyncState,
     seen_requests: HashSet<Option<CalendarDeltaLink>>,
@@ -232,7 +231,7 @@ impl CalendarSyncRound {
         self.state = state;
         self.seen_requests.clear();
         self.reset_count += 1;
-        self.reset_count <= MAX_DELTA_RESETS_PER_VIEW_ROUND
+        self.reset_count <= MAX_DELTA_RESETS_PER_ATTEMPT
     }
 
     fn is_complete(&self) -> bool {
@@ -240,7 +239,7 @@ impl CalendarSyncRound {
     }
 
     fn reached_page_limit(&self) -> bool {
-        self.page_count == MAX_PAGES_PER_VIEW_ROUND
+        self.page_count == MAX_DELTA_PAGES_PER_ATTEMPT
     }
 }
 
