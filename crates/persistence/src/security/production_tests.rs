@@ -10,7 +10,7 @@ use keyring::{Entry, Error as KeyringError};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
-use crate::SqliteMailCache;
+use crate::SqliteAccountCache;
 
 use super::{KEY_BYTES, cache_paths, credential_entry, remove_credential, with_suffix};
 
@@ -43,8 +43,10 @@ impl ProductionCache {
     }
 
     fn create_and_store_folder(&self) {
-        let cache = smol::block_on(SqliteMailCache::open_for_account(self.account_id.clone()))
-            .expect("production cache opens with the desktop Secret Service");
+        let cache = smol::block_on(SqliteAccountCache::open_for_account(
+            self.account_id.clone(),
+        ))
+        .expect("production cache opens with the desktop Secret Service");
         let folder = synthetic_folder(&self.account_id);
         smol::block_on(MailCache::replace_folders(
             &cache,
@@ -70,7 +72,10 @@ impl ProductionCache {
             .set_secret(wrong_key.as_slice())
             .expect("synthetic wrong key replaces the isolated Secret Service entry");
         assert!(
-            smol::block_on(SqliteMailCache::open_for_account(self.account_id.clone())).is_err()
+            smol::block_on(SqliteAccountCache::open_for_account(
+                self.account_id.clone()
+            ))
+            .is_err()
         );
         assert_eq!(self.database_bytes(), database_before);
     }
@@ -82,7 +87,9 @@ impl ProductionCache {
             .set_secret(malformed_key.as_slice())
             .expect("synthetic malformed key replaces the isolated Secret Service entry");
         assert!(matches!(
-            smol::block_on(SqliteMailCache::open_for_account(self.account_id.clone())),
+            smol::block_on(SqliteAccountCache::open_for_account(
+                self.account_id.clone()
+            )),
             Err(AccountCacheOpenError::MissingEncryptionKey)
         ));
         assert_eq!(self.database_bytes(), database_before);
@@ -97,8 +104,10 @@ impl ProductionCache {
     }
 
     fn assert_reopens_with_saved_folder(&self) {
-        let cache = smol::block_on(SqliteMailCache::open_for_account(self.account_id.clone()))
-            .expect("production cache reopens with its saved key");
+        let cache = smol::block_on(SqliteAccountCache::open_for_account(
+            self.account_id.clone(),
+        ))
+        .expect("production cache reopens with its saved key");
         let folders = smol::block_on(MailCache::list_folders(&cache, &self.account_id))
             .expect("production cache reads the saved folder");
         assert_eq!(folders, vec![synthetic_folder(&self.account_id)]);
@@ -111,7 +120,9 @@ impl ProductionCache {
             .delete_credential()
             .expect("synthetic cache key is removed to simulate key loss");
         assert!(matches!(
-            smol::block_on(SqliteMailCache::open_for_account(self.account_id.clone())),
+            smol::block_on(SqliteAccountCache::open_for_account(
+                self.account_id.clone()
+            )),
             Err(AccountCacheOpenError::MissingEncryptionKey)
         ));
         assert_eq!(self.database_bytes(), database_before);
@@ -120,13 +131,13 @@ impl ProductionCache {
 
     fn remove_cache_and_key(&self, original_key: &[u8]) {
         self.restore_key(original_key);
-        smol::block_on(SqliteMailCache::remove_for_account(&self.account_id))
+        smol::block_on(SqliteAccountCache::remove_for_account(&self.account_id))
             .expect("production account removal deletes the cache and key");
         assert!(!self.database_path.exists());
         assert!(!with_suffix(&self.database_path, "-wal").exists());
         assert!(!with_suffix(&self.database_path, "-shm").exists());
         assert_credential_is_missing(&self.credential);
-        smol::block_on(SqliteMailCache::remove_for_account(&self.account_id))
+        smol::block_on(SqliteAccountCache::remove_for_account(&self.account_id))
             .expect("production account removal is idempotent");
     }
 
@@ -194,7 +205,7 @@ fn reject_new_cache_without_secret_service(account_id: AccountId) {
     let paths = cache_paths(&account_id).expect("new production cache paths are available");
     assert!(!paths.database.exists());
     assert!(matches!(
-        smol::block_on(SqliteMailCache::open_for_account(account_id)),
+        smol::block_on(SqliteAccountCache::open_for_account(account_id)),
         Err(AccountCacheOpenError::Unavailable)
     ));
     assert!(!paths.database.exists());
@@ -206,7 +217,7 @@ fn preserve_existing_cache_without_secret_service(account_id: AccountId) {
     let database_before =
         fs::read(&paths.database).expect("existing encrypted database is readable");
     assert!(matches!(
-        smol::block_on(SqliteMailCache::open_for_account(account_id)),
+        smol::block_on(SqliteAccountCache::open_for_account(account_id)),
         Err(AccountCacheOpenError::Unavailable)
     ));
     assert_eq!(
@@ -217,7 +228,7 @@ fn preserve_existing_cache_without_secret_service(account_id: AccountId) {
 }
 
 fn create_test_cache_with_folder(database_path: &Path, account_id: &AccountId) {
-    let cache = smol::block_on(SqliteMailCache::open_with_test_key(
+    let cache = smol::block_on(SqliteAccountCache::open_with_test_key(
         database_path.to_owned(),
         account_id.clone(),
         0x56,

@@ -69,7 +69,7 @@ impl CacheFailure {
 
 /// One account's encrypted SQLCipher database and operating-system key reference.
 #[derive(Clone)]
-pub struct SqliteMailCache {
+pub struct SqliteAccountCache {
     account_id: AccountId,
     client: Client,
     database_path: std::path::PathBuf,
@@ -88,29 +88,29 @@ pub struct SqliteMailCache {
 #[cfg(test)]
 type TestOperationGate = (smol::channel::Sender<()>, smol::channel::Receiver<()>);
 
-/// Opens and removes account-scoped [`SqliteMailCache`] values.
+/// Opens and removes account-scoped [`SqliteAccountCache`] values.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct SqliteMailCacheFactory;
+pub struct SqliteAccountCacheFactory;
 
-impl AccountCacheFactory for SqliteMailCacheFactory {
-    type Cache = SqliteMailCache;
+impl AccountCacheFactory for SqliteAccountCacheFactory {
+    type Cache = SqliteAccountCache;
 
     async fn open_for_account(
         &self,
         account_id: AccountId,
     ) -> Result<Self::Cache, AccountCacheOpenError> {
-        SqliteMailCache::open_for_account(account_id).await
+        SqliteAccountCache::open_for_account(account_id).await
     }
 
     async fn remove_for_account(
         &self,
         account_id: &AccountId,
     ) -> Result<(), AccountCacheRemovalError> {
-        SqliteMailCache::remove_for_account(account_id).await
+        SqliteAccountCache::remove_for_account(account_id).await
     }
 }
 
-impl SqliteMailCache {
+impl SqliteAccountCache {
     /// Opens or creates the account's encrypted cache under the Linux data directory.
     ///
     /// A new 32-byte key is generated only when neither the database nor its
@@ -344,7 +344,7 @@ impl SqliteMailCache {
     }
 }
 
-impl AccountCache for SqliteMailCache {
+impl AccountCache for SqliteAccountCache {
     fn remove_account(
         &self,
         account_id: &AccountId,

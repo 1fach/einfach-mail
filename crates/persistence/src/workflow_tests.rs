@@ -30,7 +30,7 @@ use einfach_mail_domain::{
 use tempfile::TempDir;
 use time::{Date, Month};
 
-use crate::store::SqliteMailCache;
+use crate::store::SqliteAccountCache;
 
 mod account_lifecycle;
 mod mail_actions;
@@ -92,11 +92,11 @@ struct FixtureCacheFactory {
 
 struct RetainedCacheFactory {
     account_id: AccountId,
-    cache: SqliteMailCache,
+    cache: SqliteAccountCache,
 }
 
 impl AccountCacheFactory for FixtureCacheFactory {
-    type Cache = SqliteMailCache;
+    type Cache = SqliteAccountCache;
 
     fn open_for_account(
         &self,
@@ -105,8 +105,12 @@ impl AccountCacheFactory for FixtureCacheFactory {
         let database_path = self.database_directory.join("mail.sqlite3");
         async move {
             Ok(
-                SqliteMailCache::open_with_test_key(database_path, account_id, DATABASE_KEY_BYTE)
-                    .await,
+                SqliteAccountCache::open_with_test_key(
+                    database_path,
+                    account_id,
+                    DATABASE_KEY_BYTE,
+                )
+                .await,
             )
         }
     }
@@ -120,7 +124,7 @@ impl AccountCacheFactory for FixtureCacheFactory {
 }
 
 impl AccountCacheFactory for RetainedCacheFactory {
-    type Cache = SqliteMailCache;
+    type Cache = SqliteAccountCache;
 
     fn open_for_account(
         &self,
@@ -862,8 +866,8 @@ fn complete_patch(subject: String, received_at: SystemTime) -> MessageMetadataPa
     patch
 }
 
-async fn open_cache(directory: &TempDir, account_id: AccountId) -> SqliteMailCache {
-    SqliteMailCache::open_with_test_key(
+async fn open_cache(directory: &TempDir, account_id: AccountId) -> SqliteAccountCache {
+    SqliteAccountCache::open_with_test_key(
         directory.path().join("mail.sqlite3"),
         account_id,
         DATABASE_KEY_BYTE,
@@ -874,7 +878,7 @@ async fn open_cache(directory: &TempDir, account_id: AccountId) -> SqliteMailCac
 async fn open_session_over_retained_cache(
     provider: FixtureProvider,
     account_id: &AccountId,
-    cache: &SqliteMailCache,
+    cache: &SqliteAccountCache,
 ) -> Arc<dyn AccountSession> {
     let factory = AccountSessionWorkflowFactory::new(
         provider,

@@ -1191,7 +1191,7 @@ fn unknown_send_marker_survives_encrypted_restart_and_blocks_duplicate_send_and_
         ));
         assert_eq!(send_calls.load(Ordering::Relaxed), 1);
         assert_eq!(
-            <SqliteMailCache as AccountCache>::remove_account(&reopened, &account).await,
+            <SqliteAccountCache as AccountCache>::remove_account(&reopened, &account).await,
             Err(AccountCacheRemovalError::PendingMailSend)
         );
 
@@ -1279,7 +1279,7 @@ fn unknown_reply_marker_survives_encrypted_restart_without_reply_body() {
             Ok(Some(pending.clone()))
         );
         assert_eq!(
-            <SqliteMailCache as AccountCache>::remove_account(&cache, &account).await,
+            <SqliteAccountCache as AccountCache>::remove_account(&cache, &account).await,
             Err(AccountCacheRemovalError::PendingMailSend)
         );
 

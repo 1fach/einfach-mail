@@ -15,7 +15,7 @@ use tempfile::TempDir;
 use time::{Date, Month, PrimitiveDateTime, Time};
 
 use super::{
-    SqliteMailCache,
+    SqliteAccountCache,
     system_time::{system_time_from_parts, system_time_parts},
 };
 const DATABASE_KEY_BYTE: u8 = 0x51;
@@ -108,9 +108,9 @@ fn calendar_event(creation: &CalendarEventCreation) -> einfach_mail_domain::Cale
         .expect("synthetic created calendar event is valid")
 }
 
-async fn open_test_cache(directory: &TempDir, account_id: AccountId) -> SqliteMailCache {
+async fn open_test_cache(directory: &TempDir, account_id: AccountId) -> SqliteAccountCache {
     let database_path = directory.path().join("mail.sqlite3");
-    SqliteMailCache::open_with_test_key(database_path, account_id, DATABASE_KEY_BYTE).await
+    SqliteAccountCache::open_with_test_key(database_path, account_id, DATABASE_KEY_BYTE).await
 }
 
 fn complete_patch(

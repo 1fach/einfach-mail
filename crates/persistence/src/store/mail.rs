@@ -17,7 +17,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use super::{
-    CacheFailure, CacheResult, SqliteMailCache,
+    CacheFailure, CacheResult, SqliteAccountCache,
     system_time::{system_time_from_parts, system_time_parts},
 };
 use crate::schema;
@@ -65,13 +65,13 @@ impl From<async_sqlite::rusqlite::Error> for MailCacheFailure {
     }
 }
 
-impl SqliteMailCache {
+impl SqliteAccountCache {
     fn check_folder(&self, folder: &FolderReference) -> Result<(), MailCacheError> {
         self.check_account(folder.account_id())
     }
 }
 
-impl MailCache for SqliteMailCache {
+impl MailCache for SqliteAccountCache {
     fn replace_folders(
         &self,
         account_id: &AccountId,
