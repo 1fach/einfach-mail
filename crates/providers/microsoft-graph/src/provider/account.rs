@@ -283,11 +283,13 @@ async fn authorize_profile(
     let client =
         http_client::build_client().map_err(|_| AccountOperationError::ServiceUnavailable)?;
     let response = identity::authorize(
-        config.client_id,
-        config.callback_port,
-        &config.endpoints,
-        client.clone(),
-        config.browser.as_ref(),
+        identity::AuthorizationContext {
+            client_id: config.client_id,
+            callback_port: config.callback_port,
+            endpoints: &config.endpoints,
+            client,
+            browser: config.browser.as_ref(),
+        },
         request,
     )
     .await?;

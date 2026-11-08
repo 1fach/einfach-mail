@@ -74,6 +74,14 @@ pub(super) trait BrowserLauncher: Send + Sync {
     fn open(&self, authorization_url: &Url) -> Result<(), AccountOperationError>;
 }
 
+pub(super) struct AuthorizationContext<'context> {
+    pub(super) client_id: Uuid,
+    pub(super) callback_port: CallbackPort,
+    pub(super) endpoints: &'context Endpoints,
+    pub(super) client: reqwest::Client,
+    pub(super) browser: &'context dyn BrowserLauncher,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct SystemBrowser;
 
@@ -85,26 +93,22 @@ impl BrowserLauncher for SystemBrowser {
 }
 
 pub(super) async fn authorize(
-    client_id: Uuid,
-    callback_port: CallbackPort,
-    endpoints: &Endpoints,
-    client: reqwest::Client,
-    browser: &dyn BrowserLauncher,
+    context: AuthorizationContext<'_>,
     request: AccountPermissionRequest,
 ) -> Result<TokenResponse, AccountOperationError> {
-    let listener = bind_callback_listener(callback_port).await?;
+    let listener = bind_callback_listener(context.callback_port).await?;
     let redirect_uri = callback_uri(&listener)?;
-    let grant = authorization_grant(client_id, &redirect_uri, endpoints, client.clone()).await?;
-    let requested_scopes = authorization_scopes(request);
-    let (started, authorization_url) = begin_authorization(
-        &grant,
-        endpoints,
-        client_id,
+    let grant = authorization_grant(
+        context.client_id,
         &redirect_uri,
-        requested_scopes,
+        context.endpoints,
+        context.client.clone(),
     )
     .await?;
-    browser.open(&authorization_url)?;
+    let requested_scopes = authorization_scopes(request);
+    let (started, authorization_url) =
+        begin_authorization(&grant, &context, &redirect_uri, requested_scopes).await?;
+    context.browser.open(&authorization_url)?;
     complete_authorization(&grant, &listener, &started).await
 }
 
@@ -124,8 +128,7 @@ fn callback_uri(listener: &TcpListener) -> Result<String, AccountOperationError>
 
 async fn begin_authorization(
     grant: &AuthorizationCodeGrant,
-    endpoints: &Endpoints,
-    client_id: Uuid,
+    context: &AuthorizationContext<'_>,
     redirect_uri: &str,
     requested_scopes: &[&str],
 ) -> Result<(StartOutput, Url), AccountOperationError> {
@@ -142,10 +145,12 @@ async fn begin_authorization(
         .map_err(|_| AccountOperationError::SignInFailed)?;
     validate_authorization_request(
         &authorization_url,
-        &endpoints.authorization,
-        client_id,
-        redirect_uri,
-        requested_scopes,
+        &AuthorizationExpectation {
+            endpoint: &context.endpoints.authorization,
+            client_id: context.client_id,
+            redirect_uri,
+            scopes: requested_scopes,
+        },
     )?;
     Ok((started, authorization_url))
 }
@@ -218,23 +223,25 @@ async fn authorization_grant(
         .map_err(|_| AccountOperationError::SignInFailed)
 }
 
+struct AuthorizationExpectation<'expected> {
+    endpoint: &'expected Url,
+    client_id: Uuid,
+    redirect_uri: &'expected str,
+    scopes: &'expected [&'expected str],
+}
+
 fn validate_authorization_request(
     url: &Url,
-    expected_endpoint: &Url,
-    expected_client_id: Uuid,
-    redirect_uri: &str,
-    requested_scopes: &[&str],
+    expected: &AuthorizationExpectation<'_>,
 ) -> Result<(), AccountOperationError> {
-    let endpoint_is_expected = url.origin() == expected_endpoint.origin()
-        && url.path() == expected_endpoint.path()
+    let endpoint_is_expected = url.origin() == expected.endpoint.origin()
+        && url.path() == expected.endpoint.path()
         && url.username().is_empty()
         && url.password().is_none()
         && url.fragment().is_none();
     let parameters = AuthorizationParameters::parse(url);
 
-    if endpoint_is_expected
-        && parameters.matches(expected_client_id, redirect_uri, requested_scopes)
-    {
+    if endpoint_is_expected && parameters.matches(expected) {
         Ok(())
     } else {
         Err(AccountOperationError::SignInFailed)
@@ -276,23 +283,18 @@ impl AuthorizationParameters {
         }
     }
 
-    fn matches(
-        &self,
-        expected_client_id: Uuid,
-        redirect_uri: &str,
-        requested_scopes: &[&str],
-    ) -> bool {
-        let expected_client_id = expected_client_id.to_string();
+    fn matches(&self, expected: &AuthorizationExpectation<'_>) -> bool {
+        let expected_client_id = expected.client_id.to_string();
         self.response_type.as_deref() == Some("code")
             && self.client_id.as_deref() == Some(expected_client_id.as_str())
             && self.state.as_ref().is_some_and(|state| !state.is_empty())
-            && self.redirect_uri.as_deref() == Some(redirect_uri)
+            && self.redirect_uri.as_deref() == Some(expected.redirect_uri)
             && self.challenge_method.as_deref() == Some("S256")
             && self
                 .challenge
                 .as_ref()
                 .is_some_and(|challenge| !challenge.is_empty())
-            && self.has_exact_scopes(requested_scopes)
+            && self.has_exact_scopes(expected.scopes)
             && !self.includes_nonce
     }
 
@@ -357,11 +359,23 @@ mod tests {
     use url::Url;
 
     use super::{
-        BASE_AUTHORIZATION_SCOPES, CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES, Endpoints,
-        MAIL_READ_WRITE_AUTHORIZATION_SCOPES, SEND_MAIL_AUTHORIZATION_SCOPES, authorization_scopes,
-        validate_authorization_request,
+        AuthorizationExpectation, BASE_AUTHORIZATION_SCOPES,
+        CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES, Endpoints, MAIL_READ_WRITE_AUTHORIZATION_SCOPES,
+        SEND_MAIL_AUTHORIZATION_SCOPES, authorization_scopes, validate_authorization_request,
     };
     use einfach_mail_application::AccountPermissionRequest;
+
+    fn expected_authorization_request<'expected>(
+        endpoint: &'expected Url,
+        scopes: &'expected [&'expected str],
+    ) -> AuthorizationExpectation<'expected> {
+        AuthorizationExpectation {
+            endpoint,
+            client_id: uuid::Uuid::from_u128(1),
+            redirect_uri: "http://127.0.0.1:1234/callback",
+            scopes,
+        }
+    }
 
     #[test]
     fn mail_send_is_added_only_to_explicit_same_account_permission_review() {
@@ -387,26 +401,17 @@ mod tests {
             "code_challenge_method=S256&code_challenge=synthetic-challenge"
         ))
         .expect("synthetic authorization URL is valid");
-        let client_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
-            .expect("synthetic client ID is valid");
-
         assert!(
             validate_authorization_request(
                 &authorization_url,
-                &endpoint,
-                client_id,
-                "http://127.0.0.1:1234/callback",
-                &SEND_MAIL_AUTHORIZATION_SCOPES,
+                &expected_authorization_request(&endpoint, &SEND_MAIL_AUTHORIZATION_SCOPES),
             )
             .is_ok()
         );
         assert!(
             validate_authorization_request(
                 &authorization_url,
-                &endpoint,
-                client_id,
-                "http://127.0.0.1:1234/callback",
-                &BASE_AUTHORIZATION_SCOPES,
+                &expected_authorization_request(&endpoint, &BASE_AUTHORIZATION_SCOPES),
             )
             .is_err()
         );
@@ -428,11 +433,7 @@ mod tests {
         assert!(
             validate_authorization_request(
                 &authorization_url,
-                &endpoint,
-                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
-                    .expect("synthetic client ID is valid"),
-                "http://127.0.0.1:1234/callback",
-                &BASE_AUTHORIZATION_SCOPES,
+                &expected_authorization_request(&endpoint, &BASE_AUTHORIZATION_SCOPES),
             )
             .is_ok()
         );
@@ -444,11 +445,7 @@ mod tests {
         assert!(
             validate_authorization_request(
                 &duplicate_parameter_url,
-                &endpoint,
-                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
-                    .expect("synthetic client ID is valid"),
-                "http://127.0.0.1:1234/callback",
-                &BASE_AUTHORIZATION_SCOPES,
+                &expected_authorization_request(&endpoint, &BASE_AUTHORIZATION_SCOPES),
             )
             .is_err()
         );
@@ -475,11 +472,10 @@ mod tests {
         assert!(
             validate_authorization_request(
                 &authorization_url,
-                &endpoints.authorization,
-                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
-                    .expect("synthetic client ID is valid"),
-                "http://127.0.0.1:1234/callback",
-                &BASE_AUTHORIZATION_SCOPES,
+                &expected_authorization_request(
+                    &endpoints.authorization,
+                    &BASE_AUTHORIZATION_SCOPES,
+                ),
             )
             .is_err()
         );
