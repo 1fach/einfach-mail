@@ -96,7 +96,7 @@ impl GraphApi {
         let event = serde_json::from_slice::<WireCalendarEvent>(&response)
             .map_err(|_| GraphError::CalendarEventCreationOutcomeUnknown)?;
         event
-            .into_new(creation.view().clone())
+            .into_created(creation)
             .map_err(|_| GraphError::CalendarEventCreationOutcomeUnknown)
     }
 
@@ -246,6 +246,8 @@ impl GraphApi {
 pub(super) struct WireCalendarEvent {
     pub(super) id: String,
     #[serde(default)]
+    transaction_id: Option<String>,
+    #[serde(default)]
     pub(super) subject: WireField<String>,
     #[serde(default)]
     pub(super) location: WireField<WireLocation>,
@@ -290,6 +292,17 @@ pub(super) struct WireDateTimeTimeZone {
 }
 
 impl WireCalendarEvent {
+    fn into_created(
+        self,
+        creation: &CalendarEventCreation,
+    ) -> Result<CalendarOccurrence, GraphError> {
+        let expected_transaction_id = creation.id().as_uuid().to_string();
+        if self.transaction_id.as_deref() != Some(expected_transaction_id.as_str()) {
+            return Err(GraphError::InvalidRecord);
+        }
+        self.into_new(creation.view().clone())
+    }
+
     fn into_checked_editable(
         self,
         view: CalendarViewReference,

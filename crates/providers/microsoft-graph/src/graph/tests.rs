@@ -10,7 +10,7 @@ use huskarl::{
 };
 use serde_json::json;
 use time::{
-    Date, Month, OffsetDateTime, PrimitiveDateTime, Time, format_description::well_known::Rfc3339,
+    Date, Month, OffsetDateTime, PrimitiveDateTime, format_description::well_known::Rfc3339,
 };
 use url::Url;
 
@@ -66,6 +66,23 @@ fn synthetic_view() -> CalendarViewReference {
     )
     .expect("synthetic calendar range is valid");
     CalendarViewReference::new(account, range)
+}
+
+fn synthetic_calendar_creation() -> CalendarEventCreation {
+    let start = synthetic_utc_datetime("2030-01-08T09:30:00Z");
+    let end = synthetic_utc_datetime("2030-01-08T10:00:00Z");
+    let draft = CalendarEventDraft::timed(
+        "Synthetic planning meeting".to_owned(),
+        PrimitiveDateTime::new(start.date(), start.time()),
+        PrimitiveDateTime::new(end.date(), end.time()),
+        CalendarTimeZoneId::try_from("Etc/UTC".to_owned()).expect("synthetic zone is valid"),
+        start,
+        end,
+    )
+    .expect("synthetic event draft is valid");
+
+    CalendarEventCreation::try_new(synthetic_view(), draft)
+        .expect("synthetic event fits its calendar view")
 }
 
 fn synthetic_utc_datetime(date_time_text: &str) -> OffsetDateTime {
@@ -542,6 +559,30 @@ fn synthetic_graph_api(server: &MockServer) -> (GraphApi, GraphTransport) {
     (GraphApi::new(authority, handle), transport)
 }
 
+async fn assert_create_event_response_is_unknown(
+    creation: &CalendarEventCreation,
+    response: serde_json::Value,
+) {
+    let server = MockServer::start_async().await;
+    let create = server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/v1.0/me/calendar/events")
+                .body_includes(format!("\"transactionId\":\"{}\"", creation.id().as_uuid()));
+            then.status(201)
+                .header("content-type", "application/json")
+                .body(response.to_string());
+        })
+        .await;
+    let (api, _transport) = synthetic_graph_api(&server);
+    assert!(matches!(
+        api.create_calendar_event(creation, synthetic_access_token())
+            .await,
+        Err(GraphError::CalendarEventCreationOutcomeUnknown)
+    ));
+    create.assert_async().await;
+}
+
 #[tokio::test]
 async fn move_message_sends_one_immutable_id_request_and_checks_destination() {
     let server = MockServer::start_async().await;
@@ -869,32 +910,7 @@ async fn send_mail_posts_one_plain_text_recipient_and_saves_to_sent_items() {
 
 #[test]
 fn create_event_request_contains_only_timed_primary_calendar_fields() {
-    let view = synthetic_view();
-    let date =
-        Date::from_calendar_date(2030, Month::January, 8).expect("synthetic event date is valid");
-    let local_start = PrimitiveDateTime::new(
-        date,
-        Time::from_hms(9, 30, 0).expect("synthetic start time is valid"),
-    );
-    let local_end = PrimitiveDateTime::new(
-        date,
-        Time::from_hms(10, 0, 0).expect("synthetic end time is valid"),
-    );
-    let draft = CalendarEventDraft::timed(
-        "Synthetic planning meeting".to_owned(),
-        local_start,
-        local_end,
-        CalendarTimeZoneId::try_from("Etc/UTC".to_owned()).expect("synthetic time zone is valid"),
-        date.with_hms(9, 30, 0)
-            .expect("synthetic UTC start is valid")
-            .assume_utc(),
-        date.with_hms(10, 0, 0)
-            .expect("synthetic UTC end is valid")
-            .assume_utc(),
-    )
-    .expect("synthetic event draft is valid");
-    let creation =
-        CalendarEventCreation::try_new(view, draft).expect("synthetic event fits its week");
+    let creation = synthetic_calendar_creation();
 
     let body = create_calendar_event_body(&creation).expect("synthetic event body serializes");
     let body: serde_json::Value =
@@ -912,6 +928,24 @@ fn create_event_request_contains_only_timed_primary_calendar_fields() {
     assert_eq!(body["end"]["dateTime"], "2030-01-08T10:00:00");
     assert_eq!(body["end"]["timeZone"], "UTC");
     assert_eq!(body["transactionId"], creation.id().as_uuid().to_string());
+}
+
+#[tokio::test]
+async fn create_event_requires_a_matching_transaction_id_in_the_response() {
+    let creation = synthetic_calendar_creation();
+    for transaction_id in [None, Some("synthetic-other-operation")] {
+        let mut response = json!({
+            "id": "synthetic-created-event",
+            "subject": "Synthetic planning meeting",
+            "start": {"dateTime": "2030-01-08T09:30:00", "timeZone": "UTC"},
+            "end": {"dateTime": "2030-01-08T10:00:00", "timeZone": "UTC"},
+            "isAllDay": false
+        });
+        if let Some(transaction_id) = transaction_id {
+            response["transactionId"] = json!(transaction_id);
+        }
+        assert_create_event_response_is_unknown(&creation, response).await;
+    }
 }
 
 #[test]
