@@ -74,7 +74,6 @@ pub(crate) struct CalendarView<S: CalendarSession + ?Sized = dyn CalendarSession
     sync_state: Option<einfach_mail_application::CalendarSyncState>,
     write_readiness: CalendarWriteReadiness,
     status: CalendarStatus,
-    sync_running: bool,
     request_id: u64,
     task: Option<Task<()>>,
     composer_subscription: Option<Subscription>,
@@ -82,10 +81,20 @@ pub(crate) struct CalendarView<S: CalendarSession + ?Sized = dyn CalendarSession
 
 #[derive(Clone, Copy)]
 enum CalendarStatus {
+    Idle,
     LoadingCache,
     Syncing,
     UpToDate,
     Failed(CalendarWorkflowError),
+}
+
+impl CalendarStatus {
+    fn is_sync_active(&self) -> bool {
+        match self {
+            Self::LoadingCache | Self::Syncing => true,
+            Self::Idle | Self::UpToDate | Self::Failed(_) => false,
+        }
+    }
 }
 
 struct DisplayEvent<'a> {
@@ -231,8 +240,7 @@ where
             selected_agenda_event: None,
             sync_state: None,
             write_readiness: CalendarWriteReadiness::ViewSyncRequired,
-            status: CalendarStatus::LoadingCache,
-            sync_running: false,
+            status: CalendarStatus::Idle,
             request_id: 0,
             task: None,
             composer_subscription: None,
@@ -240,10 +248,9 @@ where
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.sync_running {
+        if self.status.is_sync_active() {
             return;
         }
-        self.sync_running = true;
         self.status = CalendarStatus::LoadingCache;
         self.request_id = self.request_id.saturating_add(1);
         let request = CalendarRefreshRequest {
@@ -319,7 +326,6 @@ where
             if view.request_id != request_id {
                 return;
             }
-            view.sync_running = false;
             view.task = None;
             view.status = CalendarStatus::Failed(error);
             cx.notify();
@@ -337,7 +343,6 @@ where
             if view.request_id != request_id {
                 return;
             }
-            view.sync_running = false;
             view.task = None;
             view.apply_refresh_outcome(outcome);
             cx.notify();
@@ -376,7 +381,7 @@ where
     }
 
     fn reload_cached_view(&mut self, cx: &mut Context<Self>) {
-        if self.sync_running {
+        if self.status.is_sync_active() {
             return;
         }
         self.request_id = self.request_id.saturating_add(1);
@@ -449,7 +454,7 @@ where
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.sync_running || window.has_active_sheet(cx) {
+        if self.status.is_sync_active() || window.has_active_sheet(cx) {
             return;
         }
         let setup = self.event_composer_setup(intent);
@@ -643,7 +648,7 @@ where
         };
         drop(self.task.take());
         self.request_id = self.request_id.saturating_add(1);
-        self.sync_running = false;
+        self.status = CalendarStatus::Idle;
         self.week_start = selected_week;
         self.view = view;
         self.events.clear();
@@ -657,7 +662,7 @@ where
     pub(crate) fn stop_pending_work(&mut self) {
         drop(self.task.take());
         self.request_id = self.request_id.saturating_add(1);
-        self.sync_running = false;
+        self.status = CalendarStatus::Idle;
         self.events.clear();
         self.pending_creation = None;
         self.selected_agenda_event = None;
@@ -722,8 +727,8 @@ where
             .child(
                 Button::new("calendar-sync")
                     .label("Sync now")
-                    .loading(self.sync_running)
-                    .disabled(self.sync_running)
+                    .loading(self.status.is_sync_active())
+                    .disabled(self.status.is_sync_active())
                     .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
             )
     }
@@ -740,7 +745,8 @@ where
                         "New event…"
                     })
                     .disabled(
-                        self.sync_running || self.write_readiness != CalendarWriteReadiness::Ready,
+                        self.status.is_sync_active()
+                            || self.write_readiness != CalendarWriteReadiness::Ready,
                     )
                     .on_click(cx.listener(|view, _, window, cx| {
                         view.open_event_composer(window, cx);
@@ -803,6 +809,7 @@ where
             return render_status_label(message.to_owned(), Role::Alert, colors);
         }
         let (label, role) = match self.status {
+            CalendarStatus::Idle => ("Calendar is ready to sync".to_owned(), Role::Status),
             CalendarStatus::LoadingCache => {
                 ("Loading saved calendar events…".to_owned(), Role::Status)
             }
@@ -906,7 +913,8 @@ where
                 .ghost()
                 .label("Edit")
                 .disabled(
-                    self.sync_running || self.write_readiness != CalendarWriteReadiness::Ready,
+                    self.status.is_sync_active()
+                        || self.write_readiness != CalendarWriteReadiness::Ready,
                 )
                 .on_click(cx.listener(move |view, _, window, cx| {
                     view.open_event_editor(cached_event.clone(), window, cx);
@@ -988,6 +996,7 @@ fn primary_calendar_heading() -> impl IntoElement {
 
 fn render_empty_agenda(status: CalendarStatus, colors: ColorTokens) -> impl IntoElement {
     let message = match status {
+        CalendarStatus::Idle => "Sync this calendar to load events for this week.",
         CalendarStatus::LoadingCache | CalendarStatus::Syncing => "Loading events for this week…",
         CalendarStatus::Failed(_) => "No cached events are available for this week.",
         CalendarStatus::UpToDate => "No events this week.",

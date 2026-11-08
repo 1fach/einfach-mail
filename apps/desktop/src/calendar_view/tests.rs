@@ -11,7 +11,8 @@ use std::{
 use einfach_mail_application::{
     CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
     CalendarDeltaResponse, CalendarOperationError, CalendarProvider, CalendarSession,
-    CalendarSyncMode, CalendarSyncState, CalendarWorkflow, CalendarWriteReadiness,
+    CalendarSyncMode, CalendarSyncState, CalendarWorkflow, CalendarWorkflowError,
+    CalendarWriteReadiness,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
@@ -27,8 +28,17 @@ use jiff::{Span, civil, tz::TimeZone};
 use time::{Date, Month, OffsetDateTime};
 use tokio::sync::oneshot;
 
-use super::{CalendarView, current_week_start, view_for_week};
+use super::{CalendarStatus, CalendarView, current_week_start, view_for_week};
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
+
+#[test]
+fn sync_activity_matches_calendar_status() {
+    assert!(CalendarStatus::LoadingCache.is_sync_active());
+    assert!(CalendarStatus::Syncing.is_sync_active());
+    assert!(!CalendarStatus::Idle.is_sync_active());
+    assert!(!CalendarStatus::UpToDate.is_sync_active());
+    assert!(!CalendarStatus::Failed(CalendarWorkflowError::AccountMismatch).is_sync_active());
+}
 
 #[derive(Clone, Default)]
 struct TestProvider {
@@ -787,7 +797,7 @@ async fn calendar_agenda_navigates_events_with_one_focus_stop_and_keeps_selectio
     let context = VisualTestContext::from_window(*window.deref(), cx).into_mut();
     let view = calendar_view.expect("calendar view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_ui_condition(context, |_, app| !view.read(app).status.is_sync_active()).await;
     assert_accessible_agenda(context, AGENDA_EVENT_COUNT);
     assert!(context.debug_bounds("calendar-event-list").is_some());
     assert!(
@@ -924,7 +934,7 @@ async fn selecting_an_event_uses_its_current_row_after_agenda_rows_shift(cx: &mu
     let context = VisualTestContext::from_window(*window.deref(), cx).into_mut();
     let view = calendar_view.expect("calendar view is created with the test window");
 
-    wait_for_ui_condition(context, |_, app| !(view.read(app).sync_running)).await;
+    wait_for_ui_condition(context, |_, app| !view.read(app).status.is_sync_active()).await;
     draw_calendar_view(context);
     assert!(
         context
@@ -1031,14 +1041,17 @@ async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
         test_element_is_visible(window, "calendar-sync-error")
     })
     .await;
-    let (sync_running, status_failed) = context.cx.update(|cx| {
+    let (sync_in_progress, status_failed) = context.cx.update(|cx| {
         let view = view.read(cx);
         (
-            view.sync_running,
+            view.status.is_sync_active(),
             matches!(view.status, super::CalendarStatus::Failed(_)),
         )
     });
-    assert!(!sync_running && status_failed, "calendar refresh completes");
+    assert!(
+        !sync_in_progress && status_failed,
+        "calendar refresh completes"
+    );
     assert!(context.debug_bounds("calendar-sync-error").is_some());
     assert!(context.debug_bounds("calendar-utc-fallback").is_some());
     let status_labels = context.update(|window, _| {
