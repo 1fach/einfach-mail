@@ -372,14 +372,14 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         created_at: SystemTime,
     ) -> Result<MailSendOutcome, MailSendWorkflowError> {
         let _reservation = self.reserve_send(&self.account_id)?;
-        self.ensure_no_pending_send(&self.account_id).await?;
+        self.ensure_no_pending_send().await?;
         let pending = draft.pending_send(
             self.account_id.clone(),
             MailSendOperationId::new(),
             created_at,
         );
         self.stage_send_marker(&pending).await?;
-        self.submit_staged_send(&self.account_id, MailSubmission::NewMessage(draft), pending)
+        self.submit_staged_send(MailSubmission::NewMessage(draft), pending)
             .await
     }
 
@@ -403,9 +403,9 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             return Err(MailSendProviderError::AccountMismatch.into());
         }
         let _reservation = self.reserve_send(&self.account_id)?;
-        self.ensure_no_pending_send(&self.account_id).await?;
+        self.ensure_no_pending_send().await?;
         let pending = self.stage_reply_send(&draft, created_at).await?;
-        self.submit_staged_send(&self.account_id, MailSubmission::Reply(draft), pending)
+        self.submit_staged_send(MailSubmission::Reply(draft), pending)
             .await
     }
 
@@ -431,11 +431,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         Ok(pending)
     }
 
-    async fn ensure_no_pending_send(
-        &self,
-        account_id: &AccountId,
-    ) -> Result<(), MailSendWorkflowError> {
-        if let Some(pending) = self.cache.load_pending_send(account_id).await? {
+    async fn ensure_no_pending_send(&self) -> Result<(), MailSendWorkflowError> {
+        if let Some(pending) = self.cache.load_pending_send(&self.account_id).await? {
             return Err(MailSendWorkflowError::PendingResolutionRequired(pending));
         }
         Ok(())
@@ -459,32 +456,36 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
 
     async fn submit_staged_send(
         &self,
-        account_id: &AccountId,
         submission: MailSubmission,
         pending: PendingMailSend,
     ) -> Result<MailSendOutcome, MailSendWorkflowError> {
         let provider_result = match submission {
-            MailSubmission::NewMessage(draft) => self.provider.send_mail(account_id, draft).await,
-            MailSubmission::Reply(draft) => self.provider.reply_to_message(account_id, draft).await,
+            MailSubmission::NewMessage(draft) => {
+                self.provider.send_mail(&self.account_id, draft).await
+            }
+            MailSubmission::Reply(draft) => {
+                self.provider
+                    .reply_to_message(&self.account_id, draft)
+                    .await
+            }
         };
         match provider_result {
-            Ok(()) => self.finish_accepted_send(account_id, pending).await,
+            Ok(()) => self.finish_accepted_send(pending).await,
             Err(MailSendProviderError::OutcomeUnknown) => {
                 Ok(MailSendOutcome::OutcomeUnknown(pending))
             }
-            Err(error) => self.finish_rejected_send(account_id, pending, error).await,
+            Err(error) => self.finish_rejected_send(pending, error).await,
         }
     }
 
     async fn finish_rejected_send(
         &self,
-        account_id: &AccountId,
         pending: PendingMailSend,
         error: MailSendProviderError,
     ) -> Result<MailSendOutcome, MailSendWorkflowError> {
         match self
             .cache
-            .clear_pending_send(account_id, pending.operation_id())
+            .clear_pending_send(&self.account_id, pending.operation_id())
             .await
         {
             Ok(()) => Err(MailSendWorkflowError::Provider(error)),
@@ -498,12 +499,11 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
 
     async fn finish_accepted_send(
         &self,
-        account_id: &AccountId,
         pending: PendingMailSend,
     ) -> Result<MailSendOutcome, MailSendWorkflowError> {
         match self
             .cache
-            .clear_pending_send(account_id, pending.operation_id())
+            .clear_pending_send(&self.account_id, pending.operation_id())
             .await
         {
             Ok(()) => Ok(MailSendOutcome::Accepted),
