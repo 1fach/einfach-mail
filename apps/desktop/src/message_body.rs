@@ -12,7 +12,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, ImageSource, IntoElement, Role, SharedString, base::TextSelectionLayer, div,
+    AnyElement, App, ClickEvent, ImageSource, IntoElement, Role, SharedString,
+    base::TextSelectionLayer, div,
 };
 
 pub(super) fn render_message_body(body: &MessageBodyForDisplay, colors: ColorTokens) -> AnyElement {
@@ -129,11 +130,8 @@ fn render_html_content_region(html: &SanitizedEmailHtml) -> AnyElement {
                 .selectable(true)
                 .image_source(|_| ImageSource::Custom(Arc::new(|_, _| None)))
                 .on_link_click(|href, event, _, cx| {
-                    if event.is_secondary() {
-                        return;
-                    }
                     if let Some(url) = allowed_external_message_url(href.as_ref()) {
-                        cx.open_url(url.as_str());
+                        open_message_link(&url, event, cx);
                     }
                 }),
         )
@@ -156,6 +154,13 @@ fn render_message_links_action(html: &SanitizedEmailHtml) -> Option<AnyElement> 
     )
 }
 
+fn open_message_link(link: &ExternalMessageLink, event: &ClickEvent, cx: &mut App) {
+    if event.is_secondary() {
+        return;
+    }
+    cx.open_url(link.as_str());
+}
+
 fn build_message_links_menu(menu: PopupMenu, html: &SanitizedEmailHtml) -> PopupMenu {
     let menu = html
         .external_links()
@@ -174,10 +179,9 @@ fn build_message_links_menu(menu: PopupMenu, html: &SanitizedEmailHtml) -> Popup
 fn message_link_menu_item(index: usize, link: &ExternalMessageLink) -> PopupMenuItem {
     let label = format!("Link {} — {}", index + 1, link.host());
     let destination = link.as_str().to_owned();
-    PopupMenuItem::link(label, destination.clone()).on_click(move |event, _, cx| {
-        if !event.is_secondary() {
-            cx.open_url(&destination);
-        }
+    let link = link.clone();
+    PopupMenuItem::link(label, destination).on_click(move |event, _, cx| {
+        open_message_link(&link, event, cx);
     })
 }
 
