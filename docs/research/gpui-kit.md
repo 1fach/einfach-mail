@@ -1,18 +1,20 @@
 # GPUI Kit research
 
-Research checked: 2026-10-31. GPUI Kit and its APIs are pre-1.0. Recheck official documentation before changing the UI dependency or adding its optional WebView crate.
+Research checked: 2026-11-08. GPUI Kit and its APIs are pre-1.0. Recheck official documentation before changing the UI dependency or adding its optional WebView crate.
 
 ## Findings
 
 ### Native application UI
 
-GPUI Kit 0.8.1 is the current release and uses the Apache-2.0 license. The `gpui-kit` crate includes matching GPUI crates, GPUI Base, the styled component library, and default icon assets. The getting-started example creates a native window with `application()`, calls `init`, then opens the app view with `open_window`.
+GPUI Kit 0.9.0 is the current released tag checked on 2026-11-08 and uses the Apache-2.0 license. Its release notes report accessibility, menu, table, virtual-list, and text-rendering fixes, plus a fix for an application shutdown deadlock. The release updates the default backend to `gpui-pre` 0.3.11 and optional GPUI Fast to 0.1.13. The `gpui-kit` crate includes matching GPUI crates, GPUI Base, the styled component library, and default icon assets. The getting-started example creates a native window with `application()`, calls `init`, then opens the app view with `open_window`.
 
 The app depends only on `gpui-kit`. It does not include `gpui-webview` in its dependency list. The latter is a separate crate based on Wry.
 
-GPUI Kit's published docs state Rust 1.92 or newer, but the Einfach Mail lockfile resolves GPUI snapshot 0.3.10 crates that need Rust 1.95. The app's actual minimum is therefore Rust 1.95; see [minimum Rust version](#minimum-rust-version). GPUI Kit's verified platform notes cover macOS 15 or later, Windows 10 or later with the MSVC toolchain, and Ubuntu 24.04 packages for Linux desktop development.
+GPUI Kit's published docs state Rust 1.92 or newer, but the Einfach Mail lockfile resolves GPUI snapshot 0.3.11 crates that need Rust 1.95. The GPUI Kit package manifest does not declare `rust-version`; the workspace's actual checked minimum remains Rust 1.95. The full workspace compiled with Rust 1.95.0 during the 0.9.0 review. GPUI Kit's verified platform notes cover macOS 15 or later, Windows 10 or later with the MSVC toolchain, and Ubuntu 24.04 packages for Linux desktop development.
 
-The resolved workspace lockfile uses GPUI Kit 0.8.1 with `gpui-component` and `gpui-kit-assets` enabled by default, plus GPUI snapshot 0.3.10. The desktop shell uses `init` and `assets::Assets`, so both default layers are currently needed. `gpui-webview` and Wry are absent from the lockfile.
+The resolved workspace lockfile uses GPUI Kit 0.9.0 with `gpui-component` and `gpui-kit-assets` enabled by default, plus GPUI snapshot 0.3.11. The desktop shell uses `init` and `assets::Assets`, so both default layers are currently needed. `gpui-webview` and Wry are absent from the lockfile and the Linux feature graph.
+
+The 0.9.0 migration notes make GPUI theme structs non-exhaustive, change `Window::text_system()` to return an `Rc`, and move animation timing to the executor clock. The app contains no affected theme struct literals, text-system calls, or direct wall-clock animation logic. Headless UI tests enable reduced motion through their shared wait helper so sheet assertions observe final geometry deterministically. Production code required no API migration, and Rust 1.95 compilation passed. The headless calendar composer test also passes with the local DatePicker accessible-name patch.
 
 
 The Ubuntu setup does not directly cover this Fedora 44 development host; Fedora equivalents are listed in [development setup](../project/setup.md). On 2026-10-30, `cargo check --workspace --locked --offline` and `cargo build --locked --offline --package einfach-mail-desktop` both passed. That launch attempt did not verify the window because the sandbox rejected Wayland and GPUI could not connect through X11. Fedora shell startup was verified on 2026-10-31; see [project status](../project/status.md) and [issue #1](https://github.com/1fach/einfach-mail/issues/1).
@@ -23,11 +25,11 @@ The workspace initially declared Rust 1.92 based on GPUI Kit's published require
 
 ### Email body rendering options
 
-GPUI Kit's `TextView::html` is an existing native option for common message markup. The pinned 0.8.1 implementation parses HTML with `html5ever` into GPUI text and block nodes, with selection, links, images, lists, and tables. It is not a full browser or CSS layout engine. Its default link handler opens URLs externally, and its default image handling can resolve HTTP URIs and embedded data URLs; callers need explicit link and image policies for untrusted message content.
+GPUI Kit's `TextView::html` is an existing native option for common message markup. The pinned 0.9.0 implementation parses HTML with `html5ever` into GPUI text and block nodes, with selection, links, images, lists, and tables. It is not a full browser or CSS layout engine. Its default link handler opens URLs externally, and its default image handling can resolve HTTP URIs and embedded data URLs; callers need explicit link and image policies for untrusted message content.
 
 ADR 0007 selects Ammonia 4.2.4 plus native TextView for the Linux first renderer. Synthetic application tests exercise the production sanitizer against malformed markup, active and remote content, CSS URL variants, and unsafe links. Headless `MailView` tests cover link handling, selection, copy, and the oversized-body fallback. Production integration, a 1 MiB body, the 8 MiB limit, and plain text also have synthetic coverage. Pixel fidelity, OS clipboard, and system-browser launch remain unverified. The full candidate comparison and remaining acceptance evidence are in [email rendering research](email-html-rendering.md) and [ADR 0007](../decisions/0007-message-body-rendering.md).
 
-The desktop crate enables GPUI's `test-support` feature through the pinned `gpui-pre` crate directly for headless view tests. Enabling `gpui-kit/test-support` made Cargo resolve optional GPUI Fast, whose exact Taffy 0.15.0 requirement conflicts with the workspace's locked Taffy 0.15.1. Recheck this workaround after GPUI Kit updates its dependency graph.
+The desktop crate enables GPUI Kit's `test-support` feature only as a development dependency for headless view tests. GPUI Fast remains outside the active Linux graph. The workspace already resolved Taffy 0.15.0 and Unicode properties 0.1.3 before the 0.9.0 upgrade, so the new release adds no version rollback for these packages. See the dependency review for the exact feature and advisory evidence.
 
 ### Optional email WebView
 
@@ -39,12 +41,12 @@ The WebView remains a possible body-only renderer if native TextView fails suppo
 
 - [GPUI Kit getting started](https://gpui-kit.com/docs/getting-started/)
 - [GPUI Kit installation](https://gpui-kit.com/docs/installation/)
-- [GPUI Kit v0.8.1 release](https://github.com/longbridge/gpui-kit/releases/tag/v0.8.1)
-- [GPUI Kit crate manifest](https://raw.githubusercontent.com/longbridge/gpui-kit/v0.8.1/crates/kit/Cargo.toml)
+- [GPUI Kit v0.9.0 release](https://github.com/longbridge/gpui-kit/releases/tag/v0.9.0)
+- [GPUI Kit crate manifest](https://raw.githubusercontent.com/longbridge/gpui-kit/v0.9.0/crates/kit/Cargo.toml)
 - [GPUI component Linux install script](https://github.com/longbridge/gpui-component/blob/main/script/install-linux.sh)
 - [`notify-rust` 4.18.2](https://docs.rs/crate/notify-rust/4.18.2)
 - [`notify-rust` 4.18.2 manifest](https://docs.rs/crate/notify-rust/4.18.2/source/Cargo.toml.orig)
-- [`gpui-pre-linux` 0.3.10 manifest](https://docs.rs/crate/gpui-pre-linux/0.3.10/source/Cargo.toml)
+- [`gpui-pre-linux` 0.3.11 manifest](https://docs.rs/crate/gpui-pre-linux/0.3.11/source/Cargo.toml)
 - [`gpui-pre-util` 0.3.10 source](https://docs.rs/crate/gpui-pre-util/0.3.10/source/src/lib.rs)
 - [`gpui-pre` 0.3.10 profiler source](https://docs.rs/crate/gpui-pre/0.3.10/source/src/profiler.rs)
 - [Rust issue #133508: stabilize slice-to-array conversions](https://github.com/rust-lang/rust/issues/133508)
@@ -58,7 +60,7 @@ The WebView remains a possible body-only renderer if native TextView fails suppo
 - [Fedora `libxkbcommon-x11-devel` package](https://packages.fedoraproject.org/pkgs/libxkbcommon/libxkbcommon-x11-devel/)
 - [Fedora `wayland-protocols-devel` package](https://packages.fedoraproject.org/pkgs/wayland-protocols/wayland-protocols-devel/)
 - [Fedora `vulkan-loader-devel` package](https://packages.fedoraproject.org/pkgs/vulkan-loader/vulkan-loader-devel/)
-- [GPUI Kit WebView README](https://github.com/longbridge/gpui-kit/blob/v0.8.1/crates/webview/README.md)
-- [GPUI WebView crate manifest](https://raw.githubusercontent.com/longbridge/gpui-kit/v0.8.1/crates/webview/Cargo.toml)
+- [GPUI Kit WebView README](https://github.com/longbridge/gpui-kit/blob/v0.9.0/crates/webview/README.md)
+- [GPUI WebView crate manifest](https://raw.githubusercontent.com/longbridge/gpui-kit/v0.9.0/crates/webview/Cargo.toml)
 - [GPUI Kit TextView documentation](https://gpui-kit.com/base/text-view/)
 - [GPUI Kit WebView guide](https://gpui-kit.com/docs/webview/)

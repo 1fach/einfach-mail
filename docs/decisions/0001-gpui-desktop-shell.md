@@ -11,9 +11,11 @@ GPUI Kit packages GPUI, its base layer, styled components, and default assets be
 
 ## Decision
 
-Use GPUI Kit 0.8.1 for the application shell and native views. Keep workflows in the application crate and domain rules in the domain crate.
+Use GPUI Kit 0.9.0 for the application shell and native views. Keep workflows in the application crate and domain rules in the domain crate.
 
-Do not use the Tauri runtime or add a browser-based app frontend. If sanitized HTML email later needs a browser engine, evaluate `gpui-webview` only for an isolated message-body view and record a separate security decision before adding it. Keep scripts, remote content, navigation, and access to application data disabled.
+The 2026-11-08 review found no affected theme struct literals or calls to `Window::text_system()`. App code contains no wall-clock animation logic. Headless UI tests enable reduced motion in the shared wait helper, so sheet assertions check final geometry. The Rust 1.95 workspace check passed, and the event-composer test preserved both DatePicker accessible names. GPUI Kit is pre-1.0. Review API changes with each update.
+
+If sanitized HTML email later needs a browser engine, evaluate `gpui-webview` only for an isolated message-body view and record a separate security decision before adding it. Keep scripts, remote content, navigation, and access to application data disabled.
 
 ## Consequences
 
@@ -26,5 +28,5 @@ Do not use the Tauri runtime or add a browser-based app frontend. If sanitized H
 ## Sources
 
 - [GPUI Kit getting started](https://gpui-kit.com/docs/getting-started/)
-- [GPUI Kit v0.8.1 release](https://github.com/longbridge/gpui-kit/releases/tag/v0.8.1)
-- [GPUI Kit WebView support](https://github.com/longbridge/gpui-kit/blob/v0.8.1/crates/webview/README.md)
+- [GPUI Kit v0.9.0 release](https://github.com/longbridge/gpui-kit/releases/tag/v0.9.0)
+- [GPUI Kit WebView support](https://github.com/longbridge/gpui-kit/blob/v0.9.0/crates/webview/README.md)
