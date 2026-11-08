@@ -19,7 +19,7 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 - Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
 - Windows and macOS support remain deferred.
 - The production-path cache-key lifecycle test passed on 2026-11-08 against a temporary GNOME Keyring service. This does not establish behavior for every Secret Service implementation.
-- The 2026-11-08 local RustSec audit loaded 1,422 advisories and scanned 947 locked dependencies. It found eight transitive `INFO Unmaintained` crates, with seven in the active Linux graph and `rustls-pemfile` cross-target only. It found no vulnerable or yanked versions. GPUI Kit 0.9.0, released on 2026-11-02, still contains all eight advisory packages in its lockfile; see the [dependency review](dependency-review.md) for paths and replacement checks.
+- The 2026-11-08 local RustSec audit loaded 1,422 advisories and scanned 947 locked dependencies. It found eight transitive `INFO Unmaintained` crates, with seven in the active Linux graph and `rustls-pemfile` cross-target only. It found no vulnerable or yanked versions. GPUI Kit v0.9.0 remains the latest release. At [upstream commit `137070d`](https://github.com/longbridge/gpui-kit/commit/137070d7c4e5c7525fb3af5ac260b9c3fe700919), the manifest still pins `gpui-pre` 0.3.11, and the lockfile retains all eight advisory crate names. Recheck when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates. See the [dependency review](dependency-review.md) for paths and replacement checks.
 
 ## Next actions
 
@@ -27,7 +27,7 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 2. Keep issue #6 open until a tenant confirms recurring occurrence, time-zone, and all-day behavior.
 3. Keep issue #28 open until a dedicated Microsoft 365 test tenant is available for delegated consent and live Graph send verification.
 4. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
-5. Recheck the transitive RustSec warnings when GPUI Kit or its Linux integration dependencies publish compatible updates.
+5. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
 
 ## Update rule
 
