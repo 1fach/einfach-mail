@@ -1,4 +1,5 @@
 use crate::calendar_time::{to_offset_date_time, to_timestamp};
+use crate::calendar_week::CalendarWeek;
 use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike, Weekday};
@@ -9,7 +10,7 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     CalendarEventCreation, CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft,
     CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId, CalendarViewRange,
-    CalendarViewReference, EditableCalendarEvent, PendingCalendarEventCreation,
+    EditableCalendarEvent, PendingCalendarEventCreation,
 };
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::{
@@ -69,23 +70,14 @@ pub(super) enum EventComposerIntent {
 pub(crate) struct EventComposerSetup<S: CalendarSession + ?Sized + 'static> {
     /// Account-scoped calendar session used to create, update, or delete the event.
     pub(super) session: Arc<S>,
-    /// Calendar week that must contain both event endpoints.
-    pub(super) view: CalendarViewReference,
-    /// IANA or UTC time zone used to resolve the selected local times.
-    pub(super) time_zone: TimeZone,
-    /// User-facing label for the selected time zone.
-    pub(super) time_zone_label: String,
+    pub(super) week: CalendarWeek,
     pub(super) intent: EventComposerIntent,
-    pub(super) week_start: civil::Date,
 }
 
 /// Shows and submits a single timed event for a calendar week.
 pub(crate) struct EventComposer<S: CalendarSession + ?Sized + 'static> {
     session: Arc<S>,
-    view: CalendarViewReference,
-    time_zone: TimeZone,
-    time_zone_id: CalendarTimeZoneId,
-    time_zone_label: String,
+    week: CalendarWeek,
     subject: Entity<InputState>,
     start: Entity<DatePickerState>,
     end: Entity<DatePickerState>,
@@ -432,9 +424,6 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let time_zone_id =
-            CalendarTimeZoneId::try_from(setup.time_zone.iana_name().unwrap_or("UTC").to_owned())
-                .expect("the fixed time-zone identifier is valid");
         let (state, cached_event) = match setup.intent {
             EventComposerIntent::Create { pending_creation } => (
                 ComposerState::Create(CreateState::from_pending_creation(pending_creation)),
@@ -444,13 +433,10 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
                 (ComposerState::Edit(EditState::Loading), Some(cached_event))
             }
         };
-        let (subject, start, end) = new_composer_inputs(setup.week_start, window, cx);
+        let (subject, start, end) = new_composer_inputs(setup.week.start(), window, cx);
         let mut composer = Self {
             session: setup.session,
-            view: setup.view,
-            time_zone: setup.time_zone,
-            time_zone_id,
-            time_zone_label: setup.time_zone_label,
+            week: setup.week,
             subject,
             start,
             end,
@@ -498,8 +484,8 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(form_values) = editable_event_picker_values(&editable_event, &self.time_zone)
-        else {
+        let time_zone = self.week.time_zone();
+        let Some(form_values) = editable_event_picker_values(&editable_event, &time_zone) else {
             self.state = ComposerState::Edit(EditState::LoadFailed(
                 CalendarWorkflowError::InvalidEditableEvent,
             ));
@@ -657,8 +643,9 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         else {
             return Err(DraftError::InvalidTime);
         };
-        let start = selected_event_time(selected_start, *source_start, &self.time_zone)?;
-        let end = selected_event_time(selected_end, *source_end, &self.time_zone)?;
+        let time_zone = self.week.time_zone();
+        let start = selected_event_time(selected_start, *source_start, &time_zone)?;
+        let end = selected_event_time(selected_end, *source_end, &time_zone)?;
         let draft = CalendarEventUpdateDraft::timed(subject, start, end)
             .map_err(|_| DraftError::InvalidTime)?;
         CalendarEventUpdate::new(editable_event.clone(), draft).map_err(|_| DraftError::NoChanges)
@@ -931,23 +918,25 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         if !event_endpoints_within_view_week(
             draft.local_start(),
             draft.local_end(),
-            self.view.range(),
+            self.week.view().range(),
         ) {
             return Err(DraftError::OutsideSelectedWeek);
         }
-        CalendarEventCreation::try_new(self.view.clone(), draft)
+        CalendarEventCreation::try_new(self.week.view().clone(), draft)
             .map_err(|_| DraftError::InvalidTime)
     }
 
     fn build_draft(&self, cx: &App) -> Result<CalendarEventDraft, DraftError> {
         let subject = self.event_subject(cx)?;
         let (local_start, local_end) = self.selected_local_times(cx)?;
+        let time_zone = self.week.time_zone();
         create_event_draft(
             subject,
             local_start,
             local_end,
-            &self.time_zone,
-            self.time_zone_id.clone(),
+            &time_zone,
+            CalendarTimeZoneId::try_from(self.week.time_zone_label().to_owned())
+                .expect("the selected time-zone identifier is valid"),
         )
     }
 
@@ -1033,7 +1022,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .role(Role::Status)
             .text_sm()
             .text_color(colors.muted_foreground)
-            .child(format!("Times use {0}.", self.time_zone_label))
+            .child(format!("Times use {0}.", self.week.time_zone_label()))
     }
 
     fn render_draft_validation(&self, colors: ColorTokens) -> Option<AnyElement> {

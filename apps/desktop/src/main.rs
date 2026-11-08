@@ -16,6 +16,7 @@ use uuid::Uuid;
 mod account_view;
 mod calendar_time;
 mod calendar_view;
+mod calendar_week;
 mod event_composer;
 mod list_navigation;
 mod mail_composer;

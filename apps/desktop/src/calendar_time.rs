@@ -1,5 +1,15 @@
-use jiff::Timestamp;
-use time::OffsetDateTime;
+use jiff::{Timestamp, civil};
+use time::{Date, Month, OffsetDateTime};
+
+pub(super) fn to_calendar_date(date: civil::Date) -> Option<Date> {
+    let month = Month::try_from(u8::try_from(date.month()).ok()?).ok()?;
+    Date::from_calendar_date(
+        i32::from(date.year()),
+        month,
+        u8::try_from(date.day()).ok()?,
+    )
+    .ok()
+}
 
 pub(super) fn to_offset_date_time(timestamp: Timestamp) -> Option<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp_nanos(timestamp.as_nanosecond()).ok()
