@@ -1,6 +1,9 @@
-use std::sync::{
-    Mutex,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use einfach_mail_domain::{AccountId, CalendarViewReference};
@@ -69,19 +72,23 @@ impl AccountWorkflowRecovery {
 
 #[derive(Default)]
 struct CalendarWriteRecovery {
-    synchronized_views: std::collections::HashSet<CalendarViewReference>,
-    sync_required_views: std::collections::HashSet<CalendarViewReference>,
+    views: HashMap<CalendarViewReference, CalendarViewWriteState>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CalendarViewWriteState {
+    Ready,
+    SyncRequired,
 }
 
 impl CalendarWriteRecovery {
     fn readiness_for(&self, view: &CalendarViewReference) -> CalendarWriteReadiness {
-        if self
-            .sync_required_views
-            .iter()
-            .any(|required_view| required_view.account_id() == view.account_id())
-        {
+        if self.views.iter().any(|(required_view, state)| {
+            required_view.account_id() == view.account_id()
+                && *state == CalendarViewWriteState::SyncRequired
+        }) {
             CalendarWriteReadiness::AccountSyncRequired
-        } else if self.synchronized_views.contains(view) {
+        } else if self.views.get(view) == Some(&CalendarViewWriteState::Ready) {
             CalendarWriteReadiness::Ready
         } else {
             CalendarWriteReadiness::ViewSyncRequired
@@ -89,17 +96,16 @@ impl CalendarWriteRecovery {
     }
 
     fn require_account_sync(&mut self, account_id: &AccountId) {
-        self.sync_required_views.extend(
-            self.synchronized_views
-                .iter()
-                .filter(|view| view.account_id() == account_id)
-                .cloned(),
-        );
+        for (view, state) in &mut self.views {
+            if view.account_id() == account_id && *state == CalendarViewWriteState::Ready {
+                *state = CalendarViewWriteState::SyncRequired;
+            }
+        }
     }
 
     fn mark_view_synchronized(&mut self, view: &CalendarViewReference) {
-        self.synchronized_views.insert(view.clone());
-        self.sync_required_views.remove(view);
+        self.views
+            .insert(view.clone(), CalendarViewWriteState::Ready);
     }
 }
 

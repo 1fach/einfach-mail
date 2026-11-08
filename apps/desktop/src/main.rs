@@ -1,4 +1,4 @@
-//! Native desktop entry point for Einfach Mail.
+//! Composes the GPUI mail and calendar views with application workflows.
 
 use std::{
     env::{self, VarError},
