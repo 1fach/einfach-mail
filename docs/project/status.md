@@ -48,7 +48,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 5. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
 6. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
 7. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
-8. Plan the application and cache changes for complete EWS calendar snapshots under issue [#266](https://github.com/1fach/einfach-mail/issues/266). Keep snapshot replacement separate from Graph delta cursors.
+8. Implement the application and cache integration for complete EWS calendar snapshots under issue [#266](https://github.com/1fach/einfach-mail/issues/266), following the separate snapshot-state plan in ADR 0057.
 
 ## Update rule
 

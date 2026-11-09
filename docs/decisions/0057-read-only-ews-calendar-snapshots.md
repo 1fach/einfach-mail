@@ -45,6 +45,25 @@ Propose adding Linux read-only EWS primary-calendar views in M8:
 - `localzone` 0.3.1 offers a similar bidirectional CLDR map under Apache-2.0, but its latest release is from April 2024 and it is not the selected dependency.
 - Provider fixtures cover request construction, empty and populated responses, recurrence occurrence and exception mapping, time-zone conversion, completeness checks, and provider limits. Follow-up application and cache tests must cover atomic replacement, rollback, and account isolation. No Exchange Server or sanitized calendar response recording is available, so live interoperability remains unverified and must not be claimed.
 
+## Application and cache integration plan
+
+The current calendar workflow assumes that every provider returns Graph-style delta pages. The EWS provider now returns one complete bounded snapshot, so the next implementation slice must select synchronization behavior explicitly. Do not call the snapshot method and treat `UnsupportedOperation` as a strategy probe.
+
+- Add an application-owned synchronization strategy with distinct `Delta` and `Snapshot` variants. The account router reports the selected provider's strategy. Keep the Graph `sync_round` path and its opaque links unchanged; EWS always requests a complete snapshot.
+- Keep the existing per-view reservation for both strategies. The snapshot workflow requests one response, applies the application response-byte bound, calls the cache once, and marks the in-memory account recovery state synchronized only after the cache commit succeeds. A snapshot sync report counts its one committed response.
+- Add a `CalendarCache` operation that replaces one exact account/view snapshot. Validate that every occurrence belongs to the requested view, overlaps it, and has a unique event ID. An empty complete response is a valid replacement that removes all events in that view.
+- Store EWS occurrences in the existing `calendar_events` table so calendar reads keep one representation. In one SQLCipher transaction, replace only that account and exact range, update its last-complete-snapshot time, and remove any stale replacement staging rows for that view. On a write error, transaction rollback preserves the prior active events and sync status.
+- Keep Graph cursor state separate. Its current schema requires a completed delta timestamp to have a delta link. Add snapshot completion metadata as a separate per-view state record and expose a tagged snapshot state without a `CalendarDeltaLink`; do not weaken the Graph invariant or invent a cursor. When a delta page is committed for a view, clear any snapshot metadata for that exact view in the same transaction.
+- Set EWS account calendar access to read-only. Reuse the native agenda and account session. The UI keeps event writes unavailable, and EWS provider write methods continue to reject them.
+
+This design keeps the old active snapshot readable until a complete EWS response has been validated and its single cache transaction commits. EWS response bodies are already bounded to 8 MiB by the transport and the request is limited to 512 occurrences, so a separate multi-page staging generation is unnecessary. The snapshot workflow will also enforce the existing 64 MiB sync-response budget as a second boundary.
+
+| Alternative | Reason not selected |
+| --- | --- |
+| Reuse the Graph delta link with a sentinel or fabricated value | Delta links are opaque Graph protocol state and must never represent an EWS snapshot. |
+| Remove the delta-link database constraint by rebuilding the existing sync-state table | It changes the established Graph cursor invariant and requires a migration around tables that reference the per-view key. Separate snapshot metadata is narrower and preserves the current Graph representation. |
+| Store EWS events in a second active-events table | It duplicates event persistence and requires merging two tables for each agenda read. The event rows are already provider-neutral and share the same account/view key. |
+
 ## Sources
 
 - [Microsoft: CalendarView](https://learn.microsoft.com/en-us/exchange/client-developer/web-service-reference/calendarview)
