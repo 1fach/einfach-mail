@@ -11,9 +11,9 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, CalendarAccess, FolderId, FolderReference,
-    MailCapabilities, MailFolder, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
-    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
-    ReadState,
+    MailAction, MailCapabilities, MailFolder, Mailbox, MessageBody, MessageBodyType,
+    MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+    MessageMetadataPatch, ReadState,
 };
 use ews::{
     BaseFolderId, BaseItemId, BaseShape, Folder, FolderShape, ItemShape, PathToElement,
@@ -35,7 +35,13 @@ use crate::{
     autodiscover::EwsAutodiscover,
     calendar::{build_calendar_view_request, parse_calendar_view_snapshot},
     error::EwsError,
-    transport::EwsTransport,
+    read_state::{
+        CurrentEwsItemVersion, GetItemError, UpdateConfirmationError, confirm_update,
+        current_item_version, get_item_request, parse_get_item_response,
+        parse_update_item_response, serialize_update_item_request,
+    },
+    transport::{EwsRequestSequence, EwsTransport, EwsWriteError},
+    version::ExchangeProductVersion,
 };
 use einfach_mail_provider_runtime as worker;
 
@@ -85,11 +91,13 @@ where
             return Err(AccountOperationError::InvalidConnectionDetails);
         }
 
-        let session = Arc::new(EwsSession::new(settings.clone(), password)?);
-        tokio::select! {
+        let mut session = EwsSession::new(settings.clone(), password)?;
+        let folder_collection = tokio::select! {
             () = cancellation.cancelled() => return Err(AccountOperationError::SignInCancelled),
-            result = collect_folders(&session) => { result.map_err(AccountOperationError::from)?; }
-        }
+            result = collect_folders(&session) => result.map_err(AccountOperationError::from)?,
+        };
+        session.profile = profile_for(&settings, folder_collection.server_version)
+            .map_err(AccountOperationError::from)?;
         cancellation.begin_credential_commit()?;
 
         blocking::unblock(move || save_password(&credential_bytes))
@@ -103,7 +111,7 @@ where
         }
 
         let profile = session.profile.clone();
-        *session_store.write().await = Some(session);
+        *session_store.write().await = Some(Arc::new(session));
         Ok(profile)
     }
 }
@@ -131,12 +139,13 @@ where
                 *session_store.write().await = None;
                 return Ok(None);
             };
-            let session = Arc::new(EwsSession::new(settings, password)?);
-            collect_folders(&session)
+            let mut session = EwsSession::new(settings.clone(), password)?;
+            let folder_collection = collect_folders(&session)
                 .await
                 .map_err(AccountOperationError::from)?;
+            session.profile = profile_for(&settings, folder_collection.server_version)?;
             let profile = session.profile.clone();
-            *session_store.write().await = Some(session);
+            *session_store.write().await = Some(Arc::new(session));
             Ok(Some(profile))
         })
     }
@@ -156,7 +165,7 @@ where
             if password.is_none() {
                 return Ok(None);
             }
-            Ok(Some(profile_for(&settings)?.id().clone()))
+            Ok(Some(profile_for(&settings, None)?.id().clone()))
         })
     }
 
@@ -258,6 +267,7 @@ where
             worker::run(move |_cancellation: CancellationToken| async move {
                 collect_folders(&session)
                     .await
+                    .map(|collection| collection.folders)
                     .map_err(MailOperationError::from)
             })
             .await
@@ -292,12 +302,16 @@ where
                     max_changes_returned: EWS_PAGE_SIZE,
                     sync_scope: Some(SyncScope::NormalItems),
                 };
-                let (messages, response_bytes) = session
+                let (response, response_bytes) = session
                     .transport
                     .execute_with_size(operation)
                     .await
                     .map_err(MailOperationError::from)?;
-                map_sync_responses(messages, folder.folder_id().as_str(), response_bytes)
+                map_sync_responses(
+                    response.messages,
+                    folder.folder_id().as_str(),
+                    response_bytes,
+                )
             })
             .await
         }
@@ -325,11 +339,12 @@ where
                         change_key: None,
                     }],
                 };
-                let mut responses = session
+                let response = session
                     .transport
                     .execute(request)
                     .await
                     .map_err(MailOperationError::from)?;
+                let mut responses = response.messages;
                 if responses.len() != 1 {
                     return Err(MailOperationError::InvalidResponse);
                 }
@@ -363,11 +378,29 @@ where
 
     fn set_message_read_state(
         &self,
-        _folder: &FolderReference,
-        _message_id: &MessageId,
-        _requested: ReadState,
+        folder: &FolderReference,
+        message_id: &MessageId,
+        requested: ReadState,
     ) -> impl Future<Output = Result<ReadState, MailOperationError>> + Send + '_ {
-        std::future::ready(Err(MailOperationError::UnsupportedOperation))
+        let folder = folder.clone();
+        let message_id = message_id.clone();
+        let session_store = Arc::clone(&self.session);
+        async move {
+            let session = session_for_mail(&session_store, folder.account_id().clone()).await?;
+            if !session
+                .profile
+                .capabilities()
+                .mail()
+                .supports(MailAction::SetReadState)
+            {
+                return Err(MailOperationError::UnsupportedOperation);
+            }
+
+            worker::run(move |_cancellation: CancellationToken| async move {
+                update_message_read_state(&session, &message_id, requested).await
+            })
+            .await
+        }
     }
 
     fn set_message_follow_up_flag_status(
@@ -534,7 +567,8 @@ async fn session_for_calendar(
 
 impl EwsSession {
     fn new(settings: ExchangeEwsAccountSettings, password: SecretString) -> Result<Self, EwsError> {
-        let profile = profile_for(&settings).map_err(|_| EwsError::InvalidConnectionDetails)?;
+        let profile =
+            profile_for(&settings, None).map_err(|_| EwsError::InvalidConnectionDetails)?;
         let transport = EwsTransport::new(
             settings.endpoint(),
             settings.username().to_owned(),
@@ -570,11 +604,14 @@ fn validate_settings(
         mailbox.to_owned(),
         username.to_owned(),
     );
-    profile_for(&settings).map_err(|_| AccountOperationError::InvalidConnectionDetails)?;
+    profile_for(&settings, None).map_err(|_| AccountOperationError::InvalidConnectionDetails)?;
     Ok(settings)
 }
 
-fn profile_for(settings: &ExchangeEwsAccountSettings) -> Result<AccountProfile, EwsError> {
+fn profile_for(
+    settings: &ExchangeEwsAccountSettings,
+    server_version: Option<ExchangeProductVersion>,
+) -> Result<AccountProfile, EwsError> {
     let parsed_endpoint =
         url::Url::parse(settings.endpoint()).map_err(|_| EwsError::InvalidConnectionDetails)?;
     if parsed_endpoint.scheme() != "https"
@@ -594,21 +631,85 @@ fn profile_for(settings: &ExchangeEwsAccountSettings) -> Result<AccountProfile, 
     );
     let id = AccountId::try_from(format!("ews:{}", hex::encode(Sha256::digest(account_key))))
         .map_err(|_| EwsError::InvalidConnectionDetails)?;
+    let mail_capabilities =
+        if server_version.is_some_and(ExchangeProductVersion::supports_read_receipt_suppression) {
+            MailCapabilities::from_actions([MailAction::SetReadState])
+        } else {
+            MailCapabilities::read_only()
+        };
     AccountProfile::try_new_with_capabilities(
         id,
         Some(mailbox_address.to_owned()),
         Some(mailbox_address.to_owned()),
         Some(settings.username().to_owned()),
-        AccountCapabilities::new(MailCapabilities::read_only(), CalendarAccess::ReadOnly),
+        AccountCapabilities::new(mail_capabilities, CalendarAccess::ReadOnly),
     )
     .map_err(|_| EwsError::InvalidConnectionDetails)
 }
 
-async fn collect_folders(session: &EwsSession) -> Result<Vec<MailFolder>, EwsError> {
+async fn update_message_read_state(
+    session: &EwsSession,
+    message_id: &MessageId,
+    requested: ReadState,
+) -> Result<ReadState, MailOperationError> {
+    let sequence = session.transport.sequence().await;
+    let current = current_message_version_for_write(&sequence, message_id).await?;
+    let request =
+        serialize_update_item_request(&current, requested).map_err(MailOperationError::from)?;
+    let response = match sequence.execute_update_item(&request).await {
+        Ok(response) => response,
+        Err(EwsWriteError::NotDispatched(error)) => {
+            return Err(MailOperationError::from(error));
+        }
+        Err(EwsWriteError::OutcomeUnknown) => {
+            return Err(MailOperationError::MessageUpdateOutcomeUnknown);
+        }
+    };
+    let parsed_response = parse_update_item_response(&response)
+        .map_err(|_| MailOperationError::MessageUpdateOutcomeUnknown)?;
+    match confirm_update(parsed_response, message_id, requested) {
+        Ok(state) => Ok(state),
+        Err(UpdateConfirmationError::Rejected(code)) => Err(map_response_code(code).into()),
+        Err(UpdateConfirmationError::Unknown) => {
+            Err(MailOperationError::MessageUpdateOutcomeUnknown)
+        }
+    }
+}
+
+async fn current_message_version_for_write(
+    sequence: &EwsRequestSequence<'_>,
+    message_id: &MessageId,
+) -> Result<CurrentEwsItemVersion, MailOperationError> {
+    let (document, _) = sequence
+        .execute_xml_with_size(get_item_request(message_id))
+        .await
+        .map_err(MailOperationError::from)?;
+    let parsed_response = parse_get_item_response(&document).map_err(MailOperationError::from)?;
+    let (server_version_info, current) = match current_item_version(parsed_response, message_id) {
+        Ok(current) => current,
+        Err(GetItemError::Rejected(code)) => return Err(map_response_code(code).into()),
+        Err(GetItemError::InvalidResponse) => return Err(MailOperationError::InvalidResponse),
+    };
+    let server_version = server_version_info
+        .as_ref()
+        .and_then(ExchangeProductVersion::from_server_version_info);
+    if !server_version.is_some_and(ExchangeProductVersion::supports_read_receipt_suppression) {
+        return Err(MailOperationError::UnsupportedOperation);
+    }
+    Ok(current)
+}
+
+struct EwsFolderCollection {
+    folders: Vec<MailFolder>,
+    server_version: Option<ExchangeProductVersion>,
+}
+
+async fn collect_folders(session: &EwsSession) -> Result<EwsFolderCollection, EwsError> {
     let mut sync_state = None;
     let mut seen_states = HashSet::new();
     let mut folders = Vec::new();
     let mut total_bytes = 0usize;
+    let mut server_version = None;
     for _ in 0..MAX_HIERARCHY_PAGES {
         let request = SyncFolderHierarchy {
             folder_shape: FolderShape {
@@ -617,7 +718,14 @@ async fn collect_folders(session: &EwsSession) -> Result<Vec<MailFolder>, EwsErr
             sync_folder_id: Some(BaseFolderId::new_distinguished("msgfolderroot")),
             sync_state: sync_state.clone(),
         };
-        let (mut messages, response_bytes) = session.transport.execute_with_size(request).await?;
+        let (soap_response, response_bytes) = session.transport.execute_with_size(request).await?;
+        if sync_state.is_none() {
+            server_version = soap_response
+                .server_version
+                .as_ref()
+                .and_then(ExchangeProductVersion::from_server_version_info);
+        }
+        let mut messages = soap_response.messages;
         total_bytes = total_bytes
             .checked_add(response_bytes)
             .ok_or(EwsError::ResourceLimitExceeded)?;
@@ -644,7 +752,10 @@ async fn collect_folders(session: &EwsSession) -> Result<Vec<MailFolder>, EwsErr
             }
         }
         if response.includes_last_folder_in_range {
-            return Ok(folders);
+            return Ok(EwsFolderCollection {
+                folders,
+                server_version,
+            });
         }
         sync_state = Some(response.sync_state);
     }
@@ -950,24 +1061,28 @@ mod tests {
     use einfach_mail_application::{
         CalendarOperationError, CalendarProvider, ExchangeEwsAccountSettings,
         ExchangeEwsAccountSettingsStore, ExchangeEwsSettingsError, MailOperationError,
-        MessageDeltaResponse,
+        MailProvider, MessageDeltaResponse,
     };
     use einfach_mail_domain::{
         AccountCapabilities, AccountId, CalendarAccess, CalendarEventCreation, CalendarEventDraft,
         CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion,
         CalendarOccurrencePatch, CalendarOccurrenceTimePatch, CalendarTimeZoneId,
         CalendarViewRange, CalendarViewReference, EditableCalendarEvent, EventId, FolderId,
-        FolderReference, MailCapabilities, MessageDeltaChange, MessageDeltaProgress, ReadState,
+        FolderReference, MailAction, MailCapabilities, MessageDeltaChange, MessageDeltaProgress,
+        MessageId, ReadState,
     };
+    use ews::server_version::ServerVersionInfo;
     use ews::sync_folder_items::{Change, SyncFolderItems};
+    use secrecy::SecretString;
     use time::{Date, Month, PrimitiveDateTime, Time};
 
     use crate::error::EwsError;
-    use crate::transport::parse_soap_response;
+    use crate::transport::{EwsTransport, parse_soap_response};
+    use crate::version::ExchangeProductVersion;
 
     use super::{
-        ExchangeEwsProvider, decode_cursor, decode_password, encode_cursor, map_item_change,
-        map_sync_responses, message_metadata_shape, profile_for,
+        EwsSession, ExchangeEwsProvider, decode_cursor, decode_password, encode_cursor,
+        map_item_change, map_sync_responses, message_metadata_shape, profile_for,
     };
 
     const SYNC_FOLDER_ITEMS_PAGE: &[u8] = include_bytes!("fixtures/sync-folder-items-page.xml");
@@ -1073,11 +1188,73 @@ mod tests {
             "EXAMPLE\\ada".to_owned(),
         );
 
-        let profile = profile_for(&settings).expect("synthetic EWS profile is valid");
+        let profile = profile_for(&settings, None).expect("synthetic EWS profile is valid");
 
         assert_eq!(
             profile.capabilities(),
             AccountCapabilities::new(MailCapabilities::read_only(), CalendarAccess::ReadOnly)
+        );
+    }
+
+    #[test]
+    fn ews_profile_advertises_only_read_state_after_receipt_safe_version_evidence() {
+        let settings = ExchangeEwsAccountSettings::new(
+            "https://exchange.example.test/EWS/Exchange.asmx".to_owned(),
+            "ada@example.test".to_owned(),
+            "EXAMPLE\\ada".to_owned(),
+        );
+        let info = ServerVersionInfo {
+            major_version: Some("15".to_owned()),
+            minor_version: Some("0".to_owned()),
+            major_build_number: Some("847".to_owned()),
+            minor_build_number: Some("32".to_owned()),
+            version: Some("Exchange2013_SP1".to_owned()),
+        };
+        let version = ExchangeProductVersion::from_server_version_info(&info)
+            .expect("synthetic Exchange product version parses");
+
+        let profile = profile_for(&settings, Some(version))
+            .expect("synthetic EWS profile with supported version is valid");
+        let capabilities = profile.capabilities();
+
+        assert!(capabilities.mail().supports(MailAction::SetReadState));
+        assert!(!capabilities.mail().supports(MailAction::Send));
+        assert!(!capabilities.mail().supports(MailAction::Move));
+        assert!(!capabilities.can_review_mail_write_permission());
+        assert_eq!(capabilities.calendar(), CalendarAccess::ReadOnly);
+    }
+
+    #[tokio::test]
+    async fn ews_read_state_rejects_accounts_without_capability_before_network_access() {
+        let settings = ExchangeEwsAccountSettings::new(
+            "https://exchange.example.test/EWS/Exchange.asmx".to_owned(),
+            "ada@example.test".to_owned(),
+            "EXAMPLE\\ada".to_owned(),
+        );
+        let profile = profile_for(&settings, None).expect("synthetic EWS profile is valid");
+        let account_id = profile.id().clone();
+        let transport = EwsTransport::new(
+            settings.endpoint(),
+            settings.username().to_owned(),
+            SecretString::from("synthetic-only"),
+        )
+        .expect("synthetic EWS transport starts without connecting");
+        let provider = ExchangeEwsProvider::new(EmptySettingsStore);
+        *provider.session.write().await =
+            Some(std::sync::Arc::new(EwsSession { profile, transport }));
+        let folder = FolderReference::new(
+            account_id.clone(),
+            FolderId::try_from("synthetic-folder".to_owned())
+                .expect("synthetic folder ID is valid"),
+        );
+        let message_id = MessageId::try_from("synthetic-message-id".to_owned())
+            .expect("synthetic message ID is valid");
+
+        assert_eq!(
+            provider
+                .set_message_read_state(&folder, &message_id, ReadState::Read)
+                .await,
+            Err(MailOperationError::UnsupportedOperation)
         );
     }
 
@@ -1176,9 +1353,12 @@ mod tests {
     fn maps_a_synthetic_message_page_and_preserves_its_continuation_cursor() {
         let responses = parse_soap_response::<SyncFolderItems>(SYNC_FOLDER_ITEMS_PAGE)
             .expect("synthetic EWS page fixture parses");
-        let response =
-            map_sync_responses(responses, "synthetic-folder", SYNC_FOLDER_ITEMS_PAGE.len())
-                .expect("synthetic EWS page maps");
+        let response = map_sync_responses(
+            responses.messages,
+            "synthetic-folder",
+            SYNC_FOLDER_ITEMS_PAGE.len(),
+        )
+        .expect("synthetic EWS page maps");
         let MessageDeltaResponse::Page(response) = response else {
             panic!("successful EWS page maps to a message page");
         };
@@ -1219,8 +1399,12 @@ mod tests {
     fn maps_a_synthetic_expired_cursor_response_to_a_reset() {
         let responses = parse_soap_response::<SyncFolderItems>(SYNC_STATE_EXPIRED)
             .expect("expired-state EWS fixture parses");
-        let response = map_sync_responses(responses, "synthetic-folder", SYNC_STATE_EXPIRED.len())
-            .expect("expired EWS cursor requests a replacement snapshot");
+        let response = map_sync_responses(
+            responses.messages,
+            "synthetic-folder",
+            SYNC_STATE_EXPIRED.len(),
+        )
+        .expect("expired EWS cursor requests a replacement snapshot");
         let MessageDeltaResponse::Reset(link) = response else {
             panic!("expired EWS cursor maps to a reset link");
         };

@@ -4,7 +4,7 @@
 
 Einfach Mail is a desktop workspace for email and calendar. It aims to pair a familiar, keyboard-friendly mail client with direct Microsoft 365 integration and useful operating-system behavior.
 
-The product name is Einfach Mail. Exchange Online uses Microsoft Graph and delegated access for the signed-in user. Milestone M7 adds a separate Linux account path for mail from Exchange Server installed on premises through EWS. M8 adds read-only EWS calendar views in the shared native agenda; see [ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md) and [issue #266](https://github.com/1fach/einfach-mail/issues/266). M9 plans EWS read-state changes only when the server can suppress read receipts; see [ADR 0058](../decisions/0058-per-operation-ews-mail-capabilities.md) and [issue #267](https://github.com/1fach/einfach-mail/issues/267).
+The product name is Einfach Mail. Exchange Online uses Microsoft Graph and delegated access for the signed-in user. Milestone M7 adds a separate Linux account path for mail from Exchange Server installed on premises through EWS. M8 adds read-only EWS calendar views in the shared native agenda; see [ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md) and [issue #266](https://github.com/1fach/einfach-mail/issues/266). M9 adds EWS read-state changes only when the authenticated server reports a product build that supports read-receipt suppression; other EWS writes stay unavailable. See [ADR 0058](../decisions/0058-per-operation-ews-mail-capabilities.md) and [issue #267](https://github.com/1fach/einfach-mail/issues/267).
 
 ## First users
 

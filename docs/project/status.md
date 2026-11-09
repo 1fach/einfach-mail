@@ -1,14 +1,16 @@
 # Project status
 
-Last updated: 2026-11-09
+Last updated: 2026-11-10
 
 ## Current milestone
 
-M7 Exchange Server EWS support is in progress under [issue #257](https://github.com/1fach/einfach-mail/issues/257). The first implementation targets Linux read-only mail and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. Linux Autodiscover merged into `main` in [PR #261](https://github.com/1fach/einfach-mail/pull/261) and remains tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258) for live verification.
+M9 EWS message read-state support is the current development milestone. [Issue #267](https://github.com/1fach/einfach-mail/issues/267) tracks the implementation; see [ADR 0058](../decisions/0058-per-operation-ews-mail-capabilities.md).
+
+M7 Exchange Server EWS support provides a Linux read-only mail baseline and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. Linux Autodiscover merged into `main` in [PR #261](https://github.com/1fach/einfach-mail/pull/261) and remains tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258) for live verification.
 
 Issue [#266](https://github.com/1fach/einfach-mail/issues/266) and [ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md) track M8 EWS calendar work. The provider builds a bounded `FindItem` calendar view and maps complete synthetic responses. The application workflow now selects Graph delta or EWS snapshot synchronization, and the SQLCipher adapter atomically replaces one exact view with separate snapshot completion state. The current branch exposes EWS calendar reads through the shared native agenda, displays the read-only capability, and hides and guards event writes. The Linux local gate passed on 2026-11-09, including the focused account and agenda checks. No Exchange calendar server or sanitized response recording is available for live verification.
 
-ADR 0058 and issue [#267](https://github.com/1fach/einfach-mail/issues/267) define M9. The domain now models mail operations individually. Graph retains all current mail actions, while the EWS profile remains read-only. Desktop controls gate read-state, flags, send, reply, move, and delete separately; Microsoft Graph mail-permission review is a separate account capability. Focused domain, mail-view, and account-view tests pass locally on Rust 1.95. The receipt-safe EWS `UpdateItem` path remains to be implemented and verified before enabling any EWS mail write.
+ADR 0058 and issue [#267](https://github.com/1fach/einfach-mail/issues/267) define M9. The domain models mail actions individually; Graph retains its current action set, while EWS advertises only read-state updates after authenticated Exchange product-version evidence confirms receipt suppression is available. The provider checks the version again on a fresh `GetItem`, validates explicit response codes and item identity, and sends a single receipt-suppressed `IsRead` update with a fresh change key. It never replays a possibly dispatched write; the existing application recovery marker remains responsible for reconciliation. The 52 EWS crate tests, Clippy, rustdoc, formatting, and whitespace checks pass locally on Rust 1.95. No Exchange server is available for live verification; keep issue #257 open for that evidence.
 
 PR #47 merged read-only mail into `main` at `409d299ffbe11dfe41c8f5a428b8e49b9ac97edd` on 2026-11-06. PR #50 merged the Linux calendar agenda and its reviewed stack into `main` at `8c10dca99fd8cc0a38f76fb11aed5a174b0970f8` on 2026-11-06. All four required PR #50 checks passed on head `0ecfc019ff661282bc6bf5bfe5ce522bbb77c4e3`.
 
@@ -27,7 +29,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 ## Active risks
 
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep live sign-in, initial mail sync, read-state, flag, send, reply, move, and calendar verification open under their existing issues.
-- No Exchange Server test host or sanitized EWS response recording is available. Synthetic EWS tests can verify request construction and mapping, but cannot prove the NTLM channel-binding handshake or server-specific response behavior. Keep issues #257 and #267 open for live verification.
+- No Exchange Server test host or sanitized EWS response recording is available. Synthetic EWS tests verify the request path and response mapping, but cannot prove server compatibility. Keep issue #257 open for live verification; issue #267 remains open for code review and merge.
 - No Exchange Server test host is available to verify Autodiscover's published candidate sequence, SRV behavior, redirects, and server response variants end to end. Keep issue #258 open for that live verification.
 - No Exchange Server test host or sanitized calendar response recording is available to verify EWS recurrence expansion, event time-zone mapping, all-day dates, or calendar result completeness. Keep issue #266's live-compatibility claim unverified until such evidence exists.
 - `windows-timezones` 0.5.1 declares no MSRV. The EWS provider compiled with the workspace Rust 1.95, and the Unicode-DFS-2016 terms are retained in [`LICENSES/Unicode-DFS-2016.txt`](../../LICENSES/Unicode-DFS-2016.txt). Custom or unknown Windows time-zone IDs make an EWS snapshot fail.
@@ -43,7 +45,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 
 ## Next actions
 
-1. Implement EWS `UpdateItem` for read-state under issue [#267](https://github.com/1fach/einfach-mail/issues/267). Keep the EWS profile read-only until receipt suppression, Exchange version gating, change-key validation, and uncertain-outcome handling are in place.
+1. Continue review of the issue #267 implementation, then start M10 with the persistent workspace shell in [issue #269](https://github.com/1fach/einfach-mail/issues/269).
 2. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 3. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 4. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.

@@ -17,7 +17,7 @@ use secrecy::SecretString;
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 use tokio::{
     runtime::Builder,
-    sync::{mpsc, oneshot},
+    sync::{Mutex, MutexGuard, mpsc, oneshot},
 };
 use url::Url;
 use zeroize::{Zeroize, Zeroizing};
@@ -36,6 +36,7 @@ pub(crate) const SOAP_NAMESPACE: &[u8] = b"http://schemas.xmlsoap.org/soap/envel
 
 pub(crate) struct EwsTransport {
     commands: mpsc::Sender<EwsCommand>,
+    request_sequence: Mutex<()>,
     shutdown: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -51,7 +52,36 @@ struct EwsTransportState {
 
 struct EwsCommand {
     document: Vec<u8>,
-    response: oneshot::Sender<Result<Vec<u8>, EwsError>>,
+    mode: EwsRequestMode,
+    response: oneshot::Sender<Result<Vec<u8>, EwsRequestError>>,
+}
+
+#[derive(Clone, Copy)]
+enum EwsRequestMode {
+    Read,
+    Update,
+}
+
+enum EwsRequestError {
+    Read(EwsError),
+    NotDispatched(EwsError),
+    OutcomeUnknown,
+}
+
+#[derive(Debug)]
+pub(crate) enum EwsWriteError {
+    NotDispatched(EwsError),
+    OutcomeUnknown,
+}
+
+pub(crate) struct EwsSoapResponse<M> {
+    pub(crate) messages: Vec<ews::ResponseClass<M>>,
+    pub(crate) server_version: Option<ews::server_version::ServerVersionInfo>,
+}
+
+pub(crate) struct EwsRequestSequence<'a> {
+    transport: &'a EwsTransport,
+    _guard: MutexGuard<'a, ()>,
 }
 
 impl EwsTransport {
@@ -114,6 +144,7 @@ impl EwsTransport {
         match ready_receiver.recv() {
             Ok(Ok(())) => Ok(Self {
                 commands,
+                request_sequence: Mutex::new(()),
                 shutdown: Some(shutdown),
                 worker: Some(worker),
             }),
@@ -128,33 +159,22 @@ impl EwsTransport {
         }
     }
 
-    pub(crate) async fn post_soap(&self, document: &[u8]) -> Result<Vec<u8>, EwsError> {
-        if document.is_empty() || document.len() > MAX_REQUEST_BYTES {
-            return Err(EwsError::ResourceLimitExceeded);
+    pub(crate) async fn sequence(&self) -> EwsRequestSequence<'_> {
+        let guard = self.request_sequence.lock().await;
+        EwsRequestSequence {
+            transport: self,
+            _guard: guard,
         }
-        let (response_sender, response_receiver) = oneshot::channel();
-        self.commands
-            .send(EwsCommand {
-                document: document.to_vec(),
-                response: response_sender,
-            })
-            .await
-            .map_err(|_| EwsError::ServiceUnavailable)?;
-        response_receiver
-            .await
-            .map_err(|_| EwsError::ServiceUnavailable)?
     }
 
     pub(crate) async fn execute<O>(
         &self,
         operation: O,
-    ) -> Result<Vec<ews::ResponseClass<<O::Response as OperationResponse>::Message>>, EwsError>
+    ) -> Result<EwsSoapResponse<<O::Response as OperationResponse>::Message>, EwsError>
     where
         O: Operation,
     {
-        self.execute_with_size(operation)
-            .await
-            .map(|(messages, _)| messages)
+        self.sequence().await.execute(operation).await
     }
 
     pub(crate) async fn execute_with_size<O>(
@@ -162,7 +182,47 @@ impl EwsTransport {
         operation: O,
     ) -> Result<
         (
-            Vec<ews::ResponseClass<<O::Response as OperationResponse>::Message>>,
+            EwsSoapResponse<<O::Response as OperationResponse>::Message>,
+            usize,
+        ),
+        EwsError,
+    >
+    where
+        O: Operation,
+    {
+        self.sequence().await.execute_with_size(operation).await
+    }
+
+    pub(crate) async fn execute_xml_with_size<O>(
+        &self,
+        operation: O,
+    ) -> Result<(Vec<u8>, usize), EwsError>
+    where
+        O: Operation,
+    {
+        self.sequence().await.execute_xml_with_size(operation).await
+    }
+}
+
+impl EwsRequestSequence<'_> {
+    pub(crate) async fn execute<O>(
+        &self,
+        operation: O,
+    ) -> Result<EwsSoapResponse<<O::Response as OperationResponse>::Message>, EwsError>
+    where
+        O: Operation,
+    {
+        self.execute_with_size(operation)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    pub(crate) async fn execute_with_size<O>(
+        &self,
+        operation: O,
+    ) -> Result<
+        (
+            EwsSoapResponse<<O::Response as OperationResponse>::Message>,
             usize,
         ),
         EwsError,
@@ -171,7 +231,10 @@ impl EwsTransport {
         O: Operation,
     {
         let document = serialize_soap_request(operation)?;
-        let response = self.post_soap(&document).await?;
+        let response = self
+            .request(&document, EwsRequestMode::Read)
+            .await
+            .map_err(read_request_error)?;
         let response_size = response.len();
         Ok((parse_soap_response::<O>(&response)?, response_size))
     }
@@ -184,9 +247,70 @@ impl EwsTransport {
         O: Operation,
     {
         let document = serialize_soap_request(operation)?;
-        let response = self.post_soap(&document).await?;
+        let response = self
+            .request(&document, EwsRequestMode::Read)
+            .await
+            .map_err(read_request_error)?;
         let response_size = response.len();
         Ok((response, response_size))
+    }
+
+    pub(crate) async fn execute_update_item(
+        &self,
+        document: &[u8],
+    ) -> Result<Vec<u8>, EwsWriteError> {
+        self.request(document, EwsRequestMode::Update)
+            .await
+            .map_err(update_request_error)
+    }
+
+    async fn request(
+        &self,
+        document: &[u8],
+        mode: EwsRequestMode,
+    ) -> Result<Vec<u8>, EwsRequestError> {
+        let before_dispatch = match mode {
+            EwsRequestMode::Read => EwsRequestError::Read(EwsError::ResourceLimitExceeded),
+            EwsRequestMode::Update => {
+                EwsRequestError::NotDispatched(EwsError::ResourceLimitExceeded)
+            }
+        };
+        if document.is_empty() || document.len() > MAX_REQUEST_BYTES {
+            return Err(before_dispatch);
+        }
+        let (response_sender, response_receiver) = oneshot::channel();
+        self.transport
+            .commands
+            .send(EwsCommand {
+                document: document.to_vec(),
+                mode,
+                response: response_sender,
+            })
+            .await
+            .map_err(|_| match mode {
+                EwsRequestMode::Read => EwsRequestError::Read(EwsError::ServiceUnavailable),
+                EwsRequestMode::Update => {
+                    EwsRequestError::NotDispatched(EwsError::ServiceUnavailable)
+                }
+            })?;
+        response_receiver.await.map_err(|_| match mode {
+            EwsRequestMode::Read => EwsRequestError::Read(EwsError::ServiceUnavailable),
+            EwsRequestMode::Update => EwsRequestError::OutcomeUnknown,
+        })?
+    }
+}
+
+fn read_request_error(error: EwsRequestError) -> EwsError {
+    match error {
+        EwsRequestError::Read(error) | EwsRequestError::NotDispatched(error) => error,
+        EwsRequestError::OutcomeUnknown => EwsError::ServiceUnavailable,
+    }
+}
+
+fn update_request_error(error: EwsRequestError) -> EwsWriteError {
+    match error {
+        EwsRequestError::NotDispatched(error) => EwsWriteError::NotDispatched(error),
+        EwsRequestError::OutcomeUnknown | EwsRequestError::Read(_) => EwsWriteError::OutcomeUnknown,
     }
 }
 
@@ -202,7 +326,21 @@ impl Drop for EwsTransport {
 }
 
 impl EwsTransportState {
-    async fn post_soap(&mut self, document: &[u8]) -> Result<Vec<u8>, EwsError> {
+    async fn post_soap(
+        &mut self,
+        document: &[u8],
+        mode: EwsRequestMode,
+    ) -> Result<Vec<u8>, EwsRequestError> {
+        match mode {
+            EwsRequestMode::Read => self
+                .post_soap_read(document)
+                .await
+                .map_err(EwsRequestError::Read),
+            EwsRequestMode::Update => self.post_soap_update(document).await,
+        }
+    }
+
+    async fn post_soap_read(&mut self, document: &[u8]) -> Result<Vec<u8>, EwsError> {
         let first = self.send(document, None).await?;
         if first.status == StatusCode::OK {
             if self.authenticated_connection.as_ref() != Some(&first.identity) {
@@ -242,6 +380,25 @@ impl EwsTransportState {
         Ok(authenticated.body)
     }
 
+    async fn post_soap_update(&mut self, document: &[u8]) -> Result<Vec<u8>, EwsRequestError> {
+        let Some(authenticated_connection) = self.authenticated_connection.clone() else {
+            return Err(EwsRequestError::NotDispatched(EwsError::ServiceUnavailable));
+        };
+        let response = self
+            .send(document, None)
+            .await
+            .map_err(|_| EwsRequestError::OutcomeUnknown)?;
+        if response.status == StatusCode::UNAUTHORIZED {
+            self.authenticated_connection = None;
+            return Err(EwsRequestError::NotDispatched(EwsError::ServiceUnavailable));
+        }
+        if response.status != StatusCode::OK || response.identity != authenticated_connection {
+            self.authenticated_connection = None;
+            return Err(EwsRequestError::OutcomeUnknown);
+        }
+        Ok(response.body)
+    }
+
     async fn send(
         &self,
         document: &[u8],
@@ -279,7 +436,7 @@ async fn run_worker(
                 let response = tokio::select! {
                     biased;
                     _ = &mut shutdown => break,
-                    response = state.post_soap(&command.document) => response,
+                    response = state.post_soap(&command.document, command.mode) => response,
                 };
                 let _ = command.response.send(response);
             }
@@ -312,11 +469,22 @@ pub(crate) fn serialize_soap_request<O: Operation>(operation: O) -> Result<Vec<u
 
 pub(crate) fn parse_soap_response<O: Operation>(
     document: &[u8],
-) -> Result<Vec<ews::ResponseClass<<O::Response as OperationResponse>::Message>>, EwsError> {
+) -> Result<EwsSoapResponse<<O::Response as OperationResponse>::Message>, EwsError> {
     validate_soap_header(document)?;
     let envelope = Envelope::<O::Response>::from_xml_document(document)
         .map_err(|_| EwsError::InvalidResponse)?;
-    Ok(envelope.body.into_response_messages())
+    let mut server_version = None;
+    for header in envelope.headers {
+        if let ews::soap::Header::ServerVersionInfo(version) = header
+            && server_version.replace(version).is_some()
+        {
+            return Err(EwsError::InvalidResponse);
+        }
+    }
+    Ok(EwsSoapResponse {
+        messages: envelope.body.into_response_messages(),
+        server_version,
+    })
 }
 
 struct ReceivedResponse {
@@ -566,13 +734,19 @@ enum DigestAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::{
-        DigestAlgorithm, EwsTransport, MAX_SOAP_DEPTH, build_client_builder, digest_for_hash_oid,
-        digest_for_signature_oid, map_status, parse_endpoint, parse_soap_response,
-        serialize_soap_request, validate_soap_header,
+        DigestAlgorithm, EwsTransport, EwsWriteError, MAX_SOAP_DEPTH, build_client_builder,
+        digest_for_hash_oid, digest_for_signature_oid, map_status, parse_endpoint,
+        parse_soap_response, serialize_soap_request, validate_soap_header,
     };
     use crate::error::EwsError;
     use crate::ntlm::synthetic_type_two_challenge;
+    use crate::read_state::{
+        confirm_update, current_item_version, get_item_request, parse_get_item_response,
+        parse_update_item_response, serialize_update_item_request,
+    };
+    use crate::version::ExchangeProductVersion;
     use base64::{Engine, engine::general_purpose::STANDARD};
+    use einfach_mail_domain::{MessageId, ReadState};
     use ews::{
         BaseFolderId, BaseShape, ItemShape, PathToElement, ResponseClass,
         sync_folder_items::{SyncFolderItems, SyncScope},
@@ -582,6 +756,8 @@ mod tests {
     use secrecy::SecretString;
 
     const SYNC_FOLDER_ITEMS_PAGE: &[u8] = include_bytes!("fixtures/sync-folder-items-page.xml");
+    const GET_ITEM_VERSIONED: &[u8] = include_bytes!("fixtures/get-item-versioned.xml");
+    const UPDATE_ITEM_SUCCESS: &[u8] = include_bytes!("fixtures/update-item-success.xml");
 
     fn sync_folder_items_request(sync_state: Option<String>) -> SyncFolderItems {
         SyncFolderItems {
@@ -715,9 +891,11 @@ mod tests {
 
     #[test]
     fn parses_a_synthetic_paged_ews_response_fixture() {
-        let mut responses = parse_soap_response::<SyncFolderItems>(SYNC_FOLDER_ITEMS_PAGE)
+        let response = parse_soap_response::<SyncFolderItems>(SYNC_FOLDER_ITEMS_PAGE)
             .expect("synthetic SOAP response parses");
 
+        assert!(response.server_version.is_none());
+        let mut responses = response.messages;
         assert_eq!(responses.len(), 1);
         let ResponseClass::Success(response) = responses.pop().expect("one response exists") else {
             panic!("synthetic page has a successful response class");
@@ -728,7 +906,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sends_ews_soap_over_https_with_a_serialized_ntlmv2_handshake() {
+    async fn updates_read_state_after_a_fresh_authenticated_item_read() {
         let server = MockServer::start_async().await;
         let challenge = STANDARD.encode(synthetic_type_two_challenge());
         let endpoint = server.url("/EWS/Exchange.asmx");
@@ -736,8 +914,7 @@ mod tests {
             .mock_async(|when, then| {
                 when.method("POST")
                     .path("/EWS/Exchange.asmx")
-                    .body_includes("RequestServerVersion")
-                    .body_includes("SyncFolderItems")
+                    .body_includes("GetItem")
                     .header_missing("Authorization");
                 then.status(401).header("WWW-Authenticate", "NTLM");
             })
@@ -746,6 +923,7 @@ mod tests {
             .mock_async(|when, then| {
                 when.method("POST")
                     .path("/EWS/Exchange.asmx")
+                    .body_includes("GetItem")
                     .header_matches("Authorization", r"^NTLM TlRMTVNTUAAB");
                 then.status(401)
                     .header("WWW-Authenticate", format!("NTLM {challenge}"));
@@ -755,10 +933,35 @@ mod tests {
             .mock_async(|when, then| {
                 when.method("POST")
                     .path("/EWS/Exchange.asmx")
+                    .body_includes("GetItem")
                     .header_matches("Authorization", r"^NTLM TlRMTVNTUAAD");
                 then.status(200)
                     .header("Content-Type", "text/xml; charset=utf-8")
-                    .body(SYNC_FOLDER_ITEMS_PAGE);
+                    .body(GET_ITEM_VERSIONED);
+            })
+            .await;
+        let update_request = server
+            .mock_async(|when, then| {
+                when.method("POST")
+                    .path("/EWS/Exchange.asmx")
+                    .body_includes("UpdateItem")
+                    .body_includes("SuppressReadReceipts=\"true\"")
+                    .body_includes("ConflictResolution=\"NeverOverwrite\"")
+                    .body_includes("ChangeKey=\"synthetic-change-key\"")
+                    .header_missing("Authorization");
+                then.status(200)
+                    .header("Content-Type", "text/xml; charset=utf-8")
+                    .body(UPDATE_ITEM_SUCCESS);
+            })
+            .await;
+        let unauthorized_update_request = server
+            .mock_async(|when, then| {
+                when.method("POST")
+                    .path("/EWS/Exchange.asmx")
+                    .body_includes("UpdateItem")
+                    .body_includes("ChangeKey=\"synthetic-stale-change-key\"")
+                    .header_missing("Authorization");
+                then.status(401).header("WWW-Authenticate", "NTLM");
             })
             .await;
         let certificate =
@@ -775,16 +978,46 @@ mod tests {
         )
         .expect("EWS transport starts with the synthetic test CA");
 
-        let responses = transport
-            .execute(sync_folder_items_request(None))
+        let message_id = MessageId::try_from("synthetic-message-id".to_owned())
+            .expect("synthetic message ID is valid");
+        let sequence = transport.sequence().await;
+        let (get_item_xml, _) = sequence
+            .execute_xml_with_size(get_item_request(&message_id))
             .await
-            .expect("synthetic NTLMv2 exchange returns a parsed EWS page");
-
-        assert_eq!(responses.len(), 1);
-        assert!(matches!(responses.first(), Some(ResponseClass::Success(_))));
+            .expect("synthetic NTLMv2 exchange returns a GetItem response");
+        let parsed_get_item =
+            parse_get_item_response(&get_item_xml).expect("synthetic GetItem response parses");
+        let (server_version, current) = current_item_version(parsed_get_item, &message_id)
+            .expect("synthetic GetItem confirms the requested message");
+        let product_version = server_version
+            .as_ref()
+            .and_then(ExchangeProductVersion::from_server_version_info)
+            .expect("synthetic server version is complete");
+        assert!(product_version.supports_read_receipt_suppression());
+        let request = serialize_update_item_request(&current, ReadState::Read)
+            .expect("synthetic read-state UpdateItem serializes");
+        let update_response = sequence
+            .execute_update_item(&request)
+            .await
+            .expect("authenticated connection accepts one UpdateItem request");
+        let confirmation = parse_update_item_response(&update_response)
+            .expect("synthetic UpdateItem confirmation parses");
+        assert_eq!(
+            confirm_update(confirmation, &message_id, ReadState::Read),
+            Ok(ReadState::Read)
+        );
+        let stale_request = String::from_utf8(request)
+            .expect("synthetic UpdateItem request is UTF-8")
+            .replace("synthetic-change-key", "synthetic-stale-change-key");
+        assert!(matches!(
+            sequence.execute_update_item(stale_request.as_bytes()).await,
+            Err(EwsWriteError::NotDispatched(EwsError::ServiceUnavailable))
+        ));
         anonymous_request.assert_async().await;
         negotiate_request.assert_async().await;
         authenticate_request.assert_async().await;
+        update_request.assert_async().await;
+        unauthorized_update_request.assert_async().await;
     }
 
     #[tokio::test]
