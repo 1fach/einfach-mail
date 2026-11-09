@@ -54,7 +54,19 @@ The EWS provider returns one complete bounded snapshot, and the application work
 - `CalendarCache::replace_snapshot` validates that each occurrence references the requested view, overlaps it, and has a unique event ID. An empty complete response removes all events in that view.
 - The SQLCipher adapter stores EWS occurrences in the existing `calendar_events` table. One transaction replaces rows for the exact account and range, stores the snapshot completion time, and removes stale replacement staging rows. A write error rolls back the events and sync status together.
 - Snapshot completion lives in a separate per-view state table. The cache exposes a tagged snapshot state without a `CalendarDeltaLink`; the Graph delta-link constraint remains unchanged. A Graph page commit clears snapshot metadata for that exact view in the same transaction.
-- Set EWS account calendar access to read-only. Reuse the native agenda and account session. The UI keeps event writes unavailable, and EWS provider write methods continue to reject them.
+- Return read-only mail and read-only calendar access from the EWS account profile. Reuse the existing `CalendarSession`, provider router, and native `CalendarView`; do not add an EWS-specific session or agenda.
+- Let `CalendarView` own write-command visibility and entry points. A read-only account keeps week navigation, sync, and event selection. The view shows a `Read-only` state, omits event-write controls, and does not open the event composer from pointer or keyboard actions. Keep the EWS provider's unsupported-operation results as the boundary for direct write calls.
+- Test the EWS profile capabilities, account navigation to the shared calendar view, read-only agenda controls and keyboard behavior, and provider write rejection. Keep Graph account behavior unchanged.
+
+### Agenda alternatives
+
+| Design | Benefits | Costs and risks |
+| --- | --- | --- |
+| Reuse `CalendarView` and gate writes by `CalendarAccess` | Keeps one agenda, sync flow, and keyboard model. The existing account profile already carries the capability. | `CalendarView` must check the capability in both rendering and command entry points. |
+| Keep write commands visible but disabled | Shows users which Graph accounts can change events. | Adds controls that cannot act in this account and repeats the reason beside each one. |
+| Add an EWS-specific agenda and session | Isolates EWS presentation from Graph. | Duplicates week navigation, event selection, loading, errors, and accessibility behavior. |
+
+Reuse the existing agenda. Show one read-only state, keep calendar viewing actions available, and omit event-write controls for EWS accounts.
 
 This design keeps the old active snapshot readable until a complete EWS response has been validated and its single cache transaction commits. EWS response bodies are already bounded to 8 MiB by the transport and the request is limited to 512 occurrences, so a separate multi-page staging generation is unnecessary. The snapshot workflow will also enforce the existing 64 MiB sync-response budget as a second boundary.
 
