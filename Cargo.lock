@@ -538,9 +538,9 @@ dependencies = [
 
 [[package]]
 name = "async-sqlite"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6a663737c8bf2fd5d6ae36526f766c57c10bef7b680981bad0fd1c988f4a3a3"
+checksum = "41e05c60b77f09d624d3ef0202a7e74860734fbf3ad541ce3fe7ec3d81f5bab9"
 dependencies = [
  "crossbeam-channel",
  "futures-channel",
@@ -5127,13 +5127,13 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+version = "0.39.1"
+source = "git+https://github.com/LucaCappelletti94/rusqlite.git?rev=0f1ab7393ae5d62d44a94a5a5107c00b23d4ed58#0f1ab7393ae5d62d44a94a5a5107c00b23d4ed58"
 dependencies = [
  "cc",
  "openssl-sys",
  "pkg-config",
+ "sqlcipher-src",
  "vcpkg",
 ]
 
@@ -7689,9 +7689,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -7703,8 +7703,7 @@ dependencies = [
 [[package]]
 name = "rusqlite_migration"
 version = "2.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03451d4dc523c0a96d9e412c574670b3f5f184c3988b77a435876be25477bbd3"
+source = "git+https://github.com/DannyStoll1/rusqlite_migration.git?rev=30b941a0850df790091dc58c3ec44f18dbb5e3ba#30b941a0850df790091dc58c3ec44f18dbb5e3ba"
 dependencies = [
  "log",
  "rusqlite",
@@ -8584,6 +8583,12 @@ name = "sponge-cursor"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
+
+[[package]]
+name = "sqlcipher-src"
+version = "420.0.0+sqlcipher-4.20.0-sqlite-3.54.1-libtomcrypt-1.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd6b5280ed2593d07b2816ec531821c15c306903bcca224716f1fbcc2bbfedfe"
 
 [[package]]
 name = "sspi"

@@ -60,3 +60,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0053](0053-linux-read-only-exchange-ews.md) | Add Linux read-only Exchange Server mail through EWS | Accepted |
 | [0054](0054-linux-exchange-ews-autodiscover.md) | Discover Linux EWS endpoints with Autodiscover | Accepted |
 | [0055](0055-defer-date-picker-accessible-names.md) | Defer DatePicker accessible names without local vendoring | Accepted |
+| [0056](0056-pin-patched-sqlcipher-integration.md) | Pin the patched SQLCipher integration while upstream releases catch up | Accepted |

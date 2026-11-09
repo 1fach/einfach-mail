@@ -5,7 +5,7 @@ use std::{
 };
 
 use einfach_mail_application::{AccountCacheOpenError, MailCache};
-use einfach_mail_domain::{AccountId, FolderId, FolderReference, MailFolder};
+use einfach_mail_domain::{AccountId, FolderId, FolderReference, MailFolder, MessageId};
 use keyring::{Entry, Error as KeyringError};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -23,6 +23,8 @@ const CACHE_LIFECYCLE_TEST: &str =
     "security::production_tests::production_secret_service_cache_lifecycle";
 const UNAVAILABLE_SERVICE_TEST: &str =
     "security::production_tests::unavailable_secret_service_preserves_production_caches";
+const LEGACY_SQLCIPHER_FIXTURE: &[u8] =
+    include_bytes!("../../tests/fixtures/legacy-sqlcipher-4.14-v1.db");
 
 struct ProductionCache {
     account_id: AccountId,
@@ -177,6 +179,62 @@ fn unavailable_secret_service_preserves_production_caches() {
     let output =
         run_unavailable_service_child(xdg_data_home.path(), &new_account, &existing_account);
     assert_child_test_succeeded(&output);
+}
+
+#[test]
+fn legacy_sqlcipher_cache_migrates_through_production_adapter() {
+    let temporary_directory = TempDir::new().expect("temporary cache directory is created");
+    let database_path = temporary_directory.path().join("legacy-cache.db");
+    fs::write(&database_path, LEGACY_SQLCIPHER_FIXTURE)
+        .expect("synthetic legacy SQLCipher fixture is copied");
+    assert_database_is_encrypted(&database_path);
+
+    let account_id = AccountId::try_from("synthetic-legacy-account".to_owned())
+        .expect("synthetic account identifier is valid");
+    let folder = FolderReference::new(
+        account_id.clone(),
+        FolderId::try_from("inbox".to_owned()).expect("synthetic folder identifier is valid"),
+    );
+    let message_id = MessageId::try_from("legacy-message".to_owned())
+        .expect("synthetic message identifier is valid");
+    let cache = smol::block_on(SqliteAccountCache::open_with_test_key(
+        database_path.clone(),
+        account_id.clone(),
+        0xa5,
+    ));
+
+    let (message, body) = smol::block_on(MailCache::read_message(&cache, &folder, &message_id))
+        .expect("legacy cached message is readable")
+        .expect("legacy cached message exists");
+    assert_eq!(
+        message.metadata().subject(),
+        Some("Synthetic legacy subject")
+    );
+    assert_eq!(
+        body.expect("legacy cached message body exists").content(),
+        "Synthetic legacy body"
+    );
+    assert_database_is_encrypted(&database_path);
+    smol::block_on(cache.close_for_tests());
+
+    let reopened_cache = smol::block_on(SqliteAccountCache::open_with_test_key(
+        database_path.clone(),
+        account_id,
+        0xa5,
+    ));
+    let reopened_message = smol::block_on(MailCache::read_message(
+        &reopened_cache,
+        &folder,
+        &message_id,
+    ))
+    .expect("migrated cached message is readable")
+    .expect("migrated cached message exists");
+    assert_eq!(
+        reopened_message.0.metadata().subject(),
+        Some("Synthetic legacy subject")
+    );
+    assert_database_is_encrypted(&database_path);
+    smol::block_on(reopened_cache.close_for_tests());
 }
 
 fn run_production_secret_service_cache_lifecycle() {
