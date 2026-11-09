@@ -1,12 +1,12 @@
-# ADR 0057: Propose read-only EWS calendar snapshots
+# ADR 0057: Read-only EWS calendar snapshots
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-11-09
 - Owners: Einfach Mail maintainers
 
 ## Context
 
-Issue [#266](https://github.com/1fach/einfach-mail/issues/266) extends the Linux on-premises Exchange account from read-only mail to read-only primary-calendar views. Accepted [ADR 0053](0053-linux-read-only-exchange-ews.md) leaves EWS calendars unavailable; this proposal changes that scope while keeping Exchange Online on Graph and EWS writes unavailable.
+Issue [#266](https://github.com/1fach/einfach-mail/issues/266) extends the Linux on-premises Exchange account from read-only mail to read-only primary-calendar views. Accepted [ADR 0053](0053-linux-read-only-exchange-ews.md) leaves EWS calendars unavailable; this decision changes that scope while keeping Exchange Online on Graph and EWS writes unavailable.
 
 The existing Graph calendar workflow uses fixed-range `calendarView/delta` queries and opaque per-view cursors. EWS has different semantics. Microsoft documents `FindItem` with `CalendarView` as the range query that expands recurrence occurrences and exceptions. `SyncFolderItems` does not apply calendar recurrence logic. `CalendarView` exposes a result limit but no indexed offset. Indexed paging uses another view type and does not expand recurrence. The `FindItem` response includes `IncludesLastItemInRange`, which can identify an incomplete result.
 
@@ -16,7 +16,7 @@ The workspace already uses Thunderbird's `ews` 0.1.2 crate for EWS mail. It prov
 
 ## Decision
 
-Propose adding Linux read-only EWS primary-calendar views in M8:
+Add Linux read-only EWS primary-calendar views in M8:
 
 - Set EWS account capabilities to read-only mail and read-only calendar. Expose agenda reads through the native account session and router. Keep event creation, editing, and deletion unavailable in the UI and rejected by the provider boundary.
 - Query the primary calendar for the selected fixed range with EWS `FindItem` and `CalendarView`, serializing the existing UTC instant bounds explicitly. Request only the item ID, subject, location, start/end, all-day flag, and original start/end time-zone fields needed by the provider-neutral occurrence model. Rely on Exchange's recurrence expansion; do not fetch recurring masters through `SyncFolderItems` or expand recurrence locally.

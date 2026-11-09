@@ -1185,6 +1185,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         }
         if profile.capabilities().calendar() == CalendarAccess::Unavailable {
             details = details.child("Calendar is unavailable for this account.");
+        } else if profile.capabilities().calendar() == CalendarAccess::ReadOnly {
+            details = details.child("Calendar is read-only.");
         }
         Some(details.child(
             div()

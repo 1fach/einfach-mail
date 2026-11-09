@@ -15,11 +15,11 @@ use einfach_mail_application::{
     CalendarWorkflowError, CalendarWriteReadiness,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
-    CalendarEventCreation, CalendarEventUpdate, CalendarEventVersion, CalendarOccurrence,
-    CalendarOccurrencePatch, CalendarOccurrenceTime, CalendarOccurrenceTimePatch,
-    CalendarViewRange, CalendarViewReference, EditableCalendarEvent, EventId,
-    PendingCalendarEventCreation,
+    AccountCapabilities, AccountId, AccountProfile, CalendarAccess, CalendarDeltaLink,
+    CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation, CalendarEventUpdate,
+    CalendarEventVersion, CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
+    CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference, EditableCalendarEvent,
+    EventId, MailAccess, PendingCalendarEventCreation,
 };
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestQueryExt as _;
@@ -753,6 +753,17 @@ fn profile() -> AccountProfile {
     .expect("synthetic account profile is valid")
 }
 
+fn read_only_calendar_profile() -> AccountProfile {
+    AccountProfile::try_new_with_capabilities(
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
+        Some("Ada Example".to_owned()),
+        Some("ada@example.test".to_owned()),
+        None,
+        AccountCapabilities::new(MailAccess::ReadOnly, CalendarAccess::ReadOnly),
+    )
+    .expect("synthetic read-only calendar profile is valid")
+}
+
 fn workflow_account_id() -> AccountId {
     profile().id().clone()
 }
@@ -833,6 +844,91 @@ fn draw_calendar_view(context: &mut VisualTestContext) {
     context.update(|window, app| {
         let _ = window.draw(app);
     });
+}
+
+#[gpui_kit::test]
+async fn read_only_calendar_keeps_agenda_navigation_and_blocks_event_writes(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        super::bind_calendar_event_navigation_keys(cx);
+    });
+    let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
+    let provider = TestProvider::default();
+    provider.allow_calendar_sync();
+    let event_creation_count = Arc::clone(&provider.event_creation_count);
+    let event_update_calls = Arc::clone(&provider.event_update_calls);
+    let event_deletion_calls = Arc::clone(&provider.event_deletion_calls);
+    let workflow = Arc::new(CalendarWorkflow::new(
+        workflow_account_id(),
+        provider,
+        TestCache::with_events(agenda_events(1)),
+    ));
+    let (view, context) = cx.add_window_view(|_, cx| {
+        CalendarView::new_for_week(
+            read_only_calendar_profile(),
+            workflow,
+            system_calendar_week(week_start, TimeZone::UTC),
+            cx,
+        )
+    });
+
+    context.run_until_parked();
+    wait_for_ui_condition(context, |_, app| !view.read(app).status.is_sync_active()).await;
+    draw_calendar_view(context);
+
+    let status_labels = context.update(|window, _| {
+        window
+            .find_all_by_role(gpui_kit::Role::Status)
+            .iter()
+            .map(|status| status.label().map(str::to_owned))
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        status_labels
+            .iter()
+            .any(|label| label.as_deref() == Some("Calendar is read-only")),
+        "calendar status labels: {status_labels:?}"
+    );
+    assert!(context.debug_bounds("calendar-new-event").is_none());
+    assert!(context.debug_bounds("calendar-sync").is_some());
+    assert!(context.debug_bounds("calendar-previous-week").is_some());
+    assert!(context.debug_bounds("calendar-next-week").is_some());
+
+    let event = context
+        .debug_bounds("calendar-event-row-2030-01-07-synthetic-calendar-event-1")
+        .expect("the cached agenda renders its event");
+    context.simulate_click(event.center(), Modifiers::default());
+    context.run_until_parked();
+    draw_calendar_view(context);
+    assert_selected_event(context, &view, "synthetic-calendar-event-1");
+    assert!(context.debug_bounds("calendar-event-edit").is_none());
+
+    context.simulate_keystrokes("enter");
+    context.run_until_parked();
+    draw_calendar_view(context);
+    assert!(context.debug_bounds("event-composer-fields").is_none());
+    assert_selected_event(context, &view, "synthetic-calendar-event-1");
+
+    context.update(|window, app| {
+        view.update(app, |view, app| view.open_event_composer(window, app));
+    });
+    draw_calendar_view(context);
+    assert!(context.debug_bounds("event-composer-fields").is_none());
+    assert_eq!(event_creation_count.load(Ordering::SeqCst), 0);
+    assert_eq!(event_update_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(event_deletion_calls.load(Ordering::SeqCst), 0);
+
+    let next_week = context
+        .debug_bounds("calendar-next-week")
+        .expect("read-only calendar keeps week navigation available");
+    context.simulate_click(next_week.center(), Modifiers::default());
+    wait_for_ui_condition(context, |_, app| {
+        view.read(app).week.start() == civil::Date::new(2030, 1, 14).expect("next week is valid")
+            && !view.read(app).status.is_sync_active()
+    })
+    .await;
 }
 
 fn select_default_timed_event(context: &mut VisualTestContext) {

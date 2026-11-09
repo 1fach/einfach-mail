@@ -8,8 +8,8 @@ use einfach_mail_application::{
     CalendarOperationError, CalendarSession, CalendarWorkflowError, CalendarWriteReadiness,
 };
 use einfach_mail_domain::{
-    AccountProfile, CalendarOccurrence, CalendarOccurrenceTime, CalendarViewReference, EventId,
-    PendingCalendarEventCreation,
+    AccountProfile, CalendarAccess, CalendarOccurrence, CalendarOccurrenceTime,
+    CalendarViewReference, EventId, PendingCalendarEventCreation,
 };
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt, WindowExt,
@@ -355,7 +355,7 @@ where
     }
 
     fn open_event_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.write_readiness != CalendarWriteReadiness::Ready {
+        if !self.can_write_events() || self.write_readiness != CalendarWriteReadiness::Ready {
             return;
         }
         let intent = EventComposerIntent::Create {
@@ -375,7 +375,8 @@ where
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.write_readiness != CalendarWriteReadiness::Ready
+        if !self.can_write_events()
+            || self.write_readiness != CalendarWriteReadiness::Ready
             || !matches!(cached_event.time(), CalendarOccurrenceTime::Timed { .. })
         {
             return;
@@ -625,12 +626,26 @@ where
             .gap_3()
             .child(Self::render_back_button(cx))
             .child(self.render_calendar_title());
+        if self.profile.capabilities().calendar() == CalendarAccess::ReadOnly {
+            let read_only_status = div()
+                .id("calendar-read-only-status")
+                .debug_selector(|| "calendar-read-only-status".to_owned())
+                .role(Role::Status)
+                .aria_label("Calendar is read-only")
+                .text_sm()
+                .text_color(cx.theme().semantic_tokens().colors.muted_foreground)
+                .child("Read-only");
+            #[cfg(test)]
+            let read_only_status = read_only_status.test_support();
+            title_bar = title_bar.child(read_only_status);
+        }
         if let Some(edit_action) = self.render_selected_event_edit_action(cx) {
             title_bar = title_bar.child(edit_action);
         }
-        title_bar
-            .child(self.render_event_button(cx))
-            .child(self.render_sync_button(cx))
+        if self.can_write_events() {
+            title_bar = title_bar.child(self.render_event_button(cx));
+        }
+        title_bar.child(self.render_sync_button(cx))
     }
 
     fn render_back_button(cx: &mut Context<Self>) -> impl IntoElement {
@@ -828,6 +843,9 @@ where
     }
 
     fn render_selected_event_edit_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.can_write_events() {
+            return None;
+        }
         let selected = self.selected_agenda_event.as_ref()?;
         let cached_event = self
             .events
@@ -852,6 +870,10 @@ where
                 }))
                 .into_any_element(),
         )
+    }
+
+    fn can_write_events(&self) -> bool {
+        self.profile.capabilities().calendar() == CalendarAccess::ReadWrite
     }
 }
 

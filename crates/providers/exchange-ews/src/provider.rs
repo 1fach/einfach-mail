@@ -10,9 +10,10 @@ use einfach_mail_application::{
     WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, FolderId, FolderReference, MailFolder, Mailbox,
-    MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
-    MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
+    AccountCapabilities, AccountId, AccountProfile, CalendarAccess, FolderId, FolderReference,
+    MailAccess, MailFolder, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
+    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
+    ReadState,
 };
 use ews::{
     BaseFolderId, BaseItemId, BaseShape, Folder, FolderShape, ItemShape, PathToElement,
@@ -598,7 +599,7 @@ fn profile_for(settings: &ExchangeEwsAccountSettings) -> Result<AccountProfile, 
         Some(mailbox_address.to_owned()),
         Some(mailbox_address.to_owned()),
         Some(settings.username().to_owned()),
-        AccountCapabilities::read_only_mail(),
+        AccountCapabilities::new(MailAccess::ReadOnly, CalendarAccess::ReadOnly),
     )
     .map_err(|_| EwsError::InvalidConnectionDetails)
 }
@@ -944,22 +945,174 @@ fn delete_password() -> Result<(), EwsError> {
 
 #[cfg(test)]
 mod tests {
-    use einfach_mail_application::{MailOperationError, MessageDeltaResponse};
+    use std::{future::Future, future::ready};
+
+    use einfach_mail_application::{
+        CalendarOperationError, CalendarProvider, ExchangeEwsAccountSettings,
+        ExchangeEwsAccountSettingsStore, ExchangeEwsSettingsError, MailOperationError,
+        MessageDeltaResponse,
+    };
     use einfach_mail_domain::{
-        AccountId, FolderId, FolderReference, MessageDeltaChange, MessageDeltaProgress, ReadState,
+        AccountCapabilities, AccountId, CalendarAccess, CalendarEventCreation, CalendarEventDraft,
+        CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion,
+        CalendarOccurrencePatch, CalendarOccurrenceTimePatch, CalendarTimeZoneId,
+        CalendarViewRange, CalendarViewReference, EditableCalendarEvent, EventId, FolderId,
+        FolderReference, MailAccess, MessageDeltaChange, MessageDeltaProgress, ReadState,
     };
     use ews::sync_folder_items::{Change, SyncFolderItems};
+    use time::{Date, Month, PrimitiveDateTime, Time};
 
     use crate::error::EwsError;
     use crate::transport::parse_soap_response;
 
     use super::{
-        decode_cursor, decode_password, encode_cursor, map_item_change, map_sync_responses,
-        message_metadata_shape,
+        ExchangeEwsProvider, decode_cursor, decode_password, encode_cursor, map_item_change,
+        map_sync_responses, message_metadata_shape, profile_for,
     };
 
     const SYNC_FOLDER_ITEMS_PAGE: &[u8] = include_bytes!("fixtures/sync-folder-items-page.xml");
     const SYNC_STATE_EXPIRED: &[u8] = include_bytes!("fixtures/sync-state-expired.xml");
+
+    struct EmptySettingsStore;
+
+    impl ExchangeEwsAccountSettingsStore for EmptySettingsStore {
+        fn load(
+            &self,
+        ) -> impl Future<
+            Output = Result<Option<ExchangeEwsAccountSettings>, ExchangeEwsSettingsError>,
+        > + Send
+        + '_ {
+            ready(Ok(None))
+        }
+
+        fn save(
+            &self,
+            _: ExchangeEwsAccountSettings,
+        ) -> impl Future<Output = Result<(), ExchangeEwsSettingsError>> + Send + '_ {
+            ready(Ok(()))
+        }
+
+        fn delete(&self) -> impl Future<Output = Result<(), ExchangeEwsSettingsError>> + Send + '_ {
+            ready(Ok(()))
+        }
+    }
+
+    fn synthetic_calendar_view() -> CalendarViewReference {
+        let date = Date::from_calendar_date(2030, Month::January, 7)
+            .expect("synthetic calendar date is valid");
+        let end_date = Date::from_calendar_date(2030, Month::January, 8)
+            .expect("synthetic calendar end date is valid");
+        let range = CalendarViewRange::new(
+            date.midnight().assume_utc(),
+            end_date.midnight().assume_utc(),
+            date,
+            end_date,
+        )
+        .expect("synthetic calendar range is valid");
+        CalendarViewReference::new(
+            AccountId::try_from("synthetic-account".to_owned())
+                .expect("synthetic account ID is valid"),
+            range,
+        )
+    }
+
+    fn synthetic_event_creation(view: &CalendarViewReference) -> CalendarEventCreation {
+        let date = Date::from_calendar_date(2030, Month::January, 7)
+            .expect("synthetic event date is valid");
+        let local_start = PrimitiveDateTime::new(
+            date,
+            Time::from_hms(9, 0, 0).expect("synthetic event start is valid"),
+        );
+        let local_end = PrimitiveDateTime::new(
+            date,
+            Time::from_hms(10, 0, 0).expect("synthetic event end is valid"),
+        );
+        let draft = CalendarEventDraft::timed(
+            "Synthetic event".to_owned(),
+            local_start,
+            local_end,
+            CalendarTimeZoneId::try_from("UTC".to_owned()).expect("synthetic time zone is valid"),
+            local_start.assume_utc(),
+            local_end.assume_utc(),
+        )
+        .expect("synthetic event draft is valid");
+        CalendarEventCreation::try_new(view.clone(), draft)
+            .expect("synthetic event fits the calendar view")
+    }
+
+    fn synthetic_editable_event(view: &CalendarViewReference) -> EditableCalendarEvent {
+        let start = view.range().start() + time::Duration::hours(1);
+        let end = start + time::Duration::hours(1);
+        let mut time = CalendarOccurrenceTimePatch::new();
+        time.set_start(start);
+        time.set_end(end);
+        time.set_is_all_day(false);
+        let mut patch = CalendarOccurrencePatch::new();
+        patch.set_subject(Some("Synthetic event".to_owned()));
+        patch.set_time(time);
+        let occurrence = patch
+            .into_new(
+                view.clone(),
+                EventId::try_from("synthetic-event".to_owned())
+                    .expect("synthetic event ID is valid"),
+            )
+            .expect("synthetic timed event is valid");
+        EditableCalendarEvent::new(
+            occurrence,
+            CalendarEventVersion::try_from("synthetic-version".to_owned())
+                .expect("synthetic event version is valid"),
+        )
+        .expect("synthetic event is editable")
+    }
+
+    #[test]
+    fn ews_account_profile_exposes_read_only_calendar_access() {
+        let settings = ExchangeEwsAccountSettings::new(
+            "https://exchange.example.test/EWS/Exchange.asmx".to_owned(),
+            "ada@example.test".to_owned(),
+            "EXAMPLE\\ada".to_owned(),
+        );
+
+        let profile = profile_for(&settings).expect("synthetic EWS profile is valid");
+
+        assert_eq!(
+            profile.capabilities(),
+            AccountCapabilities::new(MailAccess::ReadOnly, CalendarAccess::ReadOnly)
+        );
+    }
+
+    #[tokio::test]
+    async fn ews_provider_rejects_calendar_event_writes() {
+        let provider = ExchangeEwsProvider::new(EmptySettingsStore);
+        let view = synthetic_calendar_view();
+        let creation = synthetic_event_creation(&view);
+        let editable = synthetic_editable_event(&view);
+        let update_draft = CalendarEventUpdateDraft::timed(
+            "Changed event".to_owned(),
+            view.range().start() + time::Duration::hours(2),
+            view.range().start() + time::Duration::hours(3),
+        )
+        .expect("synthetic event update is valid");
+        let update = CalendarEventUpdate::new(editable.clone(), update_draft)
+            .expect("synthetic update changes the event");
+
+        assert!(matches!(
+            provider.create_event(&creation).await,
+            Err(CalendarOperationError::UnsupportedOperation)
+        ));
+        assert!(matches!(
+            provider.editable_event(editable.occurrence()).await,
+            Err(CalendarOperationError::UnsupportedOperation)
+        ));
+        assert!(matches!(
+            provider.update_event(&update).await,
+            Err(CalendarOperationError::UnsupportedOperation)
+        ));
+        assert!(matches!(
+            provider.delete_event(&editable).await,
+            Err(CalendarOperationError::UnsupportedOperation)
+        ));
+    }
 
     #[test]
     fn rejects_invalid_utf8_password_bytes_from_the_credential_store() {

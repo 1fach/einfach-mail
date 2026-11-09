@@ -29,10 +29,10 @@ use einfach_mail_application::{
     WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate,
-    CalendarOccurrence, CalendarViewReference, EditableCalendarEvent, FolderReference,
-    FollowUpFlagStatus, MailDraft, MailFolder, MailMessage, MailReplyDraft, MailSendOperationId,
-    MessageId, PendingMailSend, ReadState,
+    AccountCapabilities, AccountId, AccountProfile, CalendarAccess, CalendarEventCreation,
+    CalendarEventUpdate, CalendarOccurrence, CalendarViewReference, EditableCalendarEvent,
+    FolderReference, FollowUpFlagStatus, MailAccess, MailDraft, MailFolder, MailMessage,
+    MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend, ReadState,
 };
 
 #[derive(Clone, Default)]
@@ -506,7 +506,7 @@ impl AccountProvider for TestProvider {
                         Some("Ada Example".to_owned()),
                         Some("ada@example.test".to_owned()),
                         Some("EXAMPLE\\ada".to_owned()),
-                        AccountCapabilities::read_only_mail(),
+                        AccountCapabilities::new(MailAccess::ReadOnly, CalendarAccess::ReadOnly),
                     )
                     .expect("synthetic EWS account profile has an identity");
                     *saved_account_id
@@ -1714,12 +1714,19 @@ fn exchange_server_form_connects_without_microsoft_client_configuration(cx: &mut
     assert!(context.cx.update(|cx| matches!(
         &view.read(cx).status,
         AccountStatus::Connected(profile)
-            if profile.capabilities() == AccountCapabilities::read_only_mail()
+            if profile.capabilities()
+                == AccountCapabilities::new(MailAccess::ReadOnly, CalendarAccess::ReadOnly)
     )));
     assert_eq!(ews_connect_requests.load(Ordering::SeqCst), 1);
     assert!(ews_input_valid.load(Ordering::SeqCst));
     assert!(context.debug_bounds("open-mail").is_some());
-    assert!(context.debug_bounds("open-calendar").is_none());
+    assert!(context.debug_bounds("open-calendar").is_some());
+
+    click(context, "open-calendar");
+    context.run_until_parked();
+    draw_account_view(context);
+    assert!(context.debug_bounds("calendar-back").is_some());
+    assert!(context.debug_bounds("calendar-sync").is_some());
 }
 
 #[gpui_kit::test]

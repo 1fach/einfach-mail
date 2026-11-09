@@ -6,7 +6,7 @@ Last updated: 2026-11-09
 
 M7 Exchange Server EWS support is in progress under [issue #257](https://github.com/1fach/einfach-mail/issues/257). The first implementation targets Linux read-only mail and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. Linux Autodiscover merged into `main` in [PR #261](https://github.com/1fach/einfach-mail/pull/261) and remains tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258) for live verification.
 
-Issue [#266](https://github.com/1fach/einfach-mail/issues/266) and [Proposed ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md) track M8 EWS calendar work. The provider builds a bounded `FindItem` calendar view and maps complete synthetic responses. The application workflow now selects Graph delta or EWS snapshot synchronization, and the SQLCipher adapter atomically replaces one exact view with separate snapshot completion state. EWS calendar capability exposure and agenda UI remain out of scope. No Exchange calendar server or sanitized response recording is available for live verification.
+Issue [#266](https://github.com/1fach/einfach-mail/issues/266) and [ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md) track M8 EWS calendar work. The provider builds a bounded `FindItem` calendar view and maps complete synthetic responses. The application workflow now selects Graph delta or EWS snapshot synchronization, and the SQLCipher adapter atomically replaces one exact view with separate snapshot completion state. The current branch exposes EWS calendar reads through the shared native agenda, displays the read-only capability, and hides and guards event writes. The Linux local gate passed on 2026-11-09, including the focused account and agenda checks. No Exchange calendar server or sanitized response recording is available for live verification.
 
 PR #47 merged read-only mail into `main` at `409d299ffbe11dfe41c8f5a428b8e49b9ac97edd` on 2026-11-06. PR #50 merged the Linux calendar agenda and its reviewed stack into `main` at `8c10dca99fd8cc0a38f76fb11aed5a174b0970f8` on 2026-11-06. All four required PR #50 checks passed on head `0ecfc019ff661282bc6bf5bfe5ce522bbb77c4e3`.
 
@@ -48,7 +48,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 5. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
 6. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
 7. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
-8. Expose read-only EWS calendars through account capabilities and the native agenda under issue [#266](https://github.com/1fach/einfach-mail/issues/266), following ADR 0057.
+8. Keep issue [#266](https://github.com/1fach/einfach-mail/issues/266) open until a real Exchange server or sanitized response verifies the EWS calendar request, recurrence expansion, time-zone mapping, and result completeness.
 
 ## Update rule
 
