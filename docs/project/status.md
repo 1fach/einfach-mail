@@ -26,6 +26,7 @@ Issue #258 tracks Linux EWS Autodiscover. Its implementation and synthetic verif
 - SSPI 0.23.1 pins `rsa 0.10.0-rc.18`, flagged by RUSTSEC-2023-0071. The EWS provider uses only SSPI's NTLM path and has no RSA private-key operation; `.cargo/audit.toml` narrowly ignores this advisory. Issue #259 tracks removing the exception after SSPI adopts a fixed stable release.
 - Issue #6 has synthetic coverage for expanded occurrences and UTC-midnight all-day inputs. Graph's docs do not say how a non-UTC all-day event appears in a UTC-default `calendarView` response. Live recurrence, time-zone, and all-day behavior remain unverified until a Microsoft 365 tenant is available.
 - Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
+- The event composer keeps visible `Starts` and `Ends` labels, but its date pickers lack distinct accessible names after removal of the local component copy. Issue [#176](https://github.com/1fach/einfach-mail/issues/176) tracks an upstream or smaller maintained fix; issue #22 tracks real-window screen-reader review.
 - Windows and macOS support remain deferred.
 - The production-path cache-key lifecycle test passed on 2026-11-08 against a temporary GNOME Keyring service. This does not establish behavior for every Secret Service implementation.
 - Before the RustSec advisory database refresh, the 2026-11-09 local audit loaded 1,422 advisories and scanned 1,021 locked dependencies. It reported nine informational unmaintained-crate advisories and the narrowly ignored `rsa` advisory tracked in issue #259. The refreshed database's additional finding is listed below.
@@ -39,7 +40,8 @@ Issue #258 tracks Linux EWS Autodiscover. Its implementation and synthetic verif
 3. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
 4. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
 5. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
-6. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
+6. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
+7. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
 
 ## Update rule
 

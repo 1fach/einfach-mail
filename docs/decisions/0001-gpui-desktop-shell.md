@@ -13,7 +13,7 @@ GPUI Kit packages GPUI, its base layer, styled components, and default assets be
 
 Use GPUI Kit 0.9.0 for the application shell and native views. Keep workflows in the application crate and domain rules in the domain crate.
 
-The 2026-11-08 review found no affected theme struct literals or calls to `Window::text_system()`. App code contains no wall-clock animation logic. Headless UI tests enable reduced motion in the shared wait helper, so sheet assertions check final geometry. The Rust 1.95 workspace check passed, and the event-composer test preserved both DatePicker accessible names. GPUI Kit is pre-1.0. Review API changes with each update.
+The 2026-11-08 review found no affected theme struct literals or calls to `Window::text_system()`. App code contains no wall-clock animation logic. Headless UI tests enable reduced motion in the shared wait helper, so sheet assertions check final geometry. The Rust 1.95 workspace check passed. At that review, the event-composer test preserved both DatePicker names using the patch from ADR 0050; ADR 0055 removes it and defers distinct names under issue #176. GPUI Kit is pre-1.0. Review API changes with each update.
 
 If sanitized HTML email later needs a browser engine, evaluate `gpui-webview` only for an isolated message-body view and record a separate security decision before adding it. Keep scripts, remote content, navigation, and access to application data disabled.
 

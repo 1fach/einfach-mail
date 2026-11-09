@@ -996,11 +996,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .flex_col()
             .gap_2()
             .child(div().text_sm().font_bold().child("Starts"))
-            .child(
-                DatePicker::new(&self.start)
-                    .accessibility_label("Starts")
-                    .w_full(),
-            )
+            .child(DatePicker::new(&self.start).w_full())
     }
 
     fn render_end_field(&self) -> impl IntoElement {
@@ -1009,11 +1005,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .flex_col()
             .gap_2()
             .child(div().text_sm().font_bold().child("Ends"))
-            .child(
-                DatePicker::new(&self.end)
-                    .accessibility_label("Ends")
-                    .w_full(),
-            )
+            .child(DatePicker::new(&self.end).w_full())
     }
 
     fn render_time_zone(&self, colors: ColorTokens) -> impl IntoElement {
