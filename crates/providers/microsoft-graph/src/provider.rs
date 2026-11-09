@@ -31,7 +31,7 @@ pub struct MicrosoftGraphProvider {
 }
 
 struct ProviderConfig {
-    client_id: Uuid,
+    client_id: Option<Uuid>,
     callback_port: CallbackPort,
     endpoints: Endpoints,
     browser: Arc<dyn BrowserLauncher>,
@@ -53,6 +53,16 @@ impl MicrosoftGraphProvider {
     /// never accepts or stores a client secret.
     #[must_use]
     pub fn new(client_id: Uuid, callback_port: CallbackPort) -> Self {
+        Self::with_client_id(Some(client_id), callback_port)
+    }
+
+    /// Creates a provider that can inspect and remove saved credentials without Microsoft sign-in.
+    #[must_use]
+    pub fn new_unconfigured() -> Self {
+        Self::with_client_id(None, CallbackPort::Ephemeral)
+    }
+
+    fn with_client_id(client_id: Option<Uuid>, callback_port: CallbackPort) -> Self {
         let endpoints = Endpoints::microsoft();
         let graph_authority = GraphAuthority::from_profile_endpoint(&endpoints.graph_me)
             .expect("the static Microsoft Graph profile URL is valid");

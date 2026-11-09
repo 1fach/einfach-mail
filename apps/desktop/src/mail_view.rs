@@ -11,8 +11,8 @@ use einfach_mail_application::{
     ReadStateUpdateOutcome, WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountProfile, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, MailReplySource,
-    MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
+    AccountProfile, FolderReference, FollowUpFlagStatus, MailAccess, MailFolder, MailMessage,
+    MailReplySource, MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
 };
 use gpui_kit::base::VirtualListScrollHandle;
 use gpui_kit::component::StyledExt;
@@ -984,7 +984,8 @@ impl MailView {
     }
 
     fn message_move_allowed(&self) -> bool {
-        matches!(&self.sync_status, SyncStatus::UpToDate)
+        self.can_write_mail()
+            && matches!(&self.sync_status, SyncStatus::UpToDate)
             && !self.selected_folder_write_sync_required
             && !self.message_update_in_progress()
             && self.move_recovery_reason.is_none()
@@ -1047,8 +1048,13 @@ impl MailView {
         self.message_update_task.is_some()
     }
 
+    fn can_write_mail(&self) -> bool {
+        self.profile.capabilities().mail() == MailAccess::ReadWrite
+    }
+
     fn can_update_message_in(&self, folder: &FolderReference) -> bool {
-        !self.sync_status.is_sync_active()
+        self.can_write_mail()
+            && !self.sync_status.is_sync_active()
             && !self.message_update_in_progress()
             && !matches!(self.sync_status, SyncStatus::Failed(_))
             && self.selected_folder.as_ref() == Some(folder)
@@ -1366,7 +1372,7 @@ impl MailView {
     }
 
     fn open_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sync_status.is_sync_active() {
+        if !self.can_write_mail() || self.sync_status.is_sync_active() {
             return;
         }
         let title = if matches!(&self.pending_send, Ok(Some(_))) {
@@ -1396,7 +1402,8 @@ impl MailView {
     }
 
     fn can_open_reply(&self, window: &mut Window, cx: &mut App) -> bool {
-        !self.sync_status.is_sync_active()
+        self.can_write_mail()
+            && !self.sync_status.is_sync_active()
             && !self.message_update_in_progress()
             && matches!(&self.pending_send, Ok(None))
             && !window.has_active_sheet(cx)

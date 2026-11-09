@@ -15,8 +15,8 @@ use einfach_mail_application::{
     MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus, MailDraft,
-    MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, Mailbox, MessageBody,
+    AccountCapabilities, AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus,
+    MailDraft, MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, Mailbox, MessageBody,
     MessageBodyType, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
     MessageMetadataPatch, PendingMailSend, ReadState,
 };
@@ -1859,6 +1859,77 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
         last_row.top() >= list_bounds.top() && last_row.bottom() <= list_bounds.bottom(),
         "virtual scrolling uses row estimates at the current rem size"
     );
+}
+
+#[gpui_kit::test]
+async fn read_only_account_hides_mail_mutations_and_rejects_composer_entry(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_kit::init);
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (_, cache, _) = fixture(account.clone());
+    let profile = AccountProfile::try_new_with_capabilities(
+        account,
+        Some("Ada Example".to_owned()),
+        Some("ada@example.test".to_owned()),
+        Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::read_only_mail(),
+    )
+    .expect("synthetic read-only account profile has an identity");
+    let workflow = Arc::new(MailWorkflow::new(
+        profile.id().clone(),
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache,
+    ));
+    let mut mail_view = None;
+    let (_, context) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
+        mail_view = Some(view.clone());
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    let view = mail_view.expect("read-only mail view is created with the test window");
+
+    wait_for_mail_sync_to_finish(context, &view).await;
+    assert!(context.debug_bounds("new-mail-message").is_none());
+    let message_row = context
+        .debug_bounds("message-row-message-1")
+        .expect("cached read-only message is visible");
+    context.simulate_click(message_row.center(), Modifiers::default());
+    wait_for_ui_condition(context, |_, app| {
+        matches!(
+            view.read(app).message_detail_state,
+            MessageDetailState::Opened(_)
+        )
+    })
+    .await;
+    draw_mail_view(context);
+
+    for selector in [
+        "message-actions",
+        "message-read-state",
+        "message-follow-up-flag",
+        "message-move",
+        "message-archive",
+        "message-reply",
+        "message-delete",
+    ] {
+        assert!(context.debug_bounds(selector).is_none());
+    }
+    assert!(context.cx.update(|app| !view.read(app).can_write_mail()));
+
+    context.update(|window, app| {
+        view.update(app, |mail_view, cx| mail_view.open_composer(window, cx));
+        assert!(!window.has_active_sheet(app));
+    });
+    context.update(|window, app| {
+        view.update(app, |mail_view, cx| {
+            mail_view.open_reply_composer(window, cx)
+        });
+        assert!(!window.has_active_sheet(app));
+    });
 }
 
 #[gpui_kit::test]

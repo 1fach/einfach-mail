@@ -178,6 +178,14 @@ fn access_token(token_text: &str) -> Arc<AccessToken> {
     )))
 }
 
+fn http_url(server: &MockServer, path: &str) -> String {
+    format!("http://{}{path}", server.address())
+}
+
+fn http_base_url(server: &MockServer) -> String {
+    http_url(server, "")
+}
+
 fn synthetic_provider<C>(
     server: &MockServer,
     sender: mpsc::UnboundedSender<Url>,
@@ -187,18 +195,20 @@ where
     C: RefreshTokenStore + 'static,
 {
     let endpoints = Endpoints {
-        authorization: Url::parse(&server.url("/authorize"))
+        authorization: Url::parse(&http_url(server, "/authorize"))
             .expect("synthetic authorization endpoint is valid"),
-        token: Url::parse(&server.url("/token")).expect("synthetic token endpoint is valid"),
+        token: Url::parse(&http_url(server, "/token")).expect("synthetic token endpoint is valid"),
         graph_me: Url::parse(&format!(
             "{}?$select=id,displayName,mail,userPrincipalName",
-            server.url("/v1.0/me")
+            http_url(server, "/v1.0/me")
         ))
         .expect("synthetic Graph endpoint is valid"),
     };
     let config = ProviderConfig {
-        client_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
-            .expect("synthetic client ID is valid"),
+        client_id: Some(
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
+                .expect("synthetic client ID is valid"),
+        ),
         callback_port: CallbackPort::Ephemeral,
         graph_authority: GraphAuthority::from_profile_endpoint(&endpoints.graph_me)
             .expect("synthetic Graph authority is valid"),
@@ -691,7 +701,7 @@ async fn connect_rejects_a_forged_callback_state_before_token_exchange() {
 #[tokio::test]
 async fn connect_does_not_follow_a_token_endpoint_redirect() {
     let server = MockServer::start_async().await;
-    let redirect_target_url = server.url("/token-redirect-target");
+    let redirect_target_url = http_url(&server, "/token-redirect-target");
     let token_redirect = server
         .mock_async(|when, then| {
             when.method(POST).path("/token");
@@ -936,11 +946,11 @@ async fn mail_provider_reads_scoped_folders_delta_and_body() {
         .await;
     let next_link = format!(
         "{}/v1.0/me/mailFolders/folder-inbox/messages/delta?$skiptoken=opaque-next",
-        server.base_url()
+        http_base_url(&server)
     );
     let delta_link = format!(
         "{}/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=opaque-final",
-        server.base_url()
+        http_base_url(&server)
     );
     let message_delta_initial = server
         .mock_async(|when, then| {

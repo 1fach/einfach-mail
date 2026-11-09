@@ -1,10 +1,10 @@
 # Project status
 
-Last updated: 2026-11-08
+Last updated: 2026-11-09
 
 ## Current milestone
 
-M4 mail and calendar actions remain in progress.
+M7 Exchange Server EWS support is in progress under [issue #257](https://github.com/1fach/einfach-mail/issues/257). The first implementation targets Linux read-only mail and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. Autodiscover is deferred to [issue #258](https://github.com/1fach/einfach-mail/issues/258).
 
 PR #47 merged read-only mail into `main` at `409d299ffbe11dfe41c8f5a428b8e49b9ac97edd` on 2026-11-06. PR #50 merged the Linux calendar agenda and its reviewed stack into `main` at `8c10dca99fd8cc0a38f76fb11aed5a174b0970f8` on 2026-11-06. All four required PR #50 checks passed on head `0ecfc019ff661282bc6bf5bfe5ce522bbb77c4e3`.
 
@@ -14,20 +14,26 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 
 [PR #246](https://github.com/1fach/einfach-mail/pull/246) implements issue #245's durable per-view recovery for calendar event writes. Local Linux checks pass, including SQLCipher reopen and partial-view recovery tests. Live Graph behavior remains unverified under issues #40 and #42.
 
+[PR #260](https://github.com/1fach/einfach-mail/pull/260) implements issue #257's Linux read-only EWS path. The Linux-local gate passed on 2026-11-09, including synthetic HTTPS NTLM and SOAP request-response tests. No UI or GitHub Actions run was used. Keep issue #257 open until a real Exchange Server or sanitized live-response recording verifies the connection and response behavior.
+
 ## Active risks
 
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep live sign-in, initial mail sync, read-state, flag, send, reply, move, and calendar verification open under their existing issues.
+- No Exchange Server test host or sanitized EWS response recording is available. Synthetic EWS tests can verify request construction and mapping, but cannot prove the NTLM channel-binding handshake or server-specific response behavior. Keep issue #257 open for that live verification.
+- SSPI 0.23.1 pins `rsa 0.10.0-rc.18`, flagged by RUSTSEC-2023-0071. The EWS provider uses only SSPI's NTLM path and has no RSA private-key operation; `.cargo/audit.toml` narrowly ignores this advisory. Issue #259 tracks removing the exception after SSPI adopts a fixed stable release.
 - Issue #6 has synthetic coverage for expanded occurrences and UTC-midnight all-day inputs. Graph's docs do not say how a non-UTC all-day event appears in a UTC-default `calendarView` response. Live recurrence, time-zone, and all-day behavior remain unverified until a Microsoft 365 tenant is available.
 - Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
 - Windows and macOS support remain deferred.
 - The production-path cache-key lifecycle test passed on 2026-11-08 against a temporary GNOME Keyring service. This does not establish behavior for every Secret Service implementation.
-- The 2026-11-08 local RustSec audit loaded 1,422 advisories and scanned 947 locked dependencies. It found eight transitive `INFO Unmaintained` crates, with seven in the active Linux graph and `rustls-pemfile` cross-target only. It found no vulnerable or yanked versions. GPUI Kit v0.9.0 remains the latest release. Upstream `main` is 70 commits ahead at [commit `dbb0b9a`](https://github.com/longbridge/gpui-kit/commit/dbb0b9a4895c4b45753ed8647cb0dbb58178bd96), but its manifest still pins `gpui-pre` 0.3.11 and its lockfile still contains all eight advisory crate names. Recheck when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates. See the [dependency review](dependency-review.md) for paths and replacement checks.
+- The 2026-11-09 local RustSec audit loaded 1,422 advisories and scanned 1,021 locked dependencies. It reported nine informational unmaintained-crate advisories and the one narrowly ignored `rsa` advisory tracked in issue #259. No other vulnerable or yanked versions were reported. GPUI Kit v0.9.0 remains the latest release. Upstream `main` is 70 commits ahead at [commit `dbb0b9a`](https://github.com/longbridge/gpui-kit/commit/dbb0b9a4895c4b45753ed8647cb0dbb58178bd96), but its manifest still pins `gpui-pre` 0.3.11 and its lockfile still contains all eight previously known advisory crate names. Recheck when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates. See the [dependency review](dependency-review.md) for paths and replacement checks.
 
 ## Next actions
 
-1. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
-2. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
-3. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
+1. Keep issue #257 open until a real Exchange Server or sanitized live-response recording verifies the EWS flow. Track Autodiscover separately in issue #258.
+2. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
+3. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
+4. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
+5. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
 
 ## Update rule
 

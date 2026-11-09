@@ -11,7 +11,10 @@ einfach-mail-domain = { path = "../domain" }
 getrandom.workspace = true
 hex.workspace = true
 rusqlite_migration.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 time.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
@@ -24,7 +27,6 @@ xdg.workspace = true
 
 [dev-dependencies]
 smol.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+            xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+  <s:Header/>
+  <s:Body>
+    <m:SyncFolderItemsResponse>
+      <m:ResponseMessages>
+        <m:SyncFolderItemsResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:SyncState>synthetic-page-cursor</m:SyncState>
+          <m:IncludesLastItemInRange>false</m:IncludesLastItemInRange>
+          <m:Changes>
+            <t:Create>
+              <t:Message>
+                <t:ItemId Id="synthetic-message-id" ChangeKey="synthetic-change-key"/>
+                <t:ItemClass>IPM.Note</t:ItemClass>
+                <t:Subject>Synthetic EWS fixture</t:Subject>
+                <t:DateTimeReceived>2026-11-01T12:34:56Z</t:DateTimeReceived>
+                <t:From>
+                  <t:Mailbox>
+                    <t:Name>Ada Example</t:Name>
+                    <t:EmailAddress>ada@example.test</t:EmailAddress>
+                  </t:Mailbox>
+                </t:From>
+                <t:Sender>
+                  <t:Mailbox>
+                    <t:Name>Grace Example</t:Name>
+                    <t:EmailAddress>grace@example.test</t:EmailAddress>
+                  </t:Mailbox>
+                </t:Sender>
+                <t:IsRead>false</t:IsRead>
+              </t:Message>
+            </t:Create>
+          </m:Changes>
+        </m:SyncFolderItemsResponseMessage>
+      </m:ResponseMessages>
+    </m:SyncFolderItemsResponse>
+  </s:Body>
+</s:Envelope>

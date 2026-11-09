@@ -1,0 +1,15 @@
+[package]
+name = "einfach-mail-account-router"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+einfach-mail-application = { path = "../../application" }
+einfach-mail-domain = { path = "../../domain" }
+einfach-mail-exchange-ews = { path = "../exchange-ews" }
+einfach-mail-microsoft-graph = { path = "../microsoft-graph" }
+tokio.workspace = true
+
+[lints]
+workspace = true

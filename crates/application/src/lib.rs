@@ -10,6 +10,7 @@ mod calendar;
 mod calendar_cache;
 mod calendar_provider;
 mod email_html;
+mod exchange_ews_settings;
 mod mail;
 mod mail_cache;
 mod mail_workflow;
@@ -17,8 +18,8 @@ mod operation_reservations;
 mod sync_budget;
 
 pub use account::{
-    AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    AccountWorkflow,
+    AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
+    AccountPermissionRequest, AccountProvider, AccountWorkflow, ExchangeEwsConnectionInput,
 };
 pub use account_cache::{AccountCache, AccountCacheOpenError, AccountCacheRemovalError};
 pub use account_recovery::CalendarWriteReadiness;
@@ -38,6 +39,9 @@ pub use calendar_provider::{
 pub use email_html::{
     ExternalMessageLink, MessageBodyForDisplay, SanitizedEmailHtml, allowed_external_message_url,
     prepare_message_body_for_display,
+};
+pub use exchange_ews_settings::{
+    ExchangeEwsAccountSettings, ExchangeEwsAccountSettingsStore, ExchangeEwsSettingsError,
 };
 pub use mail::{
     MailOperationError, MailProvider, MailSendProviderError, MessageDeltaPageResponse,

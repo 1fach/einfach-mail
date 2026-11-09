@@ -1,13 +1,23 @@
-//! Isolated Tokio execution for the GPUI application boundary.
+//! Tokio worker isolation for providers called from the GPUI application.
 
 use std::{future::Future, thread};
 
+use einfach_mail_application::{AccountOperationCancellation, AccountOperationError};
 use tokio::{runtime::Builder, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
-use einfach_mail_application::{AccountOperationCancellation, AccountOperationError};
-
-pub(super) async fn run<T, E, F, Fut>(operation: F) -> Result<T, E>
+/// Runs one provider operation on an isolated Tokio thread.
+///
+/// Dropping the caller future cancels the worker operation. Provider errors
+/// must be constructible from [`AccountOperationError`] so thread and runtime
+/// failures can be reported as service unavailability.
+///
+/// # Errors
+///
+/// Returns the provider's operation error, or a converted
+/// [`AccountOperationError::ServiceUnavailable`] when the worker cannot start
+/// or return its result.
+pub async fn run<T, E, F, Fut>(operation: F) -> Result<T, E>
 where
     T: Send + 'static,
     E: From<AccountOperationError> + Send + 'static,
@@ -17,7 +27,21 @@ where
     run_inner(operation, None).await
 }
 
-pub(super) async fn run_with_account_cancellation<T, F, Fut>(
+/// Runs one account sign-in operation with cancellation ordered against credential commit.
+///
+/// Dropping the caller future cancels the worker before credential commit. Once
+/// [`AccountOperationCancellation::begin_credential_commit`] succeeds, the
+/// operation is allowed to finish so saved credentials and in-memory account
+/// state cannot diverge.
+///
+/// # Errors
+///
+/// Returns the provider's operation error, or
+/// [`AccountOperationError::ServiceUnavailable`] when the worker cannot start
+/// or return its result. Returns
+/// [`AccountOperationError::SignInCancelled`] when cancellation wins before
+/// credential commit.
+pub async fn run_with_account_cancellation<T, F, Fut>(
     operation: F,
     account_cancellation: AccountOperationCancellation,
 ) -> Result<T, AccountOperationError>
@@ -40,7 +64,10 @@ where
     Fut: Future<Output = Result<T, E>> + Send + 'static,
 {
     let cancellation = CancellationToken::new();
-    let _cancel_when_dropped = CancelWhenDropped(cancellation.clone());
+    let _cancel_when_dropped = CancelWhenDropped {
+        worker: cancellation.clone(),
+        account: account_cancellation.clone(),
+    };
     let worker_cancellation = cancellation.clone();
     let (response_sender, response_receiver) = oneshot::channel();
 
@@ -69,32 +96,13 @@ where
     Fut: Future<Output = Result<T, E>> + Send + 'static,
 {
     thread::Builder::new()
-        .name("einfach-mail-account".to_owned())
+        .name("einfach-mail-provider".to_owned())
         .spawn(move || {
-            send_operation_result(
-                operation,
-                cancellation,
-                account_cancellation,
-                response_sender,
-            );
+            let result = run_operation(operation, cancellation, account_cancellation);
+            let _ = response_sender.send(result);
         })
         .map(|_| ())
         .map_err(|_| E::from(AccountOperationError::ServiceUnavailable))
-}
-
-fn send_operation_result<T, E, F, Fut>(
-    operation: F,
-    cancellation: CancellationToken,
-    account_cancellation: Option<AccountOperationCancellation>,
-    response_sender: oneshot::Sender<Result<T, E>>,
-) where
-    T: Send + 'static,
-    E: From<AccountOperationError> + Send + 'static,
-    F: FnOnce(CancellationToken) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, E>> + Send + 'static,
-{
-    let operation_result = run_operation(operation, cancellation, account_cancellation);
-    let _ = response_sender.send(operation_result);
 }
 
 fn run_operation<T, E, F, Fut>(
@@ -137,22 +145,28 @@ where
     })
 }
 
-struct CancelWhenDropped(CancellationToken);
+struct CancelWhenDropped {
+    worker: CancellationToken,
+    account: Option<AccountOperationCancellation>,
+}
 
 impl Drop for CancelWhenDropped {
     fn drop(&mut self) {
-        self.0.cancel();
+        if let Some(account) = &self.account {
+            account.cancel();
+        } else {
+            self.worker.cancel();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Duration};
-
-    use tokio::sync::oneshot;
-    use tokio_util::sync::CancellationToken;
+    use std::time::Duration;
 
     use einfach_mail_application::{AccountOperationCancellation, AccountOperationError};
+    use tokio::{sync::oneshot, task};
+    use tokio_util::sync::CancellationToken;
 
     use super::run_with_account_cancellation;
 
@@ -161,16 +175,16 @@ mod tests {
         let cancellation = AccountOperationCancellation::new();
         let operation_cancellation = cancellation.clone();
         let (commit_started_sender, commit_started_receiver) = oneshot::channel();
-        let (finish_commit_sender, finish_commit_receiver) = mpsc::channel();
+        let (finish_commit_sender, finish_commit_receiver) = oneshot::channel();
         let (commit_finished_sender, commit_finished_receiver) = oneshot::channel();
-        let task = tokio::spawn(run_with_account_cancellation(
+        let operation = run_with_account_cancellation(
             move |_worker_cancellation: CancellationToken| async move {
                 operation_cancellation.begin_credential_commit()?;
                 commit_started_sender
                     .send(())
                     .expect("test waits for credential commit start");
                 finish_commit_receiver
-                    .recv()
+                    .await
                     .expect("synthetic commit is released");
                 commit_finished_sender
                     .send(())
@@ -178,7 +192,8 @@ mod tests {
                 Ok::<(), AccountOperationError>(())
             },
             cancellation,
-        ));
+        );
+        let task = task::spawn(operation);
 
         commit_started_receiver
             .await

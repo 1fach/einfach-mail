@@ -11,7 +11,9 @@ mod identifiers;
 mod mail;
 mod mailbox;
 
-pub use account::{AccountProfile, MissingAccountLabel};
+pub use account::{
+    AccountCapabilities, AccountProfile, CalendarAccess, MailAccess, MissingAccountLabel,
+};
 pub use calendar::{
     CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
     CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,

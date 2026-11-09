@@ -1,6 +1,7 @@
 //! Account connection workflows and their provider port.
 
 use std::{
+    fmt,
     future::Future,
     sync::{
         Arc, Mutex,
@@ -9,6 +10,7 @@ use std::{
 };
 
 use einfach_mail_domain::{AccountId, AccountProfile};
+use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +24,12 @@ pub enum AccountOperationError {
     /// The authorization server did not grant the requested access.
     #[error("access was not granted")]
     AccessDenied,
+    /// The connected account does not support the requested operation.
+    #[error("this account does not support that operation")]
+    UnsupportedOperation,
+    /// The supplied Exchange endpoint or sign-in identity is invalid.
+    #[error("Exchange server details are invalid")]
+    InvalidConnectionDetails,
     /// Microsoft rejected the access token used for a Graph profile request.
     #[error("the access token was rejected")]
     AccessTokenRejected,
@@ -31,8 +39,8 @@ pub enum AccountOperationError {
     /// The Linux credential service could not read, store, or remove a token.
     #[error("the Linux credential service is unavailable")]
     CredentialStoreUnavailable,
-    /// Microsoft Graph returned an incomplete account profile.
-    #[error("Microsoft returned an incomplete account profile")]
+    /// The provider returned an incomplete account profile.
+    #[error("the account profile is incomplete")]
     ProfileUnavailable,
     /// A network or browser operation failed.
     #[error("the account service is unavailable")]
@@ -58,6 +66,85 @@ pub enum AccountOperationError {
     /// The workflow could not read or update its local account state.
     #[error("account workflow state is unavailable")]
     AccountStateUnavailable,
+}
+
+/// Selects the provider and sign-in details for a new account.
+pub enum AccountConnectionRequest {
+    /// Connects a Microsoft 365 account through delegated Microsoft Graph access.
+    Microsoft365,
+    /// Connects an Exchange Server account through EWS and NTLMv2.
+    ExchangeEws(ExchangeEwsConnectionInput),
+}
+
+impl fmt::Debug for AccountConnectionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Microsoft365 => formatter.write_str("Microsoft365"),
+            Self::ExchangeEws(_) => formatter.write_str("ExchangeEws(<redacted>)"),
+        }
+    }
+}
+
+/// User-supplied values for an Exchange Server EWS connection.
+pub struct ExchangeEwsConnectionInput {
+    endpoint: String,
+    mailbox_address: String,
+    username: String,
+    password: SecretString,
+}
+
+impl ExchangeEwsConnectionInput {
+    /// Creates EWS connection input; the EWS provider validates the endpoint and identity.
+    #[must_use]
+    pub fn new(
+        endpoint: String,
+        mailbox_address: String,
+        username: String,
+        password: String,
+    ) -> Self {
+        Self {
+            endpoint,
+            mailbox_address,
+            username,
+            password: SecretString::from(password),
+        }
+    }
+
+    /// Returns the user-entered EWS endpoint for provider-side validation.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Returns the user-entered mailbox address for provider-side validation.
+    #[must_use]
+    pub fn mailbox_address(&self) -> &str {
+        &self.mailbox_address
+    }
+
+    /// Returns the user-entered NTLM identity for provider-side validation.
+    #[must_use]
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// Exposes the password to the EWS provider for authentication and storage.
+    #[must_use]
+    pub fn expose_password(&self) -> &str {
+        self.password.expose_secret()
+    }
+}
+
+impl fmt::Debug for ExchangeEwsConnectionInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExchangeEwsConnectionInput")
+            .field("endpoint", &"<redacted>")
+            .field("mailbox_address", &"<redacted>")
+            .field("username", &"<redacted>")
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The delegated permissions requested during same-account authorization.
@@ -194,7 +281,7 @@ pub trait AccountProvider: Send + Sync {
         &self,
     ) -> impl Future<Output = Result<Option<AccountId>, AccountOperationError>> + Send + '_;
 
-    /// Connects an account through the provider's delegated sign-in flow.
+    /// Connects the selected account through its provider's sign-in flow.
     ///
     /// Implementations must call [`AccountOperationCancellation::begin_credential_commit`]
     /// immediately before storing the refresh credential.
@@ -212,6 +299,31 @@ pub trait AccountProvider: Send + Sync {
         &self,
         cancellation: AccountOperationCancellation,
     ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_;
+
+    /// Connects the selected account through its provider's sign-in flow.
+    ///
+    /// Providers that do not support the selected connection request return
+    /// [`AccountOperationError::UnsupportedOperation`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountOperationError::UnsupportedOperation`] when the
+    /// provider does not support this request, or another provider error when
+    /// the connection cannot be established.
+    fn connect_account_with_request(
+        &self,
+        request: AccountConnectionRequest,
+        cancellation: AccountOperationCancellation,
+    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+        async move {
+            match request {
+                AccountConnectionRequest::Microsoft365 => self.connect_account(cancellation).await,
+                AccountConnectionRequest::ExchangeEws(_) => {
+                    Err(AccountOperationError::UnsupportedOperation)
+                }
+            }
+        }
+    }
 
     /// Requests the selected delegated permissions again for the active account.
     ///
@@ -325,8 +437,26 @@ impl<P: AccountProvider> AccountWorkflow<P> {
             .await
     }
 
-    /// Connects an account and keeps the operation result available after a
-    /// cancellation request.
+    /// Connects an account from user-supplied provider details.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountOperationError::AccountAlreadyConnected`] when an
+    /// account is active, [`AccountOperationError::UnsupportedOperation`]
+    /// when the selected provider does not support this request, or another
+    /// provider error when the connection cannot be established.
+    pub async fn connect_account_with_request(
+        &self,
+        request: AccountConnectionRequest,
+    ) -> Result<AccountProfile, AccountOperationError> {
+        self.connect_account_with_request_and_cancellation(
+            request,
+            AccountOperationCancellation::new(),
+        )
+        .await
+    }
+
+    /// Connects an account and keeps the operation result available after a cancellation request.
     ///
     /// The provider orders cancellation against its credential commit using
     /// `cancellation`.
@@ -340,8 +470,30 @@ impl<P: AccountProvider> AccountWorkflow<P> {
         &self,
         cancellation: AccountOperationCancellation,
     ) -> Result<AccountProfile, AccountOperationError> {
+        self.connect_account_with_request_and_cancellation(
+            AccountConnectionRequest::Microsoft365,
+            cancellation,
+        )
+        .await
+    }
+
+    /// Connects an account and keeps the result available after cancellation is requested.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::connect_account_with_request`]. If
+    /// cancellation wins before credential commit, returns
+    /// [`AccountOperationError::SignInCancelled`].
+    pub async fn connect_account_with_request_and_cancellation(
+        &self,
+        request: AccountConnectionRequest,
+        cancellation: AccountOperationCancellation,
+    ) -> Result<AccountProfile, AccountOperationError> {
         let operation = self.begin(AccountOperation::Connecting)?;
-        let connect_result = self.provider.connect_account(cancellation).await;
+        let connect_result = self
+            .provider
+            .connect_account_with_request(request, cancellation)
+            .await;
         if let Ok(account) = &connect_result {
             operation.complete(Some(account.clone()))?;
         }
@@ -582,8 +734,31 @@ mod tests {
     use einfach_mail_domain::{AccountId, AccountProfile};
 
     use super::{
-        AccountOperationCancellation, AccountOperationError, AccountProvider, AccountWorkflow,
+        AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
+        AccountProvider, AccountWorkflow, ExchangeEwsConnectionInput,
     };
+
+    #[test]
+    fn ews_connection_debug_redacts_endpoint_identity_and_password() {
+        let input = ExchangeEwsConnectionInput::new(
+            "https://exchange.example.test/EWS/Exchange.asmx".to_owned(),
+            "mailbox-marker@example.test".to_owned(),
+            "DOMAIN\\username-marker".to_owned(),
+            "password-marker".to_owned(),
+        );
+        let input_debug = format!("{input:?}");
+        let request_debug = format!("{:?}", AccountConnectionRequest::ExchangeEws(input));
+
+        for marker in [
+            "exchange.example.test",
+            "mailbox-marker",
+            "username-marker",
+            "password-marker",
+        ] {
+            assert!(!input_debug.contains(marker));
+            assert!(!request_debug.contains(marker));
+        }
+    }
 
     #[tokio::test]
     async fn cancellation_before_credential_commit_rejects_the_commit() {

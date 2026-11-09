@@ -952,6 +952,9 @@ fn send_error_text(error: MailSendProviderError) -> &'static str {
         MailSendProviderError::PermissionRequired => {
             "Microsoft denied send permission. Review the delegated Mail.Send request to continue."
         }
+        MailSendProviderError::UnsupportedOperation => {
+            "This Exchange account is read-only and cannot send mail."
+        }
         MailSendProviderError::Rejected => {
             "Microsoft explicitly rejected this message. Check the recipient and subject before trying again."
         }

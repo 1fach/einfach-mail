@@ -32,6 +32,9 @@ pub enum MailOperationError {
     /// The provider denied access to the requested mail data.
     #[error("mail access was denied")]
     AccessDenied,
+    /// The connected account does not support the requested mail operation.
+    #[error("this account does not support that mail operation")]
+    UnsupportedOperation,
     /// The service asked the application to wait before retrying.
     #[error("the mail service is throttling requests")]
     RateLimited {
@@ -70,6 +73,9 @@ pub enum MailSendProviderError {
     /// Microsoft denied delegated permission to send mail.
     #[error("Microsoft denied permission to send mail")]
     PermissionRequired,
+    /// The connected account does not support sending mail.
+    #[error("this account does not support sending mail")]
+    UnsupportedOperation,
     /// Microsoft explicitly rejected the message request.
     #[error("Microsoft rejected the message")]
     Rejected,
@@ -91,12 +97,14 @@ impl From<AccountOperationError> for MailSendProviderError {
     fn from(error: AccountOperationError) -> Self {
         match error {
             AccountOperationError::AccessDenied => Self::PermissionRequired,
+            AccountOperationError::UnsupportedOperation => Self::UnsupportedOperation,
             AccountOperationError::AccountMismatch => Self::AccountMismatch,
             AccountOperationError::AccountNotConnected
             | AccountOperationError::SavedAccountIdentityUnavailable
             | AccountOperationError::SignInExpired => Self::SignInRequired,
             AccountOperationError::AccessTokenRejected => Self::SignInRequired,
             AccountOperationError::CredentialStoreUnavailable
+            | AccountOperationError::InvalidConnectionDetails
             | AccountOperationError::ProfileUnavailable
             | AccountOperationError::ServiceUnavailable
             | AccountOperationError::SignInFailed
@@ -321,6 +329,7 @@ impl From<AccountOperationError> for MailOperationError {
                 Self::SignInRequired
             }
             AccountOperationError::AccessDenied => Self::AccessDenied,
+            AccountOperationError::UnsupportedOperation => Self::UnsupportedOperation,
             AccountOperationError::CredentialStoreUnavailable => Self::CredentialStoreUnavailable,
             _ => Self::ServiceUnavailable,
         }

@@ -57,3 +57,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0050](0050-name-gpui-date-pickers-through-component-patch.md) | Name styled GPUI DatePickers through a local API patch | Accepted |
 | [0051](0051-defer-calendar-id.md) | Defer a calendar identifier until calendar selection exists | Accepted |
 | [0052](0052-persist-calendar-event-write-recovery.md) | Persist calendar event write recovery | Accepted |
+| [0053](0053-linux-read-only-exchange-ews.md) | Add Linux read-only Exchange Server mail through EWS | Accepted |
