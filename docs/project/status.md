@@ -4,7 +4,7 @@ Last updated: 2026-11-09
 
 ## Current milestone
 
-M7 Exchange Server EWS support is in progress under [issue #257](https://github.com/1fach/einfach-mail/issues/257). The first implementation targets Linux read-only mail and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. The Linux Autodiscover implementation is under [PR #261](https://github.com/1fach/einfach-mail/pull/261) and tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258).
+M7 Exchange Server EWS support is in progress under [issue #257](https://github.com/1fach/einfach-mail/issues/257). The first implementation targets Linux read-only mail and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. Linux Autodiscover merged into `main` in [PR #261](https://github.com/1fach/einfach-mail/pull/261) and remains tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258) for live verification.
 
 PR #47 merged read-only mail into `main` at `409d299ffbe11dfe41c8f5a428b8e49b9ac97edd` on 2026-11-06. PR #50 merged the Linux calendar agenda and its reviewed stack into `main` at `8c10dca99fd8cc0a38f76fb11aed5a174b0970f8` on 2026-11-06. All four required PR #50 checks passed on head `0ecfc019ff661282bc6bf5bfe5ce522bbb77c4e3`.
 
@@ -16,7 +16,7 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 
 [PR #260](https://github.com/1fach/einfach-mail/pull/260) implements issue #257's Linux read-only EWS path. The Linux-local gate passed on 2026-11-09, including synthetic HTTPS NTLM and SOAP request-response tests. No UI or GitHub Actions run was used. Keep issue #257 open until a real Exchange Server or sanitized live-response recording verifies the connection and response behavior.
 
-Issue #258 tracks Linux EWS Autodiscover. Its implementation and synthetic verification are complete on PR #261, with the accepted request and credential boundary in ADR 0054. The full Linux local gate passed on 2026-11-09, including Rust 1.95, formatting, Clippy, rustdoc, dependency policy, audit, and workspace tests. The audit uses a narrow temporary exception for the pre-existing SQLCipher advisory described below; issue #262 tracks updating and verifying the bundled SQLite source so the exception can be removed. Ignored Secret Service session tests remain unrun. No Exchange Server is available, so keep #258 open for live server verification.
+Issue #258 tracks Linux EWS Autodiscover. Its implementation and synthetic verification merged into `main` at `a8226c83770e70d1bbd94767b1a5cb6f15fb7c23` in PR #261, with the accepted request and credential boundary in ADR 0054. The full Linux local gate passed on 2026-11-09, including Rust 1.95, formatting, Clippy, rustdoc, dependency policy, audit, and workspace tests. The audit uses a narrow temporary exception for the pre-existing SQLCipher advisory described below; issue #262 tracks updating and verifying the bundled SQLite source so the exception can be removed. Ignored Secret Service session tests remain unrun. No Exchange Server is available, so keep #258 open for live server verification.
 
 ## Active risks
 
