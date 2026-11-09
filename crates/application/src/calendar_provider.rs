@@ -86,6 +86,16 @@ pub enum CalendarDeltaRequest {
     Continue(CalendarDeltaLink),
 }
 
+/// Selects the synchronization protocol used by one calendar provider.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalendarSyncStrategy {
+    /// Synchronizes changes with resumable delta pages.
+    Delta,
+    /// Replaces the view with one complete provider snapshot.
+    Snapshot,
+}
+
 /// One provider delta page and the number of response-body bytes received.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CalendarDeltaPageResponse {
@@ -152,6 +162,16 @@ pub enum CalendarDeltaResponse {
 
 /// Calendar operations required by the application.
 pub trait CalendarProvider: Send + Sync {
+    /// Returns the synchronization protocol for the active account session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-safe provider error when an account router cannot
+    /// determine the selected provider.
+    fn calendar_sync_strategy(
+        &self,
+    ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_;
+
     /// Loads one delta page or expired-cursor reset for a primary-calendar view.
     ///
     /// The provider rejects a view scoped to another account. Continuation

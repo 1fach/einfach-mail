@@ -17,6 +17,7 @@ use crate::{
     calendar_cache::{CalendarCache, CalendarCacheError, CalendarSyncState},
     calendar_provider::{
         CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
+        CalendarSyncStrategy,
     },
     operation_reservations::{
         AccountReservationError, ActiveOperations, reserve_account, reserve_calendar_view,
@@ -29,7 +30,7 @@ use crate::{
 /// A user-safe category for a calendar workflow failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum CalendarWorkflowError {
-    /// The provider could not load a delta page.
+    /// The provider could not load a calendar synchronization response.
     #[error("the calendar service is unavailable")]
     Provider(#[from] CalendarOperationError),
     /// The encrypted local cache could not read or commit events.
@@ -79,17 +80,17 @@ impl From<AccountReservationError> for CalendarWorkflowError {
     }
 }
 
-/// A count of pages committed by one calendar synchronization request.
+/// A count of provider responses committed by one calendar synchronization request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CalendarSyncReport {
-    page_count: usize,
+    response_count: usize,
 }
 
 impl CalendarSyncReport {
-    /// Returns the number of delta pages committed.
+    /// Returns the number of provider responses committed to the cache.
     #[must_use]
-    pub fn page_count(self) -> usize {
-        self.page_count
+    pub fn response_count(self) -> usize {
+        self.response_count
     }
 }
 
@@ -328,16 +329,16 @@ where
         })
     }
 
-    /// Synchronizes all pages for one fixed primary-calendar view.
+    /// Synchronizes one fixed primary-calendar view using the provider's strategy.
     ///
-    /// Each page and its continuation link commit together. An interrupted
-    /// replacement scan resumes from its saved link while the prior snapshot
-    /// remains visible.
+    /// Delta providers commit each page and its continuation link together. A
+    /// snapshot provider replaces the view only after it returns a complete
+    /// response and the cache commits it.
     ///
     /// # Errors
     ///
     /// Returns [`CalendarWorkflowError::AccountMismatch`] for a view from another account, a
-    /// provider or cache error when a page cannot be loaded or
+    /// provider or cache error when a sync response cannot be loaded or
     /// committed, [`CalendarWorkflowError::RepeatedCursor`] for a looped link,
     /// a page, response, or reset limit error while preserving resumable state,
     /// [`CalendarWorkflowError::OperationInProgress`] when another operation
@@ -350,8 +351,8 @@ where
         self.ensure_account(view.account_id())?;
         let _reservation =
             reserve_calendar_view(&self.reservations, view).map_err(CalendarWorkflowError::from)?;
-        let state = self.cache.ensure_view(view).await?;
-        let report = self.sync_round(view, state).await?;
+        let strategy = self.provider.calendar_sync_strategy().await?;
+        let report = self.sync_by_strategy(view, strategy).await?;
         self.recovery
             .mark_calendar_view_synchronized(view)
             .map_err(|_| CalendarWorkflowError::StateUnavailable)?;
@@ -625,6 +626,35 @@ where
         }
     }
 
+    async fn sync_by_strategy(
+        &self,
+        view: &CalendarViewReference,
+        strategy: CalendarSyncStrategy,
+    ) -> Result<CalendarSyncReport, CalendarWorkflowError> {
+        match strategy {
+            CalendarSyncStrategy::Delta => {
+                let state = self.cache.ensure_view(view).await?;
+                self.sync_round(view, state).await
+            }
+            CalendarSyncStrategy::Snapshot => self.sync_snapshot(view).await,
+        }
+    }
+
+    async fn sync_snapshot(
+        &self,
+        view: &CalendarViewReference,
+    ) -> Result<CalendarSyncReport, CalendarWorkflowError> {
+        let response = self.provider.calendar_view_snapshot(view).await?;
+        let (events, response_bytes) = response.into_parts();
+        if response_bytes_after(0, response_bytes).is_none() {
+            return Err(CalendarWorkflowError::ResponseLimitExceeded);
+        }
+        self.cache
+            .replace_snapshot(view, events, SystemTime::now())
+            .await?;
+        Ok(CalendarSyncReport { response_count: 1 })
+    }
+
     async fn sync_round(
         &self,
         view: &CalendarViewReference,
@@ -634,7 +664,7 @@ where
         loop {
             if self.sync_next_page(view, &mut round).await? {
                 return Ok(CalendarSyncReport {
-                    page_count: round.page_count,
+                    response_count: round.page_count,
                 });
             }
             if round.reached_page_limit() {

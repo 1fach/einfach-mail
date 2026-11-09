@@ -35,7 +35,7 @@ pub use calendar::{
 pub use calendar_cache::{CalendarCache, CalendarCacheError, CalendarSyncMode, CalendarSyncState};
 pub use calendar_provider::{
     CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError,
-    CalendarProvider, CalendarViewSnapshotResponse,
+    CalendarProvider, CalendarSyncStrategy, CalendarViewSnapshotResponse,
 };
 pub use email_html::{
     ExternalMessageLink, MessageBodyForDisplay, SanitizedEmailHtml, allowed_external_message_url,

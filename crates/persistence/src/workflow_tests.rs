@@ -12,11 +12,11 @@ use einfach_mail_application::{
     AccountCache, AccountCacheFactory, AccountCacheOpenError, AccountCacheRemovalError,
     AccountSession, AccountSessionFactory, AccountSessionWorkflowFactory,
     CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError,
-    CalendarProvider, CalendarWorkflowError, MailCache, MailCacheError, MailOperationError,
-    MailProvider, MailSendOutcome, MailSendProviderError, MailSendResolutionError,
-    MailSendWorkflowError, MailSyncProgress, MailWorkflow, MailWorkflowError,
-    MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
-    WellKnownMailFolder,
+    CalendarProvider, CalendarSyncStrategy, CalendarWorkflowError, MailCache, MailCacheError,
+    MailOperationError, MailProvider, MailSendOutcome, MailSendProviderError,
+    MailSendResolutionError, MailSendWorkflowError, MailSyncProgress, MailWorkflow,
+    MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
+    MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation,
@@ -610,6 +610,13 @@ impl MailProvider for FixtureProvider {
 }
 
 impl CalendarProvider for FixtureProvider {
+    fn calendar_sync_strategy(
+        &self,
+    ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_
+    {
+        ready(Ok(CalendarSyncStrategy::Delta))
+    }
+
     fn editable_event(
         &self,
         _: &CalendarOccurrence,

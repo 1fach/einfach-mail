@@ -11,8 +11,8 @@ use std::{
 use einfach_mail_application::{
     CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
     CalendarDeltaResponse, CalendarOperationError, CalendarProvider, CalendarSession,
-    CalendarSyncMode, CalendarSyncState, CalendarWorkflow, CalendarWorkflowError,
-    CalendarWriteReadiness,
+    CalendarSyncMode, CalendarSyncState, CalendarSyncStrategy, CalendarWorkflow,
+    CalendarWorkflowError, CalendarWriteReadiness,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
@@ -127,6 +127,13 @@ impl TestProvider {
 }
 
 impl CalendarProvider for TestProvider {
+    fn calendar_sync_strategy(
+        &self,
+    ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_
+    {
+        ready(Ok(CalendarSyncStrategy::Delta))
+    }
+
     fn calendar_delta_page(
         &self,
         view: &CalendarViewReference,

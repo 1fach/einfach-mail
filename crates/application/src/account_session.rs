@@ -217,7 +217,7 @@ pub trait CalendarSession: Send + Sync {
         view: &'a CalendarViewReference,
     ) -> AccountSessionFuture<'a, Result<CalendarSnapshot, CalendarWorkflowError>>;
 
-    /// Synchronizes all delta pages for a fixed calendar view.
+    /// Synchronizes a fixed calendar view using the active provider's strategy.
     ///
     /// # Errors
     ///

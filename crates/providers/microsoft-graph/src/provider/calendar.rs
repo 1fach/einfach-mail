@@ -1,4 +1,7 @@
-use std::{future::Future, sync::Arc};
+use std::{
+    future::{Future, ready},
+    sync::Arc,
+};
 
 use huskarl::token::AccessToken;
 use tokio_util::sync::CancellationToken;
@@ -6,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::GraphError;
 use einfach_mail_application::{
     CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
+    CalendarSyncStrategy,
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
@@ -32,6 +36,13 @@ impl From<AccessTokenError> for CalendarOperationError {
 }
 
 impl CalendarProvider for MicrosoftGraphProvider {
+    fn calendar_sync_strategy(
+        &self,
+    ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_
+    {
+        ready(Ok(CalendarSyncStrategy::Delta))
+    }
+
     fn calendar_delta_page(
         &self,
         view: &CalendarViewReference,

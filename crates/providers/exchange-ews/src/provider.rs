@@ -3,7 +3,7 @@ use std::{collections::HashSet, future::Future, sync::Arc, time::SystemTime};
 use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
     AccountPermissionRequest, AccountProvider, CalendarDeltaRequest, CalendarDeltaResponse,
-    CalendarOperationError, CalendarProvider, CalendarViewSnapshotResponse,
+    CalendarOperationError, CalendarProvider, CalendarSyncStrategy, CalendarViewSnapshotResponse,
     ExchangeEwsAccountSettings, ExchangeEwsAccountSettingsStore, ExchangeEwsConnectionInput,
     ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult, MailOperationError, MailProvider,
     MailSendProviderError, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
@@ -418,6 +418,13 @@ impl<S> CalendarProvider for ExchangeEwsProvider<S>
 where
     S: ExchangeEwsAccountSettingsStore + 'static,
 {
+    fn calendar_sync_strategy(
+        &self,
+    ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_
+    {
+        std::future::ready(Ok(CalendarSyncStrategy::Snapshot))
+    }
+
     fn calendar_delta_page(
         &self,
         _view: &einfach_mail_domain::CalendarViewReference,

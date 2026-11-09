@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    future::Future,
+    future::{Future, ready},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -15,8 +15,9 @@ use einfach_mail_domain::{
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 use crate::{
-    CalendarDeltaPageResponse, CalendarSyncMode, account_recovery::AccountWorkflowRecovery,
-    operation_reservations::ActiveOperations,
+    CalendarDeltaPageResponse, CalendarSyncMode, CalendarSyncStrategy,
+    CalendarViewSnapshotResponse, account_recovery::AccountWorkflowRecovery,
+    operation_reservations::ActiveOperations, sync_budget::MAX_SYNC_RESPONSE_BYTES,
 };
 
 use super::{
@@ -34,7 +35,10 @@ struct CalendarWriteGate {
 #[derive(Clone, Default)]
 struct FixtureProvider {
     pages: Arc<Mutex<VecDeque<Result<CalendarDeltaResponse, CalendarOperationError>>>>,
+    sync_strategy: Arc<Mutex<Option<CalendarSyncStrategy>>>,
+    snapshots: Arc<Mutex<VecDeque<Result<CalendarViewSnapshotResponse, CalendarOperationError>>>>,
     delta_gate: Arc<Mutex<Option<CalendarWriteGate>>>,
+    snapshot_gate: Arc<Mutex<Option<CalendarWriteGate>>>,
     requests: Arc<Mutex<Vec<CalendarDeltaRequest>>>,
     creations: Arc<Mutex<Vec<CalendarEventCreationId>>>,
     creation_error: Arc<Mutex<Option<CalendarOperationError>>>,
@@ -53,7 +57,10 @@ impl FixtureProvider {
     ) -> Self {
         Self {
             pages: Arc::new(Mutex::new(pages.into_iter().collect())),
+            sync_strategy: Arc::new(Mutex::new(None)),
+            snapshots: Arc::new(Mutex::new(VecDeque::new())),
             delta_gate: Arc::new(Mutex::new(None)),
+            snapshot_gate: Arc::new(Mutex::new(None)),
             requests: Arc::new(Mutex::new(Vec::new())),
             creations: Arc::new(Mutex::new(Vec::new())),
             creation_error: Arc::new(Mutex::new(None)),
@@ -65,6 +72,25 @@ impl FixtureProvider {
             deletion_gate: Arc::new(Mutex::new(None)),
             deletion_error: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn with_snapshots(
+        snapshots: impl IntoIterator<
+            Item = Result<CalendarViewSnapshotResponse, CalendarOperationError>,
+        >,
+    ) -> Self {
+        let provider = Self::default();
+        *provider
+            .sync_strategy
+            .lock()
+            .expect("synthetic strategy mutex is not poisoned") =
+            Some(CalendarSyncStrategy::Snapshot);
+        provider
+            .snapshots
+            .lock()
+            .expect("synthetic snapshot queue mutex is not poisoned")
+            .extend(snapshots);
+        provider
     }
 
     fn push_page(&self, page: Result<CalendarDeltaResponse, CalendarOperationError>) {
@@ -86,6 +112,24 @@ impl FixtureProvider {
             .delta_gate
             .lock()
             .expect("synthetic delta gate mutex is not poisoned") = Some(CalendarWriteGate {
+            started: started_tx,
+            release: release_rx,
+        });
+        (started_rx, release_tx)
+    }
+
+    fn hold_next_snapshot(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self
+            .snapshot_gate
+            .lock()
+            .expect("synthetic snapshot gate mutex is not poisoned") = Some(CalendarWriteGate {
             started: started_tx,
             release: release_rx,
         });
@@ -158,6 +202,17 @@ impl FixtureProvider {
 }
 
 impl CalendarProvider for FixtureProvider {
+    fn calendar_sync_strategy(
+        &self,
+    ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_
+    {
+        let strategy = *self
+            .sync_strategy
+            .lock()
+            .expect("synthetic strategy mutex is not poisoned");
+        ready(Ok(strategy.unwrap_or(CalendarSyncStrategy::Delta)))
+    }
+
     fn calendar_delta_page(
         &self,
         _view: &CalendarViewReference,
@@ -187,6 +242,34 @@ impl CalendarProvider for FixtureProvider {
             pages
                 .lock()
                 .expect("synthetic page queue mutex is not poisoned")
+                .pop_front()
+                .unwrap_or(Err(CalendarOperationError::ServiceUnavailable))
+        }
+    }
+
+    fn calendar_view_snapshot(
+        &self,
+        _: &CalendarViewReference,
+    ) -> impl Future<Output = Result<CalendarViewSnapshotResponse, CalendarOperationError>> + Send + '_
+    {
+        let gate = self
+            .snapshot_gate
+            .lock()
+            .expect("synthetic snapshot gate mutex is not poisoned")
+            .take();
+        let snapshots = Arc::clone(&self.snapshots);
+        async move {
+            if let Some(gate) = gate {
+                gate.started
+                    .send(())
+                    .expect("the calendar snapshot test is waiting at its provider gate");
+                gate.release
+                    .await
+                    .expect("the calendar snapshot test releases its provider gate");
+            }
+            snapshots
+                .lock()
+                .expect("synthetic snapshot queue mutex is not poisoned")
                 .pop_front()
                 .unwrap_or(Err(CalendarOperationError::ServiceUnavailable))
         }
@@ -329,6 +412,7 @@ struct FixtureCache {
     rejection_cleanup_error: Arc<Mutex<Option<CalendarCacheError>>>,
     update_commit_error: Arc<Mutex<Option<CalendarCacheError>>>,
     deletion_commit_error: Arc<Mutex<Option<CalendarCacheError>>>,
+    snapshot_commit_error: Arc<Mutex<Option<CalendarCacheError>>>,
     write_recovery_cleanup_error: Arc<Mutex<Option<CalendarCacheError>>>,
 }
 
@@ -364,6 +448,13 @@ impl FixtureCache {
     fn fail_deletion_commit(&self, error: CalendarCacheError) {
         *self
             .deletion_commit_error
+            .lock()
+            .expect("synthetic cache error mutex is not poisoned") = Some(error);
+    }
+
+    fn fail_snapshot_commit(&self, error: CalendarCacheError) {
+        *self
+            .snapshot_commit_error
             .lock()
             .expect("synthetic cache error mutex is not poisoned") = Some(error);
     }
@@ -573,6 +664,7 @@ impl CalendarCache for FixtureCache {
         completed_at: SystemTime,
     ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_ {
         let views = Arc::clone(&self.views);
+        let snapshot_commit_error = Arc::clone(&self.snapshot_commit_error);
         let view = view.clone();
         async move {
             let mut event_ids = HashSet::with_capacity(events.len());
@@ -586,6 +678,14 @@ impl CalendarCache for FixtureCache {
                 {
                     return Err(CalendarCacheError::InvalidData);
                 }
+            }
+
+            if let Some(error) = snapshot_commit_error
+                .lock()
+                .expect("synthetic cache error mutex is not poisoned")
+                .take()
+            {
+                return Err(error);
             }
 
             let mut views = views.lock().expect("synthetic cache mutex is not poisoned");
@@ -1222,7 +1322,7 @@ fn sync_commits_pages_and_preserves_omitted_fields() {
             CalendarWorkflow::new(workflow_account_id(), provider, FixtureCache::default());
 
         let report = workflow.sync_view(&view).await.expect("both pages commit");
-        assert_eq!(report.page_count(), 2);
+        assert_eq!(report.response_count(), 2);
         assert_eq!(
             *request_log
                 .lock()
@@ -1250,6 +1350,188 @@ fn sync_commits_pages_and_preserves_omitted_fields() {
                 if *start == Date::from_calendar_date(2030, Month::January, 9).expect("valid date")
                     && *end_exclusive == Date::from_calendar_date(2030, Month::January, 10).expect("valid date")
         ));
+    });
+}
+
+#[test]
+fn snapshot_strategy_commits_one_response_without_requesting_delta_pages() {
+    smol::block_on(async {
+        let view = view();
+        let occurrence = all_day_patch(Some("Synthetic snapshot"), None)
+            .into_new(view.clone(), replacement_event_id())
+            .expect("synthetic snapshot event is complete");
+        let provider = FixtureProvider::with_snapshots([Ok(CalendarViewSnapshotResponse::new(
+            vec![occurrence.clone()],
+            256,
+        ))]);
+        let requests = Arc::clone(&provider.requests);
+        let workflow =
+            CalendarWorkflow::new(workflow_account_id(), provider, FixtureCache::default());
+
+        let report = workflow
+            .sync_view(&view)
+            .await
+            .expect("the complete provider snapshot commits");
+        assert_eq!(report.response_count(), 1);
+        assert!(
+            requests
+                .lock()
+                .expect("synthetic request log mutex is not poisoned")
+                .is_empty()
+        );
+
+        let cached = workflow
+            .load_cached_view(&view)
+            .await
+            .expect("the committed snapshot is readable");
+        assert!(cached.sync_state().is_snapshot());
+        assert!(cached.sync_state().delta_link().is_none());
+        assert!(cached.sync_state().last_synchronized_at().is_some());
+        assert_eq!(cached.events(), &[occurrence]);
+        assert_eq!(cached.write_readiness(), CalendarWriteReadiness::Ready);
+    });
+}
+
+#[test]
+fn snapshot_sync_holds_the_view_reservation_until_cache_commit() {
+    smol::block_on(async {
+        let view = view();
+        let provider =
+            FixtureProvider::with_snapshots([Ok(CalendarViewSnapshotResponse::new(Vec::new(), 0))]);
+        let (started, release) = provider.hold_next_snapshot();
+        let workflow = std::sync::Arc::new(CalendarWorkflow::new(
+            workflow_account_id(),
+            provider,
+            FixtureCache::default(),
+        ));
+        let syncing_workflow = std::sync::Arc::clone(&workflow);
+        let syncing_view = view.clone();
+        let sync = smol::spawn(async move { syncing_workflow.sync_view(&syncing_view).await });
+        started
+            .await
+            .expect("the synthetic snapshot request has started");
+
+        assert_eq!(
+            workflow.sync_view(&view).await,
+            Err(CalendarWorkflowError::OperationInProgress)
+        );
+
+        release
+            .send(())
+            .expect("the synthetic snapshot request is waiting for release");
+        assert_eq!(
+            sync.await
+                .expect("the snapshot sync task completes")
+                .response_count(),
+            1
+        );
+    });
+}
+
+#[test]
+fn snapshot_provider_and_budget_failures_preserve_cached_view_and_release_reservation() {
+    smol::block_on(async {
+        let view = view();
+        let prior_event = all_day_patch(Some("Prior snapshot"), None)
+            .into_new(view.clone(), event_id())
+            .expect("synthetic prior snapshot event is complete");
+        let replacement_event = all_day_patch(Some("Replacement snapshot"), None)
+            .into_new(view.clone(), replacement_event_id())
+            .expect("synthetic replacement snapshot event is complete");
+        let completed_at = UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let cache = FixtureCache::default();
+        cache
+            .replace_snapshot(&view, vec![prior_event.clone()], completed_at)
+            .await
+            .expect("prior snapshot is cached");
+        let provider = FixtureProvider::with_snapshots([
+            Err(CalendarOperationError::ServiceUnavailable),
+            Ok(CalendarViewSnapshotResponse::new(
+                vec![replacement_event],
+                MAX_SYNC_RESPONSE_BYTES + 1,
+            )),
+        ]);
+        let requests = Arc::clone(&provider.requests);
+        let workflow = CalendarWorkflow::new(workflow_account_id(), provider, cache);
+
+        assert_eq!(
+            workflow.sync_view(&view).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::ServiceUnavailable
+            ))
+        );
+        assert_eq!(
+            workflow.sync_view(&view).await,
+            Err(CalendarWorkflowError::ResponseLimitExceeded)
+        );
+        assert!(
+            requests
+                .lock()
+                .expect("synthetic request log mutex is not poisoned")
+                .is_empty()
+        );
+
+        let cached = workflow
+            .load_cached_view(&view)
+            .await
+            .expect("the prior snapshot remains readable");
+        assert!(cached.sync_state().is_snapshot());
+        assert_eq!(
+            cached.sync_state().last_synchronized_at(),
+            Some(completed_at)
+        );
+        assert_eq!(cached.events(), &[prior_event]);
+        assert_eq!(
+            cached.write_readiness(),
+            CalendarWriteReadiness::ViewSyncRequired
+        );
+    });
+}
+
+#[test]
+fn failed_snapshot_cache_commit_does_not_mark_view_synchronized() {
+    smol::block_on(async {
+        let view = view();
+        let prior_event = all_day_patch(Some("Prior snapshot"), None)
+            .into_new(view.clone(), event_id())
+            .expect("synthetic prior snapshot event is complete");
+        let replacement_event = all_day_patch(Some("Replacement snapshot"), None)
+            .into_new(view.clone(), replacement_event_id())
+            .expect("synthetic replacement snapshot event is complete");
+        let completed_at = UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let cache = FixtureCache::default();
+        cache
+            .replace_snapshot(&view, vec![prior_event.clone()], completed_at)
+            .await
+            .expect("prior snapshot is cached");
+        cache.fail_snapshot_commit(CalendarCacheError::Unavailable);
+        let provider = FixtureProvider::with_snapshots([Ok(CalendarViewSnapshotResponse::new(
+            vec![replacement_event],
+            256,
+        ))]);
+        let workflow = CalendarWorkflow::new(workflow_account_id(), provider, cache);
+
+        assert_eq!(
+            workflow.sync_view(&view).await,
+            Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable
+            ))
+        );
+
+        let cached = workflow
+            .load_cached_view(&view)
+            .await
+            .expect("the prior view state remains readable");
+        assert!(cached.sync_state().is_snapshot());
+        assert_eq!(
+            cached.sync_state().last_synchronized_at(),
+            Some(completed_at)
+        );
+        assert_eq!(cached.events(), &[prior_event]);
+        assert_eq!(
+            cached.write_readiness(),
+            CalendarWriteReadiness::ViewSyncRequired
+        );
     });
 }
 
