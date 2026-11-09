@@ -8,7 +8,7 @@ M7 Exchange Server EWS support is in progress under [issue #257](https://github.
 
 Issue [#266](https://github.com/1fach/einfach-mail/issues/266) and [ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md) track M8 EWS calendar work. The provider builds a bounded `FindItem` calendar view and maps complete synthetic responses. The application workflow now selects Graph delta or EWS snapshot synchronization, and the SQLCipher adapter atomically replaces one exact view with separate snapshot completion state. The current branch exposes EWS calendar reads through the shared native agenda, displays the read-only capability, and hides and guards event writes. The Linux local gate passed on 2026-11-09, including the focused account and agenda checks. No Exchange calendar server or sanitized response recording is available for live verification.
 
-ADR 0058 and issue [#267](https://github.com/1fach/einfach-mail/issues/267) define the next narrow EWS mail slice: mark messages read or unread only when read receipts can be suppressed. The plan replaces the broad mail write gate with per-operation capabilities. No mail write code has been added in this planning change.
+ADR 0058 and issue [#267](https://github.com/1fach/einfach-mail/issues/267) define M9. The domain now models mail operations individually. Graph retains all current mail actions, while the EWS profile remains read-only. Desktop controls gate read-state, flags, send, reply, move, and delete separately; Microsoft Graph mail-permission review is a separate account capability. Focused domain, mail-view, and account-view tests pass locally on Rust 1.95. The receipt-safe EWS `UpdateItem` path remains to be implemented and verified before enabling any EWS mail write.
 
 PR #47 merged read-only mail into `main` at `409d299ffbe11dfe41c8f5a428b8e49b9ac97edd` on 2026-11-06. PR #50 merged the Linux calendar agenda and its reviewed stack into `main` at `8c10dca99fd8cc0a38f76fb11aed5a174b0970f8` on 2026-11-06. All four required PR #50 checks passed on head `0ecfc019ff661282bc6bf5bfe5ce522bbb77c4e3`.
 
@@ -43,7 +43,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 
 ## Next actions
 
-1. Implement the planned read-state action and per-operation capabilities under issue [#267](https://github.com/1fach/einfach-mail/issues/267). Keep receipt suppression as a hard prerequisite.
+1. Implement EWS `UpdateItem` for read-state under issue [#267](https://github.com/1fach/einfach-mail/issues/267). Keep the EWS profile read-only until receipt suppression, Exchange version gating, change-key validation, and uncertain-outcome handling are in place.
 2. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 3. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 4. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.

@@ -12,7 +12,8 @@ mod mail;
 mod mailbox;
 
 pub use account::{
-    AccountCapabilities, AccountProfile, CalendarAccess, MailAccess, MissingAccountLabel,
+    AccountCapabilities, AccountProfile, CalendarAccess, MailAction, MailCapabilities,
+    MissingAccountLabel,
 };
 pub use calendar::{
     CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,

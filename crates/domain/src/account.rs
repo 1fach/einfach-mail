@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use enumset::{EnumSet, EnumSetType};
 use thiserror::Error;
 
 use crate::{AccountId, Mailbox};
@@ -14,32 +15,51 @@ pub struct MissingAccountLabel;
 /// Mail and calendar actions supported by a connected account.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AccountCapabilities {
-    mail: MailAccess,
+    mail: MailCapabilities,
     calendar: CalendarAccess,
+    mail_write_permission_review: bool,
 }
 
 impl AccountCapabilities {
     /// Creates capabilities for the supported mail and calendar actions.
     #[must_use]
-    pub const fn new(mail: MailAccess, calendar: CalendarAccess) -> Self {
-        Self { mail, calendar }
+    pub const fn new(mail: MailCapabilities, calendar: CalendarAccess) -> Self {
+        Self {
+            mail,
+            calendar,
+            mail_write_permission_review: false,
+        }
     }
 
     /// Returns read-only mail capabilities with no calendar access.
     #[must_use]
-    pub const fn read_only_mail() -> Self {
-        Self::new(MailAccess::ReadOnly, CalendarAccess::Unavailable)
+    pub fn read_only_mail() -> Self {
+        Self::new(MailCapabilities::read_only(), CalendarAccess::Unavailable)
     }
 
-    /// Returns read and write access to mail and calendar.
+    /// Returns all current mail actions and read/write calendar access.
     #[must_use]
-    pub const fn full_access() -> Self {
-        Self::new(MailAccess::ReadWrite, CalendarAccess::ReadWrite)
+    pub fn full_access() -> Self {
+        Self::new(MailCapabilities::full_access(), CalendarAccess::ReadWrite)
+            .with_mail_write_permission_review()
     }
 
-    /// Returns the account's mail access level.
+    /// Enables the Microsoft Graph mail permission review flow for this account.
     #[must_use]
-    pub const fn mail(self) -> MailAccess {
+    pub const fn with_mail_write_permission_review(mut self) -> Self {
+        self.mail_write_permission_review = true;
+        self
+    }
+
+    /// Returns whether this account can request Microsoft Graph mail write permission.
+    #[must_use]
+    pub const fn can_review_mail_write_permission(self) -> bool {
+        self.mail_write_permission_review
+    }
+
+    /// Returns the account's supported mail actions.
+    #[must_use]
+    pub const fn mail(self) -> MailCapabilities {
         self.mail
     }
 
@@ -50,13 +70,65 @@ impl AccountCapabilities {
     }
 }
 
-/// The write access available for an account's mail.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MailAccess {
-    /// The account can list folders and read messages.
-    ReadOnly,
-    /// The account can read and change messages.
-    ReadWrite,
+/// A mail operation supported by an account's provider.
+#[non_exhaustive]
+#[derive(Debug, Hash, Ord, PartialOrd, EnumSetType)]
+pub enum MailAction {
+    /// Set a message's read or unread state.
+    SetReadState,
+    /// Set or clear a message's follow-up flag.
+    SetFollowUpFlagStatus,
+    /// Send a new message.
+    Send,
+    /// Reply to a message.
+    Reply,
+    /// Move or archive a message.
+    Move,
+    /// Move a message to Deleted Items.
+    Delete,
+}
+
+/// The mail operations supported by an account's provider.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MailCapabilities(EnumSet<MailAction>);
+
+impl MailCapabilities {
+    /// Returns a capability set with no mail write actions.
+    #[must_use]
+    pub fn read_only() -> Self {
+        Self(EnumSet::empty())
+    }
+
+    /// Creates a capability set from the actions supported by a provider.
+    #[must_use]
+    pub fn from_actions(actions: impl IntoIterator<Item = MailAction>) -> Self {
+        Self(actions.into_iter().collect())
+    }
+
+    /// Returns the currently supported mail actions.
+    #[must_use]
+    pub fn full_access() -> Self {
+        Self::from_actions([
+            MailAction::SetReadState,
+            MailAction::SetFollowUpFlagStatus,
+            MailAction::Send,
+            MailAction::Reply,
+            MailAction::Move,
+            MailAction::Delete,
+        ])
+    }
+
+    /// Returns whether the provider supports the specified action.
+    #[must_use]
+    pub fn supports(self, action: MailAction) -> bool {
+        self.0.contains(action)
+    }
+
+    /// Returns whether the account has no mail write actions.
+    #[must_use]
+    pub fn is_read_only(self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// The calendar access available for an account.
@@ -209,7 +281,8 @@ fn non_empty(candidate: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountCapabilities, AccountProfile, CalendarAccess, MailAccess, MissingAccountLabel,
+        AccountCapabilities, AccountProfile, CalendarAccess, MailAction, MailCapabilities,
+        MissingAccountLabel,
     };
     use crate::AccountId;
 
@@ -302,10 +375,41 @@ mod tests {
         )
         .expect("mailbox identifies the account");
 
-        assert_eq!(profile.capabilities().mail(), MailAccess::ReadOnly);
+        assert!(profile.capabilities().mail().is_read_only());
+        assert!(!profile.capabilities().can_review_mail_write_permission());
         assert_eq!(
             profile.capabilities().calendar(),
             CalendarAccess::Unavailable
         );
+    }
+
+    #[test]
+    fn mail_capabilities_only_include_the_requested_actions() {
+        let capabilities = MailCapabilities::from_actions([MailAction::SetReadState]);
+
+        assert!(!capabilities.is_read_only());
+        assert!(capabilities.supports(MailAction::SetReadState));
+        assert!(!capabilities.supports(MailAction::SetFollowUpFlagStatus));
+        assert!(!capabilities.supports(MailAction::Send));
+        assert!(!capabilities.supports(MailAction::Reply));
+        assert!(!capabilities.supports(MailAction::Move));
+        assert!(!capabilities.supports(MailAction::Delete));
+
+        let account = AccountCapabilities::new(capabilities, CalendarAccess::ReadOnly);
+        assert!(!account.can_review_mail_write_permission());
+    }
+
+    #[test]
+    fn full_access_includes_every_current_mail_action_and_permission_review() {
+        let capabilities = AccountCapabilities::full_access();
+        let mail = capabilities.mail();
+
+        assert!(mail.supports(MailAction::SetReadState));
+        assert!(mail.supports(MailAction::SetFollowUpFlagStatus));
+        assert!(mail.supports(MailAction::Send));
+        assert!(mail.supports(MailAction::Reply));
+        assert!(mail.supports(MailAction::Move));
+        assert!(mail.supports(MailAction::Delete));
+        assert!(capabilities.can_review_mail_write_permission());
     }
 }

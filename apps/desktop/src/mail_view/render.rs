@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::message_body::render_message_body;
 use einfach_mail_application::{MailOperationError, MailWorkflowError, WellKnownMailFolder};
-use einfach_mail_domain::{FolderReference, MailFolder, MessageId, ReadState};
+use einfach_mail_domain::{FolderReference, MailAction, MailFolder, MessageId, ReadState};
 use gpui_kit::base::v_virtual_list;
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Selectable, StyledExt,
@@ -23,7 +23,7 @@ use super::{
     MoveRecoveryReason, ReadStateFeedback, SyncStatus, WellKnownFolderActionStatus,
     empty_message_detail_copy, follow_up_flag_cache_sync_message, follow_up_flag_confirmed_message,
     follow_up_flag_failure_message, follow_up_flag_progress_message, mail_error_message,
-    message_sender,
+    message_sender, well_known_folder_mail_action,
 };
 
 const MESSAGE_LIST_WIDTH: Rems = rems(21.5);
@@ -68,7 +68,12 @@ impl MailView {
             .test_support();
 
         let mut header_actions = div().flex().items_center().gap_2();
-        if self.can_write_mail() {
+        if self
+            .profile
+            .capabilities()
+            .mail()
+            .supports(MailAction::Send)
+        {
             header_actions = header_actions.child(
                 Button::new("new-mail-message")
                     .debug_selector(|| "new-mail-message".to_owned())
@@ -101,7 +106,7 @@ impl MailView {
                     .items_center()
                     .gap_4()
                     .child(div().text_lg().font_bold().child("Mail"));
-                if !self.can_write_mail() {
+                if self.profile.capabilities().mail().is_read_only() {
                     title = title.child(
                         div()
                             .text_sm()
@@ -426,33 +431,46 @@ impl MailView {
                                         metadata.subject().unwrap_or("(No subject)").to_owned(),
                                     ))
                                     .child({
-                                        if !self.can_write_mail() {
+                                        let mail = self.profile.capabilities().mail();
+                                        if mail.is_read_only() {
                                             div().into_any_element()
                                         } else {
-                                            let actions = div()
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .child(
+                                            let mut actions = div().flex().items_center().gap_2();
+                                            if mail.supports(MailAction::SetReadState) {
+                                                actions = actions.child(
                                                     self.render_read_state_action(message_id, cx),
-                                                )
-                                                .child(
+                                                );
+                                            }
+                                            if mail.supports(MailAction::SetFollowUpFlagStatus) {
+                                                actions = actions.child(
                                                     self.render_follow_up_flag_action(
                                                         message_id, cx,
                                                     ),
-                                                )
-                                                .child(self.render_well_known_folder_action(
-                                                    WellKnownMailFolder::Archive,
-                                                    message_id,
-                                                    cx,
-                                                ))
-                                                .child(self.render_move_action(message_id, cx))
-                                                .child(self.render_reply_action(message_id, cx))
-                                                .child(self.render_well_known_folder_action(
-                                                    WellKnownMailFolder::DeletedItems,
-                                                    message_id,
-                                                    cx,
-                                                ));
+                                                );
+                                            }
+                                            if mail.supports(MailAction::Move) {
+                                                actions = actions
+                                                    .child(self.render_well_known_folder_action(
+                                                        WellKnownMailFolder::Archive,
+                                                        message_id,
+                                                        cx,
+                                                    ))
+                                                    .child(self.render_move_action(message_id, cx));
+                                            }
+                                            if mail.supports(MailAction::Reply) {
+                                                actions = actions.child(
+                                                    self.render_reply_action(message_id, cx),
+                                                );
+                                            }
+                                            if mail.supports(MailAction::Delete) {
+                                                actions = actions.child(
+                                                    self.render_well_known_folder_action(
+                                                        WellKnownMailFolder::DeletedItems,
+                                                        message_id,
+                                                        cx,
+                                                    ),
+                                                );
+                                            }
                                             #[cfg(test)]
                                             let actions =
                                                 actions.id("message-actions").test_support();
@@ -548,7 +566,7 @@ impl MailView {
             .debug_selector(|| "message-move".to_owned())
             .label(if pending { "Moving…" } else { "Move to…" })
             .loading(pending)
-            .disabled(!self.message_move_allowed() || destinations.is_empty())
+            .disabled(!self.message_move_allowed(MailAction::Move) || destinations.is_empty())
             .dropdown_menu(move |menu, _, _| {
                 build_message_move_menu(
                     menu,
@@ -571,12 +589,14 @@ impl MailView {
             WellKnownMailFolder::Archive => ("message-archive", "Archive", "Archiving…"),
             WellKnownMailFolder::DeletedItems => ("message-delete", "Delete", "Deleting…"),
         };
+        let action = well_known_folder_mail_action(destination);
         let button = Button::new(button_id)
             .debug_selector(|| button_id.to_owned())
             .label(if pending { pending_label } else { label })
             .loading(pending)
             .disabled(
-                !self.message_move_allowed() || self.selected_message_id() != Some(message_id),
+                !self.message_move_allowed(action)
+                    || self.selected_message_id() != Some(message_id),
             )
             .on_click(cx.listener(move |view, _, _, cx| {
                 view.start_well_known_folder_action(destination, cx);
@@ -708,7 +728,12 @@ impl MailView {
         let feedback = if error
             == MailWorkflowError::Provider(
                 einfach_mail_application::MailOperationError::AccessDenied,
-            ) {
+            )
+            && self
+                .profile
+                .capabilities()
+                .can_review_mail_write_permission()
+        {
             feedback.child(
                 Button::new(permission_button_id)
                     .ghost()
@@ -810,10 +835,9 @@ impl MailView {
 
     fn follow_up_flag_action_disabled(&self, message_id: &MessageId) -> bool {
         self.selected_message_id() != Some(message_id)
-            || self
-                .selected_folder
-                .as_ref()
-                .is_none_or(|folder| !self.can_update_message_in(folder))
+            || self.selected_folder.as_ref().is_none_or(|folder| {
+                !self.can_update_message_in(folder, MailAction::SetFollowUpFlagStatus)
+            })
     }
 
     fn cached_read_state(&self, message_id: &MessageId) -> Option<ReadState> {
@@ -827,7 +851,7 @@ impl MailView {
         let Some(folder) = self.selected_folder.as_ref() else {
             return true;
         };
-        read_state.is_none() || !self.can_update_message_in(folder)
+        read_state.is_none() || !self.can_update_message_in(folder, MailAction::SetReadState)
     }
 
     fn render_read_state_feedback_element(
@@ -837,7 +861,12 @@ impl MailView {
     ) -> AnyElement {
         let (message, role, show_permission_review) = feedback.into_parts();
         let feedback_view = self.read_state_feedback_view(message, role, cx);
-        if show_permission_review {
+        if show_permission_review
+            && self
+                .profile
+                .capabilities()
+                .can_review_mail_write_permission()
+        {
             feedback_view
                 .flex()
                 .flex_col()
@@ -936,7 +965,11 @@ impl MailView {
                 error: MailWorkflowError::Provider(MailOperationError::AccessDenied),
                 ..
             } if failed_id == message_id
-        ) {
+        ) && self
+            .profile
+            .capabilities()
+            .can_review_mail_write_permission()
+        {
             Some(
                 feedback
                     .flex()

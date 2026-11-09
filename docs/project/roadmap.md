@@ -32,7 +32,7 @@ Add a Linux read-only primary-calendar agenda for on-premises Exchange accounts.
 
 ## M9: EWS message read-state changes
 
-Allow an EWS account to mark a message read or unread only when the server can suppress requested read receipts. Replace the broad mail read-write capability with per-operation capabilities so EWS does not expose sends, replies, flags, moves, deletes, or calendar writes. Keep Graph actions unchanged and keep uncertain EWS outcomes non-retried. Use sanitized synthetic SOAP fixtures; live compatibility remains unverified under issue #257. See [ADR 0058](../decisions/0058-per-operation-ews-mail-capabilities.md) and [issue #267](https://github.com/1fach/einfach-mail/issues/267).
+Allow an EWS account to mark a message read or unread only when the server can suppress requested read receipts. The account profile now models mail actions individually, Graph retains its current action set, and EWS remains read-only until its receipt-safe update path is verified. The remaining work must keep sends, replies, flags, moves, deletes, and calendar writes unavailable for EWS. Do not retry uncertain EWS outcomes. Use sanitized synthetic SOAP fixtures; live compatibility remains unverified under issue #257. See [ADR 0058](../decisions/0058-per-operation-ews-mail-capabilities.md) and [issue #267](https://github.com/1fach/einfach-mail/issues/267).
 
 ## M5: Windows support and daily-use integration
 

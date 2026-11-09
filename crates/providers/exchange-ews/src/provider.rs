@@ -11,7 +11,7 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, CalendarAccess, FolderId, FolderReference,
-    MailAccess, MailFolder, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
+    MailCapabilities, MailFolder, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
     MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
     ReadState,
 };
@@ -599,7 +599,7 @@ fn profile_for(settings: &ExchangeEwsAccountSettings) -> Result<AccountProfile, 
         Some(mailbox_address.to_owned()),
         Some(mailbox_address.to_owned()),
         Some(settings.username().to_owned()),
-        AccountCapabilities::new(MailAccess::ReadOnly, CalendarAccess::ReadOnly),
+        AccountCapabilities::new(MailCapabilities::read_only(), CalendarAccess::ReadOnly),
     )
     .map_err(|_| EwsError::InvalidConnectionDetails)
 }
@@ -957,7 +957,7 @@ mod tests {
         CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion,
         CalendarOccurrencePatch, CalendarOccurrenceTimePatch, CalendarTimeZoneId,
         CalendarViewRange, CalendarViewReference, EditableCalendarEvent, EventId, FolderId,
-        FolderReference, MailAccess, MessageDeltaChange, MessageDeltaProgress, ReadState,
+        FolderReference, MailCapabilities, MessageDeltaChange, MessageDeltaProgress, ReadState,
     };
     use ews::sync_folder_items::{Change, SyncFolderItems};
     use time::{Date, Month, PrimitiveDateTime, Time};
@@ -1077,7 +1077,7 @@ mod tests {
 
         assert_eq!(
             profile.capabilities(),
-            AccountCapabilities::new(MailAccess::ReadOnly, CalendarAccess::ReadOnly)
+            AccountCapabilities::new(MailCapabilities::read_only(), CalendarAccess::ReadOnly)
         );
     }
 

@@ -19,7 +19,7 @@ use einfach_mail_domain::{
     CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation, CalendarEventUpdate,
     CalendarEventVersion, CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
     CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference, EditableCalendarEvent,
-    EventId, MailAccess, PendingCalendarEventCreation,
+    EventId, MailCapabilities, PendingCalendarEventCreation,
 };
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestQueryExt as _;
@@ -759,7 +759,7 @@ fn read_only_calendar_profile() -> AccountProfile {
         Some("Ada Example".to_owned()),
         Some("ada@example.test".to_owned()),
         None,
-        AccountCapabilities::new(MailAccess::ReadOnly, CalendarAccess::ReadOnly),
+        AccountCapabilities::new(MailCapabilities::read_only(), CalendarAccess::ReadOnly),
     )
     .expect("synthetic read-only calendar profile is valid")
 }

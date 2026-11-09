@@ -11,7 +11,7 @@ use einfach_mail_application::{
     ReadStateUpdateOutcome, WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountProfile, FolderReference, FollowUpFlagStatus, MailAccess, MailFolder, MailMessage,
+    AccountProfile, FolderReference, FollowUpFlagStatus, MailAction, MailFolder, MailMessage,
     MailReplySource, MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
 };
 use gpui_kit::base::VirtualListScrollHandle;
@@ -36,6 +36,13 @@ const MESSAGE_LIST_CONTEXT: &str = "MailMessageList";
 const MESSAGE_ROW_HEIGHT: Rems = rems(4.5);
 const MAIL_COMPOSER_SHEET_WIDTH: Rems = rems(30.);
 const ACCOUNT_SYNC_REQUIRED_MESSAGE: &str = "Complete a successful mail sync for this account before archiving, moving, or deleting messages.";
+
+fn well_known_folder_mail_action(destination: WellKnownMailFolder) -> MailAction {
+    match destination {
+        WellKnownMailFolder::Archive => MailAction::Move,
+        WellKnownMailFolder::DeletedItems => MailAction::Delete,
+    }
+}
 
 pub(crate) fn bind_message_navigation_keys(cx: &mut App) {
     let context = Some(MESSAGE_LIST_CONTEXT);
@@ -772,7 +779,7 @@ impl MailView {
 
     fn selected_read_state_request(&self) -> Option<ReadStateUpdateRequest> {
         let folder = self.selected_folder.as_ref()?;
-        if !self.can_update_message_in(folder) {
+        if !self.can_update_message_in(folder, MailAction::SetReadState) {
             return None;
         }
         let folder = folder.clone();
@@ -914,7 +921,7 @@ impl MailView {
         destination_folder: FolderReference,
         destination_label: String,
     ) -> Option<MessageMoveRequest> {
-        if !self.message_move_allowed() {
+        if !self.message_move_allowed(MailAction::Move) {
             return None;
         }
         let source_folder = self.selected_folder.clone()?;
@@ -973,7 +980,7 @@ impl MailView {
         &self,
         destination: WellKnownMailFolder,
     ) -> Option<WellKnownFolderActionRequest> {
-        if !self.message_move_allowed() {
+        if !self.message_move_allowed(well_known_folder_mail_action(destination)) {
             return None;
         }
         Some(WellKnownFolderActionRequest {
@@ -983,8 +990,8 @@ impl MailView {
         })
     }
 
-    fn message_move_allowed(&self) -> bool {
-        self.can_write_mail()
+    fn message_move_allowed(&self, action: MailAction) -> bool {
+        self.profile.capabilities().mail().supports(action)
             && matches!(&self.sync_status, SyncStatus::UpToDate)
             && !self.selected_folder_write_sync_required
             && !self.message_update_in_progress()
@@ -1048,12 +1055,8 @@ impl MailView {
         self.message_update_task.is_some()
     }
 
-    fn can_write_mail(&self) -> bool {
-        self.profile.capabilities().mail() == MailAccess::ReadWrite
-    }
-
-    fn can_update_message_in(&self, folder: &FolderReference) -> bool {
-        self.can_write_mail()
+    fn can_update_message_in(&self, folder: &FolderReference, action: MailAction) -> bool {
+        self.profile.capabilities().mail().supports(action)
             && !self.sync_status.is_sync_active()
             && !self.message_update_in_progress()
             && !matches!(self.sync_status, SyncStatus::Failed(_))
@@ -1287,7 +1290,7 @@ impl MailView {
 
     fn selected_follow_up_flag_request(&self) -> Option<FollowUpFlagUpdateRequest> {
         let folder = self.selected_folder.as_ref()?;
-        if !self.can_update_message_in(folder) {
+        if !self.can_update_message_in(folder, MailAction::SetFollowUpFlagStatus) {
             return None;
         }
         let folder = folder.clone();
@@ -1372,7 +1375,13 @@ impl MailView {
     }
 
     fn open_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.can_write_mail() || self.sync_status.is_sync_active() {
+        if !self
+            .profile
+            .capabilities()
+            .mail()
+            .supports(MailAction::Send)
+            || self.sync_status.is_sync_active()
+        {
             return;
         }
         let title = if matches!(&self.pending_send, Ok(Some(_))) {
@@ -1402,7 +1411,10 @@ impl MailView {
     }
 
     fn can_open_reply(&self, window: &mut Window, cx: &mut App) -> bool {
-        self.can_write_mail()
+        self.profile
+            .capabilities()
+            .mail()
+            .supports(MailAction::Reply)
             && !self.sync_status.is_sync_active()
             && !self.message_update_in_progress()
             && matches!(&self.pending_send, Ok(None))

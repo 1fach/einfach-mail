@@ -9,7 +9,7 @@ use einfach_mail_application::{
     AccountSession, AccountSessionFactory, AccountWorkflow, ExchangeEwsConnectionInput,
     ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
 };
-use einfach_mail_domain::{AccountProfile, CalendarAccess, MailAccess};
+use einfach_mail_domain::{AccountProfile, CalendarAccess};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
@@ -714,6 +714,14 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         if self.content.opening_kind().is_some() || self.status.connected_profile().is_none() {
             return;
         }
+        if request == AccountPermissionRequest::MailReadWrite
+            && !self
+                .status
+                .connected_profile()
+                .is_some_and(|profile| profile.capabilities().can_review_mail_write_permission())
+        {
+            return;
+        }
         self.pending_permission_review = Some(request);
         cx.notify();
     }
@@ -738,6 +746,11 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         let Some(profile) = self.status.connected_profile().cloned() else {
             return;
         };
+        if request == AccountPermissionRequest::MailReadWrite
+            && !profile.capabilities().can_review_mail_write_permission()
+        {
+            return;
+        }
         let cancellation = AccountOperationCancellation::new();
         self.pending_permission_review = None;
         self.status = AccountStatus::Reauthorizing {
@@ -1180,7 +1193,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .flex_col()
             .gap_3()
             .child(self.account_identity(profile, colors));
-        if profile.capabilities().mail() == MailAccess::ReadOnly {
+        if profile.capabilities().mail().is_read_only() {
             details = details.child("Mail is read-only.");
         }
         if profile.capabilities().calendar() == CalendarAccess::Unavailable {
@@ -1720,11 +1733,11 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     .text_color(colors.muted_foreground)
                     .child("Connect a Microsoft 365 or Exchange Server account to Einfach Mail."),
             );
-        let graph_account = self
+        let can_review_mail_permissions = self
             .status
             .connected_profile()
-            .is_none_or(|profile| profile.capabilities().mail() == MailAccess::ReadWrite);
-        if graph_account
+            .is_none_or(|profile| profile.capabilities().can_review_mail_write_permission());
+        if can_review_mail_permissions
             && matches!(&self.services, Ok(services) if services.microsoft365_setup_issue.is_none())
         {
             header = header.child(self.render_permissions(colors));
@@ -1784,7 +1797,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             if self
                 .status
                 .connected_profile()
-                .is_some_and(|profile| profile.capabilities().mail() == MailAccess::ReadWrite)
+                .is_some_and(|profile| profile.capabilities().can_review_mail_write_permission())
             {
                 content = content.child(self.render_permission_review(cx));
             }

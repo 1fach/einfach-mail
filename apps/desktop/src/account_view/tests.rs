@@ -31,8 +31,8 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, CalendarAccess, CalendarEventCreation,
     CalendarEventUpdate, CalendarOccurrence, CalendarViewReference, EditableCalendarEvent,
-    FolderReference, FollowUpFlagStatus, MailAccess, MailDraft, MailFolder, MailMessage,
-    MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend, ReadState,
+    FolderReference, FollowUpFlagStatus, MailAction, MailCapabilities, MailDraft, MailFolder,
+    MailMessage, MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend, ReadState,
 };
 
 #[derive(Clone, Default)]
@@ -506,7 +506,10 @@ impl AccountProvider for TestProvider {
                         Some("Ada Example".to_owned()),
                         Some("ada@example.test".to_owned()),
                         Some("EXAMPLE\\ada".to_owned()),
-                        AccountCapabilities::new(MailAccess::ReadOnly, CalendarAccess::ReadOnly),
+                        AccountCapabilities::new(
+                            MailCapabilities::read_only(),
+                            CalendarAccess::ReadOnly,
+                        ),
                     )
                     .expect("synthetic EWS account profile has an identity");
                     *saved_account_id
@@ -1297,6 +1300,42 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+fn partial_mail_profile_rejects_graph_permission_review(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
+    let (view, _) = cx.add_window_view(|_, cx| {
+        AccountView::new(
+            Ok(AccountServices::new(
+                workflow,
+                unused_account_session_factory(),
+            )),
+            cx,
+        )
+    });
+    let profile = AccountProfile::try_new_with_capabilities(
+        AccountId::try_from("synthetic-ews-account".to_owned())
+            .expect("synthetic EWS account ID is valid"),
+        Some("Ada Example".to_owned()),
+        Some("ada@example.test".to_owned()),
+        Some("ada@example.test".to_owned()),
+        AccountCapabilities::new(
+            MailCapabilities::from_actions([MailAction::SetReadState]),
+            CalendarAccess::ReadOnly,
+        ),
+    )
+    .expect("synthetic account profile has an identity");
+
+    cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::Connected(profile);
+            view.prepare_permission_review(AccountPermissionRequest::MailReadWrite, cx);
+        });
+    });
+
+    assert!(cx.update(|cx| view.read(cx).pending_permission_review.is_none()));
+}
+
+#[gpui_kit::test]
 fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
@@ -1715,7 +1754,10 @@ fn exchange_server_form_connects_without_microsoft_client_configuration(cx: &mut
         &view.read(cx).status,
         AccountStatus::Connected(profile)
             if profile.capabilities()
-                == AccountCapabilities::new(MailAccess::ReadOnly, CalendarAccess::ReadOnly)
+                == AccountCapabilities::new(
+                    MailCapabilities::read_only(),
+                    CalendarAccess::ReadOnly,
+                )
     )));
     assert_eq!(ews_connect_requests.load(Ordering::SeqCst), 1);
     assert!(ews_input_valid.load(Ordering::SeqCst));

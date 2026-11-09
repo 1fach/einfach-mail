@@ -80,6 +80,12 @@ I found no worthwhile app-owned dependency update. Each finding comes from a dep
 
 ## Candidates
 
+### Per-operation mail capabilities — 2026-11-09
+
+| Candidate | Evidence | Decision |
+| --- | --- | --- |
+| `enumset` 1.1.15 | The [crate documentation](https://docs.rs/enumset/1.1.15/enumset/) describes compact sets over derived C-like enums; [`EnumSetType`](https://docs.rs/enumset/1.1.15/enumset/derive.EnumSetType.html) generates the enum-to-set operations. The release is MIT OR Apache-2.0, declares Rust 1.61, and was published 2026-10-23. The default dependency adds `enumset_derive`; no serialization or platform integrations are needed. | Use `EnumSet<MailAction>` so capability membership uses the same closed enum consumed by desktop actions without duplicating variant-to-bit mappings. `BTreeSet` avoids a dependency but allocates and removes `Copy` from the account profile; `bitflags` is already locked, but would need a second declaration and mapping alongside `MailAction`. |
+
 ### GPUI Kit 0.9.0 upgrade review — 2026-11-08
 
 | Candidate | Evidence | Decision |

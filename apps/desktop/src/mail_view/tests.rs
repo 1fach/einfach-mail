@@ -15,10 +15,11 @@ use einfach_mail_application::{
     MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus,
-    MailDraft, MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, Mailbox, MessageBody,
-    MessageBodyType, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
-    MessageMetadataPatch, PendingMailSend, ReadState,
+    AccountCapabilities, AccountId, AccountProfile, CalendarAccess, FolderId, FolderReference,
+    FollowUpFlagStatus, MailAction, MailCapabilities, MailDraft, MailFolder, MailMessage,
+    MailReplyDraft, MailSendOperationId, Mailbox, MessageBody, MessageBodyType, MessageDeltaLink,
+    MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch, PendingMailSend,
+    ReadState,
 };
 use gpui_kit::base::TextSelection;
 use gpui_kit::component::WindowExt as _;
@@ -62,6 +63,17 @@ fn test_mail_view(
     cx: &mut gpui_kit::Context<MailView>,
 ) -> MailView {
     MailView::new(profile, workflow, unexpected_permission_requester(), cx)
+}
+
+fn mail_profile_with_capabilities(account: AccountId, mail: MailCapabilities) -> AccountProfile {
+    AccountProfile::try_new_with_capabilities(
+        account,
+        Some("Ada Example".to_owned()),
+        Some("ada@example.test".to_owned()),
+        Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::new(mail, CalendarAccess::ReadOnly),
+    )
+    .expect("synthetic account profile has an identity")
 }
 
 async fn wait_for_mail_sync_to_finish(context: &mut VisualTestContext, view: &Entity<MailView>) {
@@ -1869,14 +1881,7 @@ async fn read_only_account_hides_mail_mutations_and_rejects_composer_entry(
     let account =
         AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
     let (_, cache, _) = fixture(account.clone());
-    let profile = AccountProfile::try_new_with_capabilities(
-        account,
-        Some("Ada Example".to_owned()),
-        Some("ada@example.test".to_owned()),
-        Some("ada@tenant.example.test".to_owned()),
-        AccountCapabilities::read_only_mail(),
-    )
-    .expect("synthetic read-only account profile has an identity");
+    let profile = mail_profile_with_capabilities(account, MailCapabilities::read_only());
     let workflow = Arc::new(MailWorkflow::new(
         profile.id().clone(),
         OfflineProvider {
@@ -1918,7 +1923,95 @@ async fn read_only_account_hides_mail_mutations_and_rejects_composer_entry(
     ] {
         assert!(context.debug_bounds(selector).is_none());
     }
-    assert!(context.cx.update(|app| !view.read(app).can_write_mail()));
+    assert!(
+        context
+            .cx
+            .update(|app| view.read(app).profile.capabilities().mail().is_read_only())
+    );
+
+    context.update(|window, app| {
+        view.update(app, |mail_view, cx| mail_view.open_composer(window, cx));
+        assert!(!window.has_active_sheet(app));
+    });
+    context.update(|window, app| {
+        view.update(app, |mail_view, cx| {
+            mail_view.open_reply_composer(window, cx)
+        });
+        assert!(!window.has_active_sheet(app));
+    });
+}
+
+#[gpui_kit::test]
+async fn partial_mail_capabilities_render_and_allow_only_supported_actions(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_kit::init);
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (_, cache, _) = fixture(account.clone());
+    let profile = mail_profile_with_capabilities(
+        account,
+        MailCapabilities::from_actions([MailAction::SetReadState]),
+    );
+    let workflow = Arc::new(MailWorkflow::new(
+        profile.id().clone(),
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache,
+    ));
+    let mut mail_view = None;
+    let (_, context) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
+        mail_view = Some(view.clone());
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    let view = mail_view.expect("partial-capability mail view is created with the test window");
+
+    wait_for_mail_sync_to_finish(context, &view).await;
+    assert!(context.debug_bounds("new-mail-message").is_none());
+    let message_row = context
+        .debug_bounds("message-row-message-1")
+        .expect("cached message is visible");
+    context.simulate_click(message_row.center(), Modifiers::default());
+    wait_for_ui_condition(context, |_, app| {
+        matches!(
+            view.read(app).message_detail_state,
+            MessageDetailState::Opened(_)
+        )
+    })
+    .await;
+    draw_mail_view(context);
+
+    assert!(context.debug_bounds("message-read-state").is_some());
+    for selector in [
+        "message-follow-up-flag",
+        "message-move",
+        "message-archive",
+        "message-reply",
+        "message-delete",
+    ] {
+        assert!(context.debug_bounds(selector).is_none());
+    }
+    assert!(context.cx.update(|app| {
+        let mail_view = view.read(app);
+        let capabilities = mail_view.profile.capabilities();
+        let archive_folder = FolderReference::new(
+            mail_view.profile.id().clone(),
+            FolderId::try_from("archive".to_owned()).expect("synthetic folder ID is valid"),
+        );
+        capabilities.mail().supports(MailAction::SetReadState)
+            && !capabilities.mail().supports(MailAction::Send)
+            && !capabilities.mail().supports(MailAction::Reply)
+            && !capabilities.can_review_mail_write_permission()
+            && mail_view.selected_follow_up_flag_request().is_none()
+            && mail_view
+                .prepare_message_move(archive_folder, "Archive".to_owned())
+                .is_none()
+            && mail_view
+                .prepare_well_known_folder_action(WellKnownMailFolder::DeletedItems)
+                .is_none()
+    }));
 
     context.update(|window, app| {
         view.update(app, |mail_view, cx| mail_view.open_composer(window, cx));
@@ -2377,7 +2470,7 @@ async fn unknown_message_delete_requires_sync_and_keeps_source_cached(cx: &mut T
             view.move_recovery_reason,
             Some(MoveRecoveryReason::OutcomeUnknown)
         ) && matches!(view.message_detail_state, MessageDetailState::Opened(_))
-            && !view.message_move_allowed()
+            && !view.message_move_allowed(MailAction::Move)
     }));
     let source = FolderReference::new(
         account,
@@ -2452,7 +2545,7 @@ async fn folder_write_sync_requirement_disables_and_blocks_message_move(cx: &mut
     assert!(context.debug_bounds("read-state-reconciliation").is_some());
     assert!(context.cx.update(|cx| {
         let view = view.read(cx);
-        !view.message_move_allowed()
+        !view.message_move_allowed(MailAction::Move)
             && view
                 .prepare_message_move(destination.clone(), "Archive".to_owned())
                 .is_none()

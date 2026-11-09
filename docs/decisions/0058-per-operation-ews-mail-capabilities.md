@@ -16,7 +16,9 @@ Microsoft documents that setting `IsRead` to true sends a read receipt when the 
 
 Make setting message read state the first EWS mail action. It is idempotent, has an existing application workflow and cache path, and does not need message composition or folder movement.
 
-Replace the all-or-nothing `MailAccess` write gate with a provider-neutral `MailCapabilities` value that reports supported operations individually. Use a closed `MailAction` enum for read-state updates, follow-up flags, send, reply, move, and delete. Graph retains its current actions. EWS advertises only `SetReadState`; the other EWS actions remain hidden and return `UnsupportedOperation` at the provider boundary.
+Replace the all-or-nothing `MailAccess` write gate with a provider-neutral `MailCapabilities` value that reports supported operations individually. Define a closed `MailAction` enum for read-state updates, follow-up flags, send, reply, move, and delete, and store its variants with `enumset`. Graph retains its current actions. EWS advertises only `SetReadState`; the other EWS actions remain hidden and return `UnsupportedOperation` at the provider boundary.
+
+Keep Microsoft Graph mail-write permission review as a separate account capability. A provider may support an individual mail action without using Microsoft's Graph consent flow; such an account must not expose or request that flow.
 
 Expose EWS read-state updates only after the connection establishes that the server can suppress read receipts. Send `UpdateItem` with `MessageDisposition=SaveOnly`, `SuppressReadReceipts=true`, and a `SetItemField` update for `message:IsRead`. Do not send this write when the server version is unknown or predates Exchange Server 2013 SP1. Keep such accounts read-only.
 
