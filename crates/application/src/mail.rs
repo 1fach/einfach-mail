@@ -105,6 +105,7 @@ impl From<AccountOperationError> for MailSendProviderError {
             AccountOperationError::AccessTokenRejected => Self::SignInRequired,
             AccountOperationError::CredentialStoreUnavailable
             | AccountOperationError::InvalidConnectionDetails
+            | AccountOperationError::AutodiscoverFailed
             | AccountOperationError::ProfileUnavailable
             | AccountOperationError::ServiceUnavailable
             | AccountOperationError::SignInFailed

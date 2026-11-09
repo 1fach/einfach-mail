@@ -4,9 +4,9 @@ use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
     AccountPermissionRequest, AccountProvider, CalendarDeltaRequest, CalendarDeltaResponse,
     CalendarOperationError, CalendarProvider, ExchangeEwsAccountSettings,
-    ExchangeEwsAccountSettingsStore, ExchangeEwsConnectionInput, MailOperationError, MailProvider,
-    MailSendProviderError, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
-    WellKnownMailFolder,
+    ExchangeEwsAccountSettingsStore, ExchangeEwsConnectionInput, ExchangeEwsDiscoveryRequest,
+    ExchangeEwsDiscoveryResult, MailOperationError, MailProvider, MailSendProviderError,
+    MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, FolderId, FolderReference, MailFolder, Mailbox,
@@ -29,7 +29,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{error::EwsError, transport::EwsTransport};
+use crate::{autodiscover::EwsAutodiscover, error::EwsError, transport::EwsTransport};
 use einfach_mail_provider_runtime as worker;
 
 const CREDENTIAL_SERVICE: &str = "com.1fach.einfach-mail";
@@ -47,6 +47,7 @@ const EWS_PAGE_SIZE: u16 = 512;
 #[derive(Clone)]
 pub struct ExchangeEwsProvider<S> {
     settings_store: Arc<S>,
+    autodiscover: Arc<EwsAutodiscover>,
     session: Arc<RwLock<Option<Arc<EwsSession>>>>,
 }
 
@@ -59,6 +60,7 @@ where
     pub fn new(settings_store: S) -> Self {
         Self {
             settings_store: Arc::new(settings_store),
+            autodiscover: Arc::new(EwsAutodiscover::default()),
             session: Arc::new(RwLock::new(None)),
         }
     }
@@ -188,6 +190,20 @@ where
                 }
             }
         }
+    }
+
+    fn discover_exchange_ews_endpoint(
+        &self,
+        request: ExchangeEwsDiscoveryRequest,
+    ) -> impl Future<Output = Result<ExchangeEwsDiscoveryResult, AccountOperationError>> + Send + '_
+    {
+        let autodiscover = Arc::clone(&self.autodiscover);
+        worker::run(move |_cancellation: CancellationToken| async move {
+            autodiscover
+                .discover(request)
+                .await
+                .map_err(AccountOperationError::from)
+        })
     }
 
     fn reauthorize_account(

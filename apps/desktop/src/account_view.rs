@@ -7,6 +7,7 @@ use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
     AccountSession, AccountSessionFactory, AccountWorkflow, ExchangeEwsConnectionInput,
+    ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
 };
 use einfach_mail_domain::{AccountProfile, CalendarAccess, MailAccess};
 use gpui_kit::component::{
@@ -17,8 +18,8 @@ use gpui_kit::component::{
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    AsyncApp, Context, Entity, IntoElement, Render, Role, Subscription, Task, Window, div,
-    prelude::*,
+    AsyncApp, Context, Div, Entity, IntoElement, Render, Role, Stateful, Subscription, Task,
+    Window, div, prelude::*,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,6 +154,9 @@ impl AccountStatus {
             AccountOperationError::InvalidConnectionDetails => {
                 "The Exchange endpoint or sign-in details are invalid. Check them and try again."
             }
+            AccountOperationError::AutodiscoverFailed => {
+                "Autodiscover could not find an EWS endpoint. Enter the HTTPS address manually."
+            }
             AccountOperationError::AccessTokenRejected => {
                 "The server rejected the saved sign-in. Connect your account again."
             }
@@ -214,6 +218,62 @@ struct ExchangeEwsConnectionForm {
     mailbox_address: Entity<InputState>,
     username: Entity<InputState>,
     password: Entity<InputState>,
+    discovery: EwsDiscoveryState,
+}
+
+enum EwsDiscoveryState {
+    Idle,
+    Searching,
+    Confirmation(ExchangeEwsDiscoveryConfirmation),
+    Cancelling,
+    Found,
+    Failed,
+}
+
+impl EwsDiscoveryState {
+    fn allows_start(&self) -> bool {
+        matches!(self, Self::Idle | Self::Failed | Self::Found)
+    }
+
+    fn is_busy(&self) -> bool {
+        matches!(self, Self::Searching | Self::Cancelling)
+    }
+
+    fn requires_confirmation(&self) -> bool {
+        matches!(self, Self::Confirmation(_))
+    }
+
+    fn feedback_message(&self) -> Option<&'static str> {
+        match self {
+            Self::Idle | Self::Confirmation(_) => None,
+            Self::Searching => Some("Searching for an EWS endpoint…"),
+            Self::Cancelling => Some("Cancelling discovery…"),
+            Self::Found => Some("Endpoint found. Review it before connecting."),
+            Self::Failed => Some(
+                "Autodiscover could not find an endpoint. Enter the HTTPS EWS address manually.",
+            ),
+        }
+    }
+
+    fn button_label(&self) -> &'static str {
+        if self.is_busy() {
+            "Discovering…"
+        } else {
+            "Discover endpoint"
+        }
+    }
+
+    fn from_result(
+        discovery_result: Result<ExchangeEwsDiscoveryResult, AccountOperationError>,
+    ) -> Self {
+        match discovery_result {
+            Ok(ExchangeEwsDiscoveryResult::ConfirmationRequired(confirmation)) => {
+                Self::Confirmation(confirmation)
+            }
+            Ok(ExchangeEwsDiscoveryResult::Cancelled) => Self::Idle,
+            _ => Self::Failed,
+        }
+    }
 }
 
 impl ExchangeEwsConnectionForm {
@@ -229,6 +289,7 @@ impl ExchangeEwsConnectionForm {
                 .new(|cx| InputState::new(window, cx).placeholder("name@example.com")),
             username: cx.new(|cx| InputState::new(window, cx).placeholder("DOMAIN\\username")),
             password: cx.new(|cx| InputState::new(window, cx).masked(true)),
+            discovery: EwsDiscoveryState::Idle,
         }
     }
 
@@ -361,14 +422,16 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn begin_exchange_ews_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(
-            &self.status,
-            AccountStatus::Disconnected
-                | AccountStatus::Failed {
-                    saved_credential_may_exist: false,
-                    ..
-                }
-        ) {
+        if self.task.is_some()
+            || !matches!(
+                &self.status,
+                AccountStatus::Disconnected
+                    | AccountStatus::Failed {
+                        saved_credential_may_exist: false,
+                        ..
+                    }
+            )
+        {
             return;
         }
         self.exchange_ews_form = Some(ExchangeEwsConnectionForm::new(window, cx));
@@ -379,6 +442,16 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         if matches!(self.status, AccountStatus::Connecting { .. }) {
             self.cancel_connect(cx);
         } else if !matches!(self.status, AccountStatus::CancellingConnect { .. }) {
+            let confirmation_pending = self.pending_ews_discovery_confirmation().is_some();
+            let discovery_busy = self
+                .exchange_ews_form
+                .as_ref()
+                .is_some_and(|form| form.discovery.is_busy());
+            if confirmation_pending {
+                self.cancel_exchange_ews_discovery(cx);
+            } else if discovery_busy {
+                self.task = None;
+            }
             self.exchange_ews_form = None;
             cx.notify();
         }
@@ -390,6 +463,167 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         };
         let request = form.request(cx);
         self.begin_connect(request, cx);
+    }
+
+    fn discover_exchange_ews_endpoint(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.task.is_some() || !self.ews_discovery_can_start() {
+            return;
+        }
+        let Some(mailbox_address) = self.ews_mailbox_address(cx) else {
+            return;
+        };
+        self.start_ews_discovery(
+            ExchangeEwsDiscoveryRequest::Start { mailbox_address },
+            window,
+            cx,
+        );
+    }
+
+    fn ews_discovery_can_start(&self) -> bool {
+        self.exchange_ews_form
+            .as_ref()
+            .is_some_and(|form| form.discovery.allows_start())
+    }
+
+    fn ews_mailbox_address(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let Some(form) = &mut self.exchange_ews_form else {
+            return None;
+        };
+        let mailbox_address = form.mailbox_address.read(cx).value().to_string();
+        if mailbox_address.trim().is_empty() {
+            form.discovery = EwsDiscoveryState::Failed;
+            cx.notify();
+            return None;
+        }
+        Some(mailbox_address)
+    }
+
+    fn continue_exchange_ews_discovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(confirmation) = self.pending_ews_discovery_confirmation().cloned() else {
+            return;
+        };
+        self.start_ews_discovery(
+            ExchangeEwsDiscoveryRequest::Continue(confirmation),
+            window,
+            cx,
+        );
+    }
+
+    fn cancel_exchange_ews_discovery(&mut self, cx: &mut Context<Self>) {
+        let Some(confirmation) = self.pending_ews_discovery_confirmation().cloned() else {
+            return;
+        };
+        let request = ExchangeEwsDiscoveryRequest::Cancel(confirmation);
+        let Ok(services) = &self.services else {
+            self.set_ews_discovery_idle(cx);
+            return;
+        };
+        let workflow = Arc::clone(&services.workflow);
+        self.set_ews_discovery_state(EwsDiscoveryState::Cancelling);
+        self.schedule_ews_discovery_cancellation(workflow, request, cx);
+        cx.notify();
+    }
+
+    fn pending_ews_discovery_confirmation(&self) -> Option<&ExchangeEwsDiscoveryConfirmation> {
+        let form = self.exchange_ews_form.as_ref()?;
+        let EwsDiscoveryState::Confirmation(confirmation) = &form.discovery else {
+            return None;
+        };
+        Some(confirmation)
+    }
+
+    fn set_ews_discovery_state(&mut self, state: EwsDiscoveryState) {
+        if let Some(form) = &mut self.exchange_ews_form {
+            form.discovery = state;
+        }
+    }
+
+    fn set_ews_discovery_idle(&mut self, cx: &mut Context<Self>) {
+        self.set_ews_discovery_state(EwsDiscoveryState::Idle);
+        cx.notify();
+    }
+
+    fn schedule_ews_discovery_cancellation(
+        &mut self,
+        workflow: Arc<AccountWorkflow<P>>,
+        request: ExchangeEwsDiscoveryRequest,
+        cx: &mut Context<Self>,
+    ) {
+        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let _ = workflow.discover_exchange_ews_endpoint(request).await;
+            let _ = this.update(cx, |view, cx| view.finish_ews_discovery_cancellation(cx));
+        }));
+    }
+
+    fn finish_ews_discovery_cancellation(&mut self, cx: &mut Context<Self>) {
+        self.task = None;
+        self.set_ews_discovery_idle(cx);
+    }
+
+    fn start_ews_discovery(
+        &mut self,
+        request: ExchangeEwsDiscoveryRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(services) = &self.services else {
+            return;
+        };
+        let workflow = Arc::clone(&services.workflow);
+        let Some(form) = &mut self.exchange_ews_form else {
+            return;
+        };
+        form.discovery = EwsDiscoveryState::Searching;
+        self.schedule_ews_discovery(workflow, request, window, cx);
+    }
+
+    fn schedule_ews_discovery(
+        &mut self,
+        workflow: Arc<AccountWorkflow<P>>,
+        request: ExchangeEwsDiscoveryRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let discovery_result = workflow.discover_exchange_ews_endpoint(request).await;
+            let _ = this.update_in(cx, |view, window, cx| {
+                view.task = None;
+                view.apply_ews_discovery_result(discovery_result, window, cx);
+            });
+        }));
+        cx.notify();
+    }
+
+    fn apply_ews_discovery_result(
+        &mut self,
+        discovery_result: Result<ExchangeEwsDiscoveryResult, AccountOperationError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.exchange_ews_form.is_none() {
+            return;
+        }
+        match discovery_result {
+            Ok(ExchangeEwsDiscoveryResult::Endpoint(endpoint)) => {
+                self.apply_discovered_ews_endpoint(endpoint, window, cx);
+            }
+            other => self.set_ews_discovery_state(EwsDiscoveryState::from_result(other)),
+        }
+        cx.notify();
+    }
+
+    fn apply_discovered_ews_endpoint(
+        &mut self,
+        endpoint: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = &mut self.exchange_ews_form else {
+            return;
+        };
+        form.endpoint
+            .update(cx, |input, cx| input.set_value(endpoint, window, cx));
+        form.discovery = EwsDiscoveryState::Found;
     }
 
     fn begin_connect(&mut self, request: AccountConnectionRequest, cx: &mut Context<Self>) {
@@ -1099,58 +1333,63 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn render_connect_options(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let mut options = div().flex().flex_col().items_center().gap_2();
-        if let Ok(services) = &self.services {
-            if let Some(issue) = services.microsoft365_setup_issue {
-                options = options.child(
-                    div()
-                        .id("microsoft365-setup-status")
-                        .role(Role::Status)
-                        .text_sm()
-                        .child(issue.message()),
-                );
-            } else {
-                options = options.child(
-                    Button::new("connect-account")
-                        .debug_selector(|| "connect-account".to_owned())
-                        .primary()
-                        .label("Connect Microsoft 365 account")
-                        .on_click(cx.listener(|view, _, _, cx| view.connect(cx))),
-                );
-            }
+        let options = div().flex().flex_col().items_center().gap_2();
+        self.add_microsoft365_connect_option(options, cx)
+            .child(self.render_ews_connect_button(cx))
+    }
+
+    fn add_microsoft365_connect_option(
+        &self,
+        options: gpui_kit::Div,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let Ok(services) = &self.services else {
+            return options;
+        };
+        self.add_microsoft365_setup_action(options, services.microsoft365_setup_issue, cx)
+    }
+
+    fn add_microsoft365_setup_action(
+        &self,
+        options: gpui_kit::Div,
+        issue: Option<SetupIssue>,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        match issue {
+            Some(issue) => options.child(Self::render_microsoft365_setup_status(issue)),
+            None => options.child(self.render_microsoft365_connect_button(cx)),
         }
-        options.child(
-            Button::new("connect-exchange-ews")
-                .debug_selector(|| "connect-exchange-ews".to_owned())
-                .label("Connect Exchange Server…")
-                .on_click(cx.listener(|view, _, window, cx| {
-                    view.begin_exchange_ews_form(window, cx);
-                })),
-        )
+    }
+
+    fn render_microsoft365_setup_status(issue: SetupIssue) -> Stateful<Div> {
+        div()
+            .id("microsoft365-setup-status")
+            .role(Role::Status)
+            .text_sm()
+            .child(issue.message())
+    }
+
+    fn render_microsoft365_connect_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Button::new("connect-account")
+            .debug_selector(|| "connect-account".to_owned())
+            .primary()
+            .label("Connect Microsoft 365 account")
+            .on_click(cx.listener(|view, _, _, cx| view.connect(cx)))
+    }
+
+    fn render_ews_connect_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Button::new("connect-exchange-ews")
+            .debug_selector(|| "connect-exchange-ews".to_owned())
+            .label("Connect Exchange Server…")
+            .disabled(self.task.is_some())
+            .on_click(cx.listener(|view, _, window, cx| {
+                view.begin_exchange_ews_form(window, cx);
+            }))
     }
 
     fn render_exchange_ews_form(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let Some(form) = &self.exchange_ews_form else {
             return div();
-        };
-        let connecting = matches!(
-            &self.status,
-            AccountStatus::Connecting { .. } | AccountStatus::CancellingConnect { .. }
-        );
-        let cancelling = matches!(&self.status, AccountStatus::CancellingConnect { .. });
-        let cancel_label = if cancelling {
-            "Finishing connection…"
-        } else if connecting {
-            "Cancel connection"
-        } else {
-            "Cancel"
-        };
-        let submit_label = if cancelling {
-            "Finishing connection…"
-        } else if connecting {
-            "Connecting…"
-        } else {
-            "Connect"
         };
         div()
             .w_full()
@@ -1161,93 +1400,269 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .child(div().text_lg().font_bold().child("Exchange Server"))
             .child(
                 div().text_sm().child(
-                    "Enter your server's HTTPS EWS address. Server certificates are verified, and your password is stored in Linux Secret Service.",
+                    "Enter your server's HTTPS EWS address or discover it from your mailbox. Discovery sends the mailbox address without credentials. Review the endpoint before connecting; your NTLM username and password are sent only after you press Connect.",
                 ),
             )
+            .child(self.render_ews_form(form, cx))
+    }
+
+    fn render_ews_form(&self, form: &ExchangeEwsConnectionForm, cx: &mut Context<Self>) -> Form {
+        Form::new()
+            .child(self.render_ews_endpoint_field(form, cx))
+            .children(self.render_ews_identity_fields(form))
+            .footer(self.render_ews_form_footer(form, cx))
+    }
+
+    fn render_ews_endpoint_field(
+        &self,
+        form: &ExchangeEwsConnectionForm,
+        cx: &mut Context<Self>,
+    ) -> Field {
+        Field::new().label("EWS endpoint").required(true).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(self.render_ews_endpoint_input(form))
+                .child(self.render_ews_discovery_button(form, cx))
+                .child(self.render_ews_discovery_feedback(&form.discovery, cx)),
+        )
+    }
+
+    fn render_ews_endpoint_input(&self, form: &ExchangeEwsConnectionForm) -> Stateful<Div> {
+        div()
+            .id("ews-endpoint-input")
+            .debug_selector(|| "ews-endpoint-input".to_owned())
             .child(
-                Form::new()
-                    .child(
-                        Field::new().label("EWS endpoint").required(true).child(
-                            div()
-                                .id("ews-endpoint-input")
-                                .debug_selector(|| "ews-endpoint-input".to_owned())
-                                .child(
-                                    Input::new(&form.endpoint)
-                                        .aria_label("EWS endpoint")
-                                        .disabled(connecting)
-                                        .w_full(),
-                                ),
-                        ),
-                    )
-                    .child(
-                        Field::new().label("Mailbox address").required(true).child(
-                            div()
-                                .id("ews-mailbox-address-input")
-                                .debug_selector(|| "ews-mailbox-address-input".to_owned())
-                                .child(
-                                    Input::new(&form.mailbox_address)
-                                        .aria_label("Mailbox address")
-                                        .disabled(connecting)
-                                        .w_full(),
-                                ),
-                        ),
-                    )
-                    .child(
-                        Field::new().label("NTLM username").required(true).child(
-                            div()
-                                .id("ews-username-input")
-                                .debug_selector(|| "ews-username-input".to_owned())
-                                .child(
-                                    Input::new(&form.username)
-                                        .aria_label("NTLM username")
-                                        .disabled(connecting)
-                                        .w_full(),
-                                ),
-                        ),
-                    )
-                    .child(
-                        Field::new().label("Password").required(true).child(
-                            div()
-                                .id("ews-password-input")
-                                .debug_selector(|| "ews-password-input".to_owned())
-                                .child(
-                                    Input::new(&form.password)
-                                        .aria_label("Password")
-                                        .mask_toggle()
-                                        .disabled(connecting)
-                                        .w_full(),
-                                ),
-                        ),
-                    )
-                    .footer(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                Button::new("cancel-ews-connection-form")
-                                    .outline()
-                                    .label(cancel_label)
-                                    .disabled(cancelling)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.cancel_exchange_ews_form(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("submit-ews-connection")
-                                    .debug_selector(|| "submit-ews-connection".to_owned())
-                                    .primary()
-                                    .label(submit_label)
-                                    .loading(matches!(
-                                        &self.status,
-                                        AccountStatus::Connecting { .. }
-                                    ))
-                                    .disabled(connecting)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.connect_exchange_ews(cx);
-                                    })),
-                            ),
-                    ),
+                Input::new(&form.endpoint)
+                    .aria_label("EWS endpoint")
+                    .disabled(self.ews_inputs_disabled(form))
+                    .w_full(),
             )
+    }
+
+    fn render_ews_discovery_button(
+        &self,
+        form: &ExchangeEwsConnectionForm,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        Button::new("discover-ews-endpoint")
+            .debug_selector(|| "discover-ews-endpoint".to_owned())
+            .outline()
+            .label(form.discovery.button_label())
+            .loading(form.discovery.is_busy())
+            .disabled(self.ews_discovery_button_disabled(&form.discovery))
+            .on_click(cx.listener(|view, _, window, cx| {
+                view.discover_exchange_ews_endpoint(window, cx);
+            }))
+    }
+
+    fn ews_discovery_button_disabled(&self, state: &EwsDiscoveryState) -> bool {
+        self.task.is_some()
+            || self.ews_connection_busy()
+            || state.is_busy()
+            || state.requires_confirmation()
+    }
+
+    fn render_ews_discovery_feedback(
+        &self,
+        state: &EwsDiscoveryState,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        if let EwsDiscoveryState::Confirmation(confirmation) = state {
+            return self.render_ews_discovery_confirmation(confirmation, cx);
+        }
+        state.feedback_message().map_or_else(
+            || div().id("ews-discovery-status"),
+            Self::render_ews_discovery_message,
+        )
+    }
+
+    fn render_ews_discovery_message(message: &'static str) -> Stateful<Div> {
+        div()
+            .id("ews-discovery-status")
+            .role(Role::Status)
+            .text_sm()
+            .child(message)
+    }
+
+    fn render_ews_discovery_confirmation(
+        &self,
+        confirmation: &ExchangeEwsDiscoveryConfirmation,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        div()
+            .id("ews-discovery-status")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Self::render_ews_confirmation_prompt(confirmation))
+            .child(self.render_ews_confirmation_actions(cx))
+    }
+
+    fn render_ews_confirmation_prompt(
+        confirmation: &ExchangeEwsDiscoveryConfirmation,
+    ) -> Stateful<Div> {
+        div()
+            .id("ews-discovery-confirmation-status")
+            .role(Role::Status)
+            .text_sm()
+            .child(format!(
+                "Send {} to {} to continue Autodiscover?",
+                confirmation.mailbox_address(),
+                confirmation.destination()
+            ))
+    }
+
+    fn render_ews_confirmation_actions(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        div()
+            .flex()
+            .gap_2()
+            .child(self.render_continue_ews_discovery_button(cx))
+            .child(self.render_cancel_ews_discovery_button(cx))
+    }
+
+    fn render_continue_ews_discovery_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Button::new("continue-ews-discovery")
+            .debug_selector(|| "continue-ews-discovery".to_owned())
+            .primary()
+            .label("Continue")
+            .on_click(cx.listener(|view, _, window, cx| {
+                view.continue_exchange_ews_discovery(window, cx);
+            }))
+    }
+
+    fn render_cancel_ews_discovery_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        Button::new("cancel-ews-discovery")
+            .debug_selector(|| "cancel-ews-discovery".to_owned())
+            .outline()
+            .label("Cancel")
+            .on_click(cx.listener(|view, _, _, cx| {
+                view.cancel_exchange_ews_discovery(cx);
+            }))
+    }
+
+    fn render_ews_identity_fields(&self, form: &ExchangeEwsConnectionForm) -> [Field; 3] {
+        let inputs_disabled = self.ews_inputs_disabled(form);
+        [
+            self.render_ews_mailbox_field(form, inputs_disabled),
+            self.render_ews_username_field(form, inputs_disabled),
+            self.render_ews_password_field(form, inputs_disabled),
+        ]
+    }
+
+    fn render_ews_mailbox_field(&self, form: &ExchangeEwsConnectionForm, disabled: bool) -> Field {
+        Field::new().label("Mailbox address").required(true).child(
+            div()
+                .id("ews-mailbox-address-input")
+                .debug_selector(|| "ews-mailbox-address-input".to_owned())
+                .child(
+                    Input::new(&form.mailbox_address)
+                        .aria_label("Mailbox address")
+                        .disabled(disabled)
+                        .w_full(),
+                ),
+        )
+    }
+
+    fn render_ews_username_field(&self, form: &ExchangeEwsConnectionForm, disabled: bool) -> Field {
+        Field::new().label("NTLM username").required(true).child(
+            div()
+                .id("ews-username-input")
+                .debug_selector(|| "ews-username-input".to_owned())
+                .child(
+                    Input::new(&form.username)
+                        .aria_label("NTLM username")
+                        .disabled(disabled)
+                        .w_full(),
+                ),
+        )
+    }
+
+    fn render_ews_password_field(&self, form: &ExchangeEwsConnectionForm, disabled: bool) -> Field {
+        Field::new().label("Password").required(true).child(
+            div()
+                .id("ews-password-input")
+                .debug_selector(|| "ews-password-input".to_owned())
+                .child(
+                    Input::new(&form.password)
+                        .aria_label("Password")
+                        .mask_toggle()
+                        .disabled(disabled)
+                        .w_full(),
+                ),
+        )
+    }
+
+    fn render_ews_form_footer(
+        &self,
+        form: &ExchangeEwsConnectionForm,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        div()
+            .flex()
+            .gap_2()
+            .child(self.render_cancel_ews_connection_button(cx))
+            .child(self.render_submit_ews_connection_button(form, cx))
+    }
+
+    fn render_cancel_ews_connection_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let connecting = self.ews_connection_busy();
+        let cancelling = matches!(&self.status, AccountStatus::CancellingConnect { .. });
+        let label = if cancelling {
+            "Finishing connection…"
+        } else if connecting {
+            "Cancel connection"
+        } else {
+            "Cancel"
+        };
+        Button::new("cancel-ews-connection-form")
+            .outline()
+            .label(label)
+            .disabled(cancelling)
+            .on_click(cx.listener(|view, _, _, cx| {
+                view.cancel_exchange_ews_form(cx);
+            }))
+    }
+
+    fn render_submit_ews_connection_button(
+        &self,
+        form: &ExchangeEwsConnectionForm,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let connecting = matches!(&self.status, AccountStatus::Connecting { .. });
+        Button::new("submit-ews-connection")
+            .debug_selector(|| "submit-ews-connection".to_owned())
+            .primary()
+            .label(self.ews_submit_label())
+            .loading(connecting)
+            .disabled(self.ews_inputs_disabled(form))
+            .on_click(cx.listener(|view, _, _, cx| {
+                view.connect_exchange_ews(cx);
+            }))
+    }
+
+    fn ews_submit_label(&self) -> &'static str {
+        if matches!(&self.status, AccountStatus::CancellingConnect { .. }) {
+            "Finishing connection…"
+        } else if matches!(&self.status, AccountStatus::Connecting { .. }) {
+            "Connecting…"
+        } else {
+            "Connect"
+        }
+    }
+
+    fn ews_inputs_disabled(&self, form: &ExchangeEwsConnectionForm) -> bool {
+        self.ews_connection_busy()
+            || form.discovery.is_busy()
+            || form.discovery.requires_confirmation()
+    }
+
+    fn ews_connection_busy(&self) -> bool {
+        matches!(
+            &self.status,
+            AccountStatus::Connecting { .. } | AccountStatus::CancellingConnect { .. }
+        )
     }
 
     fn render_open_content(&self, cx: &mut Context<Self>) -> gpui_kit::Div {

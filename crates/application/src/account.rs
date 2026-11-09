@@ -30,6 +30,9 @@ pub enum AccountOperationError {
     /// The supplied Exchange endpoint or sign-in identity is invalid.
     #[error("Exchange server details are invalid")]
     InvalidConnectionDetails,
+    /// Exchange Autodiscover could not find a usable EWS endpoint.
+    #[error("Exchange Autodiscover did not find a usable EWS endpoint")]
+    AutodiscoverFailed,
     /// Microsoft rejected the access token used for a Graph profile request.
     #[error("the access token was rejected")]
     AccessTokenRejected,
@@ -91,6 +94,100 @@ pub struct ExchangeEwsConnectionInput {
     mailbox_address: String,
     username: String,
     password: SecretString,
+}
+
+/// A pending Autodiscover destination that needs approval before sending an address.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExchangeEwsDiscoveryConfirmation {
+    challenge: u64,
+    mailbox_address: String,
+    destination: String,
+}
+
+impl ExchangeEwsDiscoveryConfirmation {
+    /// Creates a confirmation request returned by an account provider.
+    #[must_use]
+    pub fn new(challenge: u64, mailbox_address: String, destination: String) -> Self {
+        Self {
+            challenge,
+            mailbox_address,
+            destination,
+        }
+    }
+
+    /// Returns the mailbox address that would be sent after confirmation.
+    #[must_use]
+    pub fn mailbox_address(&self) -> &str {
+        &self.mailbox_address
+    }
+
+    /// Returns the HTTPS URL that would receive the mailbox address.
+    #[must_use]
+    pub fn destination(&self) -> &str {
+        &self.destination
+    }
+
+    /// Returns the provider-issued challenge identifier.
+    #[must_use]
+    pub fn challenge(&self) -> u64 {
+        self.challenge
+    }
+}
+
+impl fmt::Debug for ExchangeEwsDiscoveryConfirmation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExchangeEwsDiscoveryConfirmation")
+            .field("challenge", &"<redacted>")
+            .field("mailbox_address", &"<redacted>")
+            .field("destination", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Starts discovery or answers a pending Autodiscover confirmation.
+#[non_exhaustive]
+pub enum ExchangeEwsDiscoveryRequest {
+    /// Starts unauthenticated endpoint discovery for the mailbox address.
+    Start {
+        /// Mailbox address used to derive Autodiscover destinations.
+        mailbox_address: String,
+    },
+    /// Continues discovery after the user approved the displayed destination.
+    Continue(ExchangeEwsDiscoveryConfirmation),
+    /// Cancels a pending destination request without contacting its host.
+    Cancel(ExchangeEwsDiscoveryConfirmation),
+}
+
+impl fmt::Debug for ExchangeEwsDiscoveryRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Start { .. } => formatter.write_str("Start(<redacted>)"),
+            Self::Continue(_) => formatter.write_str("Continue(<redacted>)"),
+            Self::Cancel(_) => formatter.write_str("Cancel(<redacted>)"),
+        }
+    }
+}
+
+/// The result of an Exchange EWS Autodiscover operation.
+#[non_exhaustive]
+pub enum ExchangeEwsDiscoveryResult {
+    /// Returns the validated EWS HTTPS endpoint for the editable account form.
+    Endpoint(String),
+    /// Pauses before sending the mailbox address to a URL that needs approval.
+    ConfirmationRequired(ExchangeEwsDiscoveryConfirmation),
+    /// Reports that the user cancelled a pending destination request.
+    Cancelled,
+}
+
+impl fmt::Debug for ExchangeEwsDiscoveryResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Endpoint(_) => formatter.write_str("Endpoint(<redacted>)"),
+            Self::ConfirmationRequired(_) => formatter.write_str("ConfirmationRequired"),
+            Self::Cancelled => formatter.write_str("Cancelled"),
+        }
+    }
 }
 
 impl ExchangeEwsConnectionInput {
@@ -325,6 +422,25 @@ pub trait AccountProvider: Send + Sync {
         }
     }
 
+    /// Discovers an Exchange EWS endpoint without receiving account credentials.
+    ///
+    /// Implementations must not send a username, password, or authentication
+    /// token during discovery. They return a confirmation request before
+    /// sending the mailbox address to a destination that needs approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountOperationError::UnsupportedOperation`] when the
+    /// provider does not support EWS discovery, or another provider error when
+    /// the endpoint cannot be discovered.
+    fn discover_exchange_ews_endpoint(
+        &self,
+        _request: ExchangeEwsDiscoveryRequest,
+    ) -> impl Future<Output = Result<ExchangeEwsDiscoveryResult, AccountOperationError>> + Send + '_
+    {
+        async { Err(AccountOperationError::UnsupportedOperation) }
+    }
+
     /// Requests the selected delegated permissions again for the active account.
     ///
     /// Implementations must preserve the existing credential and session when
@@ -500,6 +616,26 @@ impl<P: AccountProvider> AccountWorkflow<P> {
         connect_result
     }
 
+    /// Discovers an Exchange EWS endpoint or continues a confirmed redirect.
+    ///
+    /// Discovery reserves the account workflow and is available only while no
+    /// account is connected. The provider receives a mailbox address and a
+    /// confirmation challenge, never account credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountOperationError::AccountAlreadyConnected`] when an
+    /// account is active, [`AccountOperationError::AccountOperationInProgress`]
+    /// when another account operation is running, or a provider error when
+    /// discovery fails.
+    pub async fn discover_exchange_ews_endpoint(
+        &self,
+        request: ExchangeEwsDiscoveryRequest,
+    ) -> Result<ExchangeEwsDiscoveryResult, AccountOperationError> {
+        let _operation = self.begin(AccountOperation::Discovering)?;
+        self.provider.discover_exchange_ews_endpoint(request).await
+    }
+
     /// Renews consent while keeping the current account active.
     ///
     /// The provider receives the active account ID and must verify that the
@@ -606,22 +742,28 @@ impl<P: AccountProvider> AccountWorkflow<P> {
         {
             return Err(AccountOperationError::AccountOperationInProgress);
         }
-        if operation == AccountOperation::Connecting {
-            self.ensure_no_active_account()?;
+        if matches!(
+            operation,
+            AccountOperation::Connecting | AccountOperation::Discovering
+        ) {
+            self.ensure_no_active_account(operation)?;
         }
         Ok(())
     }
 
-    fn ensure_no_active_account(&self) -> Result<(), AccountOperationError> {
+    fn ensure_no_active_account(
+        &self,
+        operation: AccountOperation,
+    ) -> Result<(), AccountOperationError> {
         let has_active_account = match self.state.active_account.lock() {
             Ok(active_account) => active_account.is_some(),
             Err(_) => {
-                self.release_operation(AccountOperation::Connecting);
+                self.release_operation(operation);
                 return Err(AccountOperationError::AccountStateUnavailable);
             }
         };
         if has_active_account {
-            self.release_operation(AccountOperation::Connecting);
+            self.release_operation(operation);
             return Err(AccountOperationError::AccountAlreadyConnected);
         }
         Ok(())
@@ -662,6 +804,7 @@ enum AccountOperation {
     Idle,
     Restoring,
     ReadingSavedIdentity,
+    Discovering,
     Connecting,
     Reauthorizing,
     SigningOut,

@@ -20,6 +20,7 @@ mod sync_budget;
 pub use account::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
     AccountPermissionRequest, AccountProvider, AccountWorkflow, ExchangeEwsConnectionInput,
+    ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
 };
 pub use account_cache::{AccountCache, AccountCacheOpenError, AccountCacheRemovalError};
 pub use account_recovery::CalendarWriteReadiness;
