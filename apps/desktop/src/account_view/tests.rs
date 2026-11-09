@@ -22,7 +22,8 @@ use einfach_mail_application::{
     AccountSession, AccountSessionFactory, AccountSessionFuture, AccountWorkflow,
     CalendarCacheError, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
     CalendarEventUpdateOutcome, CalendarSession, CalendarSnapshot, CalendarSyncReport,
-    CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCacheError, MailSendOutcome,
+    CalendarWorkflowError, ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest,
+    ExchangeEwsDiscoveryResult, FollowUpFlagUpdateOutcome, MailCacheError, MailSendOutcome,
     MailSendResolutionError, MailSendWorkflowError, MailSession, MailSyncProgress, MailSyncReport,
     MailSyncState, MailWorkflowError, MessageMoveOutcome, ReadStateUpdateOutcome,
     WellKnownFolderMoveOutcome, WellKnownMailFolder,
@@ -45,6 +46,8 @@ struct TestProvider {
     connect_error: Arc<Mutex<Option<AccountOperationError>>>,
     ews_connect_requests: Arc<AtomicUsize>,
     ews_input_valid: Arc<AtomicBool>,
+    ews_discovery_requests: Arc<AtomicUsize>,
+    ews_discovery_input_valid: Arc<AtomicBool>,
     saved_account_id: Arc<Mutex<Option<AccountId>>>,
     sign_out_events: Arc<Mutex<Vec<&'static str>>>,
     connection_commit: Arc<Mutex<Option<CommitGate>>>,
@@ -514,6 +517,38 @@ impl AccountProvider for TestProvider {
                     Ok(profile)
                 }
             }
+        }
+    }
+
+    fn discover_exchange_ews_endpoint(
+        &self,
+        request: ExchangeEwsDiscoveryRequest,
+    ) -> impl Future<Output = Result<ExchangeEwsDiscoveryResult, AccountOperationError>> + Send + '_
+    {
+        match request {
+            ExchangeEwsDiscoveryRequest::Start { mailbox_address } => {
+                self.ews_discovery_requests.fetch_add(1, Ordering::SeqCst);
+                self.ews_discovery_input_valid
+                    .store(mailbox_address == "ada@example.test", Ordering::SeqCst);
+                ready(Ok(ExchangeEwsDiscoveryResult::ConfirmationRequired(
+                    ExchangeEwsDiscoveryConfirmation::new(
+                        41,
+                        mailbox_address,
+                        "https://redirect.example.test".to_owned(),
+                    ),
+                )))
+            }
+            ExchangeEwsDiscoveryRequest::Continue(confirmation)
+                if confirmation.challenge() == 41 =>
+            {
+                ready(Ok(ExchangeEwsDiscoveryResult::Endpoint(
+                    "https://exchange.example.test/EWS/Exchange.asmx".to_owned(),
+                )))
+            }
+            ExchangeEwsDiscoveryRequest::Cancel(_) => {
+                ready(Ok(ExchangeEwsDiscoveryResult::Cancelled))
+            }
+            _ => ready(Err(AccountOperationError::InvalidConnectionDetails)),
         }
     }
 
@@ -1685,4 +1720,45 @@ fn exchange_server_form_connects_without_microsoft_client_configuration(cx: &mut
     assert!(ews_input_valid.load(Ordering::SeqCst));
     assert!(context.debug_bounds("open-mail").is_some());
     assert!(context.debug_bounds("open-calendar").is_none());
+}
+
+#[gpui_kit::test]
+fn exchange_autodiscover_shows_external_destination_before_continuing(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let provider = TestProvider::default();
+    let discovery_requests = Arc::clone(&provider.ews_discovery_requests);
+    let discovery_input_valid = Arc::clone(&provider.ews_discovery_input_valid);
+    let workflow = Arc::new(AccountWorkflow::new(provider));
+    let services = AccountServices::new(workflow, unused_account_session_factory());
+    let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(services), cx));
+
+    context.run_until_parked();
+    draw_account_view(context);
+    click(context, "connect-exchange-ews");
+    scroll_account_action_into_view(context, "ews-mailbox-address-input");
+    let bounds = context
+        .debug_bounds("ews-mailbox-address-input")
+        .expect("mailbox address field is visible");
+    context.simulate_click(bounds.center(), Modifiers::default());
+    context.simulate_input("ada@example.test");
+    click(context, "discover-ews-endpoint");
+
+    assert_eq!(discovery_requests.load(Ordering::SeqCst), 1);
+    assert!(discovery_input_valid.load(Ordering::SeqCst));
+    assert!(context.debug_bounds("continue-ews-discovery").is_some());
+    assert!(context.debug_bounds("cancel-ews-discovery").is_some());
+
+    click(context, "continue-ews-discovery");
+
+    let discovered_endpoint = context.cx.update(|cx| {
+        view.read(cx)
+            .exchange_ews_form
+            .as_ref()
+            .map(|form| form.endpoint.read(cx).value().to_string())
+    });
+    assert_eq!(
+        discovered_endpoint.as_deref(),
+        Some("https://exchange.example.test/EWS/Exchange.asmx")
+    );
+    assert!(context.debug_bounds("continue-ews-discovery").is_none());
 }

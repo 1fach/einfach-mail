@@ -16,10 +16,13 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 
 [PR #260](https://github.com/1fach/einfach-mail/pull/260) implements issue #257's Linux read-only EWS path. The Linux-local gate passed on 2026-11-09, including synthetic HTTPS NTLM and SOAP request-response tests. No UI or GitHub Actions run was used. Keep issue #257 open until a real Exchange Server or sanitized live-response recording verifies the connection and response behavior.
 
+Issue #258 tracks Linux EWS Autodiscover. Its implementation and synthetic verification are complete on the review branch, with the accepted request and credential boundary in ADR 0054. The local Linux gate passed on 2026-11-09. No Exchange Server is available, so keep #258 open for live server verification after review.
+
 ## Active risks
 
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep live sign-in, initial mail sync, read-state, flag, send, reply, move, and calendar verification open under their existing issues.
 - No Exchange Server test host or sanitized EWS response recording is available. Synthetic EWS tests can verify request construction and mapping, but cannot prove the NTLM channel-binding handshake or server-specific response behavior. Keep issue #257 open for that live verification.
+- No Exchange Server test host is available to verify Autodiscover's published candidate sequence, SRV behavior, redirects, and server response variants end to end. Keep issue #258 open for that live verification.
 - SSPI 0.23.1 pins `rsa 0.10.0-rc.18`, flagged by RUSTSEC-2023-0071. The EWS provider uses only SSPI's NTLM path and has no RSA private-key operation; `.cargo/audit.toml` narrowly ignores this advisory. Issue #259 tracks removing the exception after SSPI adopts a fixed stable release.
 - Issue #6 has synthetic coverage for expanded occurrences and UTC-midnight all-day inputs. Graph's docs do not say how a non-UTC all-day event appears in a UTC-default `calendarView` response. Live recurrence, time-zone, and all-day behavior remain unverified until a Microsoft 365 tenant is available.
 - Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
@@ -29,7 +32,7 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 
 ## Next actions
 
-1. Keep issue #257 open until a real Exchange Server or sanitized live-response recording verifies the EWS flow. Track Autodiscover separately in issue #258.
+1. Keep issues #257 and #258 open until a real Exchange Server or sanitized live-response recording verifies the EWS connection and Autodiscover flows.
 2. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
 3. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
 4. Continue the Linux real-window accessibility review tracked in issues #9 and #22.

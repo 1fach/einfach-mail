@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006">
+  <Response>
+    <Account>
+      <RedirectUrl>https://redirect.example.test/autodiscover/autodiscover.xml</RedirectUrl>
+    </Account>
+  </Response>
+</Autodiscover>

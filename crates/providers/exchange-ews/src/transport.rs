@@ -371,7 +371,7 @@ async fn receive_response(mut response: Response) -> Result<ReceivedResponse, Ew
     })
 }
 
-fn parse_endpoint(endpoint: &str) -> Result<Url, EwsError> {
+pub(crate) fn parse_endpoint(endpoint: &str) -> Result<Url, EwsError> {
     if endpoint.is_empty() || endpoint.len() > 2 * 1024 || endpoint.chars().any(char::is_control) {
         return Err(EwsError::InvalidConnectionDetails);
     }
@@ -382,6 +382,7 @@ fn parse_endpoint(endpoint: &str) -> Result<Url, EwsError> {
         || parsed.password().is_some()
         || parsed.query().is_some()
         || parsed.fragment().is_some()
+        || parsed.port() == Some(0)
     {
         return Err(EwsError::InvalidConnectionDetails);
     }
@@ -594,6 +595,7 @@ mod tests {
             "https://user:password@exchange.example.test/EWS/Exchange.asmx",
             "https://exchange.example.test/EWS/Exchange.asmx?tenant=x",
             "https://exchange.example.test/EWS/Exchange.asmx#fragment",
+            "https://exchange.example.test:0/EWS/Exchange.asmx",
         ] {
             assert_eq!(
                 parse_endpoint(endpoint),

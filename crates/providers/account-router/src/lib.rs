@@ -5,8 +5,9 @@ use std::future::Future;
 use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
     AccountPermissionRequest, AccountProvider, CalendarDeltaRequest, CalendarDeltaResponse,
-    CalendarOperationError, CalendarProvider, MailOperationError, MailProvider,
-    MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    CalendarOperationError, CalendarProvider, ExchangeEwsDiscoveryRequest,
+    ExchangeEwsDiscoveryResult, MailOperationError, MailProvider, MailSendProviderError,
+    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
@@ -127,6 +128,13 @@ where
         };
         *self.active_provider.write().await = Some(kind);
         Ok(profile)
+    }
+
+    async fn discover_exchange_ews_endpoint(
+        &self,
+        request: ExchangeEwsDiscoveryRequest,
+    ) -> Result<ExchangeEwsDiscoveryResult, AccountOperationError> {
+        self.ews.discover_exchange_ews_endpoint(request).await
     }
 
     fn reauthorize_account(

@@ -24,7 +24,7 @@ Support explicit mail read-state and follow-up changes, sends, replies, moves, d
 
 ## M7: Exchange Server EWS support
 
-Add a Linux account path for on-premises Exchange through an explicit HTTPS EWS endpoint. Support NTLMv2 with TLS channel binding and read-only folder browsing, message synchronization, and message reading. Keep Exchange Online on Microsoft Graph. Defer Autodiscover to [issue #258](https://github.com/1fach/einfach-mail/issues/258). Defer calendar access, mail writes, ADFS OAuth, Windows, and macOS. Keep the milestone open until a real Exchange server or sanitized recording verifies the provider. See [ADR 0053](../decisions/0053-linux-read-only-exchange-ews.md) and [issue #257](https://github.com/1fach/einfach-mail/issues/257).
+Add a Linux account path for on-premises Exchange through EWS. Support NTLMv2 with TLS channel binding, read-only folder browsing, message synchronization, and message reading. Account setup can discover endpoints through unauthenticated HTTPS Autodiscover with confirmation before sending the mailbox address to a new origin, or use a manually entered HTTPS endpoint. Keep Exchange Online on Microsoft Graph. Defer calendar access, mail writes, ADFS OAuth, Windows, and macOS. Keep the milestone open until a real Exchange server or sanitized recording verifies EWS and Autodiscover behavior. See [ADR 0053](../decisions/0053-linux-read-only-exchange-ews.md), [ADR 0054](../decisions/0054-linux-exchange-ews-autodiscover.md), and [issues #257](https://github.com/1fach/einfach-mail/issues/257) and [#258](https://github.com/1fach/einfach-mail/issues/258).
 
 ## M5: Windows support and daily-use integration
 

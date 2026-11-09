@@ -8,6 +8,8 @@ use einfach_mail_application::{
 pub(crate) enum EwsError {
     #[error("Exchange connection details are invalid")]
     InvalidConnectionDetails,
+    #[error("Exchange Autodiscover did not find a usable EWS endpoint")]
+    AutodiscoverFailed,
     #[error("the Exchange credential service is unavailable")]
     CredentialStoreUnavailable,
     #[error("Exchange rejected the NTLMv2 credentials")]
@@ -26,6 +28,7 @@ impl From<EwsError> for AccountOperationError {
     fn from(error: EwsError) -> Self {
         match error {
             EwsError::InvalidConnectionDetails => Self::InvalidConnectionDetails,
+            EwsError::AutodiscoverFailed => Self::AutodiscoverFailed,
             EwsError::CredentialStoreUnavailable => Self::CredentialStoreUnavailable,
             EwsError::AccessDenied => Self::AccessDenied,
             EwsError::InvalidResponse => Self::ProfileUnavailable,
@@ -47,6 +50,7 @@ impl From<EwsError> for MailOperationError {
             EwsError::InvalidConnectionDetails | EwsError::ServiceUnavailable => {
                 Self::ServiceUnavailable
             }
+            EwsError::AutodiscoverFailed => Self::ServiceUnavailable,
         }
     }
 }
@@ -60,6 +64,7 @@ impl From<EwsError> for MailSendProviderError {
             | EwsError::InvalidResponse
             | EwsError::ResourceLimitExceeded
             | EwsError::ServiceUnavailable
+            | EwsError::AutodiscoverFailed
             | EwsError::SyncStateExpired => Self::ServiceUnavailable,
         }
     }
@@ -74,6 +79,7 @@ impl From<EwsError> for CalendarOperationError {
             | EwsError::InvalidResponse
             | EwsError::ResourceLimitExceeded
             | EwsError::ServiceUnavailable
+            | EwsError::AutodiscoverFailed
             | EwsError::SyncStateExpired => Self::ServiceUnavailable,
         }
     }
