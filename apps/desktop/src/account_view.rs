@@ -442,8 +442,15 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         if matches!(self.status, AccountStatus::Connecting { .. }) {
             self.cancel_connect(cx);
         } else if !matches!(self.status, AccountStatus::CancellingConnect { .. }) {
-            if self.pending_ews_discovery_confirmation().is_some() {
+            let confirmation_pending = self.pending_ews_discovery_confirmation().is_some();
+            let discovery_busy = self
+                .exchange_ews_form
+                .as_ref()
+                .is_some_and(|form| form.discovery.is_busy());
+            if confirmation_pending {
                 self.cancel_exchange_ews_discovery(cx);
+            } else if discovery_busy {
+                self.task = None;
             }
             self.exchange_ews_form = None;
             cx.notify();
