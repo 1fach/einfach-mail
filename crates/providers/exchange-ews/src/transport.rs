@@ -32,6 +32,7 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SOAP_DEPTH: usize = 128;
 const MAX_NTLM_TOKEN_BYTES: usize = 16 * 1024;
 const REQUEST_CHANNEL_CAPACITY: usize = 16;
+pub(crate) const SOAP_NAMESPACE: &[u8] = b"http://schemas.xmlsoap.org/soap/envelope/";
 
 pub(crate) struct EwsTransport {
     commands: mpsc::Sender<EwsCommand>,
@@ -174,6 +175,19 @@ impl EwsTransport {
         let response_size = response.len();
         Ok((parse_soap_response::<O>(&response)?, response_size))
     }
+
+    pub(crate) async fn execute_xml_with_size<O>(
+        &self,
+        operation: O,
+    ) -> Result<(Vec<u8>, usize), EwsError>
+    where
+        O: Operation,
+    {
+        let document = serialize_soap_request(operation)?;
+        let response = self.post_soap(&document).await?;
+        let response_size = response.len();
+        Ok((response, response_size))
+    }
 }
 
 impl Drop for EwsTransport {
@@ -285,7 +299,7 @@ fn build_client_builder() -> reqwest::ClientBuilder {
         .tls_info(true)
 }
 
-fn serialize_soap_request<O: Operation>(operation: O) -> Result<Vec<u8>, EwsError> {
+pub(crate) fn serialize_soap_request<O: Operation>(operation: O) -> Result<Vec<u8>, EwsError> {
     Envelope {
         headers: vec![ews::soap::Header::RequestServerVersion {
             version: ExchangeServerVersion::Exchange2013_SP1,
@@ -389,10 +403,8 @@ pub(crate) fn parse_endpoint(endpoint: &str) -> Result<Url, EwsError> {
     Ok(parsed)
 }
 
-fn validate_soap_header(document: &[u8]) -> Result<(), EwsError> {
+pub(crate) fn validate_soap_header(document: &[u8]) -> Result<(), EwsError> {
     use quick_xml::{NsReader, events::Event, name::ResolveResult};
-
-    const SOAP_NAMESPACE: &[u8] = b"http://schemas.xmlsoap.org/soap/envelope/";
 
     let mut reader = NsReader::from_reader(document);
     let mut depth = 0usize;

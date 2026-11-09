@@ -3,10 +3,11 @@ use std::{collections::HashSet, future::Future, sync::Arc, time::SystemTime};
 use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
     AccountPermissionRequest, AccountProvider, CalendarDeltaRequest, CalendarDeltaResponse,
-    CalendarOperationError, CalendarProvider, ExchangeEwsAccountSettings,
-    ExchangeEwsAccountSettingsStore, ExchangeEwsConnectionInput, ExchangeEwsDiscoveryRequest,
-    ExchangeEwsDiscoveryResult, MailOperationError, MailProvider, MailSendProviderError,
-    MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    CalendarOperationError, CalendarProvider, CalendarViewSnapshotResponse,
+    ExchangeEwsAccountSettings, ExchangeEwsAccountSettingsStore, ExchangeEwsConnectionInput,
+    ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult, MailOperationError, MailProvider,
+    MailSendProviderError, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
+    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, FolderId, FolderReference, MailFolder, Mailbox,
@@ -29,7 +30,12 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{autodiscover::EwsAutodiscover, error::EwsError, transport::EwsTransport};
+use crate::{
+    autodiscover::EwsAutodiscover,
+    calendar::{build_calendar_view_request, parse_calendar_view_snapshot},
+    error::EwsError,
+    transport::EwsTransport,
+};
 use einfach_mail_provider_runtime as worker;
 
 const CREDENTIAL_SERVICE: &str = "com.1fach.einfach-mail";
@@ -421,6 +427,30 @@ where
         std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
     }
 
+    fn calendar_view_snapshot(
+        &self,
+        view: &einfach_mail_domain::CalendarViewReference,
+    ) -> impl Future<Output = Result<CalendarViewSnapshotResponse, CalendarOperationError>> + Send + '_
+    {
+        let view = view.clone();
+        let session_store = Arc::clone(&self.session);
+        async move {
+            let session = session_for_calendar(&session_store, view.account_id()).await?;
+            worker::run(move |_cancellation: CancellationToken| async move {
+                let request =
+                    build_calendar_view_request(&view).map_err(CalendarOperationError::from)?;
+                let (document, response_bytes) = session
+                    .transport
+                    .execute_xml_with_size(request)
+                    .await
+                    .map_err(CalendarOperationError::from)?;
+                parse_calendar_view_snapshot(&document, response_bytes, &view)
+                    .map_err(CalendarOperationError::from)
+            })
+            .await
+        }
+    }
+
     fn create_event(
         &self,
         _creation: &einfach_mail_domain::CalendarEventCreation,
@@ -475,6 +505,21 @@ async fn session_for_mail(
         .ok_or(MailOperationError::SignInRequired)?;
     if session.profile.id() != &account_id {
         return Err(MailOperationError::AccountMismatch);
+    }
+    Ok(session)
+}
+
+async fn session_for_calendar(
+    sessions: &RwLock<Option<Arc<EwsSession>>>,
+    account_id: &AccountId,
+) -> Result<Arc<EwsSession>, CalendarOperationError> {
+    let session = sessions
+        .read()
+        .await
+        .clone()
+        .ok_or(CalendarOperationError::SignInRequired)?;
+    if session.profile.id() != account_id {
+        return Err(CalendarOperationError::AccountMismatch);
     }
     Ok(session)
 }

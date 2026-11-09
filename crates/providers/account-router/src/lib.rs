@@ -5,9 +5,9 @@ use std::future::Future;
 use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
     AccountPermissionRequest, AccountProvider, CalendarDeltaRequest, CalendarDeltaResponse,
-    CalendarOperationError, CalendarProvider, ExchangeEwsDiscoveryRequest,
-    ExchangeEwsDiscoveryResult, MailOperationError, MailProvider, MailSendProviderError,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    CalendarOperationError, CalendarProvider, CalendarViewSnapshotResponse,
+    ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult, MailOperationError, MailProvider,
+    MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
@@ -389,6 +389,23 @@ where
                 Some(ProviderKind::ExchangeEws) => {
                     self.ews.calendar_delta_page(&view, request).await
                 }
+                None => Err(CalendarOperationError::SignInRequired),
+            }
+        }
+    }
+
+    fn calendar_view_snapshot(
+        &self,
+        view: &CalendarViewReference,
+    ) -> impl Future<Output = Result<CalendarViewSnapshotResponse, CalendarOperationError>> + Send + '_
+    {
+        let view = view.clone();
+        async move {
+            match self.selected_provider().await {
+                Some(ProviderKind::MicrosoftGraph) => {
+                    self.graph.calendar_view_snapshot(&view).await
+                }
+                Some(ProviderKind::ExchangeEws) => self.ews.calendar_view_snapshot(&view).await,
                 None => Err(CalendarOperationError::SignInRequired),
             }
         }

@@ -110,6 +110,30 @@ impl CalendarDeltaPageResponse {
     }
 }
 
+/// A complete fixed-range snapshot returned by a provider.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CalendarViewSnapshotResponse {
+    occurrences: Vec<CalendarOccurrence>,
+    response_bytes: usize,
+}
+
+impl CalendarViewSnapshotResponse {
+    /// Creates a snapshot with its occurrences and received response size.
+    #[must_use]
+    pub fn new(occurrences: Vec<CalendarOccurrence>, response_bytes: usize) -> Self {
+        Self {
+            occurrences,
+            response_bytes,
+        }
+    }
+
+    /// Returns the occurrences and response size.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<CalendarOccurrence>, usize) {
+        (self.occurrences, self.response_bytes)
+    }
+}
+
 /// One calendar delta page or a provider-confirmed expired cursor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CalendarDeltaResponse {
@@ -143,6 +167,23 @@ pub trait CalendarProvider: Send + Sync {
         view: &CalendarViewReference,
         request: CalendarDeltaRequest,
     ) -> impl Future<Output = Result<CalendarDeltaResponse, CalendarOperationError>> + Send + '_;
+
+    /// Loads a complete snapshot for one fixed primary-calendar view.
+    ///
+    /// Providers that use delta synchronization can keep the default unsupported
+    /// result. Snapshot providers must reject incomplete responses.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-safe provider error when sign-in, access, transport,
+    /// response validation, or resource limits prevent a complete snapshot.
+    fn calendar_view_snapshot(
+        &self,
+        _view: &CalendarViewReference,
+    ) -> impl Future<Output = Result<CalendarViewSnapshotResponse, CalendarOperationError>> + Send + '_
+    {
+        std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
+    }
 
     /// Creates one event for the operation's account and exact primary-calendar view.
     ///

@@ -6,7 +6,7 @@ Last updated: 2026-11-09
 
 M7 Exchange Server EWS support is in progress under [issue #257](https://github.com/1fach/einfach-mail/issues/257). The first implementation targets Linux read-only mail and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. Linux Autodiscover merged into `main` in [PR #261](https://github.com/1fach/einfach-mail/pull/261) and remains tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258) for live verification.
 
-The proposed M8 follow-up adds read-only EWS calendar views under [issue #266](https://github.com/1fach/einfach-mail/issues/266) and [Proposed ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md). It keeps Graph delta synchronization unchanged and uses complete EWS range snapshots. No Exchange calendar server or sanitized response recording is available for live verification.
+Issue [#266](https://github.com/1fach/einfach-mail/issues/266) and [Proposed ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md) track M8 EWS calendar work. The first local provider slice builds a bounded `FindItem` calendar view and maps complete synthetic responses. The application sync workflow, cache, account capabilities, and UI remain unchanged. No Exchange calendar server or sanitized response recording is available for live verification.
 
 PR #47 merged read-only mail into `main` at `409d299ffbe11dfe41c8f5a428b8e49b9ac97edd` on 2026-11-06. PR #50 merged the Linux calendar agenda and its reviewed stack into `main` at `8c10dca99fd8cc0a38f76fb11aed5a174b0970f8` on 2026-11-06. All four required PR #50 checks passed on head `0ecfc019ff661282bc6bf5bfe5ce522bbb77c4e3`.
 
@@ -28,7 +28,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 - No Exchange Server test host or sanitized EWS response recording is available. Synthetic EWS tests can verify request construction and mapping, but cannot prove the NTLM channel-binding handshake or server-specific response behavior. Keep issue #257 open for that live verification.
 - No Exchange Server test host is available to verify Autodiscover's published candidate sequence, SRV behavior, redirects, and server response variants end to end. Keep issue #258 open for that live verification.
 - No Exchange Server test host or sanitized calendar response recording is available to verify EWS recurrence expansion, event time-zone mapping, all-day dates, or calendar result completeness. Keep issue #266's live-compatibility claim unverified until such evidence exists.
-- `windows-timezones` 0.5.1 is the best API fit found for EWS Windows time-zone IDs. Its Unicode-DFS-2016 license requires retaining its notice, and its manifest does not declare an MSRV. Add the notice to third-party attributions and compile on Rust 1.95 before adding it under issue #266.
+- `windows-timezones` 0.5.1 declares no MSRV. The EWS provider compiled with the workspace Rust 1.95, and the Unicode-DFS-2016 terms are retained in [`LICENSES/Unicode-DFS-2016.txt`](../../LICENSES/Unicode-DFS-2016.txt). Custom or unknown Windows time-zone IDs make an EWS snapshot fail.
 - SSPI 0.23.1 pins `rsa 0.10.0-rc.18`, flagged by RUSTSEC-2023-0071. The EWS provider uses only SSPI's NTLM path and has no RSA private-key operation; `.cargo/audit.toml` narrowly ignores this advisory. Issue #259 tracks removing the exception after SSPI adopts a fixed stable release.
 - Issue #6 has synthetic coverage for expanded occurrences and UTC-midnight all-day inputs. Graph's docs do not say how a non-UTC all-day event appears in a UTC-default `calendarView` response. Live recurrence, time-zone, and all-day behavior remain unverified until a Microsoft 365 tenant is available.
 - Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
@@ -48,7 +48,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 5. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
 6. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
 7. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
-8. Implement the proposed M8 EWS calendar snapshot design under issue [#266](https://github.com/1fach/einfach-mail/issues/266), compile the `windows-timezones` candidate on Rust 1.95, preserve its license notice, and keep the result separate from Graph delta cursors.
+8. Plan the application and cache changes for complete EWS calendar snapshots under issue [#266](https://github.com/1fach/einfach-mail/issues/266). Keep snapshot replacement separate from Graph delta cursors.
 
 ## Update rule
 

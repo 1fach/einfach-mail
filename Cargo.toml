@@ -31,6 +31,7 @@ httpdate = "1.0.3"
 headers = "0.4.2"
 hyper-util = { version = "0.1.21", default-features = false, features = ["client-legacy"] }
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+windows-timezones = { version = "0.5.1", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
 html2text = "0.17.4"
 huskarl = { version = "0.11.10", default-features = false, features = ["authorization-flow-loopback"] }

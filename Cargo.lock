@@ -2094,6 +2094,7 @@ dependencies = [
  "hickory-resolver",
  "httpmock",
  "hyper-util",
+ "jiff",
  "keyring",
  "quick-xml",
  "reqwest",
@@ -2107,6 +2108,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "windows-timezones",
  "x509-parser",
  "zeroize",
 ]
@@ -10618,6 +10620,12 @@ checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
 dependencies = [
  "windows-link 0.2.1",
 ]
+
+[[package]]
+name = "windows-timezones"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53bce119c4ac0adfe0945781383966cc9838c853c2876fa3bf71662d76df4ef2"
 
 [[package]]
 name = "windows-version"

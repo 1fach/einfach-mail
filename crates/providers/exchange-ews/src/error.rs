@@ -74,13 +74,32 @@ impl From<EwsError> for CalendarOperationError {
     fn from(error: EwsError) -> Self {
         match error {
             EwsError::AccessDenied => Self::AccessDenied,
+            EwsError::InvalidResponse => Self::InvalidResponse,
+            EwsError::ResourceLimitExceeded => Self::ResourceLimitExceeded,
             EwsError::InvalidConnectionDetails
             | EwsError::CredentialStoreUnavailable
-            | EwsError::InvalidResponse
-            | EwsError::ResourceLimitExceeded
             | EwsError::ServiceUnavailable
             | EwsError::AutodiscoverFailed
             | EwsError::SyncStateExpired => Self::ServiceUnavailable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use einfach_mail_application::CalendarOperationError;
+
+    use super::EwsError;
+
+    #[test]
+    fn calendar_errors_preserve_invalid_response_and_resource_limit_categories() {
+        assert_eq!(
+            CalendarOperationError::from(EwsError::InvalidResponse),
+            CalendarOperationError::InvalidResponse
+        );
+        assert_eq!(
+            CalendarOperationError::from(EwsError::ResourceLimitExceeded),
+            CalendarOperationError::ResourceLimitExceeded
+        );
     }
 }
