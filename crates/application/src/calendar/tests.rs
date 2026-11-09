@@ -530,9 +530,9 @@ impl CalendarCache for FixtureCache {
         let view = view.clone();
         async move {
             let mut views = views.lock().expect("synthetic cache mutex is not poisoned");
-            if !views
+            if views
                 .get(&view)
-                .is_some_and(|cached| cached.state.last_synchronized_at().is_some())
+                .is_none_or(|cached| cached.state.last_synchronized_at().is_none())
             {
                 return Err(CalendarCacheError::InvalidData);
             }
