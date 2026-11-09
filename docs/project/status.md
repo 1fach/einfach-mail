@@ -16,7 +16,7 @@ PR #51 merged issue #49 calendar cursor recovery into `main` at `a31c775fc95e23d
 
 [PR #260](https://github.com/1fach/einfach-mail/pull/260) implements issue #257's Linux read-only EWS path. The Linux-local gate passed on 2026-11-09, including synthetic HTTPS NTLM and SOAP request-response tests. No UI or GitHub Actions run was used. Keep issue #257 open until a real Exchange Server or sanitized live-response recording verifies the connection and response behavior.
 
-Issue #258 tracks Linux EWS Autodiscover. Its implementation and synthetic verification are complete on the review branch, with the accepted request and credential boundary in ADR 0054. The local Linux gate passed on 2026-11-09. No Exchange Server is available, so keep #258 open for live server verification after review.
+Issue #258 tracks Linux EWS Autodiscover. Its implementation and synthetic verification are complete on the review branch, with the accepted request and credential boundary in ADR 0054. Rust 1.95 compile, formatting, Clippy, rustdoc, dependency policy, the Autodiscover headless checks, and the workspace test suite passed; ignored Secret Service session tests remain unrun. The latest full local gate stopped at `cargo audit` after the advisory database update described below; rerun it after issue #262 is resolved. No Exchange Server is available, so keep #258 open for live server verification after review.
 
 ## Active risks
 
@@ -28,15 +28,18 @@ Issue #258 tracks Linux EWS Autodiscover. Its implementation and synthetic verif
 - Manual Linux review remains open under issues #9 and #22. It covers real-window layout, focus, scrolling, screen-reader behavior, clipboard, and browser launch. No GUI has been launched during this work.
 - Windows and macOS support remain deferred.
 - The production-path cache-key lifecycle test passed on 2026-11-08 against a temporary GNOME Keyring service. This does not establish behavior for every Secret Service implementation.
-- The 2026-11-09 local RustSec audit loaded 1,422 advisories and scanned 1,021 locked dependencies. It reported nine informational unmaintained-crate advisories and the one narrowly ignored `rsa` advisory tracked in issue #259. No other vulnerable or yanked versions were reported. GPUI Kit v0.9.0 remains the latest release. Upstream `main` is 70 commits ahead at [commit `dbb0b9a`](https://github.com/longbridge/gpui-kit/commit/dbb0b9a4895c4b45753ed8647cb0dbb58178bd96), but its manifest still pins `gpui-pre` 0.3.11 and its lockfile still contains all eight previously known advisory crate names. Recheck when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates. See the [dependency review](dependency-review.md) for paths and replacement checks.
+- Before the RustSec advisory database refresh, the 2026-11-09 local audit loaded 1,422 advisories and scanned 1,021 locked dependencies. It reported nine informational unmaintained-crate advisories and the narrowly ignored `rsa` advisory tracked in issue #259. The refreshed database's additional finding is listed below.
+- The updated 2026-11-09 RustSec audit loaded 1,426 advisories and found pre-existing `libsqlite3-sys 0.38.2` / `RUSTSEC-2026-0459` in `main` as well as this branch. The finding affects SQLite before 3.54.0 when opening an attacker-crafted database and WAL pair. The current bundled SQLCipher source also needs verification: the advisory says `libsqlite3-sys 0.39.0` and `0.39.1` still bundle SQLCipher with SQLite 3.53.4, while upstream SQLCipher 4.20.0 updates to SQLite 3.54.1. Do not treat a `libsqlite3-sys` version bump as remediation unless the actual bundled SQLCipher baseline is verified. Issue [#262](https://github.com/1fach/einfach-mail/issues/262) tracks the fix and the required audit remains failing until it is resolved. The Autodiscover PR does not change this dependency.
+- GPUI Kit v0.9.0 remains the latest release. Upstream `main` is 70 commits ahead at [commit `dbb0b9a`](https://github.com/longbridge/gpui-kit/commit/dbb0b9a4895c4b45753ed8647cb0dbb58178bd96), but its manifest still pins `gpui-pre` 0.3.11 and its lockfile still contains all eight previously known advisory crate names. Recheck when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates. See the [dependency review](dependency-review.md) for paths and replacement checks.
 
 ## Next actions
 
 1. Keep issues #257 and #258 open until a real Exchange Server or sanitized live-response recording verifies the EWS connection and Autodiscover flows.
-2. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
-3. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
-4. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
-5. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
+2. Resolve issue #262 and rerun the `cargo audit --deny yanked` local gate.
+3. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
+4. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
+5. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
+6. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
 
 ## Update rule
 

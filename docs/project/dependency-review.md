@@ -146,6 +146,8 @@ For follow-up flag updates, no additional library fits the single Graph-specific
 
 ### Production persistence key-lifecycle tests
 
+The 2026-11-09 RustSec database refresh reported RUSTSEC-2026-0459 for the current `libsqlite3-sys 0.38.2` on both `main` and the Autodiscover branch. The advisory's nominal `libsqlite3-sys >=0.39.0` patched range is not sufficient evidence for the bundled-SQLCipher feature: the advisory states that 0.39.0 and 0.39.1 still bundle SQLCipher based on SQLite 3.53.4, and rusqlite 0.41.1 pins `sqlcipher-src = 419.0.6`. Upstream SQLCipher 4.20.0 updates to SQLite 3.54.1, but the Rust binding has not adopted that release. Issue [#262](https://github.com/1fach/einfach-mail/issues/262) tracks a verified update. Do not report this finding as fixed from Cargo's version threshold alone.
+
 Linux persistence tests exercise SQLCipher encryption and Secret Service key handling through `SqliteAccountCache::open_for_account` and `remove_for_account`. The default child-process case covers unavailable D-Bus for new and existing caches; the ignored case covers key creation, encrypted reopen, wrong and malformed key rejection, missing-key preservation, and account removal. It passed on 2026-11-08 in an isolated GNOME Keyring D-Bus session. The tests use existing workspace dependencies, random synthetic account IDs, and temporary XDG storage; they add no crate or native build requirement.
 
 The original standalone proof was removed after its remaining behaviors were covered by production-path tests. Its backup-specific cases had already been removed because production has no backup workflow. The Microsoft provider separately uses `keyring` for refresh-token storage and retains its own ignored Secret Service lifecycle test.
@@ -320,6 +322,10 @@ The advisory covers timing leakage from RSA private-key operations. The applicat
 - [`async-sqlite` 0.6.0 manifest](https://docs.rs/crate/async-sqlite/0.6.0/source/Cargo.toml.orig)
 - [`refinery` 0.10.0 release notes](https://github.com/rust-db/refinery/releases)
 - [RustSec rusqlite advisories](https://rustsec.org/packages/rusqlite.html)
+- [RustSec RUSTSEC-2026-0459 details](https://github.com/RustSec/advisory-db/blob/main/crates/libsqlite3-sys/RUSTSEC-2026-0459.md)
+- [`libsqlite3-sys 0.39.1` SQLCipher dependency declaration](https://github.com/rusqlite/rusqlite/blob/v0.41.1/libsqlite3-sys/Cargo.toml)
+- [SQLCipher 4.20.0 release notes](https://github.com/sqlcipher/sqlcipher/blob/v4.20.0/CHANGELOG.md)
+- [`sqlcipher-src 420.0.0` metadata](https://docs.rs/crate/sqlcipher-src/420.0.0+sqlcipher-4.20.0-sqlite-3.54.1-libtomcrypt-1.18.2)
 - [`SQLx` SQLite driver documentation](https://docs.rs/sqlx/0.9.0/sqlx/sqlite/)
 - [`redb` documentation](https://docs.rs/redb/4.4.0/redb/)
 - [Turso manual and its encryption status](https://github.com/tursodatabase/turso/blob/main/docs/manual.md)
