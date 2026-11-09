@@ -1,7 +1,9 @@
 # ADR 0050: Name GPUI DatePickers through a local component patch
 
-- Status: Accepted
+- Status: Superseded by ADR 0055
 - Date: 2026-11-07
+
+ADR 0055 superseded this decision on 2026-11-09. It removes the local patch and vendor copy. [Issue #176](https://github.com/1fach/einfach-mail/issues/176) tracks the deferred distinct picker names.
 
 ## Context
 
