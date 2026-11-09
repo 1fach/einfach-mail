@@ -24,7 +24,11 @@ Support explicit mail read-state and follow-up changes, sends, replies, moves, d
 
 ## M7: Exchange Server EWS support
 
-Add a Linux account path for on-premises Exchange through EWS. Support NTLMv2 with TLS channel binding, read-only folder browsing, message synchronization, and message reading. Account setup can discover endpoints through unauthenticated HTTPS Autodiscover with confirmation before sending the mailbox address to a new origin, or use a manually entered HTTPS endpoint. Keep Exchange Online on Microsoft Graph. Defer calendar access, mail writes, ADFS OAuth, Windows, and macOS. Keep the milestone open until a real Exchange server or sanitized recording verifies EWS and Autodiscover behavior. See [ADR 0053](../decisions/0053-linux-read-only-exchange-ews.md), [ADR 0054](../decisions/0054-linux-exchange-ews-autodiscover.md), and [issues #257](https://github.com/1fach/einfach-mail/issues/257) and [#258](https://github.com/1fach/einfach-mail/issues/258).
+Add a Linux account path for on-premises Exchange through EWS. Support NTLMv2 with TLS channel binding, read-only folder browsing, message synchronization, and message reading. Account setup can discover endpoints through unauthenticated HTTPS Autodiscover with confirmation before sending the mailbox address to a new origin, or use a manually entered HTTPS endpoint. Keep Exchange Online on Microsoft Graph. Defer read-only EWS calendar access to M8, mail writes, ADFS OAuth, Windows, and macOS. Keep the milestone open until a real Exchange server or sanitized recording verifies EWS and Autodiscover behavior. See [ADR 0053](../decisions/0053-linux-read-only-exchange-ews.md), [ADR 0054](../decisions/0054-linux-exchange-ews-autodiscover.md), and [issues #257](https://github.com/1fach/einfach-mail/issues/257) and [#258](https://github.com/1fach/einfach-mail/issues/258).
+
+## M8: Read-only EWS calendar views
+
+Add a Linux read-only primary-calendar agenda for on-premises Exchange accounts. Use EWS `FindItem` with `CalendarView` and atomically replace each fixed-range cache snapshot after confirming the full response is present. Preserve the current Graph delta flow and keep EWS event changes unavailable. Do not claim live Exchange compatibility until a real-server response or sanitized recording verifies the request, recurrence expansion, and time-zone behavior. See [Proposed ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md) and [issue #266](https://github.com/1fach/einfach-mail/issues/266).
 
 ## M5: Windows support and daily-use integration
 

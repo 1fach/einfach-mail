@@ -202,6 +202,16 @@ The selected direct dependencies for the provider are `ews`, `sspi`, `x509-parse
 
 ADR [0054](../decisions/0054-linux-exchange-ews-autodiscover.md) records the request sequence, confirmation boundary, transport limits, and manual-endpoint fallback. The accepted design does not send NTLM credentials or tokens during discovery. Synthetic HTTPS tests now prove POX and HTTP redirect confirmation, cancellation before contacting the destination, endpoint mapping, loop rejection, a slow-server timeout, and the absence of `Authorization` headers. No live Exchange server is available, so these tests do not prove server interoperability.
 
+### EWS calendar time-zone mapping — 2026-11-09
+
+| Need | Candidate and evidence | Decision |
+| --- | --- | --- |
+| Map an EWS Windows time-zone ID to a Linux IANA/tzdb ID | [`windows-timezones` 0.5.1](https://github.com/kyrias/windows-timezones) is generated from Unicode CLDR and parses a Windows ID into an enum that exposes its default tzdb ID. The `std` feature is the only default feature; it has no default third-party dependencies or build script. The optional Chrono integration is not needed because the app uses Jiff. The package license is `(MIT OR Apache-2.0) AND Unicode-DFS-2016`; the Unicode license permits use and distribution when its notices are retained. The manifest declares no `rust-version`. Version 0.5.1 was released on 2025-10-20; the repository has 52 commits and two open issues, with no release after that date at review time. The RustSec advisory database has no package directory for this crate. | Best API fit for the proposed Linux EWS adapter. If adopted, use its Windows-ID parser and `tzdb_id()` result, let existing Jiff resolve the zone, and include the Unicode license notice in third-party attributions. Do not enable `chrono-tz` or write a mapping table. Compile with the workspace Rust 1.95 before adding it and recheck the upstream CLDR snapshot. |
+| Bidirectional IANA/Windows mapping | [`localzone` 0.3.1](https://github.com/mitsuhiko/localzone) exposes direct `win_zone_to_iana` and `iana_to_win_zone` functions behind `win_zones`. It is Apache-2.0 and has no declared MSRV; the optional validation feature adds `chrono-tz` 0.9, while Windows and WebAssembly dependencies are target-specific. The latest release and repository commit are from April 2024. The RustSec advisory database has no package directory for this crate. | Do not select while `windows-timezones` is the closer default-feature API and has a newer release. Reconsider if the Unicode data license is unsuitable or the generated CLDR mapping is stale. |
+| General time-zone database | The existing [`jiff` 0.2.39](https://docs.rs/jiff/0.2.39/jiff/tz/) reads Linux tzdb and exposes IANA lookups. It internally maps the Windows system zone on Windows, but does not expose a general public Windows-ID-to-IANA conversion API. ICU4X exposes CLDR time-zone identities through BCP-47 APIs but does not provide a smaller direct replacement for the required mapping in the current app stack. | Keep Jiff for resolving mapped IANA IDs and converting event instants to local calendar dates. Do not add ICU4X for this one mapping without new evidence that the narrower mapping candidate cannot be used. |
+
+The current proposal sends EWS `CalendarView` bounds as explicit UTC instants and requests each item's original start/end time-zone fields. It does not need `TimeZoneContext` or an IANA-to-Windows conversion for the range query. No dependency is added by this review; [issue #266](https://github.com/1fach/einfach-mail/issues/266) tracks the integration and synthetic all-day/DST proof. See [Proposed ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md).
+
 #### RSA advisory exception — 2026-11-09
 
 A fresh RustSec advisory database checkout at `7a40350` loaded 1,422 advisories and scanned 1,021 locked dependencies. It reported `rsa 0.10.0-rc.18` under [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html); the current advisory patches stable `rsa >=0.10.0`, while the `sspi 0.23.1` manifest pins the affected release exactly. The upstream SSPI manifest still uses that pin.
@@ -380,6 +390,13 @@ The advisory covers timing leakage from RSA private-key operations. The applicat
 - [`chrono-tz` upstream manifest](https://github.com/chronotope/chrono-tz/blob/main/chrono-tz/Cargo.toml)
 - [`windows-timezones` 0.5.1 documentation](https://docs.rs/windows-timezones/0.5.1/windows_timezones/)
 - [`localzone` 0.3.1 Windows-to-IANA function](https://docs.rs/localzone/0.3.1/localzone/fn.win_zone_to_iana.html)
+- [`localzone` 0.3.1 manifest](https://github.com/mitsuhiko/localzone/blob/main/Cargo.toml)
+- [`windows-timezones` 0.5.1 manifest and changelog](https://github.com/kyrias/windows-timezones)
+- [Microsoft EWS CalendarView](https://learn.microsoft.com/en-us/exchange/client-developer/web-service-reference/calendarview)
+- [Microsoft EWS CalendarItem](https://learn.microsoft.com/en-us/exchange/client-developer/web-service-reference/calendaritem)
+- [Microsoft EWS time-zone handling](https://learn.microsoft.com/en-us/exchange/client-developer/exchange-web-services/time-zones-and-ews-in-exchange)
+- [Unicode-DFS-2016 license](https://spdx.org/licenses/Unicode-DFS-2016.html)
+- [`exchangelib` all-day calendar response mapping reference](https://ecederstrand.github.io/exchangelib/exchangelib/items/calendar_item.html)
 - [`time-tz` package documentation and release history](https://docs.rs/crate/time-tz/latest)
 - [`time-tz` upstream repository and manifest](https://github.com/Yuri6037/time-tz)
 - [ICU4X `TimeZone` Windows-ID mapping](https://docs.rs/icu/latest/icu/time/zone/struct.TimeZone.html)
