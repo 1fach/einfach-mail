@@ -19,7 +19,7 @@ pub enum CalendarCacheError {
     /// Another cache handle or lifecycle operation owns an account lock.
     #[error("the local calendar cache is in use")]
     InUse,
-    /// Stored values do not satisfy the calendar domain contract.
+    /// Calendar data do not satisfy the cache contract.
     #[error("the local calendar cache contains invalid data")]
     InvalidData,
     /// The requested view belongs to another cache account.
@@ -30,7 +30,7 @@ pub enum CalendarCacheError {
     CreationAlreadyPending,
 }
 
-/// An account and view's completed delta cursor and resumable page checkpoint.
+/// Sync completion and cursor state for one account and fixed calendar view.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CalendarSyncState {
     delta_link: Option<CalendarDeltaLink>,
@@ -39,14 +39,16 @@ pub struct CalendarSyncState {
     mode: CalendarSyncMode,
 }
 
-/// Identifies which calendar snapshot a saved cursor continues.
+/// Identifies the calendar sync state stored for a fixed view.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CalendarSyncMode {
-    /// Continues updates against the active snapshot.
+    /// Continues delta updates against the active snapshot.
     Incremental,
-    /// Rebuilds a snapshot while leaving the active snapshot visible.
+    /// Rebuilds a delta-backed snapshot while leaving the active snapshot visible.
     Replacement,
+    /// Marks a complete provider snapshot that has no delta cursor.
+    Snapshot,
 }
 
 impl CalendarSyncState {
@@ -61,19 +63,37 @@ impl CalendarSyncState {
         }
     }
 
+    /// Creates state for a complete snapshot without a provider delta cursor.
+    #[must_use]
+    pub fn snapshot(completed_at: SystemTime) -> Self {
+        Self {
+            delta_link: None,
+            next_link: None,
+            last_synchronized_at: Some(completed_at),
+            mode: CalendarSyncMode::Snapshot,
+        }
+    }
+
     /// Restores a checkpoint after persistence validates its stored timestamps.
     ///
     /// # Errors
     ///
-    /// Returns [`CalendarCacheError::InvalidData`] when a completion time
-    /// exists without a completed delta link.
+    /// Returns [`CalendarCacheError::InvalidData`] when a completed delta state
+    /// has no delta link, or a snapshot state has a delta link, next link, or no
+    /// completion time.
     pub fn from_checkpoint(
         delta_link: Option<CalendarDeltaLink>,
         next_link: Option<CalendarDeltaLink>,
         last_synchronized_at: Option<SystemTime>,
         mode: CalendarSyncMode,
     ) -> Result<Self, CalendarCacheError> {
-        if last_synchronized_at.is_some() && delta_link.is_none() {
+        let invalid_checkpoint = match mode {
+            CalendarSyncMode::Snapshot => {
+                delta_link.is_some() || next_link.is_some() || last_synchronized_at.is_none()
+            }
+            _ => last_synchronized_at.is_some() && delta_link.is_none(),
+        };
+        if invalid_checkpoint {
             return Err(CalendarCacheError::InvalidData);
         }
         Ok(Self {
@@ -96,7 +116,7 @@ impl CalendarSyncState {
         self.next_link.as_ref()
     }
 
-    /// Returns when the last full view round committed.
+    /// Returns when the last complete view sync committed.
     #[must_use]
     pub fn last_synchronized_at(&self) -> Option<SystemTime> {
         self.last_synchronized_at
@@ -108,7 +128,13 @@ impl CalendarSyncState {
         self.mode == CalendarSyncMode::Replacement
     }
 
-    /// Selects the interrupted page before the completed-round cursor.
+    /// Returns whether the completed state came from a full snapshot.
+    #[must_use]
+    pub fn is_snapshot(&self) -> bool {
+        self.mode == CalendarSyncMode::Snapshot
+    }
+
+    /// Selects the next Graph request, preferring an interrupted page.
     #[must_use]
     pub fn request(&self) -> CalendarDeltaRequest {
         if self.replacement_active() {
@@ -138,14 +164,14 @@ impl std::fmt::Debug for CalendarSyncState {
             )
             .field("next_link", &self.next_link.as_ref().map(|_| "<redacted>"))
             .field("last_synchronized_at", &self.last_synchronized_at)
-            .field("replacement_active", &self.replacement_active())
+            .field("mode", &self.mode)
             .finish()
     }
 }
 
 /// Encrypted local operations for one account's fixed calendar view.
 pub trait CalendarCache: Send + Sync {
-    /// Returns the view's saved cursor state, creating an empty state when needed.
+    /// Returns the view's saved sync state, creating an empty state when needed.
     ///
     /// # Errors
     ///
@@ -222,6 +248,25 @@ pub trait CalendarCache: Send + Sync {
         &self,
         view: &CalendarViewReference,
         page: CalendarDeltaPage,
+        completed_at: SystemTime,
+    ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_;
+
+    /// Replaces the complete cached snapshot for one exact account and view.
+    ///
+    /// Every occurrence must reference this view, overlap its range, and have a
+    /// unique event ID. An empty snapshot removes all events in this view.
+    /// Implementations commit the events and completion state atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarCacheError::AccountMismatch`] for a view or occurrence
+    /// from another account, [`CalendarCacheError::InvalidData`] for an
+    /// occurrence outside this view or a duplicate event ID, or
+    /// [`CalendarCacheError::Unavailable`] when the transaction fails.
+    fn replace_snapshot(
+        &self,
+        view: &CalendarViewReference,
+        events: Vec<CalendarOccurrence>,
         completed_at: SystemTime,
     ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_;
 

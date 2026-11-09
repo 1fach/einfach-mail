@@ -1,8 +1,8 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     sync::{Arc, Mutex},
-    time::SystemTime,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use einfach_mail_domain::{
@@ -566,6 +566,42 @@ impl CalendarCache for FixtureCache {
         }
     }
 
+    fn replace_snapshot(
+        &self,
+        view: &CalendarViewReference,
+        events: Vec<CalendarOccurrence>,
+        completed_at: SystemTime,
+    ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_ {
+        let views = Arc::clone(&self.views);
+        let view = view.clone();
+        async move {
+            let mut event_ids = HashSet::with_capacity(events.len());
+            for event in &events {
+                if event.reference().account_id() != view.account_id() {
+                    return Err(CalendarCacheError::AccountMismatch);
+                }
+                if event.reference() != &view
+                    || !event.overlaps_view()
+                    || !event_ids.insert(event.id().as_str())
+                {
+                    return Err(CalendarCacheError::InvalidData);
+                }
+            }
+
+            let mut views = views.lock().expect("synthetic cache mutex is not poisoned");
+            let cached = views.entry(view).or_insert_with(CachedView::empty);
+            cached.events = events
+                .into_iter()
+                .map(|event| (event.id().as_str().to_owned(), event))
+                .collect();
+            cached.replacement_events = None;
+            cached.removed_in_replacement.clear();
+            cached.state = CalendarSyncState::snapshot(completed_at);
+            cached.write_sync_required = false;
+            Ok(cached.state.clone())
+        }
+    }
+
     fn begin_full_resync(
         &self,
         view: &CalendarViewReference,
@@ -1042,6 +1078,64 @@ fn all_day_patch(subject: Option<&str>, location: Option<&str>) -> CalendarOccur
     time.set_is_all_day(true);
     patch.set_time(time);
     patch
+}
+
+#[test]
+fn snapshot_cache_replaces_events_and_rejects_duplicate_ids() {
+    smol::block_on(async {
+        let view = view();
+        let patch = all_day_patch(Some("Synthetic snapshot"), None);
+        let occurrence = patch
+            .into_new(view.clone(), replacement_event_id())
+            .expect("synthetic snapshot event is complete");
+        let cache = FixtureCache::default();
+        let completed_at = UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+
+        let state = cache
+            .replace_snapshot(&view, vec![occurrence.clone()], completed_at)
+            .await
+            .expect("complete snapshot replaces cached events");
+        assert!(state.is_snapshot());
+        assert!(state.delta_link().is_none());
+        assert_eq!(state.last_synchronized_at(), Some(completed_at));
+        assert_eq!(
+            cache
+                .list_events(&view)
+                .await
+                .expect("snapshot is readable"),
+            vec![occurrence.clone()]
+        );
+
+        assert_eq!(
+            cache
+                .replace_snapshot(&view, vec![occurrence.clone(), occurrence], completed_at)
+                .await,
+            Err(CalendarCacheError::InvalidData)
+        );
+        assert_eq!(
+            cache
+                .list_events(&view)
+                .await
+                .expect("failed snapshot keeps cache"),
+            vec![
+                all_day_patch(Some("Synthetic snapshot"), None)
+                    .into_new(view.clone(), replacement_event_id())
+                    .expect("synthetic snapshot event remains complete")
+            ]
+        );
+
+        cache
+            .replace_snapshot(&view, Vec::new(), completed_at)
+            .await
+            .expect("an empty complete snapshot clears its view");
+        assert!(
+            cache
+                .list_events(&view)
+                .await
+                .expect("empty snapshot is readable")
+                .is_empty()
+        );
+    });
 }
 
 fn utc(year: i32, month: Month, day: u8) -> OffsetDateTime {

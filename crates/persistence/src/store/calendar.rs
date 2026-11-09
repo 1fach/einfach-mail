@@ -1,4 +1,4 @@
-use std::{future::Future, time::SystemTime};
+use std::{collections::HashSet, future::Future, time::SystemTime};
 
 use async_sqlite::rusqlite::{
     Connection, OptionalExtension, Transaction, params, params_from_iter,
@@ -79,6 +79,13 @@ struct CalendarPageCommit {
     scope: CalendarScope,
     changes: Vec<CalendarDeltaChange>,
     progress: CalendarDeltaProgress,
+    completed_at: (i64, i64),
+}
+
+struct CalendarSnapshotCommit {
+    view: CalendarViewReference,
+    scope: CalendarScope,
+    events: Vec<CalendarOccurrence>,
     completed_at: (i64, i64),
 }
 
@@ -172,6 +179,44 @@ impl SqliteAccountCache {
             return Err(CalendarCacheError::AccountMismatch);
         }
         Ok(CalendarScope::from_view(view))
+    }
+
+    fn validate_calendar_snapshot(
+        &self,
+        view: &CalendarViewReference,
+        events: &[CalendarOccurrence],
+    ) -> Result<(), CalendarCacheError> {
+        let mut event_ids = HashSet::with_capacity(events.len());
+        for event in events {
+            if event.reference().account_id() != view.account_id() {
+                return Err(CalendarCacheError::AccountMismatch);
+            }
+            if event.reference() != view
+                || !event.overlaps_view()
+                || !event_ids.insert(event.id().as_str())
+            {
+                return Err(CalendarCacheError::InvalidData);
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_calendar_snapshot_commit(
+        &self,
+        view: &CalendarViewReference,
+        events: Vec<CalendarOccurrence>,
+        completed_at: SystemTime,
+    ) -> Result<CalendarSnapshotCommit, CalendarCacheError> {
+        let scope = self.check_calendar_view(view)?;
+        self.validate_calendar_snapshot(view, &events)?;
+        let completed_at =
+            system_time_parts(completed_at).map_err(CacheFailure::calendar_public)?;
+        Ok(CalendarSnapshotCommit {
+            view: view.clone(),
+            scope,
+            events,
+            completed_at,
+        })
     }
 }
 
@@ -305,6 +350,23 @@ impl CalendarCache for SqliteAccountCache {
             };
             client
                 .conn_mut_and_then(move |connection| commit_calendar_page(connection, commit))
+                .await
+                .map_err(CacheFailure::calendar_public)
+        }
+    }
+
+    fn replace_snapshot(
+        &self,
+        view: &CalendarViewReference,
+        events: Vec<CalendarOccurrence>,
+        completed_at: SystemTime,
+    ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_ {
+        let commit = self.prepare_calendar_snapshot_commit(view, events, completed_at);
+        let client = self.client.clone();
+        async move {
+            let commit = commit?;
+            client
+                .conn_mut_and_then(move |connection| commit_calendar_snapshot(connection, commit))
                 .await
                 .map_err(CacheFailure::calendar_public)
         }
@@ -678,6 +740,7 @@ fn commit_calendar_page(
     if finish_replacement {
         replace_calendar_snapshot(&transaction, scope)?;
     }
+    clear_calendar_snapshot_state(&transaction, &account_id, commit.scope)?;
     persist_calendar_progress(
         &transaction,
         CalendarProgressCommit {
@@ -691,6 +754,120 @@ fn commit_calendar_page(
     let state = read_calendar_sync_state(&transaction, &account_id, commit.scope)?;
     transaction.commit()?;
     Ok(state)
+}
+
+fn clear_calendar_snapshot_state(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    scope: CalendarScope,
+) -> CacheResult<()> {
+    delete_calendar_rows_for_scope(
+        transaction,
+        "calendar_view_snapshot_state",
+        account_id,
+        scope,
+    )
+}
+
+fn commit_calendar_snapshot(
+    connection: &mut Connection,
+    commit: CalendarSnapshotCommit,
+) -> CacheResult<CalendarSyncState> {
+    let scope = CalendarEventScope {
+        view: &commit.view,
+        range: commit.scope,
+    };
+    let account_id = scope.account_id().to_owned();
+    let transaction = connection.transaction()?;
+    insert_calendar_view_state(&transaction, &account_id, commit.scope)?;
+    clear_calendar_snapshot_rows(&transaction, &account_id, commit.scope)?;
+    for event in &commit.events {
+        write_calendar_event(&transaction, scope, event)?;
+    }
+    persist_calendar_snapshot_state(&transaction, &account_id, commit.scope, commit.completed_at)?;
+    let state = read_calendar_sync_state(&transaction, &account_id, commit.scope)?;
+    transaction.commit()?;
+    Ok(state)
+}
+
+fn clear_calendar_snapshot_rows(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    scope: CalendarScope,
+) -> CacheResult<()> {
+    for table in [
+        "calendar_event_rebuild_removed",
+        "calendar_event_rebuild",
+        "calendar_events",
+    ] {
+        delete_calendar_rows_for_scope(transaction, table, account_id, scope)?;
+    }
+    Ok(())
+}
+
+fn delete_calendar_rows_for_scope(
+    transaction: &Transaction<'_>,
+    table: &str,
+    account_id: &str,
+    scope: CalendarScope,
+) -> CacheResult<()> {
+    let statement = format!("DELETE FROM {table}{CALENDAR_SCOPE_FILTER_SQL}");
+    transaction.execute(
+        &statement,
+        params_from_iter(calendar_scope_params(account_id, scope)),
+    )?;
+    Ok(())
+}
+
+fn persist_calendar_snapshot_state(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    scope: CalendarScope,
+    completed_at: (i64, i64),
+) -> CacheResult<()> {
+    clear_calendar_delta_sync_state(transaction, account_id, scope)?;
+    transaction.execute(
+        UPSERT_CALENDAR_SNAPSHOT_STATE_SQL,
+        params_from_iter(calendar_snapshot_state_params(
+            account_id,
+            scope,
+            completed_at,
+        )),
+    )?;
+    Ok(())
+}
+
+fn clear_calendar_delta_sync_state(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+    scope: CalendarScope,
+) -> CacheResult<()> {
+    let changed = transaction.execute(
+        CLEAR_CALENDAR_DELTA_SYNC_STATE_SQL,
+        params_from_iter(calendar_scope_params(account_id, scope)),
+    )?;
+    if changed != 1 {
+        return Err(CacheFailure::InvalidData);
+    }
+    Ok(())
+}
+
+fn calendar_snapshot_state_params(
+    account_id: &str,
+    scope: CalendarScope,
+    completed_at: (i64, i64),
+) -> [async_sqlite::rusqlite::types::Value; 9] {
+    [
+        account_id.to_owned().into(),
+        scope.start_seconds.into(),
+        scope.start_nanoseconds.into(),
+        scope.end_seconds.into(),
+        scope.end_nanoseconds.into(),
+        i64::from(scope.local_start_julian_day).into(),
+        i64::from(scope.local_end_julian_day).into(),
+        completed_at.0.into(),
+        completed_at.1.into(),
+    ]
 }
 
 fn begin_calendar_full_resync(
@@ -1022,16 +1199,7 @@ fn read_calendar_sync_state(
 ) -> CacheResult<CalendarSyncState> {
     let raw = connection
         .query_row(
-            "SELECT delta_link, next_link, last_sync_seconds, last_sync_nanoseconds,
-                    replacement_active
-             FROM calendar_view_sync_state
-             WHERE account_id = ?1
-               AND range_start_seconds = ?2
-               AND range_start_nanoseconds = ?3
-               AND range_end_seconds = ?4
-               AND range_end_nanoseconds = ?5
-               AND local_start_julian_day = ?6
-               AND local_end_julian_day = ?7",
+            SELECT_CALENDAR_SYNC_STATE_SQL,
             params![
                 account_id,
                 scope.start_seconds,
@@ -1048,21 +1216,23 @@ fn read_calendar_sync_state(
                     last_sync_seconds: row.get(2)?,
                     last_sync_nanoseconds: row.get(3)?,
                     replacement_active: row.get(4)?,
+                    snapshot_seconds: row.get(5)?,
+                    snapshot_nanoseconds: row.get(6)?,
                 })
             },
         )
         .optional()?
         .ok_or(CacheFailure::InvalidData)?;
-    let last_synchronized_at = match (raw.last_sync_seconds, raw.last_sync_nanoseconds) {
-        (None, None) => None,
-        (Some(seconds), Some(nanoseconds)) => Some(system_time_from_parts(seconds, nanoseconds)?),
-        _ => return Err(CacheFailure::InvalidData),
-    };
-    let mode = match raw.replacement_active {
-        0 => CalendarSyncMode::Incremental,
-        1 => CalendarSyncMode::Replacement,
-        _ => return Err(CacheFailure::InvalidData),
-    };
+    calendar_sync_state_from_raw(raw)
+}
+
+fn calendar_sync_state_from_raw(raw: RawCalendarSyncState) -> CacheResult<CalendarSyncState> {
+    let delta_completed_at =
+        optional_calendar_completion(raw.last_sync_seconds, raw.last_sync_nanoseconds)?;
+    let snapshot_completed_at =
+        optional_calendar_completion(raw.snapshot_seconds, raw.snapshot_nanoseconds)?;
+    let (mode, last_synchronized_at) =
+        calendar_sync_mode(&raw, delta_completed_at, snapshot_completed_at)?;
     CalendarSyncState::from_checkpoint(
         raw.delta_link.map(CalendarDeltaLink::from_opaque),
         raw.next_link.map(CalendarDeltaLink::from_opaque),
@@ -1072,12 +1242,44 @@ fn read_calendar_sync_state(
     .map_err(|_| CacheFailure::InvalidData)
 }
 
+fn optional_calendar_completion(
+    seconds: Option<i64>,
+    nanoseconds: Option<i64>,
+) -> CacheResult<Option<SystemTime>> {
+    Ok(match (seconds, nanoseconds) {
+        (None, None) => None,
+        (Some(seconds), Some(nanoseconds)) => Some(system_time_from_parts(seconds, nanoseconds)?),
+        _ => return Err(CacheFailure::InvalidData),
+    })
+}
+
+fn calendar_sync_mode(
+    raw: &RawCalendarSyncState,
+    delta_completed_at: Option<SystemTime>,
+    snapshot_completed_at: Option<SystemTime>,
+) -> CacheResult<(CalendarSyncMode, Option<SystemTime>)> {
+    let has_delta_state = raw.delta_link.is_some()
+        || raw.next_link.is_some()
+        || delta_completed_at.is_some()
+        || raw.replacement_active != 0;
+    match (raw.replacement_active, snapshot_completed_at) {
+        (0, Some(completed_at)) if !has_delta_state => {
+            Ok((CalendarSyncMode::Snapshot, Some(completed_at)))
+        }
+        (0, None) => Ok((CalendarSyncMode::Incremental, delta_completed_at)),
+        (1, None) => Ok((CalendarSyncMode::Replacement, delta_completed_at)),
+        _ => Err(CacheFailure::InvalidData),
+    }
+}
+
 struct RawCalendarSyncState {
     delta_link: Option<String>,
     next_link: Option<String>,
     last_sync_seconds: Option<i64>,
     last_sync_nanoseconds: Option<i64>,
     replacement_active: i64,
+    snapshot_seconds: Option<i64>,
+    snapshot_nanoseconds: Option<i64>,
 }
 
 struct RawPendingEventCreation {
@@ -1415,6 +1617,73 @@ const UPDATE_CALENDAR_SYNC_PROGRESS: &str = "UPDATE calendar_view_sync_state
       AND range_end_nanoseconds = ?5
       AND local_start_julian_day = ?6
       AND local_end_julian_day = ?7";
+
+const CALENDAR_SCOPE_FILTER_SQL: &str = "
+    WHERE account_id = ?1
+      AND range_start_seconds = ?2
+      AND range_start_nanoseconds = ?3
+      AND range_end_seconds = ?4
+      AND range_end_nanoseconds = ?5
+      AND local_start_julian_day = ?6
+      AND local_end_julian_day = ?7";
+
+const CLEAR_CALENDAR_DELTA_SYNC_STATE_SQL: &str = "UPDATE calendar_view_sync_state
+    SET delta_link = NULL,
+        next_link = NULL,
+        last_sync_seconds = NULL,
+        last_sync_nanoseconds = NULL,
+        replacement_active = 0,
+        write_sync_required = 0
+    WHERE account_id = ?1
+      AND range_start_seconds = ?2
+      AND range_start_nanoseconds = ?3
+      AND range_end_seconds = ?4
+      AND range_end_nanoseconds = ?5
+      AND local_start_julian_day = ?6
+      AND local_end_julian_day = ?7";
+
+const UPSERT_CALENDAR_SNAPSHOT_STATE_SQL: &str = "INSERT INTO calendar_view_snapshot_state (
+    account_id,
+    range_start_seconds,
+    range_start_nanoseconds,
+    range_end_seconds,
+    range_end_nanoseconds,
+    local_start_julian_day,
+    local_end_julian_day,
+    completed_seconds,
+    completed_nanoseconds
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+ON CONFLICT (
+    account_id,
+    range_start_seconds,
+    range_start_nanoseconds,
+    range_end_seconds,
+    range_end_nanoseconds,
+    local_start_julian_day,
+    local_end_julian_day
+) DO UPDATE SET
+    completed_seconds = excluded.completed_seconds,
+    completed_nanoseconds = excluded.completed_nanoseconds";
+
+const SELECT_CALENDAR_SYNC_STATE_SQL: &str = "SELECT state.delta_link, state.next_link,
+    state.last_sync_seconds, state.last_sync_nanoseconds, state.replacement_active,
+    snapshot.completed_seconds, snapshot.completed_nanoseconds
+FROM calendar_view_sync_state AS state
+LEFT JOIN calendar_view_snapshot_state AS snapshot
+    ON snapshot.account_id = state.account_id
+   AND snapshot.range_start_seconds = state.range_start_seconds
+   AND snapshot.range_start_nanoseconds = state.range_start_nanoseconds
+   AND snapshot.range_end_seconds = state.range_end_seconds
+   AND snapshot.range_end_nanoseconds = state.range_end_nanoseconds
+   AND snapshot.local_start_julian_day = state.local_start_julian_day
+   AND snapshot.local_end_julian_day = state.local_end_julian_day
+WHERE state.account_id = ?1
+  AND state.range_start_seconds = ?2
+  AND state.range_start_nanoseconds = ?3
+  AND state.range_end_seconds = ?4
+  AND state.range_end_nanoseconds = ?5
+  AND state.local_start_julian_day = ?6
+  AND state.local_end_julian_day = ?7";
 
 fn delete_calendar_event_from(
     connection: &Connection,

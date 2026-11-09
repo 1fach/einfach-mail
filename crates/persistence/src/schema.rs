@@ -472,6 +472,48 @@ fn migrations() -> Migrations<'static> {
             SET write_sync_required = 1
             WHERE last_sync_seconds IS NOT NULL;",
         ),
+        M::up(
+            "CREATE TABLE calendar_view_snapshot_state (
+                account_id TEXT NOT NULL,
+                range_start_seconds INTEGER NOT NULL,
+                range_start_nanoseconds INTEGER NOT NULL
+                    CHECK (range_start_nanoseconds BETWEEN 0 AND 999999999),
+                range_end_seconds INTEGER NOT NULL,
+                range_end_nanoseconds INTEGER NOT NULL
+                    CHECK (range_end_nanoseconds BETWEEN 0 AND 999999999),
+                local_start_julian_day INTEGER NOT NULL,
+                local_end_julian_day INTEGER NOT NULL,
+                completed_seconds INTEGER NOT NULL,
+                completed_nanoseconds INTEGER NOT NULL
+                    CHECK (completed_nanoseconds BETWEEN 0 AND 999999999),
+                PRIMARY KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ),
+                FOREIGN KEY (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) REFERENCES calendar_view_sync_state (
+                    account_id,
+                    range_start_seconds,
+                    range_start_nanoseconds,
+                    range_end_seconds,
+                    range_end_nanoseconds,
+                    local_start_julian_day,
+                    local_end_julian_day
+                ) ON DELETE CASCADE
+            );",
+        ),
     ])
 }
 

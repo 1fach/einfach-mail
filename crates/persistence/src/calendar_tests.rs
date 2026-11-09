@@ -69,6 +69,24 @@ fn timed_event_patch(start: OffsetDateTime, end: OffsetDateTime) -> CalendarOccu
     patch
 }
 
+fn snapshot_event(
+    view: &CalendarViewReference,
+    identifier: &str,
+    start_day: u8,
+) -> einfach_mail_domain::CalendarOccurrence {
+    let start = Date::from_calendar_date(2030, Month::January, start_day)
+        .expect("synthetic snapshot event start date is valid")
+        .with_time(Time::from_hms(9, 0, 0).expect("synthetic event start time is valid"))
+        .assume_utc();
+    let end = start + time::Duration::hours(1);
+    timed_event_patch(start, end)
+        .into_new(
+            view.clone(),
+            EventId::try_from(identifier.to_owned()).expect("synthetic event ID is valid"),
+        )
+        .expect("synthetic snapshot event is complete")
+}
+
 fn out_of_view_event_patch() -> CalendarOccurrencePatch {
     let mut patch = CalendarOccurrencePatch::new();
     let mut time = CalendarOccurrenceTimePatch::new();
@@ -248,6 +266,230 @@ fn calendar_cursor_and_sparse_event_updates_survive_restart_and_stay_range_scope
                 .await
                 .expect("events outside the fixed range are not returned")
                 .is_empty()
+        );
+        reopened.close_for_tests().await;
+    });
+}
+
+#[test]
+fn complete_calendar_snapshots_are_exact_scoped_and_survive_reopen() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id("synthetic-account");
+        let view = week(7);
+        let sibling_view = week(14);
+        let event = snapshot_event(&view, "synthetic-view-event", 8);
+        let sibling_event = snapshot_event(&sibling_view, "synthetic-sibling-event", 15);
+        let completed_at = UNIX_EPOCH + Duration::from_secs(1_900_000_000);
+        let cache = open_cache(&directory, account.clone()).await;
+
+        let state = cache
+            .replace_snapshot(&view, vec![event.clone()], completed_at)
+            .await
+            .expect("complete snapshot replaces one fixed view");
+        assert!(state.is_snapshot());
+        assert!(state.delta_link().is_none());
+        assert!(state.next_link().is_none());
+        assert_eq!(state.last_synchronized_at(), Some(completed_at));
+        assert_eq!(
+            cache
+                .replace_snapshot(&view, vec![event.clone(), event.clone()], completed_at)
+                .await,
+            Err(CalendarCacheError::InvalidData)
+        );
+        assert_eq!(
+            cache
+                .list_events(&view)
+                .await
+                .expect("rejected duplicate keeps the prior snapshot"),
+            vec![event.clone()]
+        );
+        cache
+            .replace_snapshot(&sibling_view, vec![sibling_event.clone()], completed_at)
+            .await
+            .expect("sibling snapshot has independent state");
+        cache.close_for_tests().await;
+
+        let reopened = open_cache(&directory, account.clone()).await;
+        let persisted = reopened
+            .ensure_view(&view)
+            .await
+            .expect("snapshot completion survives restart");
+        assert!(persisted.is_snapshot());
+        assert_eq!(persisted.last_synchronized_at(), Some(completed_at));
+        assert_eq!(
+            reopened
+                .list_events(&view)
+                .await
+                .expect("snapshot events are readable"),
+            vec![event]
+        );
+        assert_eq!(
+            reopened
+                .list_events(&sibling_view)
+                .await
+                .expect("sibling snapshot remains readable"),
+            vec![sibling_event.clone()]
+        );
+
+        let next_link = link("synthetic-graph-next");
+        let graph_state = reopened
+            .commit_delta_page(
+                &view,
+                CalendarDeltaPage::new(Vec::new(), CalendarDeltaProgress::Next(next_link.clone())),
+                completed_at + Duration::from_secs(1),
+            )
+            .await
+            .expect("Graph progress supersedes snapshot state for this view");
+        assert!(!graph_state.is_snapshot());
+        assert_eq!(graph_state.next_link(), Some(&next_link));
+        assert!(graph_state.last_synchronized_at().is_none());
+
+        let empty_completed_at = completed_at + Duration::from_secs(2);
+        let empty_state = reopened
+            .replace_snapshot(&view, Vec::new(), empty_completed_at)
+            .await
+            .expect("empty complete snapshot clears only this view");
+        assert!(empty_state.is_snapshot());
+        assert!(
+            reopened
+                .list_events(&view)
+                .await
+                .expect("empty snapshot has no cached events")
+                .is_empty()
+        );
+        let foreign_view =
+            CalendarViewReference::new(account_id("other-account"), view.range().clone());
+        let foreign_event = snapshot_event(&foreign_view, "synthetic-foreign-event", 8);
+        assert_eq!(
+            reopened
+                .replace_snapshot(&view, vec![foreign_event], empty_completed_at)
+                .await,
+            Err(CalendarCacheError::AccountMismatch)
+        );
+        reopened.close_for_tests().await;
+
+        let reopened = open_cache(&directory, account).await;
+        let persisted_empty = reopened
+            .ensure_view(&view)
+            .await
+            .expect("empty snapshot state survives restart");
+        assert!(persisted_empty.is_snapshot());
+        assert_eq!(
+            persisted_empty.last_synchronized_at(),
+            Some(empty_completed_at)
+        );
+        assert!(
+            reopened
+                .list_events(&view)
+                .await
+                .expect("empty snapshot remains empty after restart")
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .ensure_view(&sibling_view)
+                .await
+                .expect("sibling snapshot state remains independent")
+                .last_synchronized_at(),
+            Some(completed_at)
+        );
+        assert_eq!(
+            reopened
+                .list_events(&sibling_view)
+                .await
+                .expect("sibling snapshot remains after another view clears"),
+            vec![sibling_event]
+        );
+        reopened.close_for_tests().await;
+    });
+}
+
+#[test]
+fn failed_calendar_snapshot_commit_preserves_events_and_graph_checkpoint() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id("synthetic-account");
+        let view = week(7);
+        let prior_event = snapshot_event(&view, "synthetic-prior-event", 8);
+        let next_event = snapshot_event(&view, "synthetic-new-event", 9);
+        let delta_link = link("synthetic-prior-delta");
+        let completed_at = UNIX_EPOCH + Duration::from_secs(1_900_000_100);
+        let cache = open_cache(&directory, account.clone()).await;
+        let prior_start = Date::from_calendar_date(2030, Month::January, 8)
+            .expect("synthetic event date is valid")
+            .with_time(Time::from_hms(9, 0, 0).expect("valid time"))
+            .assume_utc();
+        cache
+            .commit_delta_page(
+                &view,
+                CalendarDeltaPage::new(
+                    vec![CalendarDeltaChange::Upsert {
+                        id: prior_event.id().clone(),
+                        patch: timed_event_patch(
+                            prior_start,
+                            prior_start + time::Duration::hours(1),
+                        ),
+                    }],
+                    CalendarDeltaProgress::Complete(delta_link.clone()),
+                ),
+                completed_at,
+            )
+            .await
+            .expect("prior Graph state is complete");
+        cache
+            .execute_batch_for_tests(
+                "CREATE TRIGGER fail_calendar_snapshot_state_insert
+                 BEFORE INSERT ON calendar_view_snapshot_state
+                 BEGIN SELECT RAISE(ABORT, 'synthetic snapshot failure'); END;",
+            )
+            .await
+            .expect("synthetic rollback trigger is installed");
+
+        assert_eq!(
+            cache
+                .replace_snapshot(
+                    &view,
+                    vec![next_event],
+                    completed_at + Duration::from_secs(1),
+                )
+                .await,
+            Err(CalendarCacheError::Unavailable)
+        );
+        let state = cache
+            .ensure_view(&view)
+            .await
+            .expect("failed replacement preserves prior sync state");
+        assert!(!state.is_snapshot());
+        assert_eq!(state.delta_link(), Some(&delta_link));
+        assert_eq!(state.last_synchronized_at(), Some(completed_at));
+        assert_eq!(
+            cache
+                .list_events(&view)
+                .await
+                .expect("prior event remains readable"),
+            vec![prior_event.clone()]
+        );
+
+        cache
+            .execute_batch_for_tests("DROP TRIGGER fail_calendar_snapshot_state_insert;")
+            .await
+            .expect("synthetic rollback trigger is removed");
+        cache.close_for_tests().await;
+
+        let reopened = open_cache(&directory, account).await;
+        let persisted = reopened
+            .ensure_view(&view)
+            .await
+            .expect("prior Graph checkpoint survives restart after rollback");
+        assert_eq!(persisted.delta_link(), Some(&delta_link));
+        assert_eq!(persisted.last_synchronized_at(), Some(completed_at));
+        assert_eq!(
+            reopened
+                .list_events(&view)
+                .await
+                .expect("prior event survives rollback and restart"),
+            vec![prior_event]
         );
         reopened.close_for_tests().await;
     });

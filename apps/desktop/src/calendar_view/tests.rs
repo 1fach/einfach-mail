@@ -304,6 +304,7 @@ fn created_event(
 #[derive(Clone, Default)]
 struct TestCache {
     events: Option<Vec<CalendarOccurrence>>,
+    snapshots: Arc<Mutex<HashMap<CalendarViewReference, Vec<CalendarOccurrence>>>>,
     created_events: Arc<Mutex<HashMap<CalendarViewReference, HashMap<String, CalendarOccurrence>>>>,
     pending_creation: Arc<Mutex<Option<PendingCalendarEventCreation>>>,
     fail_next_rejected_cleanup: Arc<AtomicBool>,
@@ -425,6 +426,45 @@ impl CalendarCache for TestCache {
         ready(state)
     }
 
+    fn replace_snapshot(
+        &self,
+        view: &CalendarViewReference,
+        events: Vec<CalendarOccurrence>,
+        completed_at: std::time::SystemTime,
+    ) -> impl Future<Output = Result<CalendarSyncState, CalendarCacheError>> + Send + '_ {
+        let snapshots = Arc::clone(&self.snapshots);
+        let synchronized_views = Arc::clone(&self.synchronized_views);
+        let write_sync_required = Arc::clone(&self.write_sync_required);
+        let view = view.clone();
+        async move {
+            let mut event_ids = HashSet::with_capacity(events.len());
+            for event in &events {
+                if event.reference().account_id() != view.account_id() {
+                    return Err(CalendarCacheError::AccountMismatch);
+                }
+                if event.reference() != &view
+                    || !event.overlaps_view()
+                    || !event_ids.insert(event.id().as_str())
+                {
+                    return Err(CalendarCacheError::InvalidData);
+                }
+            }
+            snapshots
+                .lock()
+                .expect("synthetic snapshot mutex is not poisoned")
+                .insert(view.clone(), events);
+            synchronized_views
+                .lock()
+                .expect("synthetic synchronized view mutex is not poisoned")
+                .insert(view.clone());
+            write_sync_required
+                .lock()
+                .expect("synthetic write recovery mutex is not poisoned")
+                .remove(&view);
+            Ok(CalendarSyncState::snapshot(completed_at))
+        }
+    }
+
     fn begin_full_resync(
         &self,
         _: &CalendarViewReference,
@@ -437,6 +477,15 @@ impl CalendarCache for TestCache {
         &self,
         view: &CalendarViewReference,
     ) -> impl Future<Output = Result<Vec<CalendarOccurrence>, CalendarCacheError>> + Send + '_ {
+        if let Some(events) = self
+            .snapshots
+            .lock()
+            .expect("synthetic snapshot mutex is not poisoned")
+            .get(view)
+            .cloned()
+        {
+            return ready(Ok(events));
+        }
         if let Some(events) = &self.events {
             return ready(Ok(events.clone()));
         }
