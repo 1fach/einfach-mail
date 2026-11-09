@@ -1,0 +1,5 @@
+# SSPI 0.23.1 pins rsa 0.10.0-rc.18, which RustSec still marks vulnerable.
+# This app uses only SSPI's NTLM provider and has no RSA private-key operation.
+# Remove the exception when the dependency updates; see issue #259.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]

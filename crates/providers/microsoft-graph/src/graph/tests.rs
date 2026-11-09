@@ -51,6 +51,14 @@ fn synthetic_access_token() -> Arc<AccessToken> {
     )))
 }
 
+fn http_url(server: &MockServer, path: &str) -> String {
+    format!("http://{}{path}", server.address())
+}
+
+fn http_base_url(server: &MockServer) -> String {
+    http_url(server, "")
+}
+
 fn synthetic_view() -> CalendarViewReference {
     let account =
         AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
@@ -173,7 +181,7 @@ async fn folder_listing_follows_pages_and_traverses_children() {
     let server = MockServer::start_async().await;
     let page_two_link = format!(
         "{}/v1.0/me/mailFolders?$skiptoken=opaque-root-page",
-        server.base_url()
+        http_base_url(&server)
     );
     let root_page_one = server
         .mock_async(|when, then| {
@@ -300,7 +308,7 @@ async fn message_delta_page_maps_sparse_updates_and_removals() {
     let server = MockServer::start_async().await;
     let delta_link = format!(
         "{}/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=opaque-final",
-        server.base_url()
+        http_base_url(&server)
     );
     let response = server
         .mock_async(|when, then| {
@@ -474,8 +482,8 @@ async fn profile_read_does_not_follow_a_graph_redirect() {
         })
         .await;
     let (api, transport) = synthetic_graph_api(&server);
-    let profile_endpoint =
-        Url::parse(&server.url("/v1.0/me")).expect("synthetic Graph profile endpoint is valid");
+    let profile_endpoint = Url::parse(&http_url(&server, "/v1.0/me"))
+        .expect("synthetic Graph profile endpoint is valid");
 
     assert_eq!(
         api.load_profile(&profile_endpoint, synthetic_access_token())
@@ -549,8 +557,8 @@ fn utc_time(day: u8, hour: u8) -> OffsetDateTime {
 }
 
 fn synthetic_graph_api(server: &MockServer) -> (GraphApi, GraphTransport) {
-    let endpoint =
-        Url::parse(&server.url("/v1.0/me")).expect("synthetic Graph profile endpoint is valid");
+    let endpoint = Url::parse(&http_url(server, "/v1.0/me"))
+        .expect("synthetic Graph profile endpoint is valid");
     let authority = GraphAuthority::from_profile_endpoint(&endpoint)
         .expect("synthetic Graph authority is valid");
     let transport =
@@ -1335,8 +1343,14 @@ async fn event_delete_requires_an_etag_before_sending() {
 #[tokio::test]
 async fn calendar_delta_uses_exact_week_bounds_and_maps_sparse_followup_changes() {
     let server = MockServer::start_async().await;
-    let next_link = server.url("/v1.0/me/calendarView/delta?$skiptoken=synthetic-next");
-    let final_link = server.url("/v1.0/me/calendarView/delta?$deltatoken=synthetic-final");
+    let next_link = http_url(
+        &server,
+        "/v1.0/me/calendarView/delta?$skiptoken=synthetic-next",
+    );
+    let final_link = http_url(
+        &server,
+        "/v1.0/me/calendarView/delta?$deltatoken=synthetic-final",
+    );
     let initial_page = json!({
         "value": [{
             "id": "synthetic-event",
@@ -1458,7 +1472,10 @@ async fn calendar_delta_uses_exact_week_bounds_and_maps_sparse_followup_changes(
 #[tokio::test]
 async fn calendar_delta_preserves_recurring_occurrence_instants_across_dst() {
     let server = MockServer::start_async().await;
-    let delta_link = server.url("/v1.0/me/calendarView/delta?$deltatoken=synthetic-dst");
+    let delta_link = http_url(
+        &server,
+        "/v1.0/me/calendarView/delta?$deltatoken=synthetic-dst",
+    );
     let page = json!({
         "value": [
             recurring_graph_event_json(
@@ -1560,7 +1577,7 @@ async fn calendar_410_reset_requires_a_valid_location_on_a_continuation() {
     let server = MockServer::start_async().await;
     let reset_link = format!(
         "{}/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=",
-        server.base_url()
+        http_base_url(&server)
     );
     let mock_reset_link = reset_link.clone();
     let expired = server
@@ -1578,7 +1595,7 @@ async fn calendar_410_reset_requires_a_valid_location_on_a_continuation() {
             &synthetic_view(),
             CalendarDeltaRequest::Continue(CalendarDeltaLink::from_opaque(format!(
                 "{}/v1.0/me/calendarView/delta?$deltatoken=expired",
-                server.base_url()
+                http_base_url(&server)
             ))),
             synthetic_access_token(),
         )
@@ -1614,7 +1631,7 @@ async fn sync_state_not_found_starts_the_fixed_range_without_a_location() {
             &synthetic_view(),
             CalendarDeltaRequest::Continue(CalendarDeltaLink::from_opaque(format!(
                 "{}/v1.0/me/calendarView/delta?$deltatoken=expired",
-                server.base_url()
+                http_base_url(&server)
             ))),
             synthetic_access_token(),
         )

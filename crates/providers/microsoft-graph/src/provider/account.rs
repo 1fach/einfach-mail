@@ -3,11 +3,12 @@ use std::{future::Future, sync::Arc};
 use huskarl::token::{AccessToken, RefreshToken};
 use tokio_util::sync::CancellationToken;
 
-use crate::{credential::CredentialIdentity, error::GraphError, http_client, identity, worker};
+use crate::{credential::CredentialIdentity, error::GraphError, http_client, identity};
 use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
 };
 use einfach_mail_domain::{AccountId, AccountProfile};
+use einfach_mail_provider_runtime as worker;
 
 use super::{MicrosoftGraphProvider, ProviderConfig, ProviderSession};
 
@@ -43,11 +44,14 @@ impl AccountProvider for MicrosoftGraphProvider {
             let Some(saved_credential) = config.credentials.load()? else {
                 return Ok(None);
             };
+            let client_id = config
+                .client_id
+                .ok_or(AccountOperationError::ServiceUnavailable)?;
             let expected_account_id = saved_credential.expected_account_id().cloned();
             let client = http_client::build_client()
                 .map_err(|_| AccountOperationError::ServiceUnavailable)?;
             let response = identity::refresh(
-                config.client_id,
+                client_id,
                 &config.endpoints,
                 client.clone(),
                 saved_credential.token().clone(),
@@ -284,7 +288,9 @@ async fn authorize_profile(
         http_client::build_client().map_err(|_| AccountOperationError::ServiceUnavailable)?;
     let response = identity::authorize(
         identity::AuthorizationContext {
-            client_id: config.client_id,
+            client_id: config
+                .client_id
+                .ok_or(AccountOperationError::ServiceUnavailable)?,
             callback_port: config.callback_port,
             endpoints: &config.endpoints,
             client,

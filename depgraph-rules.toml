@@ -2,8 +2,11 @@
 einfach-mail-domain = []
 einfach-mail-application = ["einfach-mail-domain", "tokio-util"]
 einfach-mail-persistence = ["einfach-mail-application", "einfach-mail-domain"]
-einfach-mail-microsoft-graph = ["einfach-mail-application", "einfach-mail-domain"]
-einfach-mail-desktop = ["einfach-mail-application", "einfach-mail-domain", "einfach-mail-microsoft-graph", "einfach-mail-persistence"]
+einfach-mail-microsoft-graph = ["einfach-mail-application", "einfach-mail-domain", "einfach-mail-provider-runtime"]
+einfach-mail-exchange-ews = ["einfach-mail-application", "einfach-mail-domain", "einfach-mail-provider-runtime"]
+einfach-mail-account-router = ["einfach-mail-application", "einfach-mail-domain", "einfach-mail-exchange-ews", "einfach-mail-microsoft-graph"]
+einfach-mail-provider-runtime = ["einfach-mail-application"]
+einfach-mail-desktop = ["einfach-mail-account-router", "einfach-mail-application", "einfach-mail-domain", "einfach-mail-exchange-ews", "einfach-mail-microsoft-graph", "einfach-mail-persistence"]
 
 [options]
 strict = true

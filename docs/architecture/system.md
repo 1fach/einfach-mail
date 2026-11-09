@@ -8,11 +8,15 @@ The application uses GPUI Kit for its native interface. Rust owns the UI, mail a
 flowchart LR
     View[Native GPUI views] -->|actions and results| App[Application workflows]
     App --> Domain[Account, mail, and calendar domain]
-    App --> Graph[Microsoft Graph provider]
+    App --> Router[Account provider selection]
+    Router --> Graph[Microsoft Graph provider]
+    Router --> Ews[Exchange EWS provider]
     App --> Store[Encrypted local cache]
     Graph --> Identity[Private Entra identity module]
     Identity --> Vault[Linux Secret Service]
+    Ews --> Vault
     Graph -->|HTTPS with a private delegated token| MS[Microsoft Graph v1.0]
+    Ews -->|HTTPS with NTLMv2 and TLS channel binding| Exchange[On-premises Exchange EWS]
 ```
 
 PR #47 merged M2 read-only mail into `main`. PR #50 merged the Linux read-only calendar agenda and its reviewed M4 action stack into `main` on 2026-11-06.
@@ -30,10 +34,12 @@ ADRs [0015](../decisions/0015-idempotent-message-read-state-update.md), [0017](.
 | `apps/desktop/` | GPUI lifecycle, native views, keyboard actions, the Linux process lock, OS integration, and sanitized email rendering | Mail rules, Graph requests, database schema |
 | `crates/application/` | Account, mail, and calendar workflows, provider/cache ports, mail and calendar actions, application errors, and email sanitization | GPUI, Graph JSON, concrete database types |
 | `crates/domain/` | Provider-independent account, folder, message, calendar occurrence, and sync invariants | Framework and provider details |
+| `crates/providers/account-router/` | Selects the one saved account provider and enforces its declared account capabilities | EWS or Graph protocol details, UI state |
 | `crates/providers/microsoft-graph/` | Linux OAuth, Graph profile/folder/message/calendar-view and event requests, explicitly authorized mail and calendar writes, response mapping, private HTTP transport, and refresh-token storage | UI decisions, persistence policy, token access in application code |
+| `crates/providers/exchange-ews/` | Explicit endpoint validation, EWS SOAP/XML transport and mapping, NTLMv2 over verified HTTPS, channel binding, endpoint/mailbox settings, and the Linux Secret Service password | Graph requests, calendar behavior, unsupported mail writes |
 | `crates/persistence/` | Linux XDG paths, Secret Service key references, SQLCipher schema and migrations, encrypted records, atomic mail/calendar sync and event/message updates, durable send/reply recovery markers, and cache removal | Graph or GPUI types |
 
-The dependency direction is desktop UI → application → domain, with Graph and persistence adapters implementing application-owned ports. Views never call Graph or access the database directly.
+The dependency direction is desktop UI → application → domain, with provider and persistence adapters implementing application-owned ports. The account router selects either Graph or EWS for the single saved account. Views never call a provider or access the database directly.
 
 Mail and calendar views use GPUI Kit rem units for ordinary layout dimensions, so configured UI scaling applies consistently. The message list derives its row-height estimates from `Window::rem_size()` and rebuilds them when the scale or message count changes.
 
@@ -55,6 +61,8 @@ Mail and calendar views use GPUI Kit rem units for ordinary layout dimensions, s
 14. Native Archive and Delete resolve the locale-independent `archive` or `deleteditems` folder through Graph, verify the account-scoped reference is in the active account's visible folder tree, then use one typed well-known-folder move workflow. It requires a successful account sync, holds the source reservation during resolution, and requires exact Graph confirmation before one encrypted-cache transaction moves the message and body. It rejects a source already in the selected folder and requires another successful sync after an uncertain result or cache failure. Archive success offers to open the resolved Archive folder; Delete remains recoverable in Deleted Items. See [ADR 0039](../decisions/0039-move-messages-to-deleted-items.md) and [ADR 0040](../decisions/0040-move-messages-to-the-default-archive-folder.md).
 15. A new-message send or reply reserves the account and saves one body-free SQLCipher marker before its Graph POST. A reply keeps the cached source folder and message IDs with an optional subject; Graph selects the reply recipients. The app does not retry an uncertain POST. It keeps the marker until the user checks Sent Items and resolves it. Account removal and another send remain blocked while the marker exists. See [ADR 0017](../decisions/0017-safe-plain-text-mail-sending.md) and [ADR 0018](../decisions/0018-native-plain-text-message-reply.md).
 16. Account removal holds the shared account reservation while it checks pending send and unresolved event-creation markers and removes the cache. AccountView asks the provider for a verified account ID, removes that account's cache through the existing guard, then deletes the saved credential. During restore, the provider saves a rotated token with a pending identity before Graph `/me`; it preserves the prior expected ID across restart and exposes the identity only after Graph confirms a match. An unverified credential blocks cache removal and replacement sign-in. AccountView keeps the account session when the user returns from Mail or Calendar, then reuses its cache worker on sign-out or when the user reopens a view. The Linux desktop acquires a per-user process lock before GPUI starts. See [ADR 0027](../decisions/0027-serialize-mail-account-removal-with-mail-operations.md), [ADR 0028](../decisions/0028-single-linux-desktop-process.md), and [ADR 0041](../decisions/0041-bind-saved-sign-in-to-cache-identity.md).
+17. An account form selects Microsoft 365 or Exchange Server. The application passes typed connection input to the account router, which connects through one provider and returns an account profile with provider-neutral mail and calendar capabilities. Graph accounts retain the current mail and calendar behavior. EWS accounts expose read-only mail and no calendar view or writes. The account views hide actions that the profile does not support; the provider rejects those operations as a second boundary.
+18. The EWS adapter validates the explicit HTTPS endpoint before it reads or stores a password. It uses reqwest's platform TLS verifier, disables redirects and automatic retries, and limits EWS requests to HTTP/1.1. NTLMv2 challenges run serially on one connection. The adapter checks connection identity between challenge legs and sends the TLS channel-binding token derived from the validated peer certificate. The `ews` crate builds and parses SOAP XML. The adapter maps folder hierarchy, `SyncFolderItems`, and `GetItem` responses into provider-neutral domain values. It stores EWS message sync state through the existing opaque mail checkpoint, so each page and cursor commit together in SQLCipher. Message bodies pass through the existing application sanitizer and native GPUI renderer. See [ADR 0053](../decisions/0053-linux-read-only-exchange-ews.md).
 
 ## Synchronization rules
 

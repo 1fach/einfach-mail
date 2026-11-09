@@ -6,6 +6,8 @@
 #[cfg(all(test, target_os = "linux"))]
 mod calendar_tests;
 #[cfg(target_os = "linux")]
+mod exchange_ews_settings;
+#[cfg(target_os = "linux")]
 mod schema;
 #[cfg(target_os = "linux")]
 mod security;
@@ -14,5 +16,7 @@ mod store;
 #[cfg(all(test, target_os = "linux"))]
 mod workflow_tests;
 
+#[cfg(target_os = "linux")]
+pub use exchange_ews_settings::XdgExchangeEwsAccountSettingsStore;
 #[cfg(target_os = "linux")]
 pub use store::{SqliteAccountCache, SqliteAccountCacheFactory};

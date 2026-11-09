@@ -67,6 +67,24 @@ impl MailView {
             .debug_selector(|| "mail-sync-status".to_owned())
             .test_support();
 
+        let mut header_actions = div().flex().items_center().gap_2();
+        if self.can_write_mail() {
+            header_actions = header_actions.child(
+                Button::new("new-mail-message")
+                    .debug_selector(|| "new-mail-message".to_owned())
+                    .primary()
+                    .label(if matches!(&self.pending_send, Ok(Some(_))) {
+                        "Resolve send"
+                    } else {
+                        "Compose"
+                    })
+                    .disabled(self.sync_status.is_sync_active())
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.open_composer(window, cx);
+                    })),
+            );
+        }
+
         div()
             .w_full()
             .h(MAIL_HEADER_HEIGHT)
@@ -77,33 +95,24 @@ impl MailView {
             .px_4()
             .border_b_1()
             .border_color(colors.border)
-            .child(
-                div()
+            .child({
+                let mut title = div()
                     .flex()
                     .items_center()
                     .gap_4()
-                    .child(div().text_lg().font_bold().child("Mail"))
-                    .child(sync_status),
-            )
+                    .child(div().text_lg().font_bold().child("Mail"));
+                if !self.can_write_mail() {
+                    title = title.child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.muted_foreground)
+                            .child("Read-only"),
+                    );
+                }
+                title.child(sync_status)
+            })
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Button::new("new-mail-message")
-                            .debug_selector(|| "new-mail-message".to_owned())
-                            .primary()
-                            .label(if matches!(&self.pending_send, Ok(Some(_))) {
-                                "Resolve send"
-                            } else {
-                                "Compose"
-                            })
-                            .disabled(self.sync_status.is_sync_active())
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.open_composer(window, cx);
-                            })),
-                    )
+                header_actions
                     .child(
                         Button::new("sync-mail")
                             .ghost()
@@ -417,29 +426,38 @@ impl MailView {
                                         metadata.subject().unwrap_or("(No subject)").to_owned(),
                                     ))
                                     .child({
-                                        let actions = div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(self.render_read_state_action(message_id, cx))
-                                            .child(
-                                                self.render_follow_up_flag_action(message_id, cx),
-                                            )
-                                            .child(self.render_well_known_folder_action(
-                                                WellKnownMailFolder::Archive,
-                                                message_id,
-                                                cx,
-                                            ))
-                                            .child(self.render_move_action(message_id, cx))
-                                            .child(self.render_reply_action(message_id, cx))
-                                            .child(self.render_well_known_folder_action(
-                                                WellKnownMailFolder::DeletedItems,
-                                                message_id,
-                                                cx,
-                                            ));
-                                        #[cfg(test)]
-                                        let actions = actions.id("message-actions").test_support();
-                                        actions
+                                        if !self.can_write_mail() {
+                                            div().into_any_element()
+                                        } else {
+                                            let actions = div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    self.render_read_state_action(message_id, cx),
+                                                )
+                                                .child(
+                                                    self.render_follow_up_flag_action(
+                                                        message_id, cx,
+                                                    ),
+                                                )
+                                                .child(self.render_well_known_folder_action(
+                                                    WellKnownMailFolder::Archive,
+                                                    message_id,
+                                                    cx,
+                                                ))
+                                                .child(self.render_move_action(message_id, cx))
+                                                .child(self.render_reply_action(message_id, cx))
+                                                .child(self.render_well_known_folder_action(
+                                                    WellKnownMailFolder::DeletedItems,
+                                                    message_id,
+                                                    cx,
+                                                ));
+                                            #[cfg(test)]
+                                            let actions =
+                                                actions.id("message-actions").test_support();
+                                            actions.into_any_element()
+                                        }
                                     }),
                             )
                             .child(

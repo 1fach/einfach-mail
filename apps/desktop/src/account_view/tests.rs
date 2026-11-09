@@ -17,21 +17,21 @@ use gpui_kit::{
 
 use super::{AccountContent, AccountServices, AccountStatus, AccountView, SetupIssue};
 use einfach_mail_application::{
-    AccountCacheOpenError, AccountCacheRemovalError, AccountOperationCancellation,
-    AccountOperationError, AccountPermissionRequest, AccountProvider, AccountSession,
-    AccountSessionFactory, AccountSessionFuture, AccountWorkflow, CalendarCacheError,
-    CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
-    CalendarSession, CalendarSnapshot, CalendarSyncReport, CalendarWorkflowError,
-    FollowUpFlagUpdateOutcome, MailCacheError, MailSendOutcome, MailSendResolutionError,
-    MailSendWorkflowError, MailSession, MailSyncProgress, MailSyncReport, MailSyncState,
-    MailWorkflowError, MessageMoveOutcome, ReadStateUpdateOutcome, WellKnownFolderMoveOutcome,
-    WellKnownMailFolder,
+    AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
+    AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
+    AccountSession, AccountSessionFactory, AccountSessionFuture, AccountWorkflow,
+    CalendarCacheError, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
+    CalendarEventUpdateOutcome, CalendarSession, CalendarSnapshot, CalendarSyncReport,
+    CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCacheError, MailSendOutcome,
+    MailSendResolutionError, MailSendWorkflowError, MailSession, MailSyncProgress, MailSyncReport,
+    MailSyncState, MailWorkflowError, MessageMoveOutcome, ReadStateUpdateOutcome,
+    WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
-    MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend,
-    ReadState,
+    AccountCapabilities, AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate,
+    CalendarOccurrence, CalendarViewReference, EditableCalendarEvent, FolderReference,
+    FollowUpFlagStatus, MailDraft, MailFolder, MailMessage, MailReplyDraft, MailSendOperationId,
+    MessageId, PendingMailSend, ReadState,
 };
 
 #[derive(Clone, Default)]
@@ -43,6 +43,8 @@ struct TestProvider {
     restore_error: Arc<Mutex<Option<AccountOperationError>>>,
     restore_profile: Arc<Mutex<Option<AccountProfile>>>,
     connect_error: Arc<Mutex<Option<AccountOperationError>>>,
+    ews_connect_requests: Arc<AtomicUsize>,
+    ews_input_valid: Arc<AtomicBool>,
     saved_account_id: Arc<Mutex<Option<AccountId>>>,
     sign_out_events: Arc<Mutex<Vec<&'static str>>>,
     connection_commit: Arc<Mutex<Option<CommitGate>>>,
@@ -468,6 +470,50 @@ impl AccountProvider for TestProvider {
                 .expect("synthetic saved account ID mutex is healthy") = Some(account_id);
             signed_out.store(false, Ordering::SeqCst);
             Ok(profile)
+        }
+    }
+
+    fn connect_account_with_request(
+        &self,
+        request: AccountConnectionRequest,
+        cancellation: AccountOperationCancellation,
+    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+        let ews_connect_requests = Arc::clone(&self.ews_connect_requests);
+        let ews_input_valid = Arc::clone(&self.ews_input_valid);
+        let saved_account_id = Arc::clone(&self.saved_account_id);
+        let signed_out = Arc::clone(&self.signed_out);
+        async move {
+            match request {
+                AccountConnectionRequest::Microsoft365 => self.connect_account(cancellation).await,
+                AccountConnectionRequest::ExchangeEws(input) => {
+                    let valid = input.endpoint()
+                        == "https://exchange.example.test/EWS/Exchange.asmx"
+                        && input.mailbox_address() == "ada@example.test"
+                        && input.username() == "EXAMPLE\\ada"
+                        && input.expose_password() == "synthetic-only";
+                    ews_connect_requests.fetch_add(1, Ordering::SeqCst);
+                    ews_input_valid.store(valid, Ordering::SeqCst);
+                    if !valid {
+                        return Err(AccountOperationError::InvalidConnectionDetails);
+                    }
+                    cancellation.begin_credential_commit()?;
+                    let profile = AccountProfile::try_new_with_capabilities(
+                        AccountId::try_from("synthetic-ews-account".to_owned())
+                            .expect("synthetic EWS account ID is valid"),
+                        Some("Ada Example".to_owned()),
+                        Some("ada@example.test".to_owned()),
+                        Some("EXAMPLE\\ada".to_owned()),
+                        AccountCapabilities::read_only_mail(),
+                    )
+                    .expect("synthetic EWS account profile has an identity");
+                    *saved_account_id
+                        .lock()
+                        .expect("synthetic saved account ID mutex is healthy") =
+                        Some(profile.id().clone());
+                    signed_out.store(false, Ordering::SeqCst);
+                    Ok(profile)
+                }
+            }
         }
     }
 
@@ -1594,4 +1640,49 @@ fn missing_client_configuration_disables_account_actions(cx: &mut TestAppContext
             .update(|cx| view.read(cx).services.as_ref().err().copied()),
         Some(SetupIssue::MissingClientId)
     );
+}
+
+#[gpui_kit::test]
+fn exchange_server_form_connects_without_microsoft_client_configuration(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let provider = TestProvider::default();
+    let ews_connect_requests = Arc::clone(&provider.ews_connect_requests);
+    let ews_input_valid = Arc::clone(&provider.ews_input_valid);
+    let workflow = Arc::new(AccountWorkflow::new(provider));
+    let services = AccountServices::new(workflow, unused_account_session_factory())
+        .with_microsoft365_setup_issue(SetupIssue::MissingClientId);
+    let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(services), cx));
+
+    context.run_until_parked();
+    draw_account_view(context);
+    assert!(context.debug_bounds("connect-account").is_none());
+    click(context, "connect-exchange-ews");
+
+    for (selector, value) in [
+        (
+            "ews-endpoint-input",
+            "https://exchange.example.test/EWS/Exchange.asmx",
+        ),
+        ("ews-mailbox-address-input", "ada@example.test"),
+        ("ews-username-input", "EXAMPLE\\ada"),
+        ("ews-password-input", "synthetic-only"),
+    ] {
+        scroll_account_action_into_view(context, selector);
+        let bounds = context
+            .debug_bounds(selector)
+            .expect("Exchange form renders each required field");
+        context.simulate_click(bounds.center(), Modifiers::default());
+        context.simulate_input(value);
+    }
+    click(context, "submit-ews-connection");
+
+    assert!(context.cx.update(|cx| matches!(
+        &view.read(cx).status,
+        AccountStatus::Connected(profile)
+            if profile.capabilities() == AccountCapabilities::read_only_mail()
+    )));
+    assert_eq!(ews_connect_requests.load(Ordering::SeqCst), 1);
+    assert!(ews_input_valid.load(Ordering::SeqCst));
+    assert!(context.debug_bounds("open-mail").is_some());
+    assert!(context.debug_bounds("open-calendar").is_none());
 }

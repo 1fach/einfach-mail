@@ -3,7 +3,7 @@ use std::{future::Future, sync::Arc};
 use huskarl::token::AccessToken;
 use tokio_util::sync::CancellationToken;
 
-use crate::{error::GraphError, worker};
+use crate::error::GraphError;
 use einfach_mail_application::{
     MailOperationError, MailProvider, MailSendProviderError, MessageDeltaRequest,
     MessageDeltaResponse, WellKnownMailFolder,
@@ -12,6 +12,7 @@ use einfach_mail_domain::{
     AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailReplyDraft,
     MessageBody, MessageId, ReadState,
 };
+use einfach_mail_provider_runtime as worker;
 
 use super::{
     MicrosoftGraphProvider, ProviderConfig,

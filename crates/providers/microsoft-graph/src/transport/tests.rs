@@ -65,6 +65,14 @@ fn graph_url(value: &str) -> GraphUrl {
     GraphUrl::fixture(Url::parse(value).expect("synthetic Graph URL is valid"))
 }
 
+fn http_url(server: &MockServer, path: &str) -> String {
+    format!("http://{}{path}", server.address())
+}
+
+fn http_base_url(server: &MockServer) -> String {
+    http_url(server, "")
+}
+
 #[test]
 fn marks_the_bearer_header_as_sensitive() {
     let header = authorization_header(&synthetic_access_token())
@@ -101,7 +109,7 @@ async fn rejects_an_oversized_fixture_response() {
         .handle()
         .get(
             GraphReadOperation::Profile,
-            graph_url(&server.url("/oversized")),
+            graph_url(&http_url(&server, "/oversized")),
             synthetic_access_token(),
         )
         .await;
@@ -115,7 +123,7 @@ async fn returns_delta_reset_location_only_for_message_delta_requests() {
     let server = MockServer::start_async().await;
     let location = format!(
         "{}/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=",
-        server.base_url()
+        http_base_url(&server)
     );
     let response = server
         .mock_async(move |when, then| {
@@ -125,7 +133,7 @@ async fn returns_delta_reset_location_only_for_message_delta_requests() {
         .await;
     let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
     let handle = transport.handle();
-    let url = graph_url(&server.url("/delta"));
+    let url = graph_url(&http_url(&server, "/delta"));
 
     let reset = handle
         .get_message_delta(url.clone(), synthetic_access_token())
@@ -139,7 +147,7 @@ async fn returns_delta_reset_location_only_for_message_delta_requests() {
         reset,
         GraphResponse::MessageDeltaReset(Some(format!(
             "{}/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=",
-            server.base_url()
+            http_base_url(&server)
         )))
     );
     assert_eq!(other_operation, Err(GraphError::Transport));
@@ -151,7 +159,7 @@ async fn classifies_calendar_410_resets_only_for_continuation_requests() {
     let server = MockServer::start_async().await;
     let location = format!(
         "{}/v1.0/me/calendarView/delta?startDateTime=2030-01-07T00%3A00%3A00Z&endDateTime=2030-01-14T00%3A00%3A00Z&$deltatoken=",
-        server.base_url()
+        http_base_url(&server)
     );
     let mock_location = location.clone();
     let response = server
@@ -165,7 +173,7 @@ async fn classifies_calendar_410_resets_only_for_continuation_requests() {
         .await;
     let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
     let handle = transport.handle();
-    let url = graph_url(&server.url("/delta"));
+    let url = graph_url(&http_url(&server, "/delta"));
 
     let reset = handle
         .get_calendar_delta(
@@ -217,7 +225,7 @@ async fn maps_only_the_exact_sync_state_not_found_error_code() {
     let reset = handle
         .get_calendar_delta(
             GraphCalendarDeltaOperation::Continuation,
-            graph_url(&server.url("/expired")),
+            graph_url(&http_url(&server, "/expired")),
             synthetic_access_token(),
         )
         .await
@@ -225,7 +233,7 @@ async fn maps_only_the_exact_sync_state_not_found_error_code() {
     let error = handle
         .get_calendar_delta(
             GraphCalendarDeltaOperation::Continuation,
-            graph_url(&server.url("/unrelated")),
+            graph_url(&http_url(&server, "/unrelated")),
             synthetic_access_token(),
         )
         .await;
@@ -284,7 +292,7 @@ async fn dropping_callers_cancels_active_requests_and_frees_worker_capacity() {
         .await;
     let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
     let handle = transport.handle();
-    let slow_url = graph_url(&server.url("/slow"));
+    let slow_url = graph_url(&http_url(&server, "/slow"));
     let requests = (0..super::MAX_ACTIVE_REQUESTS)
         .map(|_| {
             let handle = handle.clone();
@@ -308,7 +316,7 @@ async fn dropping_callers_cancels_active_requests_and_frees_worker_capacity() {
         REQUEST_WAIT,
         handle.get(
             GraphReadOperation::Profile,
-            graph_url(&server.url("/probe")),
+            graph_url(&http_url(&server, "/probe")),
             synthetic_access_token(),
         ),
     )
@@ -333,7 +341,7 @@ async fn dropping_the_provider_joins_the_worker_with_active_requests() {
         .await;
     let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
     let handle = transport.handle();
-    let slow_url = graph_url(&server.url("/slow"));
+    let slow_url = graph_url(&http_url(&server, "/slow"));
     let request = tokio::spawn(async move {
         handle
             .get(
@@ -369,7 +377,7 @@ async fn worker_closure_after_read_state_patch_dispatch_reports_unknown() {
         .await;
     let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
     let handle = transport.handle();
-    let url = graph_url(&server.url("/v1.0/me/messages/synthetic-message"));
+    let url = graph_url(&http_url(&server, "/v1.0/me/messages/synthetic-message"));
     let request = tokio::spawn(async move {
         handle
             .patch_json(
@@ -407,7 +415,7 @@ async fn throttled_read_state_patch_is_not_retried() {
         .handle()
         .patch_json(
             GraphPatchOperation::MessageUpdate,
-            graph_url(&server.url("/v1.0/me/messages/synthetic-message")),
+            graph_url(&http_url(&server, "/v1.0/me/messages/synthetic-message")),
             synthetic_access_token(),
             Arc::from(&b"{\"isRead\":true}"[..]),
         )
@@ -436,7 +444,7 @@ async fn system_proxy_routes_the_production_transport_through_http_proxy() {
             then.status(200).body("synthetic proxy response");
         })
         .await;
-    let proxy_url = proxy.base_url();
+    let proxy_url = http_base_url(&proxy);
     let child_output =
         Command::new(std::env::current_exe().expect("current test executable is available"))
             .args([
@@ -493,7 +501,7 @@ async fn retries_a_synthetic_graph_throttle_response() {
         .handle()
         .get(
             GraphReadOperation::Folders,
-            graph_url(&server.url("/throttled")),
+            graph_url(&http_url(&server, "/throttled")),
             synthetic_access_token(),
         )
         .await
@@ -525,7 +533,7 @@ async fn message_read_state_patch_uses_one_attempt_and_requires_exact_confirmati
             .handle()
             .patch_json(
                 GraphPatchOperation::MessageUpdate,
-                graph_url(&server.url("/v1.0/me/messages/synthetic-message")),
+                graph_url(&http_url(&server, "/v1.0/me/messages/synthetic-message")),
                 synthetic_access_token(),
                 Arc::from(&b"{\"isRead\":true}"[..]),
             )
@@ -561,7 +569,10 @@ async fn message_move_post_uses_immutable_ids_and_accepts_created_once() {
         .handle()
         .post_json(
             GraphPostJsonOperation::MessageMove,
-            graph_url(&server.url("/v1.0/me/messages/synthetic-message/move")),
+            graph_url(&http_url(
+                &server,
+                "/v1.0/me/messages/synthetic-message/move",
+            )),
             synthetic_access_token(),
             br#"{"destinationId":"archive"}"#.to_vec(),
         )
@@ -597,7 +608,10 @@ async fn message_move_post_never_retries_uncertain_statuses() {
             .handle()
             .post_json(
                 GraphPostJsonOperation::MessageMove,
-                graph_url(&server.url("/v1.0/me/messages/synthetic-message/move")),
+                graph_url(&http_url(
+                    &server,
+                    "/v1.0/me/messages/synthetic-message/move",
+                )),
                 synthetic_access_token(),
                 br#"{"destinationId":"archive"}"#.to_vec(),
             )
@@ -634,7 +648,7 @@ async fn message_read_state_patch_does_not_retry_throttle_responses() {
         .handle()
         .patch_json(
             GraphPatchOperation::MessageUpdate,
-            graph_url(&server.url("/v1.0/me/messages/synthetic-message")),
+            graph_url(&http_url(&server, "/v1.0/me/messages/synthetic-message")),
             synthetic_access_token(),
             Arc::from(&b"{\"isRead\":true}"[..]),
         )
@@ -671,7 +685,7 @@ async fn does_not_retry_a_send_throttle() {
         let result = transport
             .handle()
             .post_mail(
-                graph_url(&server.url("/send")),
+                graph_url(&http_url(&server, "/send")),
                 synthetic_access_token(),
                 b"{}".to_vec(),
             )
@@ -710,7 +724,7 @@ async fn classifies_send_statuses_without_treating_other_success_codes_as_accept
         let result = transport
             .handle()
             .post_mail(
-                graph_url(&server.url("/send")),
+                graph_url(&http_url(&server, "/send")),
                 synthetic_access_token(),
                 b"{}".to_vec(),
             )
@@ -744,7 +758,7 @@ async fn does_not_follow_a_send_redirect() {
     let result = transport
         .handle()
         .post_mail(
-            graph_url(&server.url("/send")),
+            graph_url(&http_url(&server, "/send")),
             synthetic_access_token(),
             b"{}".to_vec(),
         )
@@ -813,7 +827,7 @@ async fn post_sends_json_and_uses_immutable_calendar_event_ids() {
         .handle()
         .post_json(
             GraphPostJsonOperation::CalendarEventCreate,
-            graph_url(&server.url("/v1.0/me/calendar/events")),
+            graph_url(&http_url(&server, "/v1.0/me/calendar/events")),
             synthetic_access_token(),
             b"{\"subject\":\"Planning\",\"transactionId\":\"synthetic-id\"}".to_vec(),
         )
@@ -839,7 +853,7 @@ async fn post_treats_a_success_status_that_does_not_confirm_creation_as_unknown(
         .handle()
         .post_json(
             GraphPostJsonOperation::CalendarEventCreate,
-            graph_url(&server.url("/v1.0/me/calendar/events")),
+            graph_url(&http_url(&server, "/v1.0/me/calendar/events")),
             synthetic_access_token(),
             b"{}".to_vec(),
         )
@@ -874,7 +888,7 @@ async fn calendar_event_update_server_failure_is_unknown_and_not_retried() {
         .handle()
         .patch_json(
             GraphPatchOperation::CalendarEventUpdate,
-            graph_url(&server.url("/v1.0/me/events/synthetic-event")),
+            graph_url(&http_url(&server, "/v1.0/me/events/synthetic-event")),
             synthetic_access_token(),
             Arc::from(&b"{\"subject\":\"Updated\"}"[..]),
         )
@@ -917,7 +931,7 @@ async fn calendar_event_update_redirect_is_unknown_and_not_retried() {
         .handle()
         .patch_json(
             GraphPatchOperation::CalendarEventUpdate,
-            graph_url(&server.url("/v1.0/me/events/synthetic-event")),
+            graph_url(&http_url(&server, "/v1.0/me/events/synthetic-event")),
             synthetic_access_token(),
             Arc::from(&b"{\"subject\":\"Updated\"}"[..]),
         )
@@ -951,7 +965,7 @@ async fn calendar_event_update_not_found_reports_a_changed_event_without_retryin
         .handle()
         .patch_json(
             GraphPatchOperation::CalendarEventUpdate,
-            graph_url(&server.url("/v1.0/me/events/synthetic-event")),
+            graph_url(&http_url(&server, "/v1.0/me/events/synthetic-event")),
             synthetic_access_token(),
             Arc::from(&b"{\"subject\":\"Updated\"}"[..]),
         )
@@ -982,7 +996,7 @@ async fn calendar_event_delete_sends_the_etag_without_a_body() {
     transport
         .handle()
         .delete_calendar_event(
-            graph_url(&server.url("/v1.0/me/events/synthetic-event")),
+            graph_url(&http_url(&server, "/v1.0/me/events/synthetic-event")),
             synthetic_access_token(),
             "W/\"synthetic-etag\"",
         )
@@ -1029,7 +1043,7 @@ async fn calendar_event_delete_classifies_responses_without_retries() {
         let result = transport
             .handle()
             .delete_calendar_event(
-                graph_url(&server.url("/v1.0/me/events/synthetic-event")),
+                graph_url(&http_url(&server, "/v1.0/me/events/synthetic-event")),
                 synthetic_access_token(),
                 "W/\"synthetic-etag\"",
             )
@@ -1065,7 +1079,7 @@ async fn calendar_event_delete_redirect_is_unknown_and_not_followed() {
         transport
             .handle()
             .delete_calendar_event(
-                graph_url(&server.url("/v1.0/me/events/synthetic-event")),
+                graph_url(&http_url(&server, "/v1.0/me/events/synthetic-event")),
                 synthetic_access_token(),
                 "W/\"synthetic-etag\"",
             )
@@ -1100,7 +1114,7 @@ async fn calendar_event_delete_rejects_invalid_etags_before_sending() {
             transport
                 .handle()
                 .delete_calendar_event(
-                    graph_url(&server.url("/v1.0/me/events/synthetic-event")),
+                    graph_url(&http_url(&server, "/v1.0/me/events/synthetic-event")),
                     synthetic_access_token(),
                     etag,
                 )
@@ -1138,7 +1152,7 @@ async fn classifies_calendar_creation_responses_without_retrying() {
             .handle()
             .post_json(
                 GraphPostJsonOperation::CalendarEventCreate,
-                graph_url(&server.url("/v1.0/me/calendar/events")),
+                graph_url(&http_url(&server, "/v1.0/me/calendar/events")),
                 synthetic_access_token(),
                 b"{}".to_vec(),
             )
@@ -1177,7 +1191,7 @@ async fn post_throttle_response_is_not_retried() {
         .handle()
         .post_json(
             GraphPostJsonOperation::CalendarEventCreate,
-            graph_url(&server.url("/v1.0/me/calendar/events")),
+            graph_url(&http_url(&server, "/v1.0/me/calendar/events")),
             synthetic_access_token(),
             b"{}".to_vec(),
         )
@@ -1198,7 +1212,10 @@ async fn http_errors_do_not_retain_the_request_url_or_response_body() {
         })
         .await;
     let transport = GraphTransport::start_for_fixtures().expect("fixture worker starts");
-    let url = format!("{}?opaque=synthetic-url-secret", server.url("/failure"));
+    let url = format!(
+        "{}?opaque=synthetic-url-secret",
+        http_url(&server, "/failure")
+    );
 
     let error = transport
         .handle()

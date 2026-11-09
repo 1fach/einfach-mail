@@ -4,11 +4,11 @@
 
 Einfach Mail is a desktop workspace for email and calendar. It aims to pair a familiar, keyboard-friendly mail client with direct Microsoft 365 integration and useful operating-system behavior.
 
-The product name is Einfach Mail. The first product decision is to make Exchange Online work well. The app will use Microsoft Graph and delegated access for the signed-in user.
+The product name is Einfach Mail. Exchange Online uses Microsoft Graph and delegated access for the signed-in user. Milestone M7 adds a separate Linux account path for read-only mail from Exchange Server installed on premises through EWS.
 
 ## First users
 
-Develop and validate the first workflows on Linux for people who use Microsoft 365 work or school accounts. Add Windows and macOS support in later milestones. Keep Windows-specific Outlook integration in the product plan. Personal Microsoft accounts and Exchange Server installed on premises need explicit acceptance tests before they become supported targets.
+Develop and validate the first workflows on Linux for people who use Microsoft 365 work or school accounts or Exchange Server installed on premises. Add Windows and macOS support in later milestones. Keep Windows-specific Outlook integration in the product plan. Personal Microsoft accounts remain out of scope. EWS live-server verification remains open until a test server or sanitized recording is available.
 
 ## User outcomes
 
@@ -31,11 +31,11 @@ Develop and validate the first workflows on Linux for people who use Microsoft 3
 
 ## First-release scope
 
-The initial release plan covers one signed-in Microsoft account, inbox and folder browsing, message reading, basic message actions, calendar viewing, and supported appointment editing and deletion. Calendar writes are limited to explicit timed, standalone appointments in the primary calendar with recoverable confirmation and sync states. Build and verify the first workflows on Linux. Add Windows desktop integration and macOS support in later milestones. The roadmap sequences these workflows. It does not promise all of them in the first runnable prototype.
+The initial release plan covers one signed-in account, inbox and folder browsing, message reading, basic message actions, calendar viewing, and supported appointment editing and deletion. Calendar writes are limited to explicit timed, standalone appointments in the primary calendar with recoverable confirmation and sync states. On-premises Exchange accounts support read-only mail through EWS. They do not expose calendar views or mail writes. Build and verify the first workflows on Linux. Add Windows desktop integration and macOS support in later milestones. The roadmap sequences these workflows. It does not promise all of them in the first runnable prototype.
 
 ## Out of scope until a decision changes the brief
 
-- Exchange Server installed on premises.
+- EWS autodiscovery (tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258)), calendar access, and mail writes.
 - Full Outlook or Thunderbird feature parity.
 - Mobile clients, team administration, and server-side multi-user access.
 - Add-ins, arbitrary plug-ins, and extensions that execute inside email content.

@@ -4,14 +4,16 @@ use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::mail_composer::MailPermissionRequester;
 use crate::mail_view::{MailView, MailViewEvent};
 use einfach_mail_application::{
-    AccountCacheOpenError, AccountCacheRemovalError, AccountOperationCancellation,
-    AccountOperationError, AccountPermissionRequest, AccountProvider, AccountSession,
-    AccountSessionFactory, AccountWorkflow,
+    AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
+    AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
+    AccountSession, AccountSessionFactory, AccountWorkflow, ExchangeEwsConnectionInput,
 };
-use einfach_mail_domain::AccountProfile;
+use einfach_mail_domain::{AccountProfile, CalendarAccess, MailAccess};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
+    form::{Field, Form},
+    input::{Input, InputState},
     scroll::ScrollableElement,
 };
 use gpui_kit::{
@@ -25,6 +27,7 @@ pub(super) enum SetupIssue {
     InvalidClientId,
     MissingCallbackPort,
     InvalidCallbackPort,
+    ExchangeSettingsUnavailable,
 }
 
 impl SetupIssue {
@@ -42,6 +45,9 @@ impl SetupIssue {
             Self::InvalidCallbackPort => {
                 "The OAuth callback port must be a nonzero TCP port registered for http://127.0.0.1."
             }
+            Self::ExchangeSettingsUnavailable => {
+                "Exchange account settings are unavailable. Check the Linux configuration directory and try again."
+            }
         }
     }
 }
@@ -49,6 +55,7 @@ impl SetupIssue {
 pub(super) struct AccountServices<P> {
     pub(super) workflow: Arc<AccountWorkflow<P>>,
     pub(super) account_session_factory: Arc<dyn AccountSessionFactory>,
+    microsoft365_setup_issue: Option<SetupIssue>,
 }
 
 impl<P> AccountServices<P> {
@@ -59,7 +66,13 @@ impl<P> AccountServices<P> {
         Self {
             workflow,
             account_session_factory,
+            microsoft365_setup_issue: None,
         }
+    }
+
+    pub(super) fn with_microsoft365_setup_issue(mut self, issue: SetupIssue) -> Self {
+        self.microsoft365_setup_issue = Some(issue);
+        self
     }
 }
 
@@ -135,10 +148,13 @@ impl AccountStatus {
         match error {
             AccountOperationError::SignInCancelled => "Sign-in was cancelled.",
             AccountOperationError::AccessDenied => {
-                "Microsoft did not grant access. Check your organization's consent policies."
+                "The server denied access. Check the account details and your organization's policies."
+            }
+            AccountOperationError::InvalidConnectionDetails => {
+                "The Exchange endpoint or sign-in details are invalid. Check them and try again."
             }
             AccountOperationError::AccessTokenRejected => {
-                "Microsoft rejected the sign-in. Connect your account again."
+                "The server rejected the saved sign-in. Connect your account again."
             }
             AccountOperationError::SignInExpired => {
                 "The saved sign-in has expired. Connect your account again."
@@ -147,7 +163,7 @@ impl AccountStatus {
                 "Linux Secret Service is unavailable. Unlock your keyring and try again."
             }
             AccountOperationError::ProfileUnavailable => {
-                "Microsoft did not return the account details needed to identify this account."
+                "The server did not return the account details needed to identify this account."
             }
             AccountOperationError::ServiceUnavailable => {
                 "The account service is unavailable. Check your connection and try again."
@@ -189,7 +205,44 @@ pub(super) struct AccountView<P: AccountProvider + 'static> {
     pending_permission_review: Option<AccountPermissionRequest>,
     content: AccountContent,
     session_open_error: Option<AccountViewCacheError>,
+    exchange_ews_form: Option<ExchangeEwsConnectionForm>,
     task: Option<Task<()>>,
+}
+
+struct ExchangeEwsConnectionForm {
+    endpoint: Entity<InputState>,
+    mailbox_address: Entity<InputState>,
+    username: Entity<InputState>,
+    password: Entity<InputState>,
+}
+
+impl ExchangeEwsConnectionForm {
+    fn new<P: AccountProvider + 'static>(
+        window: &mut Window,
+        cx: &mut Context<AccountView<P>>,
+    ) -> Self {
+        Self {
+            endpoint: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("https://mail.example/EWS/Exchange.asmx")
+            }),
+            mailbox_address: cx
+                .new(|cx| InputState::new(window, cx).placeholder("name@example.com")),
+            username: cx.new(|cx| InputState::new(window, cx).placeholder("DOMAIN\\username")),
+            password: cx.new(|cx| InputState::new(window, cx).masked(true)),
+        }
+    }
+
+    fn request<P: AccountProvider + 'static>(
+        &self,
+        cx: &Context<AccountView<P>>,
+    ) -> AccountConnectionRequest {
+        AccountConnectionRequest::ExchangeEws(ExchangeEwsConnectionInput::new(
+            self.endpoint.read(cx).value().to_string(),
+            self.mailbox_address.read(cx).value().to_string(),
+            self.username.read(cx).value().to_string(),
+            self.password.read(cx).value().to_string(),
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -270,6 +323,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             pending_permission_review: None,
             content: AccountContent::Account,
             session_open_error: None,
+            exchange_ews_form: None,
             task: None,
         };
         view.start_restore(cx);
@@ -303,6 +357,42 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
+        self.begin_connect(AccountConnectionRequest::Microsoft365, cx);
+    }
+
+    fn begin_exchange_ews_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(
+            &self.status,
+            AccountStatus::Disconnected
+                | AccountStatus::Failed {
+                    saved_credential_may_exist: false,
+                    ..
+                }
+        ) {
+            return;
+        }
+        self.exchange_ews_form = Some(ExchangeEwsConnectionForm::new(window, cx));
+        cx.notify();
+    }
+
+    fn cancel_exchange_ews_form(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.status, AccountStatus::Connecting { .. }) {
+            self.cancel_connect(cx);
+        } else if !matches!(self.status, AccountStatus::CancellingConnect { .. }) {
+            self.exchange_ews_form = None;
+            cx.notify();
+        }
+    }
+
+    fn connect_exchange_ews(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = &self.exchange_ews_form else {
+            return;
+        };
+        let request = form.request(cx);
+        self.begin_connect(request, cx);
+    }
+
+    fn begin_connect(&mut self, request: AccountConnectionRequest, cx: &mut Context<Self>) {
         let Ok(services) = &self.services else {
             return;
         };
@@ -325,6 +415,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         };
         self.task = Some(Self::connect_task(
             workflow,
+            request,
             saved_credential_may_exist,
             cancellation,
             cx,
@@ -334,13 +425,14 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn connect_task(
         workflow: Arc<AccountWorkflow<P>>,
+        request: AccountConnectionRequest,
         saved_credential_may_exist: bool,
         cancellation: AccountOperationCancellation,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let connection_result = workflow
-                .connect_account_with_cancellation(cancellation)
+                .connect_account_with_request_and_cancellation(request, cancellation)
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.task = None;
@@ -351,7 +443,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                             | AccountOperationError::AccountMismatch)
                     );
                 view.status = match connection_result {
-                    Ok(profile) => AccountStatus::Connected(profile),
+                    Ok(profile) => {
+                        view.exchange_ews_form = None;
+                        AccountStatus::Connected(profile)
+                    }
                     Err(error) => AccountStatus::Failed {
                         error,
                         saved_credential_may_exist,
@@ -557,6 +652,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn open_calendar(&mut self, cx: &mut Context<Self>) {
+        if !self
+            .status
+            .connected_profile()
+            .is_some_and(|profile| profile.capabilities().calendar() != CalendarAccess::Unavailable)
+        {
+            return;
+        }
         self.open_account_content(
             OpeningContent::Calendar,
             |profile, session, cx| {
@@ -783,13 +885,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 ("Not connected", "No account is connected.", Role::Status)
             }
             AccountStatus::Connecting { .. } => (
-                "Waiting for Microsoft sign-in",
-                "Waiting for Microsoft sign-in in your browser…",
+                "Connecting to account",
+                "Connecting to account…",
                 Role::Status,
             ),
             AccountStatus::CancellingConnect { .. } => (
-                "Finishing Microsoft sign-in",
-                "Finishing sign-in…",
+                "Finishing account connection",
+                "Finishing connection…",
                 Role::Status,
             ),
             AccountStatus::SigningOut => (
@@ -839,19 +941,23 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn render_account_details(&self, colors: ColorTokens) -> Option<impl IntoElement> {
         let profile = self.status.connected_profile()?;
-        Some(
+        let mut details = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(self.account_identity(profile, colors));
+        if profile.capabilities().mail() == MailAccess::ReadOnly {
+            details = details.child("Mail is read-only.");
+        }
+        if profile.capabilities().calendar() == CalendarAccess::Unavailable {
+            details = details.child("Calendar is unavailable for this account.");
+        }
+        Some(details.child(
             div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(self.account_identity(profile, colors))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.muted_foreground)
-                        .child("Signing out removes the saved sign-in and encrypted mail and calendar cache from this device. Microsoft organization consent is unchanged."),
-                ),
-        )
+                .text_sm()
+                .text_color(colors.muted_foreground)
+                .child("Signing out removes the saved sign-in and encrypted account cache from this device."),
+        ))
     }
 
     fn render_saved_sign_out(
@@ -987,42 +1093,186 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             | AccountStatus::Failed {
                 saved_credential_may_exist: false,
                 ..
-            } => div()
-                .flex()
-                .justify_center()
-                .debug_selector(|| "connect-account".to_owned())
-                .child(
+            } => self.render_connect_options(cx),
+            AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. } => div(),
+        }
+    }
+
+    fn render_connect_options(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let mut options = div().flex().flex_col().items_center().gap_2();
+        if let Ok(services) = &self.services {
+            if let Some(issue) = services.microsoft365_setup_issue {
+                options = options.child(
+                    div()
+                        .id("microsoft365-setup-status")
+                        .role(Role::Status)
+                        .text_sm()
+                        .child(issue.message()),
+                );
+            } else {
+                options = options.child(
                     Button::new("connect-account")
+                        .debug_selector(|| "connect-account".to_owned())
                         .primary()
                         .label("Connect Microsoft 365 account")
                         .on_click(cx.listener(|view, _, _, cx| view.connect(cx))),
-                ),
-            AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. } => div(),
+                );
+            }
         }
+        options.child(
+            Button::new("connect-exchange-ews")
+                .debug_selector(|| "connect-exchange-ews".to_owned())
+                .label("Connect Exchange Server…")
+                .on_click(cx.listener(|view, _, window, cx| {
+                    view.begin_exchange_ews_form(window, cx);
+                })),
+        )
+    }
+
+    fn render_exchange_ews_form(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let Some(form) = &self.exchange_ews_form else {
+            return div();
+        };
+        let connecting = matches!(
+            &self.status,
+            AccountStatus::Connecting { .. } | AccountStatus::CancellingConnect { .. }
+        );
+        let cancelling = matches!(&self.status, AccountStatus::CancellingConnect { .. });
+        let cancel_label = if cancelling {
+            "Finishing connection…"
+        } else if connecting {
+            "Cancel connection"
+        } else {
+            "Cancel"
+        };
+        let submit_label = if cancelling {
+            "Finishing connection…"
+        } else if connecting {
+            "Connecting…"
+        } else {
+            "Connect"
+        };
+        div()
+            .w_full()
+            .max_w_48()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(div().text_lg().font_bold().child("Exchange Server"))
+            .child(
+                div().text_sm().child(
+                    "Enter your server's HTTPS EWS address. Server certificates are verified, and your password is stored in Linux Secret Service.",
+                ),
+            )
+            .child(
+                Form::new()
+                    .child(
+                        Field::new().label("EWS endpoint").required(true).child(
+                            div()
+                                .id("ews-endpoint-input")
+                                .debug_selector(|| "ews-endpoint-input".to_owned())
+                                .child(
+                                    Input::new(&form.endpoint)
+                                        .aria_label("EWS endpoint")
+                                        .disabled(connecting)
+                                        .w_full(),
+                                ),
+                        ),
+                    )
+                    .child(
+                        Field::new().label("Mailbox address").required(true).child(
+                            div()
+                                .id("ews-mailbox-address-input")
+                                .debug_selector(|| "ews-mailbox-address-input".to_owned())
+                                .child(
+                                    Input::new(&form.mailbox_address)
+                                        .aria_label("Mailbox address")
+                                        .disabled(connecting)
+                                        .w_full(),
+                                ),
+                        ),
+                    )
+                    .child(
+                        Field::new().label("NTLM username").required(true).child(
+                            div()
+                                .id("ews-username-input")
+                                .debug_selector(|| "ews-username-input".to_owned())
+                                .child(
+                                    Input::new(&form.username)
+                                        .aria_label("NTLM username")
+                                        .disabled(connecting)
+                                        .w_full(),
+                                ),
+                        ),
+                    )
+                    .child(
+                        Field::new().label("Password").required(true).child(
+                            div()
+                                .id("ews-password-input")
+                                .debug_selector(|| "ews-password-input".to_owned())
+                                .child(
+                                    Input::new(&form.password)
+                                        .aria_label("Password")
+                                        .mask_toggle()
+                                        .disabled(connecting)
+                                        .w_full(),
+                                ),
+                        ),
+                    )
+                    .footer(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-ews-connection-form")
+                                    .outline()
+                                    .label(cancel_label)
+                                    .disabled(cancelling)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.cancel_exchange_ews_form(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("submit-ews-connection")
+                                    .debug_selector(|| "submit-ews-connection".to_owned())
+                                    .primary()
+                                    .label(submit_label)
+                                    .loading(matches!(
+                                        &self.status,
+                                        AccountStatus::Connecting { .. }
+                                    ))
+                                    .disabled(connecting)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.connect_exchange_ews(cx);
+                                    })),
+                            ),
+                    ),
+            )
     }
 
     fn render_open_content(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
         let mail_opening = self.content.opening_kind() == Some(OpeningContent::Mail);
         let calendar_opening = self.content.opening_kind() == Some(OpeningContent::Calendar);
         let opening = self.content.opening_kind().is_some();
-        div()
-            .flex()
-            .justify_center()
-            .gap_2()
-            .child(
-                Button::new("open-mail")
-                    .debug_selector(|| "open-mail".to_owned())
-                    .primary()
-                    .label(if mail_opening {
-                        "Opening mail…"
-                    } else {
-                        "Open mail"
-                    })
-                    .loading(mail_opening)
-                    .disabled(opening)
-                    .on_click(cx.listener(|view, _, _, cx| view.open_mail(cx))),
-            )
-            .child(
+        let mut content = div().flex().justify_center().gap_2().child(
+            Button::new("open-mail")
+                .debug_selector(|| "open-mail".to_owned())
+                .primary()
+                .label(if mail_opening {
+                    "Opening mail…"
+                } else {
+                    "Open mail"
+                })
+                .loading(mail_opening)
+                .disabled(opening)
+                .on_click(cx.listener(|view, _, _, cx| view.open_mail(cx))),
+        );
+        if self
+            .status
+            .connected_profile()
+            .is_some_and(|profile| profile.capabilities().calendar() != CalendarAccess::Unavailable)
+        {
+            content = content.child(
                 Button::new("open-calendar")
                     .debug_selector(|| "open-calendar".to_owned())
                     .outline()
@@ -1034,11 +1284,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     .loading(calendar_opening)
                     .disabled(opening)
                     .on_click(cx.listener(|view, _, _, cx| view.open_calendar(cx))),
-            )
+            );
+        }
+        content
     }
 
     fn render_header(&self, colors: ColorTokens) -> gpui_kit::Div {
-        div()
+        let mut header = div()
             .w_full()
             .max_w_48()
             .flex()
@@ -1049,9 +1301,18 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 div()
                     .text_sm()
                     .text_color(colors.muted_foreground)
-                    .child("Connect a Microsoft 365 work account to Einfach Mail."),
-            )
-            .child(self.render_permissions(colors))
+                    .child("Connect a Microsoft 365 or Exchange Server account to Einfach Mail."),
+            );
+        let graph_account = self
+            .status
+            .connected_profile()
+            .is_none_or(|profile| profile.capabilities().mail() == MailAccess::ReadWrite);
+        if graph_account
+            && matches!(&self.services, Ok(services) if services.microsoft365_setup_issue.is_none())
+        {
+            header = header.child(self.render_permissions(colors));
+        }
+        header
     }
 
     fn render_setup_status(&self, issue: SetupIssue) -> impl IntoElement {
@@ -1093,6 +1354,9 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         colors: ColorTokens,
         cx: &mut Context<Self>,
     ) -> gpui_kit::Div {
+        if self.exchange_ews_form.is_some() {
+            return content.child(self.render_exchange_ews_form(cx));
+        }
         if let Some(details) = self.render_account_details(colors) {
             content = content.child(details);
         }
@@ -1100,7 +1364,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             &self.status,
             AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. }
         ) {
-            content = content.child(self.render_permission_review(cx));
+            if self
+                .status
+                .connected_profile()
+                .is_some_and(|profile| profile.capabilities().mail() == MailAccess::ReadWrite)
+            {
+                content = content.child(self.render_permission_review(cx));
+            }
             if self.pending_permission_review.is_none() {
                 content = content.child(self.render_saved_sign_out(cx, "Sign out"));
             }

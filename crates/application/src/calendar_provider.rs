@@ -23,6 +23,9 @@ pub enum CalendarOperationError {
     /// The provider denied access to the calendar operation.
     #[error("calendar access was denied")]
     AccessDenied,
+    /// The connected account does not expose calendar operations.
+    #[error("this account does not support calendar operations")]
+    UnsupportedOperation,
     /// The provider confirmed that the event request was rejected.
     #[error("the calendar event request was rejected")]
     EventCreationRejected,
@@ -65,6 +68,7 @@ impl From<AccountOperationError> for CalendarOperationError {
     fn from(error: AccountOperationError) -> Self {
         match error {
             AccountOperationError::AccessDenied => Self::AccessDenied,
+            AccountOperationError::UnsupportedOperation => Self::UnsupportedOperation,
             AccountOperationError::AccessTokenRejected | AccountOperationError::SignInExpired => {
                 Self::SignInRequired
             }

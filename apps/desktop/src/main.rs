@@ -5,11 +5,13 @@ use std::{
     sync::{Arc, mpsc},
 };
 
+use einfach_mail_account_router::AccountProviderRouter;
 use einfach_mail_application::{
     AccountSessionFactory, AccountSessionWorkflowFactory, AccountWorkflow,
 };
+use einfach_mail_exchange_ews::ExchangeEwsProvider;
 use einfach_mail_microsoft_graph::{CallbackPort, MicrosoftGraphProvider};
-use einfach_mail_persistence::SqliteAccountCacheFactory;
+use einfach_mail_persistence::{SqliteAccountCacheFactory, XdgExchangeEwsAccountSettingsStore};
 use gpui_kit::*;
 use uuid::Uuid;
 
@@ -32,30 +34,63 @@ use account_view::{AccountServices, AccountView, SetupIssue};
 const CLIENT_ID_ENV: &str = "EINFACH_MAIL_ENTRA_CLIENT_ID";
 const CALLBACK_PORT_ENV: &str = "EINFACH_MAIL_ENTRA_CALLBACK_PORT";
 
-fn configured_account_services() -> Result<AccountServices<MicrosoftGraphProvider>, SetupIssue> {
-    let client_id = match env::var(CLIENT_ID_ENV) {
-        Ok(client_id_value) => {
-            Uuid::parse_str(&client_id_value).map_err(|_| SetupIssue::InvalidClientId)?
-        }
-        Err(VarError::NotPresent) => return Err(SetupIssue::MissingClientId),
-        Err(VarError::NotUnicode(_)) => return Err(SetupIssue::InvalidClientId),
-    };
-    let callback_port_value = match env::var(CALLBACK_PORT_ENV) {
-        Ok(port_value) => Some(port_value),
-        Err(VarError::NotPresent) => None,
-        Err(VarError::NotUnicode(_)) => return Err(SetupIssue::InvalidCallbackPort),
-    };
-    let callback_port = configured_callback_port(callback_port_value.as_deref())?;
-
-    let provider = MicrosoftGraphProvider::new(client_id, callback_port);
+fn configured_account_services()
+-> Result<AccountServices<AccountProviderRouter<XdgExchangeEwsAccountSettingsStore>>, SetupIssue> {
+    let (graph_provider, graph_setup_issue) = configured_graph_provider();
+    let settings_store = XdgExchangeEwsAccountSettingsStore::new()
+        .map_err(|_| SetupIssue::ExchangeSettingsUnavailable)?;
+    let ews_provider = ExchangeEwsProvider::new(settings_store);
+    let provider =
+        AccountProviderRouter::new(graph_provider, ews_provider, graph_setup_issue.is_none());
     let account_workflow = Arc::new(AccountWorkflow::new(provider.clone()));
     let account_session_factory: Arc<dyn AccountSessionFactory> = Arc::new(
         AccountSessionWorkflowFactory::new(provider, SqliteAccountCacheFactory),
     );
-    Ok(AccountServices::new(
-        account_workflow,
-        account_session_factory,
-    ))
+    let services = AccountServices::new(account_workflow, account_session_factory);
+    Ok(match graph_setup_issue {
+        Some(issue) => services.with_microsoft365_setup_issue(issue),
+        None => services,
+    })
+}
+
+fn configured_graph_provider() -> (MicrosoftGraphProvider, Option<SetupIssue>) {
+    let client_id = match env::var(CLIENT_ID_ENV) {
+        Ok(client_id_value) => match Uuid::parse_str(&client_id_value) {
+            Ok(client_id) => client_id,
+            Err(_) => {
+                return (
+                    MicrosoftGraphProvider::new_unconfigured(),
+                    Some(SetupIssue::InvalidClientId),
+                );
+            }
+        },
+        Err(VarError::NotPresent) => {
+            return (
+                MicrosoftGraphProvider::new_unconfigured(),
+                Some(SetupIssue::MissingClientId),
+            );
+        }
+        Err(VarError::NotUnicode(_)) => {
+            return (
+                MicrosoftGraphProvider::new_unconfigured(),
+                Some(SetupIssue::InvalidClientId),
+            );
+        }
+    };
+    let callback_port_value = match env::var(CALLBACK_PORT_ENV) {
+        Ok(port_value) => Some(port_value),
+        Err(VarError::NotPresent) => None,
+        Err(VarError::NotUnicode(_)) => {
+            return (
+                MicrosoftGraphProvider::new_unconfigured(),
+                Some(SetupIssue::InvalidCallbackPort),
+            );
+        }
+    };
+    match configured_callback_port(callback_port_value.as_deref()) {
+        Ok(callback_port) => (MicrosoftGraphProvider::new(client_id, callback_port), None),
+        Err(issue) => (MicrosoftGraphProvider::new_unconfigured(), Some(issue)),
+    }
 }
 
 fn configured_callback_port(port_text: Option<&str>) -> Result<CallbackPort, SetupIssue> {

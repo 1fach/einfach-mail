@@ -60,7 +60,9 @@ async fn refresh_access_token(
     client: Client,
 ) -> Result<Arc<AccessToken>, AccessTokenError> {
     let response = identity::refresh(
-        config.client_id,
+        config
+            .client_id
+            .ok_or(AccessTokenError::ServiceUnavailable)?,
         &config.endpoints,
         client,
         saved_credential.token().clone(),

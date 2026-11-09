@@ -3,7 +3,7 @@ use std::{future::Future, sync::Arc};
 use huskarl::token::AccessToken;
 use tokio_util::sync::CancellationToken;
 
-use crate::{error::GraphError, worker};
+use crate::error::GraphError;
 use einfach_mail_application::{
     CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
 };
@@ -11,6 +11,7 @@ use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
     CalendarViewReference, EditableCalendarEvent,
 };
+use einfach_mail_provider_runtime as worker;
 
 use super::{
     MicrosoftGraphProvider, ProviderConfig,

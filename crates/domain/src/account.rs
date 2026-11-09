@@ -11,6 +11,65 @@ use crate::{AccountId, Mailbox};
 #[error("account profile has no display name or address")]
 pub struct MissingAccountLabel;
 
+/// Mail and calendar actions supported by a connected account.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AccountCapabilities {
+    mail: MailAccess,
+    calendar: CalendarAccess,
+}
+
+impl AccountCapabilities {
+    /// Creates capabilities for the supported mail and calendar actions.
+    #[must_use]
+    pub const fn new(mail: MailAccess, calendar: CalendarAccess) -> Self {
+        Self { mail, calendar }
+    }
+
+    /// Returns read-only mail capabilities with no calendar access.
+    #[must_use]
+    pub const fn read_only_mail() -> Self {
+        Self::new(MailAccess::ReadOnly, CalendarAccess::Unavailable)
+    }
+
+    /// Returns read and write access to mail and calendar.
+    #[must_use]
+    pub const fn full_access() -> Self {
+        Self::new(MailAccess::ReadWrite, CalendarAccess::ReadWrite)
+    }
+
+    /// Returns the account's mail access level.
+    #[must_use]
+    pub const fn mail(self) -> MailAccess {
+        self.mail
+    }
+
+    /// Returns the account's calendar access level.
+    #[must_use]
+    pub const fn calendar(self) -> CalendarAccess {
+        self.calendar
+    }
+}
+
+/// The write access available for an account's mail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailAccess {
+    /// The account can list folders and read messages.
+    ReadOnly,
+    /// The account can read and change messages.
+    ReadWrite,
+}
+
+/// The calendar access available for an account.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalendarAccess {
+    /// The account does not expose calendar data.
+    Unavailable,
+    /// The account can read calendar data.
+    ReadOnly,
+    /// The account can read and change calendar data.
+    ReadWrite,
+}
+
 /// Provider-independent identity details for one connected account.
 #[derive(Clone, Eq, PartialEq)]
 pub struct AccountProfile {
@@ -18,6 +77,7 @@ pub struct AccountProfile {
     display_name: Option<String>,
     mailbox: Option<Mailbox>,
     user_principal_name: Option<String>,
+    capabilities: AccountCapabilities,
 }
 
 impl fmt::Debug for AccountProfile {
@@ -28,6 +88,7 @@ impl fmt::Debug for AccountProfile {
             .field("display_name", &"<redacted>")
             .field("mailbox", &self.mailbox)
             .field("user_principal_name", &"<redacted>")
+            .field("capabilities", &self.capabilities)
             .finish()
     }
 }
@@ -47,6 +108,30 @@ impl AccountProfile {
         mailbox_address: Option<String>,
         user_principal_name: Option<String>,
     ) -> Result<Self, MissingAccountLabel> {
+        Self::try_new_with_capabilities(
+            id,
+            display_name,
+            mailbox_address,
+            user_principal_name,
+            AccountCapabilities::full_access(),
+        )
+    }
+
+    /// Creates an account profile with explicit mail and calendar capabilities.
+    ///
+    /// Empty or whitespace-only optional values are discarded. The mailbox
+    /// address remains separate from the sign-in user principal name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MissingAccountLabel`] when all display values are empty.
+    pub fn try_new_with_capabilities(
+        id: AccountId,
+        display_name: Option<String>,
+        mailbox_address: Option<String>,
+        user_principal_name: Option<String>,
+        capabilities: AccountCapabilities,
+    ) -> Result<Self, MissingAccountLabel> {
         let display_name = non_empty(display_name);
         let mailbox_address = non_empty(mailbox_address);
         let user_principal_name = non_empty(user_principal_name);
@@ -64,6 +149,7 @@ impl AccountProfile {
             display_name,
             mailbox,
             user_principal_name,
+            capabilities,
         })
     }
 
@@ -91,6 +177,12 @@ impl AccountProfile {
         self.user_principal_name.as_deref()
     }
 
+    /// Returns the actions supported by this account's provider.
+    #[must_use]
+    pub fn capabilities(&self) -> AccountCapabilities {
+        self.capabilities
+    }
+
     /// Returns the best available label for the connected account.
     ///
     /// # Panics
@@ -116,7 +208,9 @@ fn non_empty(candidate: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountProfile, MissingAccountLabel};
+    use super::{
+        AccountCapabilities, AccountProfile, CalendarAccess, MailAccess, MissingAccountLabel,
+    };
     use crate::AccountId;
 
     fn account_id() -> AccountId {
@@ -195,5 +289,23 @@ mod tests {
         ] {
             assert!(!debug.contains(marker), "Debug output included {marker:?}");
         }
+    }
+
+    #[test]
+    fn profile_retains_read_only_mail_capabilities() {
+        let profile = AccountProfile::try_new_with_capabilities(
+            account_id(),
+            None,
+            Some("ada@example.test".to_owned()),
+            None,
+            AccountCapabilities::read_only_mail(),
+        )
+        .expect("mailbox identifies the account");
+
+        assert_eq!(profile.capabilities().mail(), MailAccess::ReadOnly);
+        assert_eq!(
+            profile.capabilities().calendar(),
+            CalendarAccess::Unavailable
+        );
     }
 }

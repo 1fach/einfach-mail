@@ -9,7 +9,6 @@ mod http_client;
 mod identity;
 mod provider;
 mod transport;
-mod worker;
 
 pub use config::{CallbackPort, InvalidCallbackPort};
 pub use provider::MicrosoftGraphProvider;
