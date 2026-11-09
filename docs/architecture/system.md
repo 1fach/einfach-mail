@@ -24,6 +24,8 @@ PR #47 merged M2 read-only mail into `main`. PR #50 merged the Linux read-only c
 
 M4 mail actions include read-state updates, follow-up flags, plain-text sends and replies, message moves, Archive, and Delete. Event actions include creating, editing, and deleting supported timed appointments. Archive moves mail to the default Outlook Archive folder. Delete moves mail to recoverable Deleted Items.
 
+ADR 0058 plans per-operation mail capabilities for M9. EWS will expose only message read-state changes, and only when the server can suppress read receipts. This capability change is planned in issue [#267](https://github.com/1fach/einfach-mail/issues/267); the current EWS provider still rejects all mail writes.
+
 ADRs [0015](../decisions/0015-idempotent-message-read-state-update.md), [0017](../decisions/0017-safe-plain-text-mail-sending.md), [0018](../decisions/0018-native-plain-text-message-reply.md), [0019](../decisions/0019-follow-up-flags-on-cached-messages.md), [0020](../decisions/0020-move-cached-messages-between-folders.md), [0039](../decisions/0039-move-messages-to-deleted-items.md), and [0040](../decisions/0040-move-messages-to-the-default-archive-folder.md) record these actions.
 
 [PR #51](https://github.com/1fach/einfach-mail/pull/51) merged issue #49 calendar cursor recovery into `main` after PRs #47 and #50. Its accepted design is in [ADR 0036](../decisions/0036-recover-expired-calendar-delta-cursors.md). Live reset-response behavior remains unverified until a Microsoft 365 tenant is available.
@@ -37,7 +39,7 @@ ADRs [0015](../decisions/0015-idempotent-message-read-state-update.md), [0017](.
 | `crates/domain/` | Provider-independent account, folder, message, calendar occurrence, and sync invariants | Framework and provider details |
 | `crates/providers/account-router/` | Selects the one saved account provider and enforces its declared account capabilities | EWS or Graph protocol details, UI state |
 | `crates/providers/microsoft-graph/` | Linux OAuth, Graph profile/folder/message/calendar-view and event requests, explicitly authorized mail and calendar writes, response mapping, private HTTP transport, and refresh-token storage | UI decisions, persistence policy, token access in application code |
-| `crates/providers/exchange-ews/` | Unauthenticated HTTPS Autodiscover, explicit endpoint validation, EWS SOAP/XML transport and mapping, NTLMv2 over verified HTTPS, channel binding, endpoint/mailbox settings, and the Linux Secret Service password | Graph requests, calendar behavior, unsupported mail writes |
+| `crates/providers/exchange-ews/` | Unauthenticated HTTPS Autodiscover, explicit endpoint validation, EWS mail and calendar requests and mapping, NTLMv2 over verified HTTPS, channel binding, endpoint/mailbox settings, and the Linux Secret Service password | Graph requests, UI gating, persistence rules |
 | `crates/persistence/` | Linux XDG paths, Secret Service key references, SQLCipher schema and migrations, encrypted records, atomic mail/calendar sync and event/message updates, durable send/reply recovery markers, and cache removal | Graph or GPUI types |
 
 The dependency direction is desktop UI → application → domain, with provider and persistence adapters implementing application-owned ports. The account router selects either Graph or EWS for the single saved account. Views never call a provider or access the database directly.

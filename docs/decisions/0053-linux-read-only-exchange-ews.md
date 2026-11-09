@@ -18,7 +18,7 @@ Use provider-neutral account capabilities to describe which mail and calendar ac
 
 Use the maintained `ews` crate for EWS SOAP types and XML serialization. Guard its malformed-envelope panic path at the response boundary. Use the existing `reqwest` HTTP client with redirects disabled, HTTP/1.1 only, platform TLS verification, bounded responses, and serialized NTLM handshakes. Use Devolutions `sspi` directly in NTLM mode for NTLMv2; its secret credential types zeroize the password when dropped. Parse the TLS-validated peer certificate with `x509-parser` and derive the RFC 5929 `tls-server-end-point` bytes with `sha2`, following only the certificate signature algorithms with a single defined hash. Keep the HTTP handshake connection-bound and verify that each challenge leg uses the same TCP connection before sending the next token.
 
-Accept only a user-entered HTTPS EWS endpoint without embedded credentials. Do not follow redirects or send credentials to a new URL. Defer Autodiscover to issue #258. Defer EWS writes, calendar operations, Exchange Online EWS, ADFS OAuth, Windows, and macOS.
+Accept only a user-entered HTTPS EWS endpoint without embedded credentials. Do not follow redirects or send credentials to a new URL. Defer Autodiscover to issue #258. Defer EWS writes to the follow-up scope in ADR 0058, calendar operations, Exchange Online EWS, ADFS OAuth, Windows, and macOS.
 
 Store the password only in Linux Secret Service. Store the endpoint and mailbox identity in application configuration without a password. Keep EWS message sync state in the existing encrypted SQLCipher cache and reuse the application's 90-day initial mail cutoff and page-commit rules.
 
@@ -38,7 +38,7 @@ Store the password only in Linux Secret Service. Store the endpoint and mailbox 
 
 - The application adds an Exchange account form and keeps Graph sign-in available when its public-client configuration is present.
 - EWS uses the existing account cache, message sanitizer, and native GPUI renderer.
-- The account model and views must gate read-only mail and unavailable calendar features. EWS write and calendar ports return explicit unsupported-operation errors.
+- The account model and views gate the initial read-only mail scope and unavailable calendar features. EWS writes remain unsupported until the operation-specific capability in ADR 0058 is implemented; calendar writes remain unsupported.
 - EWS authentication is enabled only for a validated HTTPS endpoint. A failed certificate check, redirect, malformed challenge, or connection change ends the request without sending another NTLM token.
 - SSPI 0.23.1 pins `rsa 0.10.0-rc.18`, which triggers RUSTSEC-2023-0071. This application invokes only SSPI's NTLM provider and has no RSA private key or private-key operation in its EWS path, so `.cargo/audit.toml` ignores only that advisory. Keep the rest of the RustSec audit active and remove the exception when SSPI adopts a fixed stable RSA release; [issue #259](https://github.com/1fach/einfach-mail/issues/259) tracks the update.
 - The first implementation has no live-server evidence. Keep issue #257 open until a real Exchange Server or sanitized recording verifies authentication, hierarchy paging, message paging, and body retrieval.

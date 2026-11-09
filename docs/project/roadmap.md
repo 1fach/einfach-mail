@@ -30,6 +30,10 @@ Add a Linux account path for on-premises Exchange through EWS. Support NTLMv2 wi
 
 Add a Linux read-only primary-calendar agenda for on-premises Exchange accounts. Reuse the shared native agenda, display the read-only capability, and keep EWS event changes unavailable. Use EWS `FindItem` with `CalendarView` and atomically replace each fixed-range cache snapshot after confirming the full response is present. Preserve the current Graph delta flow. Do not claim live Exchange compatibility until a real-server response or sanitized recording verifies the request, recurrence expansion, and time-zone behavior. See [ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md) and [issue #266](https://github.com/1fach/einfach-mail/issues/266).
 
+## M9: EWS message read-state changes
+
+Allow an EWS account to mark a message read or unread only when the server can suppress requested read receipts. Replace the broad mail read-write capability with per-operation capabilities so EWS does not expose sends, replies, flags, moves, deletes, or calendar writes. Keep Graph actions unchanged and keep uncertain EWS outcomes non-retried. Use sanitized synthetic SOAP fixtures; live compatibility remains unverified under issue #257. See [ADR 0058](../decisions/0058-per-operation-ews-mail-capabilities.md) and [issue #267](https://github.com/1fach/einfach-mail/issues/267).
+
 ## M5: Windows support and daily-use integration
 
 Add and verify Windows shell launch, authentication and credential storage, accessibility, installation, account removal, and operating-system integrations for mail and calendar use.

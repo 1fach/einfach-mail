@@ -62,3 +62,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0055](0055-defer-date-picker-accessible-names.md) | Defer DatePicker accessible names without local vendoring | Accepted |
 | [0056](0056-pin-patched-sqlcipher-integration.md) | Pin the patched SQLCipher integration while upstream releases catch up | Accepted |
 | [0057](0057-read-only-ews-calendar-snapshots.md) | Read-only EWS calendar snapshots | Accepted |
+| [0058](0058-per-operation-ews-mail-capabilities.md) | Gate EWS mail actions by operation | Accepted; implementation tracked in issue #267 |
