@@ -564,6 +564,20 @@ mod tests {
 
     use super::{apply_parallel_schema_compatibility, migrations};
 
+    #[test]
+    fn bundled_sqlcipher_source_matches_reviewed_versions() {
+        let connection = Connection::open_in_memory().expect("in-memory database opens");
+        let cipher_version: String = connection
+            .query_row("PRAGMA cipher_version", [], |row| row.get(0))
+            .expect("SQLCipher runtime version is readable");
+        let sqlite_version: String = connection
+            .query_row("SELECT sqlite_version()", [], |row| row.get(0))
+            .expect("SQLite runtime version is readable");
+
+        assert_eq!(cipher_version.split_whitespace().next(), Some("4.20.0"));
+        assert_eq!(sqlite_version, "3.54.1");
+    }
+
     fn assert_flag_transition_preserves_cached_mail(connection: &Connection) {
         let sync = connection
             .query_row(
