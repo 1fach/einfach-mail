@@ -117,28 +117,16 @@ impl MailView {
                 title.child(sync_status)
             })
             .child(
-                header_actions
-                    .child(
-                        Button::new("sync-mail")
-                            .ghost()
-                            .label("Sync")
-                            .loading(self.sync_status.is_sync_active())
-                            .disabled(
-                                self.sync_status.is_sync_active()
-                                    || self.message_update_in_progress(),
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
-                    )
-                    .child(
-                        Button::new("account")
-                            .debug_selector(|| "mail-account-navigation".to_owned())
-                            .ghost()
-                            .label("Account")
-                            .disabled(self.message_update_in_progress())
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(MailViewEvent::BackToAccount);
-                            })),
-                    ),
+                header_actions.child(
+                    Button::new("sync-mail")
+                        .ghost()
+                        .label("Sync")
+                        .loading(self.sync_status.is_sync_active())
+                        .disabled(
+                            self.sync_status.is_sync_active() || self.message_update_in_progress(),
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
+                ),
             )
     }
 

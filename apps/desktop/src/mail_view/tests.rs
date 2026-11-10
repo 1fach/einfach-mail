@@ -3374,7 +3374,7 @@ fn uncertain_read_state_shows_sync_guidance_and_blocks_another_write(cx: &mut Te
 }
 
 #[gpui_kit::test]
-fn pending_read_state_keeps_account_navigation_open(cx: &mut TestAppContext) {
+fn pending_read_state_does_not_render_duplicate_account_navigation(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let account =
         AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
@@ -3388,16 +3388,6 @@ fn pending_read_state_keeps_account_navigation_open(cx: &mut TestAppContext) {
         cache,
     ));
     let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
-    let navigation_requested = Arc::new(AtomicBool::new(false));
-    let observed_navigation = Arc::clone(&navigation_requested);
-    let _subscription = context.cx.update(|cx| {
-        cx.subscribe(&view, move |_, event: &MailViewEvent, _| {
-            if matches!(event, MailViewEvent::BackToAccount) {
-                observed_navigation.store(true, Ordering::Relaxed);
-            }
-        })
-    });
-
     context.run_until_parked();
     draw_mail_view(context);
     let row_bounds = context
@@ -3420,12 +3410,7 @@ fn pending_read_state_keeps_account_navigation_open(cx: &mut TestAppContext) {
         }
     )));
 
-    let account_bounds = context
-        .debug_bounds("mail-account-navigation")
-        .expect("account navigation remains visible while the write is pending");
-    context.simulate_click(account_bounds.center(), Modifiers::default());
-    context.run_until_parked();
-    assert!(!navigation_requested.load(Ordering::Relaxed));
+    assert!(context.debug_bounds("mail-account-navigation").is_none());
 }
 
 #[gpui_kit::test]

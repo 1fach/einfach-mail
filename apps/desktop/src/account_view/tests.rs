@@ -15,6 +15,7 @@ use gpui_kit::{
     px, size,
 };
 
+use super::WorkspaceSection;
 use super::{AccountContent, AccountServices, AccountStatus, AccountView, SetupIssue};
 use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
@@ -671,6 +672,160 @@ fn scroll_account_view(context: &mut VisualTestContext, delta_y: f32) {
     draw_account_view(context);
 }
 
+#[gpui_kit::test]
+fn workspace_navigation_stays_visible_and_supports_keyboard_switching(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
+    let factory = unused_account_session_factory();
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    assert_disconnected_workspace_routes(&view, context);
+    connect_synthetic_workspace_account(&view, context);
+    assert_keyboard_navigation_selects_calendar(&view, context);
+}
+
+#[gpui_kit::test]
+fn unavailable_calendar_navigation_explains_why_it_is_disabled(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
+    let factory = unused_account_session_factory();
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let profile = mail_only_profile();
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::Connected(profile);
+            cx.notify();
+        });
+    });
+    context.run_until_parked();
+    draw_account_view(context);
+    assert!(context.debug_bounds("nav-calendar").is_some());
+    assert_eq!(
+        context.cx.update(|cx| {
+            view.read(cx)
+                .navigation_disabled_reason(WorkspaceSection::Calendar, cx)
+        }),
+        Some("Calendar is unavailable for this account.")
+    );
+    click(context, "nav-calendar");
+    assert!(
+        context.cx.update(|cx| {
+            view.read(cx).content.selected_section() == WorkspaceSection::Accounts
+        })
+    );
+}
+
+type WorkspaceTestView = gpui_kit::Entity<AccountView<TestProvider>>;
+
+fn mail_only_profile() -> AccountProfile {
+    AccountProfile::try_new_with_capabilities(
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
+        Some("Ada Example".to_owned()),
+        Some("ada@example.test".to_owned()),
+        Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::read_only_mail(),
+    )
+    .expect("synthetic mail-only account profile is valid")
+}
+
+fn assert_workspace_navigation_is_visible(context: &mut VisualTestContext) {
+    for selector in ["nav-mail", "nav-calendar", "nav-accounts"] {
+        assert!(context.debug_bounds(selector).is_some());
+    }
+}
+
+fn assert_disconnected_navigation_explains_disabled_destinations(
+    view: &WorkspaceTestView,
+    context: &mut VisualTestContext,
+) {
+    let reasons = context.cx.update(|cx| {
+        let view = view.read(cx);
+        [
+            view.navigation_disabled_reason(WorkspaceSection::Mail, cx),
+            view.navigation_disabled_reason(WorkspaceSection::Calendar, cx),
+        ]
+    });
+    assert_eq!(
+        reasons,
+        [
+            Some("Connect an account to use this section."),
+            Some("Connect an account to use this section."),
+        ]
+    );
+}
+
+fn assert_disconnected_workspace_routes(view: &WorkspaceTestView, context: &mut VisualTestContext) {
+    context.run_until_parked();
+    draw_account_view(context);
+    assert_workspace_navigation_is_visible(context);
+    assert_disconnected_navigation_explains_disabled_destinations(view, context);
+    click(context, "nav-mail");
+    assert!(context.cx.update(|cx| {
+        matches!(&view.read(cx).content, AccountContent::Account)
+            && matches!(&view.read(cx).status, AccountStatus::Disconnected)
+    }));
+}
+
+fn assert_keyboard_navigation_selects_calendar(
+    view: &WorkspaceTestView,
+    context: &mut VisualTestContext,
+) {
+    draw_account_view(context);
+    focus_calendar_after_mail(view, context);
+    press_enter(context);
+    draw_account_view(context);
+    assert!(
+        context.cx.update(|cx| {
+            view.read(cx).content.selected_section() == WorkspaceSection::Calendar
+        })
+    );
+}
+
+fn connect_synthetic_workspace_account(view: &WorkspaceTestView, context: &mut VisualTestContext) {
+    let profile = AccountProfile::try_new(
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
+        Some("Ada Example".to_owned()),
+        Some("ada@example.test".to_owned()),
+        Some("ada@tenant.example.test".to_owned()),
+    )
+    .expect("synthetic account profile is valid");
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::Connected(profile);
+            cx.notify();
+        });
+    });
+}
+
+fn focus_calendar_after_mail(view: &WorkspaceTestView, context: &mut VisualTestContext) {
+    let mail_focus = context
+        .cx
+        .update(|cx| view.read(cx).mail_navigation_focus.clone());
+    context.update(|window, cx| {
+        mail_focus.focus(window, cx);
+        window.focus_next(cx);
+    });
+    let calendar_focus = context
+        .cx
+        .update(|cx| view.read(cx).calendar_navigation_focus.clone());
+    assert!(
+        context.update(|window, _| calendar_focus.is_focused(window)),
+        "Tab reaches the Calendar navigation button"
+    );
+}
+
+fn press_enter(context: &mut VisualTestContext) {
+    let keystroke = gpui_kit::Keystroke::parse("enter").expect("Enter keystroke is valid");
+    context.simulate_event(gpui_kit::KeyDownEvent {
+        keystroke: keystroke.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    context.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+    context.run_until_parked();
+}
+
 #[test]
 fn cancelled_permission_review_has_permission_specific_copy() {
     assert_eq!(
@@ -741,7 +896,7 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
     });
     draw_account_view(context);
 
-    click(context, "open-calendar");
+    click(context, "nav-calendar");
 
     assert!(context.debug_bounds("account-cache-error").is_some());
     assert!(context.cx.update(|cx| matches!(
@@ -811,7 +966,7 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
     });
     draw_account_view(context);
 
-    click(context, "open-mail");
+    click(context, "nav-mail");
     open_started_receiver
         .recv_timeout(Duration::from_secs(1))
         .expect("the account session open starts");
@@ -1138,7 +1293,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
             .update(|cx| view.read(cx).account_session.is_none())
     );
 
-    click(context, "open-mail");
+    click(context, "nav-mail");
 
     assert_eq!(
         *opened_account_ids
@@ -1153,7 +1308,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
             .is_some_and(|retained| Arc::ptr_eq(retained, &session_b))
     }));
 
-    click(context, "mail-account-navigation");
+    click(context, "nav-accounts");
     click(context, "sign-out");
 
     let retry_state_is_bound_to_account_b = context.cx.update(|cx| {
@@ -1240,13 +1395,13 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
     });
     draw_account_view(context);
 
-    click(context, "open-calendar");
+    click(context, "nav-calendar");
     let calendar_open = context
         .cx
         .update(|cx| matches!(&view.read(cx).content, AccountContent::Calendar { .. }));
     assert!(calendar_open);
 
-    click(context, "calendar-back");
+    click(context, "nav-accounts");
     let returned_to_account = context
         .cx
         .update(|cx| matches!(&view.read(cx).content, AccountContent::Account));
@@ -1369,7 +1524,7 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
     });
     draw_account_view(context);
 
-    click(context, "open-mail");
+    click(context, "nav-mail");
     assert!(
         context
             .cx
@@ -1402,13 +1557,26 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
             .update(|cx| { view.read(cx).pending_permission_review.is_none() })
     );
 
-    click(context, "open-mail");
+    click(context, "nav-mail");
     assert!(
         context
             .cx
             .update(|cx| matches!(&view.read(cx).content, AccountContent::Mail { .. }))
     );
-    click(context, "mail-account-navigation");
+    click(context, "nav-calendar");
+    assert!(
+        context
+            .cx
+            .update(|cx| { matches!(&view.read(cx).content, AccountContent::Calendar { .. }) })
+    );
+    click(context, "nav-mail");
+    assert!(
+        context
+            .cx
+            .update(|cx| { matches!(&view.read(cx).content, AccountContent::Mail { .. }) })
+    );
+    assert_eq!(session_open_attempts.load(Ordering::SeqCst), 1);
+    click(context, "nav-accounts");
     assert!(
         context
             .cx
@@ -1421,7 +1589,7 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
             .is_some_and(|retained| Arc::ptr_eq(retained, &session))
     }));
 
-    click(context, "open-calendar");
+    click(context, "nav-calendar");
     assert!(
         context
             .cx
@@ -1761,13 +1929,13 @@ fn exchange_server_form_connects_without_microsoft_client_configuration(cx: &mut
     )));
     assert_eq!(ews_connect_requests.load(Ordering::SeqCst), 1);
     assert!(ews_input_valid.load(Ordering::SeqCst));
-    assert!(context.debug_bounds("open-mail").is_some());
-    assert!(context.debug_bounds("open-calendar").is_some());
+    assert!(context.debug_bounds("nav-mail").is_some());
+    assert!(context.debug_bounds("nav-calendar").is_some());
 
-    click(context, "open-calendar");
+    click(context, "nav-calendar");
     context.run_until_parked();
     draw_account_view(context);
-    assert!(context.debug_bounds("calendar-back").is_some());
+    assert!(context.debug_bounds("nav-accounts").is_some());
     assert!(context.debug_bounds("calendar-sync").is_some());
 }
 

@@ -56,7 +56,6 @@ pub(crate) fn bind_calendar_event_navigation_keys(cx: &mut App) {
 }
 
 pub(crate) enum CalendarViewEvent {
-    BackToAccount,
     ReviewCalendarWritePermission,
 }
 
@@ -624,7 +623,6 @@ where
             .items_center()
             .justify_between()
             .gap_3()
-            .child(Self::render_back_button(cx))
             .child(self.render_calendar_title());
         if self.profile.capabilities().calendar() == CalendarAccess::ReadOnly {
             let read_only_status = div()
@@ -646,16 +644,6 @@ where
             title_bar = title_bar.child(self.render_event_button(cx));
         }
         title_bar.child(self.render_sync_button(cx))
-    }
-
-    fn render_back_button(cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("calendar-back")
-            .debug_selector(|| "calendar-back".to_owned())
-            .ghost()
-            .label("Accounts")
-            .on_click(cx.listener(|_, _, _, cx| {
-                cx.emit(CalendarViewEvent::BackToAccount);
-            }))
     }
 
     fn render_calendar_title(&self) -> impl IntoElement {

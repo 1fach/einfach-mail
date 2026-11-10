@@ -11,15 +11,15 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{AccountProfile, CalendarAccess};
 use gpui_kit::component::{
-    ActiveTheme, ColorTokens, Disableable, StyledExt,
+    ActiveTheme, ColorTokens, Disableable, Icon, IconName, Selectable, StyledExt,
     button::{Button, ButtonVariants},
     form::{Field, Form},
     input::{Input, InputState},
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    AsyncApp, Context, Div, Entity, IntoElement, Render, Role, Stateful, Subscription, Task,
-    Window, div, prelude::*,
+    App, AsyncApp, Context, Div, Entity, FocusHandle, IntoElement, Render, Role, Stateful,
+    Subscription, Task, Window, div, prelude::*,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,6 +208,9 @@ pub(super) struct AccountView<P: AccountProvider + 'static> {
     status: AccountStatus,
     pending_permission_review: Option<AccountPermissionRequest>,
     content: AccountContent,
+    mail_navigation_focus: FocusHandle,
+    calendar_navigation_focus: FocusHandle,
+    accounts_navigation_focus: FocusHandle,
     session_open_error: Option<AccountViewCacheError>,
     exchange_ews_form: Option<ExchangeEwsConnectionForm>,
     task: Option<Task<()>>,
@@ -312,6 +315,23 @@ enum OpeningContent {
     Calendar,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WorkspaceSection {
+    Mail,
+    Calendar,
+    Accounts,
+}
+
+impl WorkspaceSection {
+    fn navigation_identity(self) -> (&'static str, &'static str, IconName) {
+        match self {
+            Self::Mail => ("nav-mail", "Mail", IconName::Inbox),
+            Self::Calendar => ("nav-calendar", "Calendar", IconName::Calendar),
+            Self::Accounts => ("nav-accounts", "Accounts", IconName::User),
+        }
+    }
+}
+
 enum AccountContent {
     Account,
     Opening(OpeningContent),
@@ -334,6 +354,16 @@ impl AccountContent {
         match self {
             Self::Opening(opening) => Some(*opening),
             Self::Account | Self::Mail { .. } | Self::Calendar { .. } => None,
+        }
+    }
+
+    fn selected_section(&self) -> WorkspaceSection {
+        match self {
+            Self::Mail { .. } => WorkspaceSection::Mail,
+            Self::Calendar { .. } => WorkspaceSection::Calendar,
+            Self::Opening(OpeningContent::Mail) => WorkspaceSection::Mail,
+            Self::Opening(OpeningContent::Calendar) => WorkspaceSection::Calendar,
+            Self::Account => WorkspaceSection::Accounts,
         }
     }
 }
@@ -383,6 +413,9 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             status,
             pending_permission_review: None,
             content: AccountContent::Account,
+            mail_navigation_focus: cx.focus_handle().tab_stop(true),
+            calendar_navigation_focus: cx.focus_handle().tab_stop(true),
+            accounts_navigation_focus: cx.focus_handle().tab_stop(true),
             session_open_error: None,
             exchange_ews_form: None,
             task: None,
@@ -876,10 +909,6 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 let subscription = cx.subscribe(
                     &mail_view,
                     |view, _, event: &MailViewEvent, cx| match event {
-                        MailViewEvent::BackToAccount => {
-                            drop(view.close_content_view(cx));
-                            cx.notify();
-                        }
                         MailViewEvent::ReviewMailWritePermission => {
                             drop(view.close_content_view(cx));
                             view.prepare_permission_review(
@@ -899,11 +928,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn open_calendar(&mut self, cx: &mut Context<Self>) {
-        if !self
-            .status
-            .connected_profile()
-            .is_some_and(|profile| profile.capabilities().calendar() != CalendarAccess::Unavailable)
-        {
+        if !self.calendar_is_available() {
             return;
         }
         self.open_account_content(
@@ -914,10 +939,6 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 let subscription =
                     cx.subscribe(&calendar_view, |view, _, event: &CalendarViewEvent, cx| {
                         match event {
-                            CalendarViewEvent::BackToAccount => {
-                                drop(view.close_content_view(cx));
-                                cx.notify();
-                            }
                             CalendarViewEvent::ReviewCalendarWritePermission => {
                                 drop(view.close_content_view(cx));
                                 view.prepare_permission_review(
@@ -934,6 +955,78 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             },
             cx,
         );
+    }
+
+    fn navigate_to(&mut self, section: WorkspaceSection, cx: &mut Context<Self>) {
+        if self.content.selected_section() == section
+            || self.navigation_disabled_reason(section, cx).is_some()
+        {
+            return;
+        }
+
+        drop(self.close_content_view(cx));
+        match section {
+            WorkspaceSection::Accounts => cx.notify(),
+            WorkspaceSection::Mail => self.open_mail(cx),
+            WorkspaceSection::Calendar => self.open_calendar(cx),
+        }
+    }
+
+    fn navigation_disabled_reason(
+        &self,
+        section: WorkspaceSection,
+        cx: &App,
+    ) -> Option<&'static str> {
+        if self.content.opening_kind().is_some() {
+            return Some("Wait for the current section to finish opening.");
+        }
+        if !self.can_navigate_away(cx) {
+            return Some("Wait for the current mail update to finish before switching sections.");
+        }
+        self.section_disabled_reason(section)
+    }
+
+    fn section_disabled_reason(&self, section: WorkspaceSection) -> Option<&'static str> {
+        if section == WorkspaceSection::Accounts {
+            return None;
+        }
+        if let Err(issue) = &self.services {
+            return Some(issue.message());
+        }
+        if !matches!(&self.status, AccountStatus::Connected(_)) {
+            return Some(if matches!(&self.status, AccountStatus::Disconnected) {
+                "Connect an account to use this section."
+            } else {
+                "Resolve the account status in Accounts before using this section."
+            });
+        }
+        if section == WorkspaceSection::Calendar && !self.calendar_is_available() {
+            return Some("Calendar is unavailable for this account.");
+        }
+        None
+    }
+
+    fn calendar_is_available(&self) -> bool {
+        self.status
+            .connected_profile()
+            .is_some_and(|profile| profile.capabilities().calendar() != CalendarAccess::Unavailable)
+    }
+
+    fn navigation_focus(&self, section: WorkspaceSection) -> &FocusHandle {
+        match section {
+            WorkspaceSection::Mail => &self.mail_navigation_focus,
+            WorkspaceSection::Calendar => &self.calendar_navigation_focus,
+            WorkspaceSection::Accounts => &self.accounts_navigation_focus,
+        }
+    }
+
+    fn can_navigate_away(&self, cx: &App) -> bool {
+        match &self.content {
+            AccountContent::Mail { view, .. } => view.read(cx).can_navigate_away(),
+            AccountContent::Account
+            | AccountContent::Opening(_)
+            | AccountContent::Calendar { .. } => true,
+        }
     }
 
     fn open_account_content(
@@ -1324,7 +1417,15 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                         .label("Cancel sign-in")
                         .on_click(cx.listener(|view, _, _, cx| view.cancel_connect(cx))),
                 ),
-            AccountStatus::Connected(_) if self.services.is_ok() => self.render_open_content(cx),
+            AccountStatus::Connected(_) if self.services.is_ok() => {
+                match self.content.opening_kind() {
+                    Some(OpeningContent::Mail) => Self::render_progress_action("Opening mail…"),
+                    Some(OpeningContent::Calendar) => {
+                        Self::render_progress_action("Opening calendar…")
+                    }
+                    None => div(),
+                }
+            }
             AccountStatus::Failed {
                 saved_credential_may_exist: true,
                 ..
@@ -1680,45 +1781,6 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         )
     }
 
-    fn render_open_content(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let mail_opening = self.content.opening_kind() == Some(OpeningContent::Mail);
-        let calendar_opening = self.content.opening_kind() == Some(OpeningContent::Calendar);
-        let opening = self.content.opening_kind().is_some();
-        let mut content = div().flex().justify_center().gap_2().child(
-            Button::new("open-mail")
-                .debug_selector(|| "open-mail".to_owned())
-                .primary()
-                .label(if mail_opening {
-                    "Opening mail…"
-                } else {
-                    "Open mail"
-                })
-                .loading(mail_opening)
-                .disabled(opening)
-                .on_click(cx.listener(|view, _, _, cx| view.open_mail(cx))),
-        );
-        if self
-            .status
-            .connected_profile()
-            .is_some_and(|profile| profile.capabilities().calendar() != CalendarAccess::Unavailable)
-        {
-            content = content.child(
-                Button::new("open-calendar")
-                    .debug_selector(|| "open-calendar".to_owned())
-                    .outline()
-                    .label(if calendar_opening {
-                        "Opening calendar…"
-                    } else {
-                        "Open calendar"
-                    })
-                    .loading(calendar_opening)
-                    .disabled(opening)
-                    .on_click(cx.listener(|view, _, _, cx| view.open_calendar(cx))),
-            );
-        }
-        content
-    }
-
     fn render_header(&self, colors: ColorTokens) -> gpui_kit::Div {
         let mut header = div()
             .w_full()
@@ -1830,20 +1892,98 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         }
         content.child(self.render_primary_action(cx))
     }
-}
 
-impl<P: AccountProvider + 'static> Render for AccountView<P> {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("workspace-navigation")
+            .role(Role::Navigation)
+            .aria_label("Main navigation")
+            .w(gpui_kit::px(256.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .bg(cx.theme().tokens.sidebar)
+            .text_color(cx.theme().sidebar_foreground)
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
+            .child(self.render_navigation_brand())
+            .child(self.render_feature_navigation(cx))
+            .child(div().flex_1())
+            .child(self.render_account_navigation(cx))
+    }
+
+    fn render_navigation_brand(&self) -> impl IntoElement {
+        div()
+            .px_4()
+            .py_4()
+            .child(div().text_lg().font_semibold().child("Einfach Mail"))
+    }
+
+    fn render_feature_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("workspace-feature-navigation")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_2()
+            .child(self.render_navigation_button(WorkspaceSection::Mail, cx))
+            .child(self.render_navigation_button(WorkspaceSection::Calendar, cx))
+    }
+
+    fn render_account_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("workspace-account-navigation")
+            .border_t_1()
+            .border_color(cx.theme().sidebar_border)
+            .p_2()
+            .child(self.render_navigation_button(WorkspaceSection::Accounts, cx))
+    }
+
+    fn render_navigation_button(
+        &self,
+        section: WorkspaceSection,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let (id, label, icon) = section.navigation_identity();
+        let selected = self.content.selected_section() == section;
+        let disabled_reason = self.navigation_disabled_reason(section, cx);
+        Button::new(id)
+            .debug_selector(move || id.to_owned())
+            .ghost()
+            .selected(selected)
+            .disabled(disabled_reason.is_some())
+            .label(label)
+            .icon(Icon::new(icon).size_4())
+            .w_full()
+            .track_focus(self.navigation_focus(section))
+            .when_some(disabled_reason, |button, reason| button.tooltip(reason))
+            .on_click(cx.listener(move |view, _, _, cx| view.navigate_to(section, cx)))
+    }
+
+    fn render_workspace_content(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         match &self.content {
             AccountContent::Mail { view, .. } => {
-                return div().size_full().child(view.clone()).into_any_element();
+                div().size_full().child(view.clone()).into_any_element()
             }
             AccountContent::Calendar { view, .. } => {
-                return div().size_full().child(view.clone()).into_any_element();
+                div().size_full().child(view.clone()).into_any_element()
             }
-            AccountContent::Account | AccountContent::Opening(_) => {}
+            AccountContent::Account | AccountContent::Opening(_) => {
+                self.render_account_workspace_content(colors, cx)
+            }
         }
-        let colors = cx.theme().semantic_tokens().colors;
+    }
+
+    fn render_account_workspace_content(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
         div()
             .size_full()
             .overflow_y_scrollbar()
@@ -1857,6 +1997,27 @@ impl<P: AccountProvider + 'static> Render for AccountView<P> {
                     .justify_center()
                     .p_8()
                     .child(self.render_account_content(colors, cx)),
+            )
+            .into_any_element()
+    }
+}
+
+impl<P: AccountProvider + 'static> Render for AccountView<P> {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().semantic_tokens().colors;
+        div()
+            .id("workspace")
+            .size_full()
+            .flex()
+            .child(self.render_navigation(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(self.render_workspace_content(colors, cx)),
             )
             .into_any_element()
     }

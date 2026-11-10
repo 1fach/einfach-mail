@@ -55,7 +55,6 @@ pub(crate) fn bind_message_navigation_keys(cx: &mut App) {
 }
 
 pub(crate) enum MailViewEvent {
-    BackToAccount,
     ReviewMailWritePermission,
 }
 
@@ -558,6 +557,10 @@ impl MailView {
         self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
         self.move_recovery_reason = None;
         self.selected_folder_write_sync_required = true;
+    }
+
+    pub(crate) fn can_navigate_away(&self) -> bool {
+        !self.message_update_in_progress()
     }
 
     fn select_folder(&mut self, folder: FolderReference, cx: &mut Context<Self>) {
