@@ -34,11 +34,11 @@ use gpui_kit::{
 
 use super::super::composer::bind_mail_composer_keys;
 use super::{
-    FollowUpFlagUpdateStatus, MailFolderNavigation, MailPermissionRequester, MailSyncProgress,
-    MailView, MailViewEvent, MessageDetailState, MessageListState, MessageMoveMenuAction,
-    MoveRecoveryReason, ReadStateUpdateStatus, SyncStatus, WellKnownFolderActionStatus,
-    bind_message_navigation_keys, empty_message_detail_copy, follow_up_flag_failure_message,
-    mail_error_message, read_state_failure_message,
+    CompactMailPane, FollowUpFlagUpdateStatus, MailFolderNavigation, MailPermissionRequester,
+    MailSyncProgress, MailView, MailViewEvent, MessageDetailState, MessageListState,
+    MessageMoveMenuAction, MoveRecoveryReason, ReadStateUpdateStatus, SyncStatus,
+    WellKnownFolderActionStatus, bind_message_navigation_keys, empty_message_detail_copy,
+    follow_up_flag_failure_message, mail_error_message, read_state_failure_message,
 };
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
 
@@ -1990,6 +1990,158 @@ async fn message_list_width_controls_are_focusable_and_bounded(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
+async fn compact_mail_keeps_folder_context_and_supports_pointer_and_keyboard_navigation(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        bind_message_navigation_keys(cx);
+    });
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, message_id) = fixture(account);
+    let workflow = Arc::new(MailWorkflow::new(
+        profile.id().clone(),
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache,
+    ));
+    let mut mail_view = None;
+    let (_, context) = cx.add_window_view(|window, cx| {
+        let (root, view) = test_mail_workspace(profile, workflow, window, cx);
+        mail_view = Some(view);
+        root
+    });
+    let view = mail_view.expect("mail view is created with the test window");
+
+    context.simulate_resize(size(px(900.), px(720.)));
+    wait_for_mail_sync_to_finish(context, &view).await;
+    draw_mail_view(context);
+
+    let (viewport, folder_navigation, inbox_folder, message_list) = context.update(|window, _| {
+        (
+            window.bounds(),
+            window.find("mail-folder-navigation").bounds(),
+            window.find("folder:inbox"),
+            window.find("mail-message-list").bounds(),
+        )
+    });
+    assert!(folder_navigation.right() <= viewport.right());
+    assert!(message_list.right() <= viewport.right());
+    assert_eq!(inbox_folder.label(), Some("Inbox"));
+    assert!(context.update(|window, _| window.try_find_by_label("Widen list").is_none()));
+    assert!(context.cx.update(|app| {
+        view.read(app)
+            .selected_folder
+            .as_ref()
+            .is_some_and(|folder| folder.folder_id().as_str() == "inbox")
+    }));
+    assert!(context.update(|window, _| window.try_find("mail-reader").is_none()));
+    assert_accessible_message_list(context);
+
+    context.update(|window, app| window.click("message-option-message-1", app));
+    context.run_until_parked();
+    draw_mail_view(context);
+
+    assert!(
+        context
+            .cx
+            .update(|app| matches!(view.read(app).compact_pane, CompactMailPane::MessageReader))
+    );
+    assert!(context.update(|window, _| window.try_find("cached-message-list").is_none()));
+    assert!(
+        context
+            .update(|window, _| { window.find("mail-reader").label() == Some("Message reader") })
+    );
+    assert!(context.update(|window, app| {
+        window.find_by_label("Back to messages").visible()
+            && view.read(app).message_list_focus.is_focused(window)
+    }));
+    assert!(context.cx.update(|app| {
+        view.read(app).selected_message_id() == Some(&message_id)
+            && matches!(
+                &view.read(app).message_detail_state,
+                MessageDetailState::Opened(_)
+            )
+    }));
+
+    let back_button =
+        context.update(|window, _| window.find_by_label("Back to messages").bounds().center());
+    context.simulate_click(back_button, Modifiers::default());
+    context.run_until_parked();
+    draw_mail_view(context);
+    assert!(context.update(|window, app| {
+        window.try_find("cached-message-list").is_some()
+            && window.try_find("mail-reader").is_none()
+            && view.read(app).message_list_focus.is_focused(window)
+    }));
+    assert_selected_message_and_accessible_label(
+        context,
+        &view,
+        Some(&message_id),
+        SYNTHETIC_MESSAGE_LABEL_PREFIX,
+    );
+
+    press_window_key(context, "enter");
+    draw_mail_view(context);
+    assert!(context.update(|window, _| window.try_find("mail-reader").is_some()));
+    press_window_key(context, "escape");
+    draw_mail_view(context);
+    assert!(context.update(|window, app| {
+        window.try_find("cached-message-list").is_some()
+            && window.try_find("mail-reader").is_none()
+            && view.read(app).message_list_focus.is_focused(window)
+    }));
+
+    context.simulate_resize(size(px(1600.), px(900.)));
+    draw_mail_view(context);
+    assert!(context.update(|window, app| {
+        window.find("mail-message-list").bounds().size.width > px(0.)
+            && window.find("mail-reader").bounds().size.width > px(0.)
+            && view.read(app).selected_message_id() == Some(&message_id)
+    }));
+
+    context.simulate_resize(size(px(900.), px(720.)));
+    draw_mail_view(context);
+    assert!(context.update(|window, app| {
+        window.try_find("cached-message-list").is_some()
+            && window.try_find("mail-reader").is_none()
+            && view.read(app).selected_message_id() == Some(&message_id)
+    }));
+    assert_selected_message_and_accessible_label(
+        context,
+        &view,
+        Some(&message_id),
+        SYNTHETIC_MESSAGE_LABEL_PREFIX,
+    );
+
+    context.simulate_resize(size(px(1600.), px(900.)));
+    draw_mail_view(context);
+    for _ in 0..8 {
+        let position =
+            context.update(|window, _| window.find_by_label("Widen list").bounds().center());
+        context.simulate_click(position, Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+    }
+    assert_eq!(message_list_width(context), px(480.));
+
+    context.simulate_resize(size(px(1200.), px(720.)));
+    draw_mail_view(context);
+    assert!(context.update(|window, _| {
+        window.try_find("cached-message-list").is_some() && window.try_find("mail-reader").is_none()
+    }));
+
+    context.simulate_resize(size(px(1260.), px(720.)));
+    draw_mail_view(context);
+    assert!(context.update(|window, _| {
+        window.find("mail-message-list").bounds().size.width > px(0.)
+            && window.find("mail-reader").bounds().size.width >= px(480.)
+    }));
+}
+
+#[gpui_kit::test]
 async fn dragged_message_list_width_keeps_its_rem_size_after_zoom(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let account =
@@ -2040,6 +2192,7 @@ async fn dragged_message_list_width_keeps_its_rem_size_after_zoom(cx: &mut TestA
     context.cx.update(|cx| {
         gpui_kit::component::Theme::update(cx, |theme| theme.font_size = px(24.));
     });
+    context.simulate_resize(size(px(1800.), px(900.)));
     context.run_until_parked();
     draw_mail_view(context);
 

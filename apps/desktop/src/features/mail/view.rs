@@ -30,18 +30,29 @@ gpui_kit::actions!(
         SelectNextMessage,
         SelectFirstMessage,
         SelectLastMessage,
+        OpenSelectedMessage,
+        ReturnToMessageList,
     ]
 );
 
 const MESSAGE_LIST_CONTEXT: &str = "MailMessageList";
+const MESSAGE_READER_CONTEXT: &str = "MailMessageReader";
 const MESSAGE_ROW_HEIGHT: Rems = rems(4.5);
 const MESSAGE_LIST_DEFAULT_WIDTH: Rems = rems(22.);
 const MESSAGE_LIST_MIN_WIDTH: Rems = rems(18.);
 const MESSAGE_LIST_MAX_WIDTH: Rems = rems(30.);
 const MESSAGE_LIST_WIDTH_STEP: Rems = rems(1.);
 const MESSAGE_READER_MIN_WIDTH: Rems = rems(30.);
+const MAIL_SHELL_NAVIGATION_WIDTH: Rems = rems(16.);
+const MAIL_SPLIT_HANDLE_RESERVE: Rems = rems(1.);
 const MAIL_COMPOSER_SHEET_WIDTH: Rems = rems(30.);
 const ACCOUNT_SYNC_REQUIRED_MESSAGE: &str = "Complete a successful mail sync for this account before archiving, moving, or deleting messages.";
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CompactMailPane {
+    MessageList,
+    MessageReader,
+}
 
 fn well_known_folder_mail_action(destination: WellKnownMailFolder) -> MailAction {
     match destination {
@@ -57,6 +68,8 @@ pub(crate) fn bind_message_navigation_keys(cx: &mut App) {
         KeyBinding::new("down", SelectNextMessage, context),
         KeyBinding::new("home", SelectFirstMessage, context),
         KeyBinding::new("end", SelectLastMessage, context),
+        KeyBinding::new("enter", OpenSelectedMessage, context),
+        KeyBinding::new("escape", ReturnToMessageList, Some(MESSAGE_READER_CONTEXT)),
     ]);
 }
 
@@ -75,6 +88,7 @@ pub(crate) struct MailView {
     selected_folder: Option<FolderReference>,
     messages: Vec<MailMessage>,
     message_list_state: MessageListState,
+    compact_pane: CompactMailPane,
     pane_layout: MailPaneLayout,
     message_row_sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
     message_row_rem_size: Option<Pixels>,
@@ -516,6 +530,7 @@ impl MailView {
             selected_folder: None,
             messages: Vec::new(),
             message_list_state: MessageListState::Loading,
+            compact_pane: CompactMailPane::MessageList,
             pane_layout: MailPaneLayout::new(cx),
             message_row_sizes: Rc::new(Vec::new()),
             message_row_rem_size: None,
@@ -699,7 +714,9 @@ impl MailView {
         if self.message_update_in_progress() {
             return;
         }
+        self.compact_pane = CompactMailPane::MessageList;
         if self.selected_folder.as_ref() == Some(&folder) {
+            cx.notify();
             return;
         }
         self.message_move_status = MessageMoveStatus::Idle;
@@ -812,7 +829,37 @@ impl MailView {
             return;
         }
         self.message_list_focus.focus(window, cx);
+        self.compact_pane = CompactMailPane::MessageReader;
         self.select_message(message_id, cx);
+    }
+
+    fn on_open_selected_message(
+        &mut self,
+        _: &OpenSelectedMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.message_update_in_progress() || self.selected_message_id().is_none() {
+            return;
+        }
+        self.compact_pane = CompactMailPane::MessageReader;
+        self.message_list_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn on_return_to_message_list(
+        &mut self,
+        _: &ReturnToMessageList,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.return_to_message_list(window, cx);
+    }
+
+    fn return_to_message_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.compact_pane = CompactMailPane::MessageList;
+        self.message_list_focus.focus(window, cx);
+        cx.notify();
     }
 
     fn on_select_previous_message(
