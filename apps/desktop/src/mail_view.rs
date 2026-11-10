@@ -479,6 +479,14 @@ impl MailView {
         }
     }
 
+    pub(crate) fn folders(&self) -> &[MailFolder] {
+        &self.folders
+    }
+
+    pub(crate) fn selected_folder(&self) -> Option<&FolderReference> {
+        self.selected_folder.as_ref()
+    }
+
     fn set_messages(&mut self, messages: Vec<MailMessage>) {
         self.message_list_scroll
             .scroll_to_item(0, ScrollStrategy::Top);
@@ -563,7 +571,7 @@ impl MailView {
         !self.message_update_in_progress()
     }
 
-    fn select_folder(&mut self, folder: FolderReference, cx: &mut Context<Self>) {
+    pub(crate) fn select_folder(&mut self, folder: FolderReference, cx: &mut Context<Self>) {
         if self.message_update_in_progress() {
             return;
         }

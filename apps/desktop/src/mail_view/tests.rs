@@ -2805,8 +2805,19 @@ async fn folder_message_list_failure_does_not_claim_a_message_is_loading(cx: &mu
         .lock()
         .expect("fixture cache mutex is healthy")
         .list_messages_error = Some(MailCacheError::Unavailable);
-    let archive = context.update(|window, _| window.find_by_label("Archive"));
-    context.simulate_click(archive.bounds().center(), Modifiers::default());
+    let archive_reference = cache
+        .0
+        .lock()
+        .expect("fixture cache mutex is healthy")
+        .folders
+        .iter()
+        .find(|folder| folder.display_name() == "Archive")
+        .expect("fixture contains the archive folder")
+        .reference()
+        .clone();
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| view.select_folder(archive_reference, cx));
+    });
     wait_for_ui_condition(context, |_, app| {
         matches!(
             &view.read(app).message_list_state,
@@ -2956,8 +2967,11 @@ async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut T
             && view.read(app).selected_folder.is_some()
     }));
 
-    let archive_button = context.update(|window, _| window.find_by_label("Archive"));
-    context.simulate_click(archive_button.bounds().center(), Modifiers::default());
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.select_folder(archive_reference.clone(), cx);
+        });
+    });
     wait_for_ui_condition(context, |_, app| {
         let view = view.read(app);
         view.selected_folder.as_ref() == Some(&archive_reference)
@@ -2975,10 +2989,7 @@ async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut T
             break;
         }
     }
-    assert!(
-        list_focused,
-        "Tab reaches cached folders' message list during sync"
-    );
+    assert!(list_focused, "Tab reaches the message list during sync");
     press_window_key(context, "home");
     wait_for_ui_condition(context, |_, app| {
         matches!(
@@ -2999,8 +3010,11 @@ async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut T
         .await
         .expect("sync completion starts loading its selected-folder snapshot");
 
-    let inbox_button = context.update(|window, _| window.find_by_label("Inbox"));
-    context.simulate_click(inbox_button.bounds().center(), Modifiers::default());
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.select_folder(inbox_reference.clone(), cx)
+        });
+    });
     wait_for_ui_condition(context, |_, app| {
         let view = view.read(app);
         view.selected_folder.as_ref() == Some(&inbox_reference)

@@ -9,7 +9,7 @@ use einfach_mail_application::{
     AccountSession, AccountSessionFactory, AccountWorkflow, ExchangeEwsConnectionInput,
     ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
 };
-use einfach_mail_domain::{AccountProfile, CalendarAccess};
+use einfach_mail_domain::{AccountProfile, CalendarAccess, FolderReference};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Icon, IconName, Selectable, StyledExt,
     button::{Button, ButtonVariants},
@@ -337,12 +337,21 @@ enum AccountContent {
     Opening(OpeningContent),
     Mail {
         view: Entity<MailView>,
-        subscription: Subscription,
+        event_subscription: Subscription,
+        navigation_subscription: Subscription,
     },
     Calendar {
         view: Entity<CalendarView>,
         subscription: Subscription,
     },
+}
+
+struct MailFolderNavigationItem {
+    id: String,
+    reference: FolderReference,
+    label: String,
+    selected: bool,
+    can_select: bool,
 }
 
 impl AccountContent {
@@ -879,8 +888,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn close_content_view(&mut self, cx: &mut Context<Self>) -> Option<Arc<dyn AccountSession>> {
         match std::mem::replace(&mut self.content, AccountContent::Account) {
-            AccountContent::Mail { view, subscription } => {
-                drop(subscription);
+            AccountContent::Mail {
+                view,
+                event_subscription,
+                navigation_subscription,
+            } => {
+                drop(event_subscription);
+                drop(navigation_subscription);
                 view.update(cx, |view, _| view.stop_pending_work());
             }
             AccountContent::Calendar { view, subscription } => {
@@ -918,9 +932,11 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                         }
                     },
                 );
+                let navigation_subscription = cx.observe(&mail_view, |_, _, cx| cx.notify());
                 AccountContent::Mail {
                     view: mail_view,
-                    subscription,
+                    event_subscription: subscription,
+                    navigation_subscription,
                 }
             },
             cx,
@@ -1896,9 +1912,12 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     fn render_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("workspace-navigation")
+            .debug_selector(|| "workspace-navigation".to_owned())
             .role(Role::Navigation)
             .aria_label("Main navigation")
-            .w(gpui_kit::px(256.))
+            .w(gpui_kit::rems(16.))
+            .min_w(gpui_kit::rems(14.))
+            .max_w(gpui_kit::rems(20.))
             .h_full()
             .flex()
             .flex_col()
@@ -1909,8 +1928,97 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .border_color(cx.theme().sidebar_border)
             .child(self.render_navigation_brand())
             .child(self.render_feature_navigation(cx))
-            .child(div().flex_1())
+            .child(self.render_mail_navigation(cx))
             .child(self.render_account_navigation(cx))
+    }
+
+    fn render_mail_navigation(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let AccountContent::Mail { view, .. } = &self.content else {
+            return div().flex_1().into_any_element();
+        };
+        let mut navigation = div()
+            .id("mail-folder-navigation")
+            .debug_selector(|| "mail-folder-navigation".to_owned())
+            .role(Role::Group)
+            .aria_label("Mail folders")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0();
+        if let Some(identity) = self.render_active_mail_account(cx) {
+            navigation = navigation.child(identity);
+        }
+        navigation
+            .child(div().px_4().py_2().text_sm().font_bold().child("Folders"))
+            .child(self.render_mail_folder_list(view, cx))
+            .into_any_element()
+    }
+
+    fn render_active_mail_account(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+        let profile = self.status.connected_profile()?;
+        let name = profile.display_name().unwrap_or(profile.label());
+        let address = profile
+            .mailbox()
+            .map(|mailbox| mailbox.address())
+            .filter(|address| *address != name);
+        let identity = div()
+            .id("mail-active-account")
+            .debug_selector(|| "mail-active-account".to_owned())
+            .role(Role::Group)
+            .aria_label("Active account")
+            .px_4()
+            .py_3()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(div().text_sm().font_semibold().child(name.to_owned()))
+            .when_some(address, |identity, address| {
+                identity.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().semantic_tokens().colors.muted_foreground)
+                        .child(address.to_owned()),
+                )
+            });
+        Some(identity.into_any_element())
+    }
+
+    fn render_mail_folder_list(
+        &self,
+        mail_view: &Entity<MailView>,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let folder_items = mail_folder_navigation_items(mail_view.read(cx));
+        let mut folders = div().id("mail-folder-list").flex().flex_col().gap_1();
+        for folder in folder_items {
+            folders = folders.child(self.render_mail_folder_button(mail_view, folder, cx));
+        }
+        folders
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .into_any_element()
+    }
+
+    fn render_mail_folder_button(
+        &self,
+        mail_view: &Entity<MailView>,
+        folder: MailFolderNavigationItem,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let debug_id = folder.id.clone();
+        let mail_view = mail_view.clone();
+        Button::new(folder.id)
+            .debug_selector(move || debug_id.clone())
+            .ghost()
+            .selected(folder.selected)
+            .label(folder.label)
+            .disabled(!folder.can_select)
+            .on_click(cx.listener(move |_, _, _, cx| {
+                mail_view.update(cx, |mail_view, mail_cx| {
+                    mail_view.select_folder(folder.reference.clone(), mail_cx);
+                });
+            }))
     }
 
     fn render_navigation_brand(&self) -> impl IntoElement {
@@ -2000,6 +2108,21 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             )
             .into_any_element()
     }
+}
+
+fn mail_folder_navigation_items(mail_view: &MailView) -> Vec<MailFolderNavigationItem> {
+    let can_select = mail_view.can_navigate_away();
+    mail_view
+        .folders()
+        .iter()
+        .map(|folder| MailFolderNavigationItem {
+            id: format!("mail-folder:{}", folder.reference().folder_id().as_str()),
+            reference: folder.reference().clone(),
+            label: folder.display_name().to_owned(),
+            selected: mail_view.selected_folder() == Some(folder.reference()),
+            can_select,
+        })
+        .collect()
 }
 
 impl<P: AccountProvider + 'static> Render for AccountView<P> {

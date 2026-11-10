@@ -10,6 +10,7 @@ use std::{
 
 use tokio::sync::oneshot;
 
+use gpui_kit::test::TestQueryExt as _;
 use gpui_kit::{
     AppContext as _, Modifiers, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point,
     px, size,
@@ -32,8 +33,9 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, CalendarAccess, CalendarEventCreation,
     CalendarEventUpdate, CalendarOccurrence, CalendarViewReference, EditableCalendarEvent,
-    FolderReference, FollowUpFlagStatus, MailAction, MailCapabilities, MailDraft, MailFolder,
-    MailMessage, MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend, ReadState,
+    FolderId, FolderReference, FollowUpFlagStatus, MailAction, MailCapabilities, MailDraft,
+    MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend,
+    ReadState,
 };
 
 #[derive(Clone, Default)]
@@ -64,11 +66,14 @@ struct CommitGate {
 struct TestAccountSession {
     account_id: AccountId,
     removal_attempts: Arc<Mutex<Vec<AccountId>>>,
+    cached_folders: Option<Vec<MailFolder>>,
 }
 
 impl AccountSession for TestAccountSession {
     fn mail_session(&self) -> Arc<dyn MailSession> {
-        Arc::new(TestMailSession)
+        Arc::new(TestMailSession {
+            cached_folders: self.cached_folders.clone(),
+        })
     }
 
     fn calendar_session(&self) -> Arc<dyn CalendarSession> {
@@ -94,7 +99,9 @@ impl AccountSession for TestAccountSession {
     }
 }
 
-struct TestMailSession;
+struct TestMailSession {
+    cached_folders: Option<Vec<MailFolder>>,
+}
 
 fn pending_mail_call<'a, Output: Send + 'a>() -> AccountSessionFuture<'a, Output> {
     Box::pin(std::future::pending())
@@ -112,28 +119,44 @@ impl MailSession for TestMailSession {
     fn list_cached_folders(
         &self,
     ) -> AccountSessionFuture<'_, Result<Vec<MailFolder>, MailWorkflowError>> {
-        pending_mail_call()
+        if let Some(folders) = self.cached_folders.clone() {
+            Box::pin(ready(Ok(folders)))
+        } else {
+            pending_mail_call()
+        }
     }
 
     fn list_cached_messages<'a>(
         &'a self,
         _: &'a FolderReference,
     ) -> AccountSessionFuture<'a, Result<Vec<MailMessage>, MailWorkflowError>> {
-        pending_mail_call()
+        if self.cached_folders.is_some() {
+            Box::pin(ready(Ok(Vec::new())))
+        } else {
+            pending_mail_call()
+        }
     }
 
     fn cached_sync_state<'a>(
         &'a self,
         _: &'a FolderReference,
     ) -> AccountSessionFuture<'a, Result<Option<MailSyncState>, MailWorkflowError>> {
-        pending_mail_call()
+        if self.cached_folders.is_some() {
+            Box::pin(ready(Ok(None)))
+        } else {
+            pending_mail_call()
+        }
     }
 
     fn folder_write_sync_required<'a>(
         &'a self,
         _: &'a FolderReference,
     ) -> AccountSessionFuture<'a, Result<bool, MailWorkflowError>> {
-        pending_mail_call()
+        if self.cached_folders.is_some() {
+            Box::pin(ready(Ok(false)))
+        } else {
+            pending_mail_call()
+        }
     }
 
     fn open_message<'a>(
@@ -200,7 +223,11 @@ impl MailSession for TestMailSession {
     fn load_pending_send(
         &self,
     ) -> AccountSessionFuture<'_, Result<Option<PendingMailSend>, MailCacheError>> {
-        pending_mail_call()
+        if self.cached_folders.is_some() {
+            Box::pin(ready(Ok(None)))
+        } else {
+            pending_mail_call()
+        }
     }
 
     fn resolve_pending_send<'a>(
@@ -325,6 +352,7 @@ fn unused_account_session_factory() -> Arc<dyn AccountSessionFactory> {
             account_id: AccountId::try_from("synthetic-account".to_owned())
                 .expect("synthetic account ID is valid"),
             removal_attempts: Arc::new(Mutex::new(Vec::new())),
+            cached_folders: None,
         }),
         fallback_removals: Arc::new(AtomicBool::new(false)),
         session_open_attempts: Arc::new(AtomicUsize::new(0)),
@@ -685,6 +713,100 @@ fn workspace_navigation_stays_visible_and_supports_keyboard_switching(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn mail_folders_share_workspace_navigation_and_keep_selection_in_mail_view(
+    cx: &mut TestAppContext,
+) {
+    cx.update(gpui_kit::init);
+    let account_id =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let folders = vec![
+        synthetic_mail_folder(&account_id, "inbox", "Inbox"),
+        synthetic_mail_folder(&account_id, "archive", "Archive"),
+    ];
+    let session: Arc<dyn AccountSession> = Arc::new(TestAccountSession {
+        account_id,
+        removal_attempts: Arc::new(Mutex::new(Vec::new())),
+        cached_folders: Some(folders.clone()),
+    });
+    let factory: Arc<dyn AccountSessionFactory> = Arc::new(TestAccountSessionFactory {
+        session,
+        fallback_removals: Arc::new(AtomicBool::new(false)),
+        session_open_attempts: Arc::new(AtomicUsize::new(0)),
+        opened_account_ids: Arc::new(Mutex::new(Vec::new())),
+    });
+    let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    context.run_until_parked();
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::Connected(mail_only_profile());
+            cx.notify();
+        });
+    });
+    draw_account_view(context);
+
+    click(context, "nav-mail");
+    context.run_until_parked();
+    draw_account_view(context);
+
+    let navigation = context
+        .debug_bounds("workspace-navigation")
+        .expect("the contextual navigation pane remains visible");
+    let mail_content = context
+        .debug_bounds("mail-main-content")
+        .expect("the message list and reader share the mail content region");
+    let message_list = context
+        .debug_bounds("mail-message-list-pane")
+        .expect("the message list has its own region");
+    let reader = context
+        .debug_bounds("mail-reading-pane")
+        .expect("the reader has its own region");
+    assert!(context.debug_bounds("mail-active-account").is_some());
+    assert!(context.debug_bounds("mail-folder-navigation").is_some());
+    assert!(context.debug_bounds("mail-folder:inbox").is_some());
+    assert!(context.debug_bounds("mail-folder:archive").is_some());
+    let expected_navigation_width = context.update(|window, _| window.rem_size() * 16.);
+    assert_eq!(navigation.size.width, expected_navigation_width);
+    assert_eq!(
+        mail_content.origin.x,
+        navigation.origin.x + navigation.size.width
+    );
+    assert_eq!(message_list.origin.x, mail_content.origin.x);
+    assert_eq!(
+        reader.origin.x,
+        message_list.origin.x + message_list.size.width
+    );
+    assert_eq!(
+        reader.origin.x + reader.size.width,
+        mail_content.origin.x + mail_content.size.width
+    );
+
+    let mail_focus = context
+        .cx
+        .update(|cx| view.read(cx).mail_navigation_focus.clone());
+    context.update(|window, cx| {
+        mail_focus.focus(window, cx);
+        window.focus_next(cx);
+        window.focus_next(cx);
+    });
+    assert_eq!(
+        context.update(|window, _| window.find_by_label("Archive").focused()),
+        Some(true),
+        "Tab reaches the Archive folder button"
+    );
+    press_enter(context);
+    let mail_view = context.cx.update(|cx| match &view.read(cx).content {
+        AccountContent::Mail { view, .. } => view.clone(),
+        _ => panic!("the mail workspace remains open"),
+    });
+    let selected_folder = context
+        .cx
+        .update(|cx| mail_view.read(cx).selected_folder().cloned());
+    assert_eq!(selected_folder, Some(folders[1].reference().clone()));
+}
+
+#[gpui_kit::test]
 fn unavailable_calendar_navigation_explains_why_it_is_disabled(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
@@ -727,6 +849,16 @@ fn mail_only_profile() -> AccountProfile {
         AccountCapabilities::read_only_mail(),
     )
     .expect("synthetic mail-only account profile is valid")
+}
+
+fn synthetic_mail_folder(account_id: &AccountId, folder_id: &str, name: &str) -> MailFolder {
+    let folder_id = FolderId::try_from(folder_id.to_owned()).expect("synthetic folder ID is valid");
+    MailFolder::new(
+        FolderReference::new(account_id.clone(), folder_id),
+        None,
+        name.to_owned(),
+    )
+    .expect("synthetic folder has no invalid parent")
 }
 
 fn assert_workspace_navigation_is_visible(context: &mut VisualTestContext) {
@@ -1231,10 +1363,12 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
     let session_a: Arc<dyn AccountSession> = Arc::new(TestAccountSession {
         account_id: account_a_id,
         removal_attempts: Arc::clone(&session_a_removals),
+        cached_folders: None,
     });
     let session_b: Arc<dyn AccountSession> = Arc::new(TestAccountSession {
         account_id: account_b_id.clone(),
         removal_attempts: Arc::clone(&session_b_removals),
+        cached_folders: None,
     });
     let session_open_attempts = Arc::new(AtomicUsize::new(0));
     let opened_account_ids = Arc::new(Mutex::new(Vec::new()));
@@ -1369,6 +1503,7 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
         account_id: AccountId::try_from("synthetic-account".to_owned())
             .expect("synthetic account ID is valid"),
         removal_attempts: Arc::clone(&removal_attempts),
+        cached_folders: None,
     });
     let factory: Arc<dyn AccountSessionFactory> = Arc::new(TestAccountSessionFactory {
         session: Arc::clone(&session),
@@ -1499,6 +1634,7 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
         account_id: AccountId::try_from("synthetic-account".to_owned())
             .expect("synthetic account ID is valid"),
         removal_attempts: Arc::new(Mutex::new(Vec::new())),
+        cached_folders: None,
     });
     let factory: Arc<dyn AccountSessionFactory> = Arc::new(TestAccountSessionFactory {
         session: Arc::clone(&session),

@@ -5,10 +5,9 @@ use einfach_mail_application::{MailOperationError, MailWorkflowError, WellKnownM
 use einfach_mail_domain::{FolderReference, MailAction, MailFolder, MessageId, ReadState};
 use gpui_kit::base::v_virtual_list;
 use gpui_kit::component::{
-    ActiveTheme, ColorTokens, Disableable, Selectable, StyledExt,
+    ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
-    scroll::ScrollableElement,
 };
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
@@ -28,7 +27,6 @@ use super::{
 
 const MESSAGE_LIST_WIDTH: Rems = rems(21.5);
 const MAIL_HEADER_HEIGHT: Rems = rems(3.625);
-const FOLDER_SIDEBAR_WIDTH: Rems = rems(13.5);
 
 impl MailView {
     fn render_reply_action(&self, message_id: &MessageId, cx: &mut Context<Self>) -> AnyElement {
@@ -130,37 +128,6 @@ impl MailView {
             )
     }
 
-    fn render_folder_sidebar(
-        &self,
-        colors: ColorTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut folders = div().flex().flex_col().gap_1().overflow_y_scrollbar();
-        for folder in &self.folders {
-            let reference = folder.reference().clone();
-            folders = folders.child(
-                Button::new(format!("folder:{}", reference.folder_id().as_str()))
-                    .ghost()
-                    .selected(self.selected_folder.as_ref() == Some(&reference))
-                    .label(folder.display_name().to_owned())
-                    .disabled(self.message_update_in_progress())
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.select_folder(reference.clone(), cx);
-                    })),
-            );
-        }
-        div()
-            .w(FOLDER_SIDEBAR_WIDTH)
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_3()
-            .bg(colors.surface)
-            .child(div().text_sm().font_bold().child("Folders"))
-            .child(folders.flex_1().min_h_0())
-    }
-
     fn render_message_list(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
         match &self.message_list_state {
             MessageListState::Ready => {}
@@ -200,6 +167,7 @@ impl MailView {
         let Some(folder) = self.selected_folder.as_ref() else {
             let empty = div()
                 .id("mail-list-empty-folders")
+                .debug_selector(|| "mail-message-list-pane".to_owned())
                 .w(MESSAGE_LIST_WIDTH)
                 .min_h_0()
                 .p_4()
@@ -213,6 +181,7 @@ impl MailView {
         };
         if self.messages.is_empty() {
             return div()
+                .debug_selector(|| "mail-message-list-pane".to_owned())
                 .w(MESSAGE_LIST_WIDTH)
                 .min_h_0()
                 .p_4()
@@ -224,6 +193,7 @@ impl MailView {
         let folder_reference = folder.clone();
         let sizes = Rc::clone(&self.message_row_sizes);
         div()
+            .debug_selector(|| "mail-message-list-pane".to_owned())
             .w(MESSAGE_LIST_WIDTH)
             .min_h_0()
             .flex()
@@ -352,6 +322,7 @@ impl MailView {
                     &self.messages,
                 );
                 let panel = div()
+                    .debug_selector(|| "mail-reading-pane".to_owned())
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
@@ -368,6 +339,7 @@ impl MailView {
                 }
             }
             MessageDetailState::Loading(_) => div()
+                .debug_selector(|| "mail-reading-pane".to_owned())
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
@@ -396,6 +368,7 @@ impl MailView {
                 let message_id = opened.message().id();
                 let body = render_message_body(opened.body(), colors);
                 div()
+                    .debug_selector(|| "mail-reading-pane".to_owned())
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
@@ -1080,10 +1053,10 @@ impl Render for MailView {
             .child(self.render_header(colors, cx))
             .child(
                 div()
+                    .debug_selector(|| "mail-main-content".to_owned())
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.render_folder_sidebar(colors, cx))
                     .child(self.render_message_list(colors, cx))
                     .child(self.render_message_detail(colors, cx)),
             )
