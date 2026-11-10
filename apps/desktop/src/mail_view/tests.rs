@@ -83,6 +83,125 @@ async fn wait_for_mail_sync_to_finish(context: &mut VisualTestContext, view: &En
     .await;
 }
 
+#[gpui_kit::test]
+fn message_list_resizer_supports_keyboard_and_preserves_open_message(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, message_id) = fixture(account);
+    let provider = OfflineProvider {
+        body_fetches: Arc::new(AtomicUsize::new(0)),
+    };
+    let body_fetches = Arc::clone(&provider.body_fetches);
+    let workflow = Arc::new(MailWorkflow::new(profile.id().clone(), provider, cache));
+    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
+
+    context.run_until_parked();
+    draw_mail_view(context);
+    let message_row = context
+        .debug_bounds("message-row-message-1")
+        .expect("synthetic message is visible");
+    context.simulate_click(message_row.center(), Modifiers::default());
+    context.run_until_parked();
+    draw_mail_view(context);
+    assert_eq!(
+        context
+            .cx
+            .update(|cx| view.read(cx).selected_message_id().cloned()),
+        Some(message_id.clone())
+    );
+    assert!(context.cx.update(|cx| matches!(
+        &view.read(cx).message_detail_state,
+        MessageDetailState::Opened(opened) if opened.message().id() == &message_id
+    )));
+
+    let splitter = context.update(|window, _| window.find_all_by_role(gpui_kit::Role::Splitter));
+    assert_eq!(splitter.len(), 1, "the message panes expose one divider");
+    assert_eq!(splitter[0].label(), Some("Resize message list"));
+    let regions = context.update(|window, _| window.find_all_by_role(gpui_kit::Role::Region));
+    assert!(
+        regions
+            .iter()
+            .any(|region| region.label() == Some("Message list"))
+    );
+    assert!(
+        regions
+            .iter()
+            .any(|region| region.label() == Some("Message reading pane"))
+    );
+
+    let focus_handle = context
+        .cx
+        .update(|cx| view.read(cx).message_list_resize_focus.clone());
+    let reached_by_tab = (0..20).any(|_| {
+        context.update(|window, cx| window.focus_next(cx));
+        context.update(|window, _| focus_handle.is_focused(window))
+    });
+    assert!(
+        reached_by_tab,
+        "the divider is reachable through Tab navigation"
+    );
+
+    let rem_size = context.update(|window, _| window.rem_size());
+    context.simulate_keystrokes("right");
+    draw_mail_view(context);
+    let initial_list_width = context
+        .debug_bounds("mail-message-list-pane")
+        .expect("message list has test bounds")
+        .size
+        .width;
+    assert_eq!(initial_list_width, rem_size * 23.);
+
+    let reader_bounds = context
+        .debug_bounds("mail-reading-pane")
+        .expect("the reader pane has test bounds");
+    let drag_start = point(reader_bounds.left() - px(2.), reader_bounds.center().y);
+    let drag_threshold = point(reader_bounds.left() + px(10.), drag_start.y);
+    let drag_end = point(rem_size * 25., drag_start.y);
+    context.simulate_mouse_down(drag_start, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_move(
+        drag_threshold,
+        Some(MouseButton::Left),
+        Modifiers::default(),
+    );
+    context.simulate_mouse_move(drag_end, Some(MouseButton::Left), Modifiers::default());
+    context.simulate_mouse_up(drag_end, MouseButton::Left, Modifiers::default());
+    draw_mail_view(context);
+    let dragged_list_width = context
+        .debug_bounds("mail-message-list-pane")
+        .expect("message list remains visible after pointer resizing")
+        .size
+        .width;
+    assert_eq!(dragged_list_width, rem_size * 25.);
+
+    context.simulate_keystrokes("home left");
+    draw_mail_view(context);
+    let minimum_list_width = context
+        .debug_bounds("mail-message-list-pane")
+        .expect("message list remains visible at its minimum")
+        .size
+        .width;
+    assert_eq!(minimum_list_width, rem_size * 18.);
+
+    context.simulate_keystrokes("end right");
+    draw_mail_view(context);
+    let maximum_list_width = context
+        .debug_bounds("mail-message-list-pane")
+        .expect("message list remains visible at its maximum")
+        .size
+        .width;
+    assert_eq!(maximum_list_width, rem_size * 30.);
+    assert!(context.cx.update(|cx| {
+        let view = view.read(cx);
+        view.selected_message_id() == Some(&message_id)
+            && matches!(
+                &view.message_detail_state,
+                MessageDetailState::Opened(opened) if opened.message().id() == &message_id
+            )
+    }));
+    assert_eq!(body_fetches.load(Ordering::Relaxed), 0);
+}
+
 #[test]
 fn sync_activity_matches_mail_status() {
     assert!(SyncStatus::LoadingCache.is_sync_active());
@@ -1835,7 +1954,8 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
         .expect("the first cached message is visible");
     assert_eq!(first_row.size.height, px(72.));
     let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
-    assert_eq!(list_bounds.size.width, px(343.));
+    let rem_size = context.update(|window, _| window.rem_size());
+    assert_eq!(list_bounds.size.width + px(1.), rem_size * 22.);
 
     context.cx.update(|cx| {
         gpui_kit::component::Theme::update(cx, |theme| theme.font_size = px(24.));
@@ -1852,7 +1972,8 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
         .update(|cx| view.read(cx).message_row_sizes[0].height);
     assert_eq!(scaled_row_estimate, px(108.));
     let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
-    assert_eq!(list_bounds.size.width, px(515.));
+    let scaled_rem_size = context.update(|window, _| window.rem_size());
+    assert_eq!(list_bounds.size.width + px(1.), scaled_rem_size * 18.);
 
     context.cx.update(|cx| {
         view.update(cx, |view, _| {

@@ -14,6 +14,7 @@ use einfach_mail_domain::{
     AccountProfile, FolderReference, FollowUpFlagStatus, MailAction, MailFolder, MailMessage,
     MailReplySource, MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
 };
+use gpui_kit::base::ResizableState;
 use gpui_kit::base::VirtualListScrollHandle;
 use gpui_kit::component::StyledExt;
 use gpui_kit::component::WindowExt;
@@ -72,6 +73,8 @@ pub(crate) struct MailView {
     message_row_sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
     message_row_rem_size: Option<Pixels>,
     message_list_focus: FocusHandle,
+    message_list_resize_focus: FocusHandle,
+    message_list_resize_state: Entity<ResizableState>,
     message_list_scroll: VirtualListScrollHandle,
     sync_state: Option<MailSyncState>,
     sync_status: SyncStatus,
@@ -388,6 +391,8 @@ impl MailView {
             message_row_sizes: Rc::new(Vec::new()),
             message_row_rem_size: None,
             message_list_focus: cx.focus_handle().tab_stop(true),
+            message_list_resize_focus: cx.focus_handle().tab_stop(true),
+            message_list_resize_state: cx.new(|_| ResizableState::default()),
             message_list_scroll: VirtualListScrollHandle::new(),
             sync_state: None,
             sync_status: SyncStatus::LoadingCache,

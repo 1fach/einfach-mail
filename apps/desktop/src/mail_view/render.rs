@@ -4,16 +4,18 @@ use crate::message_body::render_message_body;
 use einfach_mail_application::{MailOperationError, MailWorkflowError, WellKnownMailFolder};
 use einfach_mail_domain::{FolderReference, MailAction, MailFolder, MessageId, ReadState};
 use gpui_kit::base::v_virtual_list;
+use gpui_kit::base::{ResizableState, ResizeHandleRenderer};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
+    resizable::{h_resizable, resizable_panel, resize_handle_appearance},
 };
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, Context, Div, IntoElement, Rems, Render, Role, Stateful, WeakEntity, Window, div,
-    prelude::*, rems,
+    AnyElement, App, Context, Div, Entity, FocusHandle, IntoElement, KeyDownEvent, Orientation,
+    Pixels, Rems, Render, Role, Stateful, WeakEntity, Window, div, prelude::*, rems,
 };
 
 use super::{
@@ -25,8 +27,118 @@ use super::{
     message_sender, well_known_folder_mail_action,
 };
 
-const MESSAGE_LIST_WIDTH: Rems = rems(21.5);
+const MESSAGE_LIST_INITIAL_WIDTH: Rems = rems(22.);
+const MESSAGE_LIST_MIN_WIDTH: Rems = rems(18.);
+const MESSAGE_LIST_MAX_WIDTH: Rems = rems(30.);
+const MESSAGE_LIST_RESIZE_STEP: f32 = 1.;
 const MAIL_HEADER_HEIGHT: Rems = rems(3.625);
+
+fn message_list_region() -> Stateful<Div> {
+    div()
+        .id("mail-message-list-pane-region")
+        .debug_selector(|| "mail-message-list-pane".to_owned())
+        .role(Role::Region)
+        .aria_label("Message list")
+}
+
+fn observe_message_region(region: Stateful<Div>) -> impl IntoElement {
+    #[cfg(test)]
+    let region = region.test_support();
+    region
+}
+
+fn message_reading_region() -> Stateful<Div> {
+    div()
+        .id("mail-reading-pane-region")
+        .debug_selector(|| "mail-reading-pane".to_owned())
+        .role(Role::Region)
+        .aria_label("Message reading pane")
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+}
+
+fn message_list_resize_target(
+    key: &str,
+    current_size: Option<Pixels>,
+    rem_size: Pixels,
+) -> Option<Pixels> {
+    let current = current_size.unwrap_or_else(|| MESSAGE_LIST_INITIAL_WIDTH.to_pixels(rem_size));
+    let current_rem = current / rem_size;
+    let target_rem = match key {
+        "left" => (current_rem - MESSAGE_LIST_RESIZE_STEP).max(MESSAGE_LIST_MIN_WIDTH.0),
+        "right" => (current_rem + MESSAGE_LIST_RESIZE_STEP).min(MESSAGE_LIST_MAX_WIDTH.0),
+        "home" => MESSAGE_LIST_MIN_WIDTH.0,
+        "end" => MESSAGE_LIST_MAX_WIDTH.0,
+        _ => return None,
+    };
+    Some(rems(target_rem).to_pixels(rem_size))
+}
+
+fn resize_message_list_on_key_down(
+    resize_state: Entity<ResizableState>,
+    mail_view: WeakEntity<MailView>,
+) -> impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static {
+    move |event, window, cx| {
+        let Some(target) = message_list_resize_target(
+            event.keystroke.key.as_str(),
+            resize_state.read(cx).sizes().first().copied(),
+            window.rem_size(),
+        ) else {
+            return;
+        };
+        resize_state.update(cx, |state, cx| {
+            state.resize_panel(0, target, window, cx);
+        });
+        if let Some(view) = mail_view.upgrade() {
+            view.update(cx, |_, cx| cx.notify());
+        }
+        cx.stop_propagation();
+    }
+}
+
+fn message_list_resize_handle_appearance(
+    resize_state: Entity<ResizableState>,
+    focus_handle: FocusHandle,
+    mail_view: WeakEntity<MailView>,
+) -> ResizeHandleRenderer {
+    let default_appearance = resize_handle_appearance();
+    Rc::new(move |handle, window, cx| {
+        let visual = default_appearance(handle, window, cx)?;
+        let current_size = resize_state.read(cx).sizes().first().copied();
+        let current_rem = current_size
+            .unwrap_or_else(|| MESSAGE_LIST_INITIAL_WIDTH.to_pixels(window.rem_size()))
+            / window.rem_size();
+        let current_rem = current_rem.clamp(MESSAGE_LIST_MIN_WIDTH.0, MESSAGE_LIST_MAX_WIDTH.0);
+        let colors = cx.theme().semantic_tokens().colors;
+        let resize_key_handler =
+            resize_message_list_on_key_down(resize_state.clone(), mail_view.clone());
+        let divider = div()
+            .id("mail-message-list-resize-handle")
+            .debug_selector(|| "mail-message-list-resize-handle".to_owned())
+            .role(Role::Splitter)
+            .aria_label("Resize message list")
+            .aria_orientation(Orientation::Vertical)
+            .aria_min_numeric_value(MESSAGE_LIST_MIN_WIDTH.0 as f64)
+            .aria_max_numeric_value(MESSAGE_LIST_MAX_WIDTH.0 as f64)
+            .aria_numeric_value(current_rem as f64)
+            .aria_numeric_value_step(MESSAGE_LIST_RESIZE_STEP as f64);
+        #[cfg(test)]
+        let divider = divider.test_support();
+        Some(
+            divider
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .track_focus(&focus_handle)
+                .focus_visible(|style| style.border_1().border_color(colors.ring))
+                .on_key_down(resize_key_handler)
+                .child(visual)
+                .into_any_element(),
+        )
+    })
+}
 
 impl MailView {
     fn render_reply_action(&self, message_id: &MessageId, cx: &mut Context<Self>) -> AnyElement {
@@ -133,9 +245,6 @@ impl MailView {
             MessageListState::Ready => {}
             MessageListState::Loading => {
                 let loading = div()
-                    .w(MESSAGE_LIST_WIDTH)
-                    .min_h_0()
-                    .p_4()
                     .id("mail-list-loading")
                     .role(Role::Status)
                     .child("Loading messages…");
@@ -143,15 +252,21 @@ impl MailView {
                 let loading = loading
                     .debug_selector(|| "mail-list-loading".to_owned())
                     .test_support();
-                return loading.into_any_element();
+                return observe_message_region(
+                    message_list_region()
+                        .w_full()
+                        .min_h_0()
+                        .p_4()
+                        .child(loading),
+                )
+                .into_any_element();
             }
             MessageListState::Failed(error) => {
                 if self.selected_folder.is_none() {
-                    return div().w(MESSAGE_LIST_WIDTH).min_h_0().into_any_element();
+                    return observe_message_region(message_list_region().w_full().min_h_0())
+                        .into_any_element();
                 }
                 let list_error = div()
-                    .w(MESSAGE_LIST_WIDTH)
-                    .min_h_0()
                     .p_4()
                     .id("mail-list-error")
                     .role(Role::Alert)
@@ -161,15 +276,15 @@ impl MailView {
                 let list_error = list_error
                     .debug_selector(|| "mail-list-error".to_owned())
                     .test_support();
-                return list_error.into_any_element();
+                return observe_message_region(
+                    message_list_region().w_full().min_h_0().child(list_error),
+                )
+                .into_any_element();
             }
         }
         let Some(folder) = self.selected_folder.as_ref() else {
             let empty = div()
                 .id("mail-list-empty-folders")
-                .debug_selector(|| "mail-message-list-pane".to_owned())
-                .w(MESSAGE_LIST_WIDTH)
-                .min_h_0()
                 .p_4()
                 .text_color(colors.muted_foreground)
                 .child("No visible mail folders were found.");
@@ -177,24 +292,25 @@ impl MailView {
             let empty = empty
                 .debug_selector(|| "mail-list-empty-folders".to_owned())
                 .test_support();
-            return empty.into_any_element();
+            return observe_message_region(message_list_region().w_full().min_h_0().child(empty))
+                .into_any_element();
         };
         if self.messages.is_empty() {
-            return div()
-                .debug_selector(|| "mail-message-list-pane".to_owned())
-                .w(MESSAGE_LIST_WIDTH)
-                .min_h_0()
-                .p_4()
-                .text_color(colors.muted_foreground)
-                .child("No messages in this folder.")
-                .into_any_element();
+            return observe_message_region(
+                message_list_region()
+                    .w_full()
+                    .min_h_0()
+                    .p_4()
+                    .text_color(colors.muted_foreground)
+                    .child("No messages in this folder."),
+            )
+            .into_any_element();
         }
 
         let folder_reference = folder.clone();
         let sizes = Rc::clone(&self.message_row_sizes);
-        div()
-            .debug_selector(|| "mail-message-list-pane".to_owned())
-            .w(MESSAGE_LIST_WIDTH)
+        let message_list = message_list_region()
+            .w_full()
             .min_h_0()
             .flex()
             .flex_col()
@@ -305,8 +421,8 @@ impl MailView {
                         .track_scroll(&self.message_list_scroll),
                     )
                     .focus_visible(|style| style.border_1().border_color(colors.ring))
-            })
-            .into_any_element()
+            });
+        observe_message_region(message_list).into_any_element()
     }
 
     fn render_message_detail(
@@ -321,35 +437,31 @@ impl MailView {
                     self.selected_folder.as_ref(),
                     &self.messages,
                 );
-                let panel = div()
-                    .debug_selector(|| "mail-reading-pane".to_owned())
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
+                let panel = message_reading_region()
                     .flex()
                     .flex_col()
                     .items_center()
                     .justify_center()
                     .gap_3()
                     .text_color(colors.muted_foreground);
-                if let Some(notice) = self.render_move_recovery_notice(cx) {
-                    panel.child(notice).into_any_element()
+                let panel = if let Some(notice) = self.render_move_recovery_notice(cx) {
+                    panel.child(notice)
                 } else {
-                    panel.child(empty_state).into_any_element()
-                }
+                    panel.child(empty_state)
+                };
+                observe_message_region(panel).into_any_element()
             }
-            MessageDetailState::Loading(_) => div()
-                .debug_selector(|| "mail-reading-pane".to_owned())
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .items_center()
-                .justify_center()
-                .text_color(colors.muted_foreground)
-                .child("Loading message…")
-                .into_any_element(),
+            MessageDetailState::Loading(_) => observe_message_region(
+                message_reading_region()
+                    .items_center()
+                    .justify_center()
+                    .text_color(colors.muted_foreground)
+                    .child("Loading message…"),
+            )
+            .into_any_element(),
             MessageDetailState::Failed { error, .. } => {
                 let detail_error = div()
+                    .debug_selector(|| "mail-reading-pane".to_owned())
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
@@ -361,17 +473,14 @@ impl MailView {
                     .children(self.render_move_recovery_notice(cx));
                 #[cfg(test)]
                 let detail_error = detail_error.test_support();
-                detail_error.into_any_element()
+                observe_message_region(message_reading_region().child(detail_error))
+                    .into_any_element()
             }
             MessageDetailState::Opened(opened) => {
                 let metadata = opened.message().metadata();
                 let message_id = opened.message().id();
                 let body = render_message_body(opened.body(), colors);
-                div()
-                    .debug_selector(|| "mail-reading-pane".to_owned())
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
+                let panel = message_reading_region()
                     .flex()
                     .flex_col()
                     .child(
@@ -454,8 +563,8 @@ impl MailView {
                             .children(self.render_move_recovery_notice(cx))
                             .children(self.render_read_state_reconciliation_notice()),
                     )
-                    .child(body)
-                    .into_any_element()
+                    .child(body);
+                observe_message_region(panel).into_any_element()
             }
             MessageDetailState::MoveCompleted {
                 destination_folder,
@@ -488,7 +597,7 @@ impl MailView {
                     );
                 #[cfg(test)]
                 let completed = completed.test_support();
-                completed.into_any_element()
+                observe_message_region(message_reading_region().child(completed)).into_any_element()
             }
             MessageDetailState::DeleteCompleted => {
                 let completed = div()
@@ -506,7 +615,7 @@ impl MailView {
                     .child("Moved to Deleted Items.");
                 #[cfg(test)]
                 let completed = completed.test_support();
-                completed.into_any_element()
+                observe_message_region(message_reading_region().child(completed)).into_any_element()
             }
         }
     }
@@ -1044,6 +1153,35 @@ impl Render for MailView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.update_message_row_sizes(window.rem_size());
         let colors = cx.theme().semantic_tokens().colors;
+        let rem_size = window.rem_size();
+        let resize_state = self.message_list_resize_state.clone();
+        let mail_view = cx.entity().downgrade();
+        let panes = h_resizable("mail-content-panes")
+            .with_state(&resize_state)
+            .with_handle_appearance(message_list_resize_handle_appearance(
+                resize_state,
+                self.message_list_resize_focus.clone(),
+                mail_view.clone(),
+            ))
+            .on_resize(move |_, _, cx| {
+                if let Some(view) = mail_view.upgrade() {
+                    view.update(cx, |_, cx| cx.notify());
+                }
+            })
+            .child(
+                resizable_panel()
+                    .size(MESSAGE_LIST_INITIAL_WIDTH.to_pixels(rem_size))
+                    .size_range(
+                        MESSAGE_LIST_MIN_WIDTH.to_pixels(rem_size)
+                            ..MESSAGE_LIST_MAX_WIDTH.to_pixels(rem_size),
+                    )
+                    .child(self.render_message_list(colors, cx)),
+            )
+            .child(
+                resizable_panel()
+                    .size_range(MESSAGE_LIST_MAX_WIDTH.to_pixels(rem_size)..Pixels::MAX)
+                    .child(self.render_message_detail(colors, cx)),
+            );
         div()
             .size_full()
             .flex()
@@ -1056,9 +1194,8 @@ impl Render for MailView {
                     .debug_selector(|| "mail-main-content".to_owned())
                     .flex_1()
                     .min_h_0()
-                    .flex()
-                    .child(self.render_message_list(colors, cx))
-                    .child(self.render_message_detail(colors, cx)),
+                    .min_w_0()
+                    .child(panes),
             )
     }
 }
