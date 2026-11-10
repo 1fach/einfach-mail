@@ -13,10 +13,13 @@ mod calendar;
 mod calendar_cache;
 #[path = "calendar/provider.rs"]
 mod calendar_provider;
+#[path = "mail/email_html.rs"]
 mod email_html;
 #[path = "account/ews_settings.rs"]
 mod exchange_ews_settings;
+#[path = "mail/provider.rs"]
 mod mail;
+#[path = "mail/cache.rs"]
 mod mail_cache;
 mod mail_workflow;
 mod shared;

@@ -32,6 +32,8 @@ Issue #258 tracks Linux EWS Autodiscover. Its implementation and synthetic verif
 
 PR #265 contains the locally verified Linux implementation for issue #262. Runtime tests report SQLCipher 4.20.0 on SQLite 3.54.1. The production adapter migrates a synthetic SQLCipher 4.14.0 cache and preserves its message body; the production Secret Service key lifecycle also passes on the current dependency stack in a private headless D-Bus session. The full Linux local gate passes with RUSTSEC-2026-0459 removed. Issue #262 documents a one-time Linux-only exception for exact commits from upstream draft PRs #1932 and #370. Follow-up issue [#264](https://github.com/1fach/einfach-mail/issues/264) tracks replacing the pins after compatible official releases. No project GitHub Actions or UI launch was used.
 
+The #282 feature-first module refactor is active as engineering-health work. PR #314 merged #307's calendar test split into `feat/mail-list-resizing` at `47e3bd8aae7164d32ed63ddb785eccca011fb49a`. Issue #308 moves the application mail provider, cache port, and sanitized-body boundary under `crates/application/src/mail/`, with the 15 existing sanitizer tests in `mail/email_html/tests.rs`. The local Linux gate passed on 2026-11-10. The workspace test listing and all 12 crate-root `pub use` statements match their pre-move versions byte for byte. No GitHub Actions ran. Issue #309 is next after #308 merges.
+
 ## Active risks
 
 - GitHub Actions compute is unavailable. PR #301 has no CI runs; its full Linux local gate passed on the exact PR head.
@@ -52,7 +54,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 
 ## Next actions
 
-1. Continue #282 with #308 after #307 merges; keep #283 linked until the stack reaches `main`, then follow the remaining #285 subissues in dependency order.
+1. Continue #282 with #308, then #309; keep #283 linked until the stack reaches `main`, then follow the remaining #285 subissues in dependency order.
 2. Continue M10 with the next small wide-workspace issue after #291; keep the stacked draft PRs unmerged until required checks and Linux real-window review are available.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
