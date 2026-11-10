@@ -1939,7 +1939,9 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
     }
 }
 
+#[path = "view/render.rs"]
 mod render;
 
 #[cfg(test)]
+#[path = "view/tests.rs"]
 mod tests;

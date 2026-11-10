@@ -1300,4 +1300,5 @@ fn calendar_error_text(error: CalendarWorkflowError) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "view/tests.rs"]
 mod tests;

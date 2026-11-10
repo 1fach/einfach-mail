@@ -15,18 +15,30 @@ use einfach_mail_persistence::{SqliteAccountCacheFactory, XdgExchangeEwsAccountS
 use gpui_kit::*;
 use uuid::Uuid;
 
+#[path = "app/workspace.rs"]
 mod account_view;
+#[path = "features/calendar/time.rs"]
 mod calendar_time;
+#[path = "features/calendar/view.rs"]
 mod calendar_view;
+#[path = "features/calendar/week.rs"]
 mod calendar_week;
+#[path = "features/calendar/composer.rs"]
 mod event_composer;
+#[path = "components/list_navigation.rs"]
 mod list_navigation;
+#[path = "features/mail/composer.rs"]
 mod mail_composer;
+#[path = "features/mail/view.rs"]
 mod mail_view;
+#[path = "features/mail/body.rs"]
 mod message_body;
+#[path = "platform/linux/single_instance.rs"]
 mod single_instance;
+#[path = "shared/sync_age.rs"]
 mod sync_age;
 #[cfg(test)]
+#[path = "test_support/mod.rs"]
 mod test_support;
 
 use account_view::{AccountServices, AccountView, SetupIssue};

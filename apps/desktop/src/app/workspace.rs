@@ -2184,4 +2184,5 @@ fn account_cache_removal_error_message(error: AccountCacheRemovalError) -> &'sta
 }
 
 #[cfg(test)]
+#[path = "workspace/tests.rs"]
 mod tests;
