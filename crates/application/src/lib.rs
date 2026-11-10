@@ -21,6 +21,7 @@ mod exchange_ews_settings;
 mod mail;
 #[path = "mail/cache.rs"]
 mod mail_cache;
+#[path = "mail/workflow/mod.rs"]
 mod mail_workflow;
 mod shared;
 #[cfg(test)]
