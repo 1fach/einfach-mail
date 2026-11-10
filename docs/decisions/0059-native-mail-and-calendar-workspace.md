@@ -8,18 +8,19 @@
 
 The Linux desktop currently opens Accounts first. It replaces that view with either Mail or Calendar, and each child view adds its own header and return button. `AccountView` owns the shared `AccountSession`; the mail and calendar views receive workflow-specific session ports. The accepted session boundary must remain intact when navigation changes. See [ADR 0043](0043-per-account-mail-and-calendar-session.md).
 
-The supplied Wino Mail screenshots show persistent navigation, a dense message list beside a reading pane, and separate account and preference sections. The project already has native mail reading, a weekly calendar, account connection, and account details. The first release supports one active account at a time; see [ADR 0060](0060-one-active-account-first-release.md). Global mail search, People, and To Do remain out of scope.
+The supplied Wino Mail screenshots show persistent navigation, a dense message list beside a reading pane, and separate account and preference sections. Use them as references for hierarchy and density, not as pixel specifications. The screenshots use a dark theme and a custom Windows title bar; the Linux app follows GPUI Kit themes and system window decorations. The project already has native mail reading, a weekly calendar, account connection, and account details. The first release supports one active account at a time; see [ADR 0060](0060-one-active-account-first-release.md). Global mail search, People, and To Do remain out of scope.
 
 The design should borrow the Windows mail workspace's clear hierarchy and density while keeping Linux window decorations and keyboard behavior. Windows materials do not map directly to Linux. Microsoft describes Mica as an opaque window material and Acrylic as a translucent material for transient surfaces. GPUI Kit 0.9 uses GPUI Fast 0.1.13, which exposes whole-window `Opaque`, `Transparent`, and `Blurred` backgrounds. On Linux, Wayland blur depends on compositor protocol support, while X11 exposes transparency without an application-controlled blur effect. GPUI does not provide per-element desktop backdrop blur.
 
 ## Decision
 
-- Keep one shared desktop window with persistent destinations for Mail, Calendar, Accounts, and Settings. Use the system title bar on Linux.
+- Keep one shared desktop window with persistent destinations for Mail, Calendar, Accounts, and Settings. Show a destination only when it has working behavior. Add Settings to the visible navigation with the first persisted preference in issue #273. Use the system title bar on Linux.
 - Use a Wino-inspired mail workspace with one contextual navigation pane, a message list, and a reading pane. Put the current account identity and its folders in the contextual pane. Keep the app destinations in that pane rather than adding a fourth permanent column.
+- Use GPUI Kit semantic theme tokens in light and dark appearances. Keep hierarchy clear through spacing and grouping before color. Show navigation selection with the selected item's own surface and foreground, not a one-sided accent stripe.
 - Give the main regions minimum, preferred, and maximum widths. At narrow widths, collapse the contextual pane or reading pane while preserving a clear keyboard path back to it. Keep selection and message identity stable when panes change.
 - Keep the one-active-account scope from [ADR 0060](0060-one-active-account-first-release.md). Show the active account identity without a selector or add-account control.
 - Place the existing weekly agenda inside the shared shell. Preserve its one-listbox keyboard behavior from [ADR 0042](0042-keyboard-navigation-for-calendar-agenda.md).
-- Use GPUI Kit semantic theme tokens for surfaces and text. Keep message text and large work panes opaque. Limit translucency to transient overlays and compact navigation surfaces where it helps show their relationship to the content.
+- Use GPUI Kit semantic theme tokens for surfaces and text. Keep message text and large work panes opaque. Limit translucency to transient overlays and compact navigation surfaces where it helps show their relationship to the content. Use a maintained GPUI API for any material effect. Defer the effect if Linux support needs a renderer fork or custom blur code.
 - Treat a Linux blurred window backdrop as an optional platform effect, not a requirement. Keep an opaque fallback for unsupported compositors and transparency settings. Do not rely on X11 blur or ship a window effect before it has been reviewed in a real Linux session.
 - Show only destinations and controls that perform a supported action. Defer People, To Do, global search, and settings that do not have real persisted behavior.
 
@@ -49,16 +50,20 @@ The [synthetic layout comparison](../design/native-workspace-options.svg) sketch
 1. [Issue #268](https://github.com/1fach/einfach-mail/issues/268) records the one-active-account first-release decision.
 2. [Issue #269](https://github.com/1fach/einfach-mail/issues/269) establishes persistent navigation and is the first implementation issue.
 3. [Issues #270 and #271](https://github.com/1fach/einfach-mail/milestone/9) move Mail and Calendar into the shell.
-4. [Issue #272](https://github.com/1fach/einfach-mail/issues/272) integrates account setup and details after the shell and account-scope decision.
-5. [Issues #273 and #274](https://github.com/1fach/einfach-mail/milestone/9) add one working preference and evaluate selective Linux translucency after the shell.
+4. [Issues #278 and #279](https://github.com/1fach/einfach-mail/milestone/9) handle narrow Mail and Calendar layouts after their desktop layouts.
+5. [Issue #272](https://github.com/1fach/einfach-mail/issues/272) presents connected-account details. [Issue #280](https://github.com/1fach/einfach-mail/issues/280) presents account setup and permission review.
+6. [Issue #273](https://github.com/1fach/einfach-mail/issues/273) adds the first working Settings destination and appearance preference.
+7. [Issue #274](https://github.com/1fach/einfach-mail/issues/274) evaluates selective Linux translucency after the shell and pane work.
 
 ## Sources
 
 - [Wino Mail source repository](https://github.com/bkaankose/Wino-Mail), used as a layout reference only
 - [Microsoft: Mica material](https://learn.microsoft.com/en-us/windows/apps/design/style/mica)
 - [Microsoft: Acrylic material](https://learn.microsoft.com/en-us/windows/apps/design/style/acrylic)
+- [Microsoft: Windows app design best practices](https://learn.microsoft.com/en-us/windows/apps/get-started/best-practices)
 - [GPUI Fast `WindowBackgroundAppearance`](https://docs.rs/gpui-fast/0.1.13/gpui/platform/enum.WindowBackgroundAppearance.html)
 - [GPUI Fast Linux Wayland window source](https://github.com/longbridge/gpui-fast)
+- [GPUI Kit issue #3598: Proposal for in-window backdrop materials](https://github.com/longbridge/gpui-kit/issues/3598)
 - [GPUI Kit design guides](../../.agents/skills/gpui-kit-design-guides/references/design-guides.md)
 - [GPUI Kit coding guides](../../.agents/skills/gpui-kit/references/coding-guides.md)
 - [ADR 0042: Use one listbox for weekly agenda navigation](0042-keyboard-navigation-for-calendar-agenda.md)
