@@ -18,8 +18,11 @@ use thiserror::Error;
 
 use crate::security;
 
+#[path = "../../calendar/store/mod.rs"]
 mod calendar;
+#[path = "../../mail/store/mod.rs"]
 mod mail;
+#[path = "time.rs"]
 mod system_time;
 
 pub(super) type CacheResult<T> = Result<T, CacheFailure>;
