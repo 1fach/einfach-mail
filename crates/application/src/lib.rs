@@ -5,11 +5,13 @@
 mod account;
 #[path = "account/cache.rs"]
 mod account_cache;
+#[path = "account/session.rs"]
 mod account_session;
 mod calendar;
 mod calendar_cache;
 mod calendar_provider;
 mod email_html;
+#[path = "account/ews_settings.rs"]
 mod exchange_ews_settings;
 mod mail;
 mod mail_cache;
