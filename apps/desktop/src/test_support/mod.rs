@@ -18,3 +18,5 @@ pub(crate) async fn wait_for_ui_condition(
 pub(crate) fn test_element_is_visible(window: &Window, id: &'static str) -> bool {
     window.try_find(id).is_some_and(|element| element.visible())
 }
+
+pub(crate) mod calendar;
