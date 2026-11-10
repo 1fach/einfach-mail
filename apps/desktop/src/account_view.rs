@@ -10,10 +10,11 @@ use crate::settings_view;
 use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    AccountSession, AccountSessionFactory, AccountWorkflow, ExchangeEwsConnectionInput,
-    ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
+    AccountProviderKind, AccountSession, AccountSessionFactory, AccountWorkflow, ConnectedAccount,
+    ExchangeEwsConnectionInput, ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest,
+    ExchangeEwsDiscoveryResult,
 };
-use einfach_mail_domain::{AccountProfile, CalendarAccess};
+use einfach_mail_domain::{AccountProfile, CalendarAccess, MailAction, MailCapabilities};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Icon, IconName, Selectable, StyledExt,
     button::{Button, ButtonVariants},
@@ -92,20 +93,23 @@ enum AccountStatus {
     CancellingConnect {
         saved_credential_may_exist: bool,
     },
-    SigningOut,
-    Connected(AccountProfile),
+    SigningOut {
+        account: Option<ConnectedAccount>,
+    },
+    Connected(ConnectedAccount),
     Reauthorizing {
-        profile: AccountProfile,
+        account: ConnectedAccount,
         cancellation: AccountOperationCancellation,
     },
     CancellingReauthorization {
-        profile: AccountProfile,
+        account: ConnectedAccount,
     },
     ReauthorizationFailed {
-        profile: AccountProfile,
+        account: ConnectedAccount,
         error: AccountOperationError,
     },
     SignOutFailed {
+        account: Option<ConnectedAccount>,
         error: AccountOperationError,
     },
     Failed {
@@ -128,7 +132,7 @@ impl AccountStatus {
                 saved_credential_may_exist,
                 ..
             } => *saved_credential_may_exist,
-            Self::SigningOut
+            Self::SigningOut { .. }
             | Self::Connected(_)
             | Self::Reauthorizing { .. }
             | Self::CancellingReauthorization { .. }
@@ -140,11 +144,22 @@ impl AccountStatus {
     }
 
     fn connected_profile(&self) -> Option<&AccountProfile> {
+        self.connected_account().map(ConnectedAccount::profile)
+    }
+
+    fn connected_account(&self) -> Option<&ConnectedAccount> {
         match self {
-            Self::Connected(profile)
-            | Self::Reauthorizing { profile, .. }
-            | Self::CancellingReauthorization { profile }
-            | Self::ReauthorizationFailed { profile, .. } => Some(profile),
+            Self::Connected(account)
+            | Self::Reauthorizing { account, .. }
+            | Self::CancellingReauthorization { account }
+            | Self::ReauthorizationFailed { account, .. } => Some(account),
+            Self::SigningOut {
+                account: Some(account),
+            }
+            | Self::SignOutFailed {
+                account: Some(account),
+                ..
+            } => Some(account),
             _ => None,
         }
     }
@@ -537,7 +552,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             let _ = this.update(cx, |view, cx| {
                 view.task = None;
                 view.status = match restore_result {
-                    Ok(Some(profile)) => AccountStatus::Connected(profile),
+                    Ok(Some(account)) => AccountStatus::Connected(account),
                     Ok(None) => AccountStatus::Disconnected,
                     Err(error) => AccountStatus::Failed {
                         error,
@@ -810,9 +825,9 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                             | AccountOperationError::AccountMismatch)
                     );
                 view.status = match connection_result {
-                    Ok(profile) => {
+                    Ok(account) => {
                         view.exchange_ews_form = None;
-                        AccountStatus::Connected(profile)
+                        AccountStatus::Connected(account)
                     }
                     Err(error) => AccountStatus::Failed {
                         error,
@@ -876,23 +891,26 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         };
         let workflow = Arc::clone(&services.workflow);
-        let Some(profile) = self.status.connected_profile().cloned() else {
+        let Some(account) = self.status.connected_account().cloned() else {
             return;
         };
         if request == AccountPermissionRequest::MailReadWrite
-            && !profile.capabilities().can_review_mail_write_permission()
+            && !account
+                .profile()
+                .capabilities()
+                .can_review_mail_write_permission()
         {
             return;
         }
         let cancellation = AccountOperationCancellation::new();
         self.pending_permission_review = None;
         self.status = AccountStatus::Reauthorizing {
-            profile: profile.clone(),
+            account: account.clone(),
             cancellation: cancellation.clone(),
         };
         self.task = Some(Self::reauthorize_task(
             workflow,
-            profile,
+            account,
             request,
             cancellation,
             cx,
@@ -902,14 +920,18 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn reauthorize_task(
         workflow: Arc<AccountWorkflow<P>>,
-        profile: AccountProfile,
+        account: ConnectedAccount,
         request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let reauthorization_result = workflow
-                .reauthorize_account_with_cancellation(profile.id(), request, cancellation)
+                .reauthorize_account_with_cancellation(
+                    account.profile().id(),
+                    request,
+                    cancellation,
+                )
                 .await;
             let _ = this.update(cx, |view, cx| {
                 view.task = None;
@@ -917,8 +939,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     view.pending_permission_review = Some(request);
                 }
                 view.status = match reauthorization_result {
-                    Ok(profile) => AccountStatus::Connected(profile),
-                    Err(error) => AccountStatus::ReauthorizationFailed { profile, error },
+                    Ok(account) => AccountStatus::Connected(account),
+                    Err(error) => AccountStatus::ReauthorizationFailed { account, error },
                 };
                 cx.notify();
             });
@@ -927,7 +949,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn cancel_reauthorization(&mut self, cx: &mut Context<Self>) {
         let AccountStatus::Reauthorizing {
-            profile,
+            account,
             cancellation,
         } = &self.status
         else {
@@ -935,7 +957,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         };
         cancellation.cancel();
         self.status = AccountStatus::CancellingReauthorization {
-            profile: profile.clone(),
+            account: account.clone(),
         };
         cx.notify();
     }
@@ -953,20 +975,21 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     | AccountStatus::CancellingConnect { .. }
                     | AccountStatus::Reauthorizing { .. }
                     | AccountStatus::CancellingReauthorization { .. }
-                    | AccountStatus::SigningOut
+                    | AccountStatus::SigningOut { .. }
             )
         {
             return;
         }
 
         let previous_status = self.status.clone();
+        let account = previous_status.connected_account().cloned();
         let account_session_factory = Arc::clone(&services.account_session_factory);
         let account_session = self
             .close_content_view(cx)
             .or_else(|| self.account_session.clone());
         self.content = AccountContent::Account;
         self.session_open_error = None;
-        self.status = AccountStatus::SigningOut;
+        self.status = AccountStatus::SigningOut { account };
         self.task = Some(Self::sign_out_task(
             workflow,
             previous_status,
@@ -1157,14 +1180,14 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         if !self.content.is_account() {
             return;
         }
-        let AccountStatus::Connected(profile) = &self.status else {
+        let AccountStatus::Connected(account) = &self.status else {
             return;
         };
         let Ok(services) = &self.services else {
             return;
         };
         let account_session_factory = Arc::clone(&services.account_session_factory);
-        let profile = profile.clone();
+        let profile = account.profile().clone();
         let retained_session = self.account_session.clone();
         self.content = AccountContent::Opening(opening);
         self.session_open_error = None;
@@ -1185,7 +1208,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     || !matches!(
                         &view.status,
                         AccountStatus::Connected(current_profile)
-                            if current_profile.id() == profile.id()
+                            if current_profile.profile().id() == profile.id()
                     )
                 {
                     return;
@@ -1260,7 +1283,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             }
             Err(AccountSignOutError::CredentialRemoval(error)) => {
                 self.account_session = None;
-                self.status = AccountStatus::SignOutFailed { error };
+                self.status = AccountStatus::SignOutFailed {
+                    account: previous_status.connected_account().cloned(),
+                    error,
+                };
             }
         }
         self.task = None;
@@ -1347,12 +1373,12 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 "Finishing connection…",
                 Role::Status,
             ),
-            AccountStatus::SigningOut => (
+            AccountStatus::SigningOut { .. } => (
                 "Removing saved sign-in",
                 "Removing saved sign-in…",
                 Role::Status,
             ),
-            AccountStatus::SignOutFailed { error } => (
+            AccountStatus::SignOutFailed { error, .. } => (
                 AccountStatus::error_message(*error),
                 AccountStatus::error_message(*error),
                 Role::Alert,
@@ -1380,7 +1406,9 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             ),
         };
         let label = match &self.status {
-            AccountStatus::Connected(profile) => format!("Connected to {}", profile.label()),
+            AccountStatus::Connected(account) => {
+                format!("Connected to {}", account.profile().label())
+            }
             _ => label.to_owned(),
         };
 
@@ -1393,20 +1421,46 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn render_account_details(&self, colors: ColorTokens) -> Option<impl IntoElement> {
-        let profile = self.status.connected_profile()?;
+        let account = self.status.connected_account()?;
+        let profile = account.profile();
+        let provider = match account.provider_kind() {
+            AccountProviderKind::MicrosoftGraph => "Microsoft Graph (Microsoft 365)",
+            AccountProviderKind::ExchangeEws => "Exchange Web Services (Exchange Server)",
+            _ => "Other provider",
+        };
         let mut details = div()
             .flex()
             .flex_col()
             .gap_3()
-            .child(self.account_identity(profile, colors));
-        if profile.capabilities().mail().is_read_only() {
-            details = details.child("Mail is read-only.");
-        }
-        if profile.capabilities().calendar() == CalendarAccess::Unavailable {
-            details = details.child("Calendar is unavailable for this account.");
-        } else if profile.capabilities().calendar() == CalendarAccess::ReadOnly {
-            details = details.child("Calendar is read-only.");
-        }
+            .child(self.account_identity(profile, colors))
+            .child(
+                div()
+                    .id("account-provider")
+                    .debug_selector(|| "account-provider".to_owned())
+                    .text_sm()
+                    .child(format!("Provider: {provider}")),
+            )
+            .child(
+                div()
+                    .id("account-mail-capabilities")
+                    .debug_selector(|| "account-mail-capabilities".to_owned())
+                    .text_sm()
+                    .child(mail_access_summary(profile.capabilities().mail())),
+            );
+        let calendar_summary = match profile.capabilities().calendar() {
+            CalendarAccess::Unavailable => "Calendar actions: unavailable.",
+            CalendarAccess::ReadOnly => "Calendar actions: view events.",
+            CalendarAccess::ReadWrite => {
+                "Calendar actions: view events and make supported changes."
+            }
+        };
+        details = details.child(
+            div()
+                .id("account-calendar-capabilities")
+                .debug_selector(|| "account-calendar-capabilities".to_owned())
+                .text_sm()
+                .child(calendar_summary),
+        );
         Some(details.child(
             div()
                 .text_sm()
@@ -1502,7 +1556,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     fn render_primary_action(&self, cx: &mut Context<Self>) -> impl IntoElement {
         match &self.status {
             AccountStatus::Restoring => Self::render_progress_action("Checking account…"),
-            AccountStatus::SigningOut => Self::render_progress_action("Signing out…"),
+            AccountStatus::SigningOut { .. } => Self::render_progress_action("Signing out…"),
             AccountStatus::SignOutFailed { .. } => div(),
             AccountStatus::CancellingConnect { .. } => {
                 Self::render_progress_action("Finishing sign-in…")
@@ -2169,6 +2223,26 @@ impl<P: AccountProvider + 'static> Render for AccountView<P> {
             )
             .into_any_element()
     }
+}
+
+fn mail_access_summary(capabilities: MailCapabilities) -> String {
+    let mut actions = vec!["read messages"];
+    for (action, label) in [
+        (MailAction::SetReadState, "mark read or unread"),
+        (
+            MailAction::SetFollowUpFlagStatus,
+            "set or clear follow-up flags",
+        ),
+        (MailAction::Send, "send"),
+        (MailAction::Reply, "reply"),
+        (MailAction::Move, "move or archive"),
+        (MailAction::Delete, "delete"),
+    ] {
+        if capabilities.supports(action) {
+            actions.push(label);
+        }
+    }
+    format!("Mail actions: {}.", actions.join(", "))
 }
 
 async fn remove_account_cache(

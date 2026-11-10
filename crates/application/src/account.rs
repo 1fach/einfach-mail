@@ -14,6 +14,49 @@ use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+/// Identifies the provider that established a connected account.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountProviderKind {
+    /// Microsoft 365 through Microsoft Graph.
+    MicrosoftGraph,
+    /// Exchange Server through Exchange Web Services.
+    ExchangeEws,
+}
+
+/// Pairs a provider-independent profile with the provider that established it.
+///
+/// Workflows return this value after restore, connection, and permission review
+/// so consumers receive provider metadata with the corresponding identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectedAccount {
+    profile: AccountProfile,
+    provider_kind: AccountProviderKind,
+}
+
+impl ConnectedAccount {
+    /// Creates an account result for a provider workflow.
+    #[must_use]
+    pub const fn new(profile: AccountProfile, provider_kind: AccountProviderKind) -> Self {
+        Self {
+            profile,
+            provider_kind,
+        }
+    }
+
+    /// Returns the provider-independent account identity and capabilities.
+    #[must_use]
+    pub const fn profile(&self) -> &AccountProfile {
+        &self.profile
+    }
+
+    /// Returns the provider selected for this account.
+    #[must_use]
+    pub const fn provider_kind(&self) -> AccountProviderKind {
+        self.provider_kind
+    }
+}
+
 /// A user-safe category for an account workflow failure.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -354,7 +397,7 @@ enum AccountOperationPhase {
 
 /// Operations the application needs from a connected-account provider.
 pub trait AccountProvider: Send + Sync {
-    /// Restores the saved account, if the provider has a refresh credential.
+    /// Restores the saved account and identifies its provider, if a credential exists.
     ///
     /// # Errors
     ///
@@ -362,7 +405,7 @@ pub trait AccountProvider: Send + Sync {
     /// or mapped to an account profile.
     fn restore_account(
         &self,
-    ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_;
+    ) -> impl Future<Output = Result<Option<ConnectedAccount>, AccountOperationError>> + Send + '_;
 
     /// Returns a verified account ID that can identify the cache to remove.
     ///
@@ -378,7 +421,7 @@ pub trait AccountProvider: Send + Sync {
         &self,
     ) -> impl Future<Output = Result<Option<AccountId>, AccountOperationError>> + Send + '_;
 
-    /// Connects the selected account through its provider's sign-in flow.
+    /// Connects the selected account and identifies the provider that signed it in.
     ///
     /// Implementations must call [`AccountOperationCancellation::begin_credential_commit`]
     /// immediately before storing the refresh credential.
@@ -395,7 +438,7 @@ pub trait AccountProvider: Send + Sync {
     fn connect_account(
         &self,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_;
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_;
 
     /// Connects the selected account through its provider's sign-in flow.
     ///
@@ -411,7 +454,7 @@ pub trait AccountProvider: Send + Sync {
         &self,
         request: AccountConnectionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         async move {
             match request {
                 AccountConnectionRequest::Microsoft365 => self.connect_account(cancellation).await,
@@ -441,7 +484,7 @@ pub trait AccountProvider: Send + Sync {
         async { Err(AccountOperationError::UnsupportedOperation) }
     }
 
-    /// Requests the selected delegated permissions again for the active account.
+    /// Reviews permissions and returns the active account with its provider kind.
     ///
     /// Implementations must preserve the existing credential and session when
     /// authorization is cancelled, denied, or returns another account.
@@ -459,7 +502,7 @@ pub trait AccountProvider: Send + Sync {
         expected_account_id: &AccountId,
         request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_;
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_;
 
     /// Removes the provider's locally saved refresh credential.
     ///
@@ -500,11 +543,11 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     /// another account operation is running. Returns
     /// [`AccountOperationError::AccountStateUnavailable`] if local workflow
     /// state cannot be read or updated.
-    pub async fn restore_account(&self) -> Result<Option<AccountProfile>, AccountOperationError> {
+    pub async fn restore_account(&self) -> Result<Option<ConnectedAccount>, AccountOperationError> {
         let operation = self.begin(AccountOperation::Restoring)?;
         let restore_result = self.provider.restore_account().await;
         if let Ok(account) = &restore_result {
-            operation.complete(account.clone())?;
+            operation.complete(account.as_ref().map(|account| account.profile().clone()))?;
         }
         restore_result
     }
@@ -548,7 +591,7 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     ///
     /// Dropping this future releases its operation reservation without
     /// changing the workflow's active account.
-    pub async fn connect_account(&self) -> Result<AccountProfile, AccountOperationError> {
+    pub async fn connect_account(&self) -> Result<ConnectedAccount, AccountOperationError> {
         self.connect_account_with_cancellation(AccountOperationCancellation::new())
             .await
     }
@@ -564,7 +607,7 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     pub async fn connect_account_with_request(
         &self,
         request: AccountConnectionRequest,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         self.connect_account_with_request_and_cancellation(
             request,
             AccountOperationCancellation::new(),
@@ -585,7 +628,7 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     pub async fn connect_account_with_cancellation(
         &self,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         self.connect_account_with_request_and_cancellation(
             AccountConnectionRequest::Microsoft365,
             cancellation,
@@ -604,14 +647,14 @@ impl<P: AccountProvider> AccountWorkflow<P> {
         &self,
         request: AccountConnectionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         let operation = self.begin(AccountOperation::Connecting)?;
         let connect_result = self
             .provider
             .connect_account_with_request(request, cancellation)
             .await;
         if let Ok(account) = &connect_result {
-            operation.complete(Some(account.clone()))?;
+            operation.complete(Some(account.profile().clone()))?;
         }
         connect_result
     }
@@ -658,7 +701,7 @@ impl<P: AccountProvider> AccountWorkflow<P> {
         &self,
         expected_account_id: &AccountId,
         request: AccountPermissionRequest,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         self.reauthorize_account_with_cancellation(
             expected_account_id,
             request,
@@ -680,18 +723,18 @@ impl<P: AccountProvider> AccountWorkflow<P> {
         expected_account_id: &AccountId,
         request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         let operation = self.begin(AccountOperation::Reauthorizing)?;
         self.ensure_active_account_matches(expected_account_id)?;
         let reauthorization_result = self
             .provider
             .reauthorize_account(expected_account_id, request, cancellation)
             .await;
-        if let Ok(profile) = &reauthorization_result {
-            if profile.id() != expected_account_id {
+        if let Ok(account) = &reauthorization_result {
+            if account.profile().id() != expected_account_id {
                 return Err(AccountOperationError::AccountMismatch);
             }
-            operation.complete(Some(profile.clone()))?;
+            operation.complete(Some(account.profile().clone()))?;
         }
         reauthorization_result
     }
@@ -878,7 +921,8 @@ mod tests {
 
     use super::{
         AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
-        AccountProvider, AccountWorkflow, ExchangeEwsConnectionInput,
+        AccountProvider, AccountProviderKind, AccountWorkflow, ConnectedAccount,
+        ExchangeEwsConnectionInput,
     };
 
     #[test]
@@ -949,14 +993,18 @@ mod tests {
     struct FakeProvider {
         fail_next_sign_out: Arc<AtomicBool>,
         pause_sign_out: Arc<AtomicBool>,
+        restore_missing: Arc<AtomicBool>,
     }
 
     impl AccountProvider for FakeProvider {
         fn restore_account(
             &self,
-        ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_
+        ) -> impl Future<Output = Result<Option<ConnectedAccount>, AccountOperationError>> + Send + '_
         {
-            ready(Ok(Some(synthetic_profile())))
+            let restore_missing = self.restore_missing.load(Ordering::SeqCst);
+            ready(Ok((!restore_missing).then(|| {
+                ConnectedAccount::new(synthetic_profile(), AccountProviderKind::MicrosoftGraph)
+            })))
         }
 
         fn saved_credential_account_id(
@@ -969,9 +1017,12 @@ mod tests {
         fn connect_account(
             &self,
             _: super::AccountOperationCancellation,
-        ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
+        ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_
         {
-            ready(Ok(synthetic_profile()))
+            ready(Ok(ConnectedAccount::new(
+                synthetic_profile(),
+                AccountProviderKind::MicrosoftGraph,
+            )))
         }
 
         fn reauthorize_account(
@@ -979,9 +1030,12 @@ mod tests {
             _: &AccountId,
             _: super::AccountPermissionRequest,
             _: super::AccountOperationCancellation,
-        ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
+        ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_
         {
-            ready(Ok(synthetic_profile()))
+            ready(Ok(ConnectedAccount::new(
+                synthetic_profile(),
+                AccountProviderKind::MicrosoftGraph,
+            )))
         }
 
         fn sign_out(&self) -> impl Future<Output = Result<(), AccountOperationError>> + Send + '_ {
@@ -1000,12 +1054,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn restore_without_saved_account_clears_active_account() {
+        let provider = FakeProvider::default();
+        let restore_missing = Arc::clone(&provider.restore_missing);
+        let workflow = AccountWorkflow::new(provider);
+
+        workflow
+            .connect_account()
+            .await
+            .expect("synthetic account connection succeeds");
+        restore_missing.store(true, Ordering::SeqCst);
+
+        assert_eq!(workflow.restore_account().await, Ok(None));
+        assert_eq!(
+            workflow.connect_account().await,
+            Ok(ConnectedAccount::new(
+                synthetic_profile(),
+                AccountProviderKind::MicrosoftGraph,
+            ))
+        );
+    }
+
     struct PendingProvider;
 
     impl AccountProvider for PendingProvider {
         fn restore_account(
             &self,
-        ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_
+        ) -> impl Future<Output = Result<Option<ConnectedAccount>, AccountOperationError>> + Send + '_
         {
             ready(Ok(None))
         }
@@ -1020,7 +1096,7 @@ mod tests {
         fn connect_account(
             &self,
             _: super::AccountOperationCancellation,
-        ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
+        ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_
         {
             std::future::pending()
         }
@@ -1030,7 +1106,7 @@ mod tests {
             _: &AccountId,
             _: super::AccountPermissionRequest,
             _: super::AccountOperationCancellation,
-        ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_
+        ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_
         {
             std::future::pending()
         }
@@ -1077,7 +1153,10 @@ mod tests {
 
         assert_eq!(
             workflow.restore_account().await,
-            Ok(Some(synthetic_profile()))
+            Ok(Some(ConnectedAccount::new(
+                synthetic_profile(),
+                AccountProviderKind::MicrosoftGraph,
+            )))
         );
         assert_eq!(
             workflow.connect_account().await,
@@ -1139,7 +1218,10 @@ mod tests {
         provider.pause_sign_out.store(false, Ordering::SeqCst);
         assert_eq!(
             workflow
-                .reauthorize_account(profile.id(), super::AccountPermissionRequest::Current)
+                .reauthorize_account(
+                    profile.profile().id(),
+                    super::AccountPermissionRequest::Current,
+                )
                 .await,
             Ok(profile)
         );
@@ -1155,7 +1237,10 @@ mod tests {
             .expect("synthetic profile is available");
 
         let renewed = workflow
-            .reauthorize_account(profile.id(), super::AccountPermissionRequest::Current)
+            .reauthorize_account(
+                profile.profile().id(),
+                super::AccountPermissionRequest::Current,
+            )
             .await
             .expect("synthetic consent renewal succeeds");
 

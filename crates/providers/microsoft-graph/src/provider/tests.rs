@@ -32,11 +32,12 @@ use crate::{
 };
 use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    AccountWorkflow, CalendarProvider, MailOperationError, MailProvider, MailSendProviderError,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    AccountProviderKind, AccountWorkflow, CalendarProvider, ConnectedAccount, MailOperationError,
+    MailProvider, MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse,
+    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, CalendarEventCreation, CalendarEventDraft, CalendarOccurrenceTime,
+    AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrenceTime,
     CalendarViewRange, CalendarViewReference, FolderId, FolderReference, MailReplyDraft,
     MailReplySource, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaProgress,
     MessageId,
@@ -592,10 +593,12 @@ async fn connect_runs_pkce_callback_graph_profile_and_token_storage() {
         .expect("loopback callback reaches the test listener");
     assert!(response.status().is_success());
 
-    let profile = connect_task
+    let account = connect_task
         .await
         .expect("provider task completes")
         .expect("synthetic account connection succeeds");
+    assert_eq!(account.provider_kind(), AccountProviderKind::MicrosoftGraph);
+    let profile = account.profile();
     assert_eq!(profile.id().as_str(), "account-123");
     assert_eq!(profile.label(), "Ada Example");
     assert_eq!(
@@ -765,8 +768,8 @@ async fn provider_credential_lifecycle_uses_secret_service_across_restore() {
         uuid::Uuid::new_v4()
     )));
     let _cleanup = SecretServiceCredentialCleanup::new(credentials.as_ref().clone());
-    let (provider, profile) = connect_with_secret_service(&server, Arc::clone(&credentials)).await;
-    let account_id = profile.id().clone();
+    let (provider, account) = connect_with_secret_service(&server, Arc::clone(&credentials)).await;
+    let account_id = account.profile().id().clone();
 
     assert_eq!(account_id.as_str(), "synthetic-account");
     assert_saved_refresh_token(&credentials, &account_id, "synthetic-connect-refresh");
@@ -775,7 +778,7 @@ async fn provider_credential_lifecycle_uses_secret_service_across_restore() {
     let (provider, restored_profile) =
         restore_with_secret_service(&server, Arc::clone(&credentials)).await;
 
-    assert_eq!(restored_profile.id(), &account_id);
+    assert_eq!(restored_profile.profile().id(), &account_id);
     assert_saved_refresh_token(&credentials, &account_id, "synthetic-rotated-refresh");
     provider
         .sign_out()
@@ -792,7 +795,7 @@ async fn provider_credential_lifecycle_uses_secret_service_across_restore() {
 async fn connect_with_secret_service(
     server: &MockServer,
     credentials: Arc<SecretServiceRefreshTokenStore>,
-) -> (MicrosoftGraphProvider, AccountProfile) {
+) -> (MicrosoftGraphProvider, ConnectedAccount) {
     let token_exchange = server
         .mock_async(|when, then| {
             when.method(POST)
@@ -835,7 +838,7 @@ async fn connect_with_secret_service(
 async fn restore_with_secret_service(
     server: &MockServer,
     credentials: Arc<SecretServiceRefreshTokenStore>,
-) -> (MicrosoftGraphProvider, AccountProfile) {
+) -> (MicrosoftGraphProvider, ConnectedAccount) {
     let token_exchange = server
         .mock_async(|when, then| {
             when.method(POST)
@@ -1007,11 +1010,12 @@ async fn mail_provider_reads_scoped_folders_delta_and_body() {
     ));
     let provider = synthetic_provider(&server, browser_sender, credentials.clone());
 
-    let profile = provider
+    let account = provider
         .restore_account()
         .await
         .expect("synthetic account restores")
         .expect("synthetic account is present");
+    let profile = account.profile();
     let folders = provider
         .list_folders(profile.id())
         .await
@@ -1217,7 +1221,9 @@ async fn restore_persists_rotated_refresh_token_and_loads_profile() {
         .restore_account()
         .await
         .expect("saved synthetic account is restored");
-    let profile = restored.expect("saved refresh token identifies an account");
+    let account = restored.expect("saved refresh token identifies an account");
+    assert_eq!(account.provider_kind(), AccountProviderKind::MicrosoftGraph);
+    let profile = account.profile();
 
     assert_eq!(profile.label(), "Grace Example");
     assert_eq!(
@@ -1638,7 +1644,7 @@ async fn connection_cancellation_during_commit_returns_and_restores_the_profile(
         .await
         .expect("connection workflow completes")
         .expect("commit wins the cancellation race");
-    assert_eq!(connected_profile.id().as_str(), "account-123");
+    assert_eq!(connected_profile.profile().id().as_str(), "account-123");
     assert_eq!(
         credentials.token_value().as_deref(),
         Some("synthetic-connect-refresh")
@@ -1653,7 +1659,10 @@ async fn connection_cancellation_during_commit_returns_and_restores_the_profile(
         .await
         .expect("new workflow restores the committed account")
         .expect("committed account is present");
-    assert_eq!(restored_profile.id(), connected_profile.id());
+    assert_eq!(
+        restored_profile.profile().id(),
+        connected_profile.profile().id()
+    );
     assert_eq!(
         credentials.token_value().as_deref(),
         Some("synthetic-recovered-refresh")
@@ -1744,7 +1753,7 @@ async fn calendar_permission_renewal_requests_only_calendar_write_access() {
         .await
         .expect("calendar permission renewal task completes")
         .expect("same-account calendar permission renewal succeeds");
-    assert_eq!(profile.id(), &expected_account);
+    assert_eq!(profile.profile().id(), &expected_account);
     assert_eq!(
         credentials.token_value().as_deref(),
         Some("synthetic-calendar-write-refresh")
@@ -1835,7 +1844,7 @@ async fn permission_renewal_cancels_before_commit_and_commits_after_cancellation
         .await
         .expect("initial account restores")
         .expect("synthetic account is present");
-    let expected_account_id = active_profile.id().clone();
+    let expected_account_id = active_profile.profile().id().clone();
 
     let cancelled_operation = AccountOperationCancellation::new();
     let task_cancellation = cancelled_operation.clone();
@@ -1905,7 +1914,10 @@ async fn permission_renewal_cancels_before_commit_and_commits_after_cancellation
         .await
         .expect("permission workflow completes")
         .expect("commit wins the cancellation race");
-    assert_eq!(renewed_profile.id(), active_profile.id());
+    assert_eq!(
+        renewed_profile.profile().id(),
+        active_profile.profile().id()
+    );
     assert_eq!(
         credentials.token_value().as_deref(),
         Some("synthetic-renewed-refresh")
@@ -1920,7 +1932,10 @@ async fn permission_renewal_cancels_before_commit_and_commits_after_cancellation
         .await
         .expect("new workflow restores the renewed account")
         .expect("renewed account remains present");
-    assert_eq!(restored_profile.id(), renewed_profile.id());
+    assert_eq!(
+        restored_profile.profile().id(),
+        renewed_profile.profile().id()
+    );
     assert_eq!(
         credentials.token_value().as_deref(),
         Some("synthetic-final-refresh")
@@ -1992,7 +2007,7 @@ async fn permission_renewal_for_another_account_keeps_the_saved_session() {
         .expect("saved account restores")
         .expect("synthetic account is present");
 
-    let expected_account_id = active_profile.id().clone();
+    let expected_account_id = active_profile.profile().id().clone();
     let cancellation = AccountOperationCancellation::new();
     let renewal = provider.reauthorize_account(
         &expected_account_id,
@@ -2029,7 +2044,7 @@ async fn permission_renewal_for_another_account_keeps_the_saved_session() {
     let session = session
         .as_ref()
         .expect("mismatched authorization preserves the active session");
-    assert_eq!(session.account_id, *active_profile.id());
+    assert_eq!(session.account_id, *active_profile.profile().id());
     assert_eq!(
         session
             .access_token

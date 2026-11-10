@@ -2,12 +2,12 @@ use std::{collections::HashSet, future::Future, sync::Arc, time::SystemTime};
 
 use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
-    AccountPermissionRequest, AccountProvider, CalendarDeltaRequest, CalendarDeltaResponse,
-    CalendarOperationError, CalendarProvider, CalendarSyncStrategy, CalendarViewSnapshotResponse,
-    ExchangeEwsAccountSettings, ExchangeEwsAccountSettingsStore, ExchangeEwsConnectionInput,
-    ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult, MailOperationError, MailProvider,
-    MailSendProviderError, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
-    WellKnownMailFolder,
+    AccountPermissionRequest, AccountProvider, AccountProviderKind, CalendarDeltaRequest,
+    CalendarDeltaResponse, CalendarOperationError, CalendarProvider, CalendarSyncStrategy,
+    CalendarViewSnapshotResponse, ConnectedAccount, ExchangeEwsAccountSettings,
+    ExchangeEwsAccountSettingsStore, ExchangeEwsConnectionInput, ExchangeEwsDiscoveryRequest,
+    ExchangeEwsDiscoveryResult, MailOperationError, MailProvider, MailSendProviderError,
+    MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, CalendarAccess, FolderId, FolderReference,
@@ -83,7 +83,7 @@ where
         session_store: Arc<RwLock<Option<Arc<EwsSession>>>>,
         input: ExchangeEwsConnectionInput,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         let settings = validate_settings(&input)?;
         let password = SecretString::from(input.expose_password().to_owned());
         let credential_bytes = Zeroizing::new(input.expose_password().as_bytes().to_vec());
@@ -112,7 +112,10 @@ where
 
         let profile = session.profile.clone();
         *session_store.write().await = Some(Arc::new(session));
-        Ok(profile)
+        Ok(ConnectedAccount::new(
+            profile,
+            AccountProviderKind::ExchangeEws,
+        ))
     }
 }
 
@@ -122,7 +125,7 @@ where
 {
     fn restore_account(
         &self,
-    ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<Option<ConnectedAccount>, AccountOperationError>> + Send + '_
     {
         let settings_store = Arc::clone(&self.settings_store);
         let session_store = Arc::clone(&self.session);
@@ -146,7 +149,10 @@ where
             session.profile = profile_for(&settings, folder_collection.server_version)?;
             let profile = session.profile.clone();
             *session_store.write().await = Some(Arc::new(session));
-            Ok(Some(profile))
+            Ok(Some(ConnectedAccount::new(
+                profile,
+                AccountProviderKind::ExchangeEws,
+            )))
         })
     }
 
@@ -172,7 +178,7 @@ where
     fn connect_account(
         &self,
         _cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         std::future::ready(Err(AccountOperationError::UnsupportedOperation))
     }
 
@@ -180,7 +186,7 @@ where
         &self,
         request: AccountConnectionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         let settings_store = Arc::clone(&self.settings_store);
         let session_store = Arc::clone(&self.session);
         let commit_cancellation = cancellation.clone();
@@ -227,7 +233,7 @@ where
         _expected_account_id: &AccountId,
         _request: AccountPermissionRequest,
         _cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         std::future::ready(Err(AccountOperationError::UnsupportedOperation))
     }
 
