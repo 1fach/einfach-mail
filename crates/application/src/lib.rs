@@ -7,8 +7,11 @@ mod account;
 mod account_cache;
 #[path = "account/session.rs"]
 mod account_session;
+#[path = "calendar/workflow.rs"]
 mod calendar;
+#[path = "calendar/cache.rs"]
 mod calendar_cache;
+#[path = "calendar/provider.rs"]
 mod calendar_provider;
 mod email_html;
 #[path = "account/ews_settings.rs"]

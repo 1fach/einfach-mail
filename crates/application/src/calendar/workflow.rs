@@ -727,4 +727,5 @@ fn request_cursor(request: &CalendarDeltaRequest) -> Option<CalendarDeltaLink> {
 }
 
 #[cfg(test)]
+#[path = "tests.rs"]
 mod tests;
