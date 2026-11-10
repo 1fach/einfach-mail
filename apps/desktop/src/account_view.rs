@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::mail_composer::MailPermissionRequester;
-use crate::mail_view::{MailView, MailViewEvent};
+use crate::mail_view::{MailFolderNavigation, MailView, MailViewEvent};
 use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
@@ -17,9 +17,11 @@ use gpui_kit::component::{
     input::{Input, InputState},
     scroll::ScrollableElement,
 };
+#[cfg(test)]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     App, AsyncApp, Context, Div, Entity, FocusHandle, IntoElement, Render, Role, Stateful,
-    Subscription, Task, Window, div, prelude::*,
+    Subscription, Task, Window, div, prelude::*, rems,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -337,6 +339,7 @@ enum AccountContent {
     Opening(OpeningContent),
     Mail {
         view: Entity<MailView>,
+        folder_navigation: Entity<MailFolderNavigation>,
         subscription: Subscription,
     },
     Calendar {
@@ -879,8 +882,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn close_content_view(&mut self, cx: &mut Context<Self>) -> Option<Arc<dyn AccountSession>> {
         match std::mem::replace(&mut self.content, AccountContent::Account) {
-            AccountContent::Mail { view, subscription } => {
+            AccountContent::Mail {
+                view,
+                folder_navigation,
+                subscription,
+            } => {
                 drop(subscription);
+                drop(folder_navigation);
                 view.update(cx, |view, _| view.stop_pending_work());
             }
             AccountContent::Calendar { view, subscription } => {
@@ -906,6 +914,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 let mail_view_session = session.mail_session();
                 let mail_view = cx
                     .new(|cx| MailView::new(profile, mail_view_session, permission_requester, cx));
+                let folder_navigation =
+                    cx.new(|cx| MailFolderNavigation::new(mail_view.clone(), cx));
                 let subscription = cx.subscribe(
                     &mail_view,
                     |view, _, event: &MailViewEvent, cx| match event {
@@ -920,6 +930,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 );
                 AccountContent::Mail {
                     view: mail_view,
+                    folder_navigation,
                     subscription,
                 }
             },
@@ -1894,11 +1905,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn render_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let navigation = div()
             .id("workspace-navigation")
             .role(Role::Navigation)
             .aria_label("Main navigation")
-            .w(gpui_kit::px(256.))
+            .w(rems(16.))
+            .min_w(rems(14.))
+            .max_w(rems(20.))
             .h_full()
             .flex()
             .flex_col()
@@ -1908,9 +1921,22 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
             .child(self.render_navigation_brand())
-            .child(self.render_feature_navigation(cx))
-            .child(div().flex_1())
-            .child(self.render_account_navigation(cx))
+            .child(self.render_feature_navigation(cx));
+        #[cfg(test)]
+        let navigation = navigation.test_support();
+        let mut navigation = navigation;
+        if let Some(profile) = self.status.connected_profile() {
+            navigation = navigation.child(Self::render_active_account_identity(profile, cx));
+        }
+        if let AccountContent::Mail {
+            folder_navigation, ..
+        } = &self.content
+        {
+            navigation = navigation.child(folder_navigation.clone());
+        } else {
+            navigation = navigation.child(div().flex_1());
+        }
+        navigation.child(self.render_account_navigation(cx))
     }
 
     fn render_navigation_brand(&self) -> impl IntoElement {
@@ -1929,6 +1955,61 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .px_2()
             .child(self.render_navigation_button(WorkspaceSection::Mail, cx))
             .child(self.render_navigation_button(WorkspaceSection::Calendar, cx))
+    }
+
+    fn render_active_account_identity(
+        profile: &AccountProfile,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = cx.theme().semantic_tokens().colors;
+        let identity = div()
+            .id("active-account-identity")
+            .role(Role::Group)
+            .aria_label(format!("Active account: {}", profile.label()))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_3()
+            .child(Icon::new(IconName::User).size_4())
+            .child(Self::render_active_account_details(profile, colors));
+        #[cfg(test)]
+        let identity = identity.test_support();
+        identity
+    }
+
+    fn render_active_account_details(
+        profile: &AccountProfile,
+        colors: ColorTokens,
+    ) -> impl IntoElement {
+        let mailbox_address = profile
+            .mailbox()
+            .map(|mailbox| mailbox.address().to_owned())
+            .filter(|address| !profile.label().eq_ignore_ascii_case(address));
+        div()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .w_full()
+                    .text_sm()
+                    .font_semibold()
+                    .truncate()
+                    .child(profile.label().to_owned()),
+            )
+            .when_some(mailbox_address, |details, address| {
+                details.child(
+                    div()
+                        .w_full()
+                        .text_xs()
+                        .text_color(colors.muted_foreground)
+                        .truncate()
+                        .child(address),
+                )
+            })
     }
 
     fn render_account_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {

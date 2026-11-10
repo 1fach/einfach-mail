@@ -23,6 +23,7 @@ use einfach_mail_domain::{
 };
 use gpui_kit::base::TextSelection;
 use gpui_kit::component::WindowExt as _;
+use gpui_kit::prelude::*;
 use gpui_kit::test::TestQueryExt as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
@@ -31,11 +32,11 @@ use gpui_kit::{
 };
 
 use super::{
-    FollowUpFlagUpdateStatus, MailPermissionRequester, MailSyncProgress, MailView, MailViewEvent,
-    MessageDetailState, MessageListState, MessageMoveMenuAction, MoveRecoveryReason,
-    ReadStateUpdateStatus, SyncStatus, WellKnownFolderActionStatus, bind_message_navigation_keys,
-    empty_message_detail_copy, follow_up_flag_failure_message, mail_error_message,
-    read_state_failure_message,
+    FollowUpFlagUpdateStatus, MailFolderNavigation, MailPermissionRequester, MailSyncProgress,
+    MailView, MailViewEvent, MessageDetailState, MessageListState, MessageMoveMenuAction,
+    MoveRecoveryReason, ReadStateUpdateStatus, SyncStatus, WellKnownFolderActionStatus,
+    bind_message_navigation_keys, empty_message_detail_copy, follow_up_flag_failure_message,
+    mail_error_message, read_state_failure_message,
 };
 use crate::mail_composer::bind_mail_composer_keys;
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
@@ -63,6 +64,52 @@ fn test_mail_view(
     cx: &mut gpui_kit::Context<MailView>,
 ) -> MailView {
     MailView::new(profile, workflow, unexpected_permission_requester(), cx)
+}
+
+struct TestMailWorkspace {
+    folder_navigation: Entity<MailFolderNavigation>,
+    mail_view: Entity<MailView>,
+}
+
+impl gpui_kit::Render for TestMailWorkspace {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        gpui_kit::div()
+            .size_full()
+            .flex()
+            .child(
+                gpui_kit::div()
+                    .w(gpui_kit::rems(16.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(self.folder_navigation.clone()),
+            )
+            .child(
+                gpui_kit::div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(self.mail_view.clone()),
+            )
+    }
+}
+
+fn test_mail_workspace(
+    profile: AccountProfile,
+    workflow: Arc<dyn MailSession>,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::Context<gpui_kit::base::Root>,
+) -> (gpui_kit::base::Root, Entity<MailView>) {
+    let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
+    let navigation = cx.new(|cx| MailFolderNavigation::new(view.clone(), cx));
+    let workspace = cx.new(|_| TestMailWorkspace {
+        folder_navigation: navigation,
+        mail_view: view.clone(),
+    });
+    (gpui_kit::base::Root::new(workspace, window, cx), view)
 }
 
 fn mail_profile_with_capabilities(account: AccountId, mail: MailCapabilities) -> AccountProfile {
@@ -2796,7 +2843,13 @@ async fn folder_message_list_failure_does_not_claim_a_message_is_loading(cx: &mu
         },
         cache.clone(),
     ));
-    let (view, context) = cx.add_window_view(|_, cx| test_mail_view(profile, workflow, cx));
+    let mut mail_view = None;
+    let (_, context) = cx.add_window_view(|window, cx| {
+        let (root, view) = test_mail_workspace(profile, workflow, window, cx);
+        mail_view = Some(view);
+        root
+    });
+    let view = mail_view.expect("mail view is attached to contextual folder navigation");
 
     wait_for_mail_sync_to_finish(context, &view).await;
 
@@ -2942,11 +2995,11 @@ async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut T
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
-        mail_view = Some(view.clone());
-        gpui_kit::base::Root::new(view, window, cx)
+        let (root, view) = test_mail_workspace(profile, workflow, window, cx);
+        mail_view = Some(view);
+        root
     });
-    let view = mail_view.expect("mail view is created with the test window");
+    let view = mail_view.expect("mail view is attached to contextual folder navigation");
 
     sync_started_receiver
         .await
@@ -3906,6 +3959,55 @@ fn oversized_cached_html_shows_a_safe_reader_fallback(cx: &mut TestAppContext) {
             .debug_bounds("mail-message-body-too-large")
             .is_some()
     );
+}
+
+#[gpui_kit::test]
+async fn contextual_folder_navigation_updates_mail_selection(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, _) = fixture(account);
+    let inbox_reference = FolderReference::new(
+        profile.id().clone(),
+        FolderId::try_from("inbox".to_owned()).expect("synthetic inbox ID is valid"),
+    );
+    let archive_reference = FolderReference::new(
+        profile.id().clone(),
+        FolderId::try_from("archive".to_owned()).expect("synthetic archive ID is valid"),
+    );
+    let workflow = Arc::new(MailWorkflow::new(
+        profile.id().clone(),
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache,
+    ));
+    let mut mail_view = None;
+    let (_, context) = cx.add_window_view(|window, cx| {
+        let (root, view) = test_mail_workspace(profile, workflow, window, cx);
+        mail_view = Some(view);
+        root
+    });
+    let view = mail_view.expect("mail view is attached to contextual folder navigation");
+    context.run_until_parked();
+    wait_for_mail_sync_to_finish(context, &view).await;
+    draw_mail_view(context);
+
+    assert!(
+        context
+            .update(|_, app| { view.read(app).selected_folder.as_ref() == Some(&inbox_reference) })
+    );
+    let archive_button = context.update(|window, _| window.find_by_label("Archive"));
+    context.simulate_click(archive_button.bounds().center(), Modifiers::default());
+    wait_for_ui_condition(context, |_, app| {
+        view.read(app).selected_folder.as_ref() == Some(&archive_reference)
+    })
+    .await;
+    draw_mail_view(context);
+
+    assert!(context.update(|window, _| {
+        window.try_find_by_label("Inbox").is_some() && window.try_find_by_label("Archive").is_some()
+    }));
 }
 
 #[gpui_kit::test]

@@ -87,6 +87,21 @@ pub(crate) struct MailView {
     selected_folder_write_sync_required: bool,
 }
 
+pub(crate) struct MailFolderNavigation {
+    mail_view: Entity<MailView>,
+    _subscription: Subscription,
+}
+
+impl MailFolderNavigation {
+    pub(crate) fn new(mail_view: Entity<MailView>, cx: &mut Context<Self>) -> Self {
+        let _subscription = cx.observe(&mail_view, |_, _, cx| cx.notify());
+        Self {
+            mail_view,
+            _subscription,
+        }
+    }
+}
+
 struct MailComposerPresentation {
     title: &'static str,
     context: MailComposerContext,

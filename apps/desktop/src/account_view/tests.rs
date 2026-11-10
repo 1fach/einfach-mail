@@ -10,6 +10,7 @@ use std::{
 
 use tokio::sync::oneshot;
 
+use gpui_kit::test::TestQueryExt as _;
 use gpui_kit::{
     AppContext as _, Modifiers, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point,
     px, size,
@@ -682,6 +683,50 @@ fn workspace_navigation_stays_visible_and_supports_keyboard_switching(cx: &mut T
     assert_disconnected_workspace_routes(&view, context);
     connect_synthetic_workspace_account(&view, context);
     assert_keyboard_navigation_selects_calendar(&view, context);
+}
+
+#[gpui_kit::test]
+fn mail_workspace_places_folders_before_the_message_list_and_reader(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
+    let factory = unused_account_session_factory();
+    let (view, context) = cx
+        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::Connected(mail_only_profile());
+            cx.notify();
+        });
+    });
+
+    click(context, "nav-mail");
+
+    assert!(
+        context
+            .cx
+            .update(|cx| { matches!(&view.read(cx).content, AccountContent::Mail { .. }) })
+    );
+    assert_workspace_navigation_is_visible(context);
+    let (navigation, folders, reader) = context.update(|window, _| {
+        (
+            window.find_by_label("Main navigation").bounds(),
+            window.find_by_label("Mail folders").bounds(),
+            window.find_by_label("Message reader").bounds(),
+        )
+    });
+    let message_list = context
+        .debug_bounds("mail-list-loading")
+        .expect("the loading message list is rendered");
+    let identity = context.update(|window, _| window.find_by_label("Active account: Ada Example"));
+
+    assert_eq!(identity.role(), Some(gpui_kit::Role::Group));
+    assert!(navigation.size.width >= px(224.));
+    assert!(navigation.size.width <= px(320.));
+    assert!(folders.left() >= navigation.left());
+    assert!(folders.right() <= navigation.right());
+    assert!(message_list.left() >= navigation.right());
+    assert!(reader.left() >= message_list.right());
+    assert!(reader.size.width > px(0.));
 }
 
 #[gpui_kit::test]
