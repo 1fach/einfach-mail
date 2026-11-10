@@ -28,8 +28,8 @@ use jiff::{Span, civil, tz::TimeZone};
 use time::{Date, Month, OffsetDateTime};
 use tokio::sync::oneshot;
 
+use super::super::week::CalendarWeek;
 use super::{CalendarStatus, CalendarView};
-use crate::calendar_week::CalendarWeek;
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
 
 #[test]
@@ -1308,7 +1308,7 @@ async fn native_calendar_view_keeps_cached_events_and_navigates_fixed_weeks(
     );
     let composer_week = context.cx.update(|cx| {
         view.read(cx)
-            .event_composer_setup(crate::event_composer::EventComposerIntent::Create {
+            .event_composer_setup(super::super::composer::EventComposerIntent::Create {
                 pending_creation: None,
             })
             .week
@@ -1596,7 +1596,7 @@ async fn denied_calendar_write_emits_permission_review_request(cx: &mut TestAppC
 #[gpui_kit::test]
 async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    cx.update(crate::event_composer::bind_event_composer_keys);
+    cx.update(super::super::composer::bind_event_composer_keys);
     let provider = TestProvider::default();
     provider.allow_calendar_sync();
     let workflow = Arc::new(CalendarWorkflow::new(
@@ -1728,7 +1728,7 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
 #[gpui_kit::test]
 async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    cx.update(crate::event_composer::bind_event_composer_keys);
+    cx.update(super::super::composer::bind_event_composer_keys);
     let provider = TestProvider::default();
     provider.allow_calendar_sync();
     let workflow = Arc::new(CalendarWorkflow::new(
@@ -1930,7 +1930,7 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
 #[gpui_kit::test]
 async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    cx.update(crate::event_composer::bind_event_composer_keys);
+    cx.update(super::super::composer::bind_event_composer_keys);
     let provider = TestProvider::default();
     provider.allow_calendar_sync();
     let workflow = Arc::new(CalendarWorkflow::new(

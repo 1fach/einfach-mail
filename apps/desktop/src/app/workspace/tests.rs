@@ -1582,7 +1582,7 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
     });
     context.cx.update(|cx| {
         mail_view.update(cx, |_, cx| {
-            cx.emit(crate::mail_view::MailViewEvent::ReviewMailWritePermission);
+            cx.emit(crate::features::MailViewEvent::ReviewMailWritePermission);
         });
     });
     context.run_until_parked();
@@ -1646,7 +1646,7 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
     });
     context.cx.update(|cx| {
         calendar_view.update(cx, |_, cx| {
-            cx.emit(crate::calendar_view::CalendarViewEvent::ReviewCalendarWritePermission);
+            cx.emit(crate::features::CalendarViewEvent::ReviewCalendarWritePermission);
         });
     });
     context.run_until_parked();

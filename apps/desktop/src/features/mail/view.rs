@@ -1,10 +1,10 @@
 use std::{rc::Rc, sync::Arc, time::SystemTime};
 
-use crate::list_navigation::ListNavigation;
-use crate::mail_composer::{
+use super::composer::{
     ComposerTarget, MailComposer, MailComposerContext, MailComposerEvent, MailPermissionRequester,
 };
-use crate::sync_age::relative_age_label;
+use crate::components::ListNavigation;
+use crate::shared::relative_age_label;
 use einfach_mail_application::{
     FollowUpFlagUpdateOutcome, MailCacheError, MailOperationError, MailSession, MailSyncProgress,
     MailSyncReport, MailSyncState, MailWorkflowError, MessageMoveOutcome, OpenedMessage,

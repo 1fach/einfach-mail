@@ -1,5 +1,5 @@
 #[derive(Clone, Copy)]
-pub(super) enum ListNavigation {
+pub(crate) enum ListNavigation {
     Previous,
     Next,
     First,
@@ -7,7 +7,7 @@ pub(super) enum ListNavigation {
 }
 
 impl ListNavigation {
-    pub(super) fn target_index(
+    pub(crate) fn target_index(
         self,
         selected_index: Option<usize>,
         item_count: usize,

@@ -33,7 +33,7 @@ impl ProcessLock {
     }
 }
 
-pub(super) fn run_with_user_lock<T>(run_application: impl FnOnce() -> T) -> io::Result<T> {
+pub(crate) fn run_with_user_lock<T>(run_application: impl FnOnce() -> T) -> io::Result<T> {
     let lock_path =
         xdg::BaseDirectories::with_prefix("einfach-mail").place_data_file("instance.lock")?;
     run_with_process_lock(&lock_path, run_application)
@@ -92,7 +92,7 @@ mod tests {
         let mut child_process = Command::new(test_executable)
             .args([
                 "--exact",
-                "single_instance::tests::process_lock_rejects_competing_startup_and_releases_after_exit",
+                "platform::linux::single_instance::tests::process_lock_rejects_competing_startup_and_releases_after_exit",
                 "--nocapture",
             ])
             .env("EINFACH_MAIL_TEST_LOCK_PATH", &lock_path)

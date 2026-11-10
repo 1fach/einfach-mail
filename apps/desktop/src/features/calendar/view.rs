@@ -1,9 +1,9 @@
-use crate::calendar_time::{to_calendar_date, to_timestamp};
-use crate::calendar_week::CalendarWeek;
-use crate::list_navigation::ListNavigation;
+use super::time::{to_calendar_date, to_timestamp};
+use super::week::CalendarWeek;
+use crate::components::ListNavigation;
 use std::{sync::Arc, time::SystemTime};
 
-use crate::sync_age::relative_age_label;
+use crate::shared::relative_age_label;
 use einfach_mail_application::{
     CalendarOperationError, CalendarSession, CalendarWorkflowError, CalendarWriteReadiness,
 };
@@ -25,9 +25,7 @@ use gpui_kit::{
 use jiff::{Span, Timestamp, civil, tz::TimeZone};
 use time::{Date, OffsetDateTime};
 
-use crate::event_composer::{
-    EventComposer, EventComposerEvent, EventComposerIntent, EventComposerSetup,
-};
+use super::composer::{EventComposer, EventComposerEvent, EventComposerIntent, EventComposerSetup};
 
 gpui_kit::actions!(
     calendar_event_list,

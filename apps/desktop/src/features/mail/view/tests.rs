@@ -32,6 +32,7 @@ use gpui_kit::{
     point, px, size,
 };
 
+use super::super::composer::bind_mail_composer_keys;
 use super::{
     FollowUpFlagUpdateStatus, MailFolderNavigation, MailPermissionRequester, MailSyncProgress,
     MailView, MailViewEvent, MessageDetailState, MessageListState, MessageMoveMenuAction,
@@ -39,7 +40,6 @@ use super::{
     bind_message_navigation_keys, empty_message_detail_copy, follow_up_flag_failure_message,
     mail_error_message, read_state_failure_message,
 };
-use crate::mail_composer::bind_mail_composer_keys;
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
 
 struct UnexpectedPermissionRequester;

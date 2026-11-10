@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime};
 
-pub(super) fn relative_age_label(last_sync: SystemTime) -> String {
+pub(crate) fn relative_age_label(last_sync: SystemTime) -> String {
     let elapsed = SystemTime::now()
         .duration_since(last_sync)
         .unwrap_or(Duration::ZERO);

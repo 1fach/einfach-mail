@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use crate::calendar_view::{CalendarView, CalendarViewEvent};
-use crate::mail_composer::MailPermissionRequester;
-use crate::mail_view::{MailFolderNavigation, MailView, MailViewEvent};
+use crate::features::{
+    CalendarView, CalendarViewEvent, MailFolderNavigation, MailPermissionRequester, MailView,
+    MailViewEvent,
+};
 use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,

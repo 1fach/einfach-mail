@@ -1,4 +1,4 @@
-use crate::calendar_time::{to_calendar_date, to_offset_date_time};
+use super::time::{to_calendar_date, to_offset_date_time};
 use std::time::SystemTime;
 
 use einfach_mail_domain::{CalendarViewRange, CalendarViewReference};

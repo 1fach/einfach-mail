@@ -1,5 +1,5 @@
-use crate::calendar_time::{to_offset_date_time, to_timestamp};
-use crate::calendar_week::CalendarWeek;
+use super::time::{to_offset_date_time, to_timestamp};
+use super::week::CalendarWeek;
 use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike, Weekday};
