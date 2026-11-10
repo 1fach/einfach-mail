@@ -34,11 +34,13 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 
 The #282 feature-first module refactor continues as engineering-health work. PR #314 merged #307's calendar test split into `feat/mail-list-resizing` at `47e3bd8aae7164d32ed63ddb785eccca011fb49a`. PR #315 merged #308's application mail provider, cache port, and sanitized-body boundary moves into `feat/mail-list-resizing` at `99da9076483496b8515a2288cbfb20c1a2dedb8b`. PR #316 merged #309's application mail workflow split into `feat/mail-list-resizing` at `8027462e39a10e39a0512f9ad2091d11bd8f9d78`. PR #317 merged #286's persistence layout into `feat/mail-list-resizing` at `ce19d1d617a22a33ff2ba3a9af9521c170d81ca0`. PR #318 merged #287's Microsoft Graph layout into `feat/mail-list-resizing` at `abcc3a966487d81e27e1a81365927b4cbc099b2d`.
 
-Issue #288 aligns the EWS provider with ADR 0061. Account, mail, calendar, session, authentication, Autodiscover, transport, and version code now live in role modules, with tests grouped by behavior. The public export and all 494 workspace test names match the baseline. `account-router` and provider runtime remain unchanged because each has one responsibility. The full Linux local gate passes on Rust 1.95. Existing HTTP mock tests needed localhost socket access and passed in the socket-enabled run. GitHub Actions are unavailable and no Actions ran. Issue #289 is next in dependency order. Keep #283 linked until the stack reaches `main`.
+Issue #288 aligns the EWS provider with ADR 0061. Account, mail, calendar, session, authentication, Autodiscover, transport, and version code now live in role modules, with tests grouped by behavior. The public export and all 494 workspace test names match the baseline. `account-router` and provider runtime remain unchanged because each has one responsibility. The full Linux local gate passes on Rust 1.95. Existing HTTP mock tests needed localhost socket access and passed in the socket-enabled run. GitHub Actions are unavailable and no Actions ran.
+
+Issue #289 moved desktop startup, workspace, mail and calendar features, Linux process locking, shared helpers, and GPUI test support under their agreed ownership paths in [PR #320](https://github.com/1fach/einfach-mail/pull/320), targeting `feat/mail-list-resizing`. All 494 test function identifiers match the baseline. The full Linux local gate passes with localhost socket access for synthetic HTTP tests. Existing headless account and workspace tests passed. No real window was launched because Xvfb and Weston are unavailable. Continue with #290, and keep #283 linked until the engineering-health stack reaches `main`.
 
 ## Active risks
 
-- GitHub Actions compute is unavailable. PR #301 has no CI runs; its full Linux local gate passed on the exact PR head.
+- GitHub Actions compute is unavailable. PR #301 has no CI runs; its full Linux local gate passed on the exact PR head. PR #320 also has no CI runs; its full Linux local gate passes on the current PR head.
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep live sign-in, initial mail sync, read-state, flag, send, reply, move, and calendar verification open under their existing issues.
 - No Exchange Server test host or sanitized EWS response recording is available. Synthetic EWS tests verify the request path and response mapping, but cannot prove server compatibility. Keep issue #257 open for live verification; issue #267 remains open for code review and merge.
 - No Exchange Server test host is available to verify Autodiscover's published candidate sequence, SRV behavior, redirects, and server response variants end to end. Keep issue #258 open for that live verification.
@@ -56,7 +58,7 @@ Issue #288 aligns the EWS provider with ADR 0061. Account, mail, calendar, sessi
 
 ## Next actions
 
-1. Continue with #289, then #290, and keep #283 linked until the engineering-health stack reaches `main`.
+1. Continue with #290 after merging #289 into `feat/mail-list-resizing`, and keep #283 linked until the engineering-health stack reaches `main`.
 2. Continue M10 with the next small wide-workspace issue after #291; keep the stacked draft PRs unmerged until required checks and Linux real-window review are available.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
