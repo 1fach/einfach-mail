@@ -20,7 +20,7 @@ use gpui_kit::component::{
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, IntoElement, KeyBinding,
-    Render, Role, ScrollHandle, Subscription, Task, WeakEntity, Window, div, prelude::*,
+    Render, Role, ScrollHandle, Subscription, Task, WeakEntity, Window, div, prelude::*, rems,
 };
 use jiff::{Span, Timestamp, civil, tz::TimeZone};
 use time::{Date, OffsetDateTime};
@@ -618,6 +618,7 @@ where
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut title_bar = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .justify_between()
             .gap_3()
@@ -628,6 +629,7 @@ where
                 .debug_selector(|| "calendar-read-only-status".to_owned())
                 .role(Role::Status)
                 .aria_label("Calendar is read-only")
+                .flex_shrink_0()
                 .text_sm()
                 .text_color(cx.theme().semantic_tokens().colors.muted_foreground)
                 .child("Read-only");
@@ -647,14 +649,17 @@ where
     fn render_calendar_title(&self) -> impl IntoElement {
         div()
             .flex_1()
+            .min_w(rems(12.))
             .text_lg()
             .font_bold()
+            .truncate()
             .child(format!("Calendar · {}", self.profile.label()))
     }
 
     fn render_sync_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
+            .flex_shrink_0()
             .debug_selector(|| "calendar-sync".to_owned())
             .child(
                 Button::new("calendar-sync")
@@ -668,6 +673,7 @@ where
     fn render_event_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
+            .flex_shrink_0()
             .debug_selector(|| "calendar-new-event".to_owned())
             .child(
                 Button::new("calendar-new-event")
@@ -689,15 +695,20 @@ where
     fn render_week_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
+            .flex_wrap()
             .items_center()
             .justify_between()
             .gap_3()
+            .debug_selector(|| "calendar-week-navigation".to_owned())
             .child(Self::previous_week_button(cx))
             .child(
                 div()
                     .flex_1()
+                    .min_w(rems(10.))
                     .text_base()
                     .font_bold()
+                    .truncate()
+                    .debug_selector(|| "calendar-week-label".to_owned())
                     .child(week_label(self.week.start())),
             )
             .child(Self::next_week_button(cx))
@@ -846,6 +857,7 @@ where
             Button::new("calendar-event-edit")
                 .debug_selector(|| "calendar-event-edit".to_owned())
                 .ghost()
+                .flex_shrink_0()
                 .label("Edit")
                 .disabled(
                     self.status.is_sync_active()
@@ -907,12 +919,16 @@ fn week_navigation_button<S>(
 where
     S: CalendarSession + ?Sized + 'static,
 {
-    div().flex().debug_selector(move || id.to_owned()).child(
-        Button::new(id)
-            .ghost()
-            .label(label)
-            .on_click(cx.listener(move |view, _, _, cx| view.change_week(week_offset, cx))),
-    )
+    div()
+        .flex()
+        .flex_shrink_0()
+        .debug_selector(move || id.to_owned())
+        .child(
+            Button::new(id)
+                .ghost()
+                .label(label)
+                .on_click(cx.listener(move |view, _, _, cx| view.change_week(week_offset, cx))),
+        )
 }
 
 fn render_utc_fallback(colors: ColorTokens) -> impl IntoElement {
@@ -961,7 +977,7 @@ fn render_status_label(label: String, role: Role, colors: ColorTokens) -> AnyEle
 
 fn render_agenda_day_heading(date: civil::Date) -> impl IntoElement {
     div()
-        .w_32()
+        .w_full()
         .flex()
         .flex_col()
         .text_sm()
@@ -1135,7 +1151,7 @@ where
     let date_id = event_key.date.strftime("%Y-%m-%d").to_string();
     let event_id = event_key.event_id.as_str().to_owned();
     let accessible_label = calendar_event_accessible_label(&agenda_event.display, event_key.date);
-    let mut card = div()
+    let card = div()
         .id(format!("calendar-event-option-{date_id}-{event_id}"))
         .debug_selector(move || format!("calendar-event-row-{date_id}-{event_id}"))
         .w_full()
@@ -1173,10 +1189,12 @@ where
                 colors.muted
             })
         })
-        .child(render_event_heading(&agenda_event.display));
-    if let Some(location) = agenda_event.display.event.location() {
-        card = card.child(render_event_location(location, colors, selected));
-    }
+        .child(render_event_heading(
+            &agenda_event.display,
+            &agenda_event.key,
+            colors,
+            selected,
+        ));
     #[cfg(test)]
     let card = card.test_support();
     card.on_click(cx.listener(move |view, _, window, cx| {
@@ -1198,19 +1216,44 @@ fn calendar_event_accessible_label(event: &DisplayEvent<'_>, date: civil::Date) 
     }
 }
 
-fn render_event_heading(event: &DisplayEvent<'_>) -> impl IntoElement {
+fn render_event_heading(
+    event: &DisplayEvent<'_>,
+    key: &AgendaEventKey,
+    colors: ColorTokens,
+    selected: bool,
+) -> impl IntoElement {
+    let event_identity = format!(
+        "{}-{}",
+        key.date.strftime("%Y-%m-%d"),
+        key.event_id.as_str()
+    );
+    let details_selector = format!("calendar-event-details-{event_identity}");
+    let time_selector = format!("calendar-event-time-{event_identity}");
+    let mut details = div()
+        .debug_selector(move || details_selector.clone())
+        .flex_1()
+        .min_w(rems(10.))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(render_event_subject(event));
+    if let Some(location) = event.event.location() {
+        details = details.child(render_event_location(location, colors, selected));
+    }
     div()
         .flex()
+        .flex_wrap()
         .items_start()
-        .justify_between()
         .gap_3()
-        .child(render_event_time(event))
-        .child(render_event_subject(event))
+        .child(render_event_time(event, time_selector))
+        .child(details)
 }
 
-fn render_event_time(event: &DisplayEvent<'_>) -> impl IntoElement {
+fn render_event_time(event: &DisplayEvent<'_>, selector: String) -> impl IntoElement {
     div()
+        .debug_selector(move || selector.clone())
         .w_32()
+        .flex_shrink_0()
         .text_sm()
         .font_medium()
         .child(event.time_label.clone())
@@ -1218,16 +1261,13 @@ fn render_event_time(event: &DisplayEvent<'_>) -> impl IntoElement {
 
 fn render_event_subject(event: &DisplayEvent<'_>) -> impl IntoElement {
     let subject = event.event.subject().unwrap_or("(No title)");
-    div()
-        .flex_1()
-        .min_w_0()
-        .font_medium()
-        .child(subject.to_owned())
+    div().font_medium().child(subject.to_owned())
 }
 
 fn render_event_location(location: &str, colors: ColorTokens, selected: bool) -> impl IntoElement {
     div()
-        .pl_32()
+        .w_full()
+        .min_w_0()
         .text_sm()
         .text_color(if selected {
             colors.accent_foreground

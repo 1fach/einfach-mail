@@ -10,7 +10,7 @@ use einfach_mail_application::{
 use einfach_mail_domain::{CalendarOccurrenceTime, EventId};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestQueryExt as _;
-use gpui_kit::{AppContext as _, Modifiers, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
 use jiff::{Span, civil, tz::TimeZone};
 use time::{Date, Month};
 
@@ -22,6 +22,12 @@ use crate::test_support::calendar::{
     workflow_account_id,
 };
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
+
+#[derive(Clone, Copy)]
+enum ExpectedEventDetailsLayout {
+    Stacked,
+    Inline,
+}
 
 #[gpui_kit::test]
 async fn native_event_composer_renders_date_pickers_and_recovers_create_outcomes(
@@ -52,6 +58,178 @@ fn sync_activity_matches_calendar_status() {
     assert!(!CalendarStatus::Idle.is_sync_active());
     assert!(!CalendarStatus::UpToDate.is_sync_active());
     assert!(!CalendarStatus::Failed(CalendarWorkflowError::AccountMismatch).is_sync_active());
+}
+
+#[gpui_kit::test]
+async fn compact_calendar_keeps_navigation_and_agenda_inside_the_available_width(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|app| {
+        gpui_kit::init(app);
+        super::bind_calendar_event_navigation_keys(app);
+    });
+
+    for (width, expected_details_layout) in [
+        (340.0, ExpectedEventDetailsLayout::Stacked),
+        (520.0, ExpectedEventDetailsLayout::Inline),
+    ] {
+        assert_calendar_layout_at_width(cx, width, expected_details_layout).await;
+    }
+}
+
+async fn assert_calendar_layout_at_width(
+    cx: &mut TestAppContext,
+    width: f32,
+    expected_details_layout: ExpectedEventDetailsLayout,
+) {
+    let week_start = civil::Date::new(2030, 1, 7).expect("synthetic week is valid");
+    let workflow = Arc::new(CalendarWorkflow::new(
+        workflow_account_id(),
+        TestProvider::default(),
+        TestCache::default(),
+    ));
+    let mut calendar_view = None;
+    let window = cx.open_window(size(px(width), px(640.)), |window, app| {
+        let view = app.new(|app| {
+            CalendarView::new_for_week(
+                profile(),
+                workflow,
+                system_calendar_week(week_start, TimeZone::UTC),
+                app,
+            )
+        });
+        calendar_view = Some(view.clone());
+        gpui_kit::base::Root::new(view, window, app)
+    });
+    cx.run_until_parked();
+    let context = VisualTestContext::from_window(*window.deref(), cx).into_mut();
+    let view = calendar_view.expect("calendar view is created with the test window");
+
+    wait_for_ui_condition(context, |_, app| !view.read(app).status.is_sync_active()).await;
+    draw_calendar_view(context);
+    assert_compact_agenda_accessibility(context);
+    assert_calendar_controls_fit(context, width, expected_details_layout);
+    assert_compact_agenda_navigation(context, &view, width);
+}
+
+fn assert_compact_agenda_accessibility(context: &mut VisualTestContext) {
+    let listboxes = context.update(|window, _| window.find_all_by_role(gpui_kit::Role::ListBox));
+    let options =
+        context.update(|window, _| window.find_all_by_role(gpui_kit::Role::ListBoxOption));
+    assert_eq!(
+        listboxes.len(),
+        1,
+        "the agenda keeps one listbox focus stop"
+    );
+    assert_eq!(listboxes[0].label(), Some("Events this week"));
+    assert_eq!(options.len(), 2, "both cached events remain reachable");
+    let labels = options
+        .iter()
+        .filter_map(|option| option.label())
+        .collect::<Vec<_>>();
+    assert!(labels.iter().any(|label| {
+        label.contains("Synthetic offline event") && label.contains("Synthetic room")
+    }));
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.contains("Synthetic overnight event"))
+    );
+}
+
+fn assert_calendar_controls_fit(
+    context: &mut VisualTestContext,
+    width: f32,
+    expected_details_layout: ExpectedEventDetailsLayout,
+) {
+    let viewport = context.update(|window, _| window.bounds());
+    for selector in [
+        "calendar-sync",
+        "calendar-new-event",
+        "calendar-week-navigation",
+        "calendar-previous-week",
+        "calendar-week-label",
+        "calendar-next-week",
+        "calendar-event-list",
+        "calendar-event-row-2030-01-07-synthetic-ui-event",
+        "calendar-event-time-2030-01-07-synthetic-ui-event",
+        "calendar-event-details-2030-01-07-synthetic-ui-event",
+    ] {
+        let bounds = context
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is rendered at {width}px"));
+        assert!(
+            bounds.left() >= viewport.left() && bounds.right() <= viewport.right(),
+            "{selector} stays inside the {width}px calendar viewport; bounds={bounds:?}, viewport={viewport:?}"
+        );
+    }
+
+    let navigation = context
+        .debug_bounds("calendar-week-navigation")
+        .expect("week navigation is rendered");
+    let label = context
+        .debug_bounds("calendar-week-label")
+        .expect("the current week remains visible");
+    assert!(
+        label.left() >= navigation.left() && label.right() <= navigation.right(),
+        "the week label stays inside its navigation row at {width}px"
+    );
+
+    let event_row = context
+        .debug_bounds("calendar-event-row-2030-01-07-synthetic-ui-event")
+        .expect("the event row is rendered");
+    let event_time = context
+        .debug_bounds("calendar-event-time-2030-01-07-synthetic-ui-event")
+        .expect("the event time is rendered");
+    let event_details = context
+        .debug_bounds("calendar-event-details-2030-01-07-synthetic-ui-event")
+        .expect("the event subject and location are rendered");
+    assert!(event_time.left() >= event_row.left() && event_time.right() <= event_row.right());
+    assert!(event_details.left() >= event_row.left() && event_details.right() <= event_row.right());
+    match expected_details_layout {
+        ExpectedEventDetailsLayout::Stacked => assert!(
+            event_time.bottom() <= event_details.top(),
+            "event details wrap below the time at {width}px"
+        ),
+        ExpectedEventDetailsLayout::Inline => assert!(
+            event_time.right() <= event_details.left(),
+            "event details stay beside the time at {width}px"
+        ),
+    }
+}
+
+fn assert_compact_agenda_navigation<S: CalendarSession + ?Sized + 'static>(
+    context: &mut VisualTestContext,
+    view: &Entity<CalendarView<S>>,
+    width: f32,
+) {
+    context.update(gpui_kit::Window::focus_next);
+    let mut list_focused =
+        context.update(|window, app| view.read(app).event_list_focus.is_focused(window));
+    for _ in 0..24 {
+        if list_focused {
+            break;
+        }
+        context.simulate_keystrokes("tab");
+        list_focused =
+            context.update(|window, app| view.read(app).event_list_focus.is_focused(window));
+    }
+    assert!(list_focused, "Tab reaches the agenda at {width}px");
+
+    context.simulate_keystrokes("down");
+    assert_selected_event(context, view, "synthetic-ui-event");
+    context.simulate_keystrokes("end");
+    assert_selected_event(context, view, "synthetic-timed-event");
+    context.simulate_keystrokes("home");
+    assert_selected_event(context, view, "synthetic-ui-event");
+    context.simulate_keystrokes("up");
+    assert_selected_event(context, view, "synthetic-ui-event");
+
+    let first_event = context
+        .debug_bounds("calendar-event-row-2030-01-07-synthetic-ui-event")
+        .expect("the first event remains reachable");
+    context.simulate_click(first_event.center(), Modifiers::default());
+    assert!(context.update(|window, app| { view.read(app).event_list_focus.is_focused(window) }));
 }
 
 #[gpui_kit::test]

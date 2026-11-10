@@ -36,7 +36,7 @@ The #282 feature-first module refactor continues as engineering-health work. PR 
 
 Issue #288 aligns the EWS provider with ADR 0061. Account, mail, calendar, session, authentication, Autodiscover, transport, and version code now live in role modules, with tests grouped by behavior. The public export and all 494 workspace test names match the baseline. `account-router` and provider runtime remain unchanged because each has one responsibility. The full Linux local gate passes on Rust 1.95. Existing HTTP mock tests needed localhost socket access and passed in the socket-enabled run. GitHub Actions are unavailable and no Actions ran.
 
-Issue #289 moved desktop startup, workspace, mail and calendar features, Linux process locking, shared helpers, and GPUI test support under their agreed ownership paths in [PR #320](https://github.com/1fach/einfach-mail/pull/320), targeting `feat/mail-list-resizing`. All 494 test function identifiers match the baseline. The full Linux local gate passes with localhost socket access for synthetic HTTP tests. Existing headless account and workspace tests passed. No real window was launched because Xvfb and Weston are unavailable. The #290 plan now has children #321 through #324. The #321 Calendar composer split passes the full Linux local gate and preserves all 494 workspace test identifiers. The next child, #322, depends on #279. Keep #283 linked until the engineering-health stack reaches `main`.
+Issue #289 moved desktop startup, workspace, mail and calendar features, Linux process locking, shared helpers, and GPUI test support under their agreed ownership paths in [PR #320](https://github.com/1fach/einfach-mail/pull/320), targeting `feat/mail-list-resizing`. All 494 test function identifiers match the baseline. The full Linux local gate passes with localhost socket access for synthetic HTTP tests. Existing headless account and workspace tests passed. No real window was launched because Xvfb and Weston are unavailable. The #290 plan now has children #321 through #324. The #321 Calendar composer split passes the full Linux local gate and preserves all 494 workspace test identifiers. Issue #279's compact Calendar agenda implementation passes the Linux local gate and 492 workspace tests (3 ignored); its headless coverage checks 340px and 520px layouts, navigation bounds, accessible event labels, and keyboard focus behavior. No real window was launched. [PR #326](https://github.com/1fach/einfach-mail/pull/326) targets `feat/mail-list-resizing`; merging it into the stack unblocks #322. Keep #283 linked until the engineering-health stack reaches `main`.
 
 ## Active risks
 
@@ -58,8 +58,8 @@ Issue #289 moved desktop startup, workspace, mail and calendar features, Linux p
 
 ## Next actions
 
-1. Continue with #290 after merging #289 into `feat/mail-list-resizing`, and keep #283 linked until the engineering-health stack reaches `main`.
-2. Continue M10 with the next small wide-workspace issue after #291; keep the stacked draft PRs unmerged until required checks and Linux real-window review are available.
+1. Merge the reviewed #279 compact Calendar PR into `feat/mail-list-resizing`, then continue with #322 under #290 and keep #283 linked until the engineering-health stack reaches `main`.
+2. Continue M10 with the next small wide-workspace issue after #291; keep the release stack unmerged until Linux real-window review is available.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
