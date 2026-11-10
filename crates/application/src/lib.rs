@@ -3,6 +3,7 @@
 //! This crate coordinates domain behavior without depending on a UI framework, Microsoft Graph, or a database.
 
 mod account;
+#[path = "account/cache.rs"]
 mod account_cache;
 mod account_session;
 mod calendar;
