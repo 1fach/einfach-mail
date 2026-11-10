@@ -7,12 +7,14 @@ use uuid::Uuid;
 
 use crate::{
     CallbackPort,
-    credential::{RefreshTokenStore, SecretServiceRefreshTokenStore},
+    auth::{
+        credential::{RefreshTokenStore, SecretServiceRefreshTokenStore},
+        identity::{BrowserLauncher, Endpoints, SystemBrowser},
+    },
     error::GraphError,
-    graph::GraphApi,
-    graph_url::GraphAuthority,
-    identity::{BrowserLauncher, Endpoints, SystemBrowser},
+    transport::GraphAuthority,
     transport::GraphTransport,
+    wire::GraphApi,
 };
 use einfach_mail_domain::AccountId;
 

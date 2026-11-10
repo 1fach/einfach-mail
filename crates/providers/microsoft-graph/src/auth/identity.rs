@@ -32,14 +32,14 @@ const CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
     "User.Read",
     "offline_access",
 ];
-pub(super) const SEND_MAIL_AUTHORIZATION_SCOPES: [&str; 5] = [
+pub const SEND_MAIL_AUTHORIZATION_SCOPES: [&str; 5] = [
     "Calendars.Read",
     "Mail.Read",
     "Mail.Send",
     "User.Read",
     "offline_access",
 ];
-pub(super) const MAIL_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
+pub const MAIL_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
     "Calendars.Read",
     "Mail.ReadWrite",
     "User.Read",
@@ -47,14 +47,14 @@ pub(super) const MAIL_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
 ];
 
 #[derive(Clone)]
-pub(super) struct Endpoints {
-    pub(super) authorization: Url,
-    pub(super) token: Url,
-    pub(super) graph_me: Url,
+pub struct Endpoints {
+    pub authorization: Url,
+    pub token: Url,
+    pub graph_me: Url,
 }
 
 impl Endpoints {
-    pub(super) fn microsoft() -> Self {
+    pub fn microsoft() -> Self {
         Self {
             authorization: Url::parse(
                 "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize",
@@ -70,20 +70,20 @@ impl Endpoints {
     }
 }
 
-pub(super) trait BrowserLauncher: Send + Sync {
+pub trait BrowserLauncher: Send + Sync {
     fn open(&self, authorization_url: &Url) -> Result<(), AccountOperationError>;
 }
 
-pub(super) struct AuthorizationContext<'context> {
-    pub(super) client_id: Uuid,
-    pub(super) callback_port: CallbackPort,
-    pub(super) endpoints: &'context Endpoints,
-    pub(super) client: reqwest::Client,
-    pub(super) browser: &'context dyn BrowserLauncher,
+pub struct AuthorizationContext<'context> {
+    pub client_id: Uuid,
+    pub callback_port: CallbackPort,
+    pub endpoints: &'context Endpoints,
+    pub client: reqwest::Client,
+    pub browser: &'context dyn BrowserLauncher,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct SystemBrowser;
+pub struct SystemBrowser;
 
 impl BrowserLauncher for SystemBrowser {
     fn open(&self, authorization_url: &Url) -> Result<(), AccountOperationError> {
@@ -92,7 +92,7 @@ impl BrowserLauncher for SystemBrowser {
     }
 }
 
-pub(super) async fn authorize(
+pub async fn authorize(
     context: AuthorizationContext<'_>,
     request: AccountPermissionRequest,
 ) -> Result<TokenResponse, AccountOperationError> {
@@ -170,7 +170,7 @@ async fn complete_authorization(
     Ok(completed.token_response)
 }
 
-pub(super) async fn refresh(
+pub async fn refresh(
     client_id: Uuid,
     endpoints: &Endpoints,
     client: reqwest::Client,
@@ -308,7 +308,7 @@ impl AuthorizationParameters {
     }
 }
 
-pub(super) fn authorization_scopes(request: AccountPermissionRequest) -> &'static [&'static str] {
+pub fn authorization_scopes(request: AccountPermissionRequest) -> &'static [&'static str] {
     match request {
         AccountPermissionRequest::Current => &BASE_AUTHORIZATION_SCOPES,
         AccountPermissionRequest::MailReadWrite => &MAIL_READ_WRITE_AUTHORIZATION_SCOPES,
@@ -355,152 +355,4 @@ fn map_refresh_error(error: &HuskarlError) -> AccountOperationError {
 }
 
 #[cfg(test)]
-mod tests {
-    use url::Url;
-
-    use super::{
-        AuthorizationExpectation, BASE_AUTHORIZATION_SCOPES,
-        CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES, Endpoints, MAIL_READ_WRITE_AUTHORIZATION_SCOPES,
-        SEND_MAIL_AUTHORIZATION_SCOPES, authorization_scopes, validate_authorization_request,
-    };
-    use einfach_mail_application::AccountPermissionRequest;
-
-    fn expected_authorization_request<'expected>(
-        endpoint: &'expected Url,
-        scopes: &'expected [&'expected str],
-    ) -> AuthorizationExpectation<'expected> {
-        AuthorizationExpectation {
-            endpoint,
-            client_id: uuid::Uuid::from_u128(1),
-            redirect_uri: "http://127.0.0.1:1234/callback",
-            scopes,
-        }
-    }
-
-    #[test]
-    fn mail_send_is_added_only_to_explicit_same_account_permission_review() {
-        assert!(!BASE_AUTHORIZATION_SCOPES.contains(&"Mail.Send"));
-        assert!(SEND_MAIL_AUTHORIZATION_SCOPES.contains(&"Mail.Send"));
-        assert!(
-            BASE_AUTHORIZATION_SCOPES
-                .iter()
-                .all(|scope| SEND_MAIL_AUTHORIZATION_SCOPES.contains(scope))
-        );
-        assert!(!SEND_MAIL_AUTHORIZATION_SCOPES.contains(&"Mail.Send.Shared"));
-    }
-
-    #[test]
-    fn accepts_the_exact_mail_send_scope_set_only_for_send_permission_review() {
-        let endpoint = Url::parse("https://login.microsoftonline.com/organizations/authorize")
-            .expect("synthetic endpoint is valid");
-        let authorization_url = Url::parse(concat!(
-            "https://login.microsoftonline.com/organizations/authorize?",
-            "client_id=00000000-0000-0000-0000-000000000001&response_type=code&",
-            "redirect_uri=http%3A%2F%2F127.0.0.1%3A1234%2Fcallback&state=test-state&",
-            "scope=Calendars.Read%20Mail.Read%20Mail.Send%20User.Read%20offline_access&",
-            "code_challenge_method=S256&code_challenge=synthetic-challenge"
-        ))
-        .expect("synthetic authorization URL is valid");
-        assert!(
-            validate_authorization_request(
-                &authorization_url,
-                &expected_authorization_request(&endpoint, &SEND_MAIL_AUTHORIZATION_SCOPES),
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_authorization_request(
-                &authorization_url,
-                &expected_authorization_request(&endpoint, &BASE_AUTHORIZATION_SCOPES),
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn accepts_only_the_expected_oauth_authorization_request() {
-        let endpoint = Url::parse("https://login.microsoftonline.com/organizations/authorize")
-            .expect("synthetic endpoint is valid");
-        let authorization_url = Url::parse(concat!(
-            "https://login.microsoftonline.com/organizations/authorize?",
-            "client_id=00000000-0000-0000-0000-000000000001&response_type=code&",
-            "redirect_uri=http%3A%2F%2F127.0.0.1%3A1234%2Fcallback&state=test-state&",
-            "scope=Calendars.Read%20Mail.Read%20User.Read%20offline_access&code_challenge_method=S256&",
-            "code_challenge=synthetic-challenge"
-        ))
-        .expect("synthetic authorization URL is valid");
-
-        assert!(
-            validate_authorization_request(
-                &authorization_url,
-                &expected_authorization_request(&endpoint, &BASE_AUTHORIZATION_SCOPES),
-            )
-            .is_ok()
-        );
-
-        let mut duplicate_parameter_url = authorization_url.clone();
-        duplicate_parameter_url
-            .query_pairs_mut()
-            .append_pair("response_type", "token");
-        assert!(
-            validate_authorization_request(
-                &duplicate_parameter_url,
-                &expected_authorization_request(&endpoint, &BASE_AUTHORIZATION_SCOPES),
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn rejects_an_authorization_request_with_oidc_or_unapproved_scopes() {
-        let endpoints = Endpoints {
-            authorization: Url::parse("https://login.microsoftonline.com/organizations/authorize")
-                .expect("synthetic endpoint is valid"),
-            token: Url::parse("https://login.microsoftonline.com/organizations/token")
-                .expect("synthetic endpoint is valid"),
-            graph_me: Url::parse("https://graph.microsoft.com/v1.0/me")
-                .expect("synthetic endpoint is valid"),
-        };
-        let authorization_url = Url::parse(concat!(
-            "https://login.microsoftonline.com/organizations/authorize?",
-            "response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A1234%2Fcallback&",
-            "state=test-state&scope=openid%20Calendars.Read%20Mail.Read%20User.Read%20offline_access&nonce=nonce&",
-            "code_challenge_method=S256&code_challenge=synthetic-challenge"
-        ))
-        .expect("synthetic authorization URL is valid");
-
-        assert!(
-            validate_authorization_request(
-                &authorization_url,
-                &expected_authorization_request(
-                    &endpoints.authorization,
-                    &BASE_AUTHORIZATION_SCOPES,
-                ),
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn requests_mail_write_scope_only_for_the_explicit_permission_update() {
-        assert_eq!(
-            authorization_scopes(AccountPermissionRequest::Current),
-            &BASE_AUTHORIZATION_SCOPES
-        );
-        let requested = authorization_scopes(AccountPermissionRequest::MailReadWrite);
-        assert_eq!(requested, &MAIL_READ_WRITE_AUTHORIZATION_SCOPES);
-        assert!(requested.contains(&"Mail.ReadWrite"));
-        assert!(
-            !authorization_scopes(AccountPermissionRequest::Current).contains(&"Mail.ReadWrite")
-        );
-        let requested = authorization_scopes(AccountPermissionRequest::CalendarReadWrite);
-        assert_eq!(requested, &CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES);
-        assert!(requested.contains(&"Calendars.ReadWrite"));
-        assert!(!requested.contains(&"Mail.ReadWrite"));
-        assert!(!requested.contains(&"Mail.Send"));
-        assert_eq!(
-            authorization_scopes(AccountPermissionRequest::SendMail),
-            &SEND_MAIL_AUTHORIZATION_SCOPES
-        );
-    }
-}
+mod tests;

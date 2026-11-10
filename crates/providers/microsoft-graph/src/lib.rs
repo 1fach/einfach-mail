@@ -1,14 +1,14 @@
 //! Microsoft Graph account connection adapter for Linux.
 
+mod auth;
 mod config;
-mod credential;
 mod error;
-mod graph;
-mod graph_url;
-mod http_client;
-mod identity;
 mod provider;
 mod transport;
+mod wire;
+
+#[cfg(test)]
+mod test_support;
 
 pub use config::{CallbackPort, InvalidCallbackPort};
 pub use provider::MicrosoftGraphProvider;

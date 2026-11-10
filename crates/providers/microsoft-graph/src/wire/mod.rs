@@ -6,8 +6,7 @@ use url::Url;
 
 use crate::{
     error::GraphError,
-    graph_url::GraphAuthority,
-    transport::{GraphReadOperation, GraphTransportHandle},
+    transport::{GraphAuthority, GraphReadOperation, GraphTransportHandle},
 };
 use einfach_mail_domain::{AccountId, AccountProfile};
 

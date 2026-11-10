@@ -5,7 +5,7 @@ use reqwest::{Client, ClientBuilder, redirect::Policy};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub(super) fn build_client() -> Result<Client, reqwest::Error> {
+pub fn build_client() -> Result<Client, reqwest::Error> {
     client_builder().build()
 }
 
