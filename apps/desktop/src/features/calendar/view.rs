@@ -1298,4 +1298,6 @@ fn calendar_error_text(error: CalendarWorkflowError) -> &'static str {
 }
 
 #[cfg(test)]
+mod composer_tests;
+#[cfg(test)]
 mod tests;

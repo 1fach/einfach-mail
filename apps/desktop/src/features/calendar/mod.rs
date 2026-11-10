@@ -1,4 +1,6 @@
 mod composer;
+#[cfg(test)]
+mod support;
 mod time;
 mod view;
 mod week;
