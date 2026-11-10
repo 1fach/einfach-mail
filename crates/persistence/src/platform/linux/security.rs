@@ -469,7 +469,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-#[path = "security/production_tests.rs"]
+#[path = "security/tests/production.rs"]
 mod production_tests;
 
 #[cfg(test)]

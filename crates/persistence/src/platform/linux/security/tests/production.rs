@@ -24,7 +24,7 @@ const CACHE_LIFECYCLE_TEST: &str =
 const UNAVAILABLE_SERVICE_TEST: &str =
     "security::production_tests::unavailable_secret_service_preserves_production_caches";
 const LEGACY_SQLCIPHER_FIXTURE: &[u8] =
-    include_bytes!("../../tests/fixtures/legacy-sqlcipher-4.14-v1.db");
+    include_bytes!("../../../../../tests/fixtures/legacy-sqlcipher-4.14-v1.db");
 
 struct ProductionCache {
     account_id: AccountId,

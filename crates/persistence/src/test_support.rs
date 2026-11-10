@@ -5,94 +5,89 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 
 use einfach_mail_application::{
-    AccountCache, AccountCacheFactory, AccountCacheOpenError, AccountCacheRemovalError,
-    AccountSession, AccountSessionFactory, AccountSessionWorkflowFactory,
-    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError,
-    CalendarProvider, CalendarSyncStrategy, CalendarWorkflowError, MailCache, MailCacheError,
-    MailOperationError, MailProvider, MailSendOutcome, MailSendProviderError,
-    MailSendResolutionError, MailSendWorkflowError, MailSyncProgress, MailWorkflow,
-    MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
-    MessageDeltaResponse, WellKnownMailFolder,
+    AccountCacheFactory, AccountCacheOpenError, AccountCacheRemovalError, AccountSession,
+    AccountSessionFactory, AccountSessionWorkflowFactory, CalendarDeltaPageResponse,
+    CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
+    CalendarSyncStrategy, MailOperationError, MailProvider, MailSendProviderError,
+    MailSyncProgress, MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
+    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation,
     CalendarEventUpdate, CalendarEventVersion, CalendarOccurrence, CalendarOccurrencePatch,
     CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference, EditableCalendarEvent,
     EventId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailRecipient,
-    MailReplyDraft, MailReplySource, MailSendOperationId, MailSubject, MessageBody,
-    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
-    MessageId, MessageMetadataPatch, ReadState,
+    MailSubject, MessageBody, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+    MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
 };
 use tempfile::TempDir;
 use time::{Date, Month};
 
 use crate::store::SqliteAccountCache;
 
-mod account_lifecycle;
-mod mail_actions;
-mod mail_sync;
+pub(super) const DATABASE_KEY_BYTE: u8 = 0x62;
 
-const DATABASE_KEY_BYTE: u8 = 0x62;
-
-type PageQueue = VecDeque<Result<MessageDeltaResponse, MailOperationError>>;
-type CalendarPageQueue = VecDeque<CalendarDeltaResponse>;
-type ProviderGate = Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
-type ReadStateGate = Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
-type FollowUpFlagGate =
+pub(super) type PageQueue = VecDeque<Result<MessageDeltaResponse, MailOperationError>>;
+pub(super) type CalendarPageQueue = VecDeque<CalendarDeltaResponse>;
+pub(super) type ProviderGate =
+    Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
+pub(super) type ReadStateGate =
+    Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
+pub(super) type FollowUpFlagGate =
     Arc<Mutex<Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>>>;
 
 #[derive(Clone, Copy)]
-enum FollowUpFlagResponse {
+pub(super) enum FollowUpFlagResponse {
     Confirm,
     Deny,
     Unknown,
 }
 
 #[derive(Clone)]
-struct FixtureProvider {
-    account_id: AccountId,
-    folders: Vec<MailFolder>,
-    folder_list_gate: Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>,
-    folder_snapshots: Arc<Mutex<VecDeque<Vec<MailFolder>>>>,
-    folder_list_calls: Arc<AtomicUsize>,
-    pages: Arc<Mutex<PageQueue>>,
-    requests: Arc<Mutex<Vec<MessageDeltaRequest>>>,
-    body_result: Result<MessageBody, MailOperationError>,
-    body_fetches: Arc<AtomicUsize>,
-    read_state_updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
-    read_state_gate: ReadStateGate,
-    send_calls: Arc<AtomicUsize>,
-    send_result: Result<(), MailSendProviderError>,
-    body_gate: Option<BodyFetchGate>,
-    delta_gate: Option<DeltaPageGate>,
-    follow_up_flag_updates: Arc<Mutex<Vec<(MessageId, FollowUpFlagStatus)>>>,
-    follow_up_flag_gate: FollowUpFlagGate,
-    follow_up_flag_response: FollowUpFlagResponse,
-    message_moves: Arc<Mutex<Vec<(FolderReference, MessageId, FolderReference)>>>,
-    move_result: Arc<Mutex<Result<(), MailOperationError>>>,
-    move_gate: ProviderGate,
-    archive_folder_id: FolderId,
-    deleted_items_folder_id: FolderId,
-    well_known_folder_calls: Arc<AtomicUsize>,
-    well_known_folder_gate: ProviderGate,
-    send_gate: ProviderGate,
-    calendar_gate: Option<CalendarSyncGate>,
-    calendar_pages: Arc<Mutex<CalendarPageQueue>>,
-    calendar_delete_result: Result<(), CalendarOperationError>,
-    calendar_delete_calls: Arc<AtomicUsize>,
+pub(super) struct FixtureProvider {
+    pub(super) account_id: AccountId,
+    pub(super) folders: Vec<MailFolder>,
+    pub(super) folder_list_gate: Option<(smol::channel::Sender<()>, smol::channel::Receiver<()>)>,
+    pub(super) folder_snapshots: Arc<Mutex<VecDeque<Vec<MailFolder>>>>,
+    pub(super) folder_list_calls: Arc<AtomicUsize>,
+    pub(super) pages: Arc<Mutex<PageQueue>>,
+    pub(super) requests: Arc<Mutex<Vec<MessageDeltaRequest>>>,
+    pub(super) body_result: Result<MessageBody, MailOperationError>,
+    pub(super) body_fetches: Arc<AtomicUsize>,
+    pub(super) read_state_updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
+    pub(super) read_state_gate: ReadStateGate,
+    pub(super) send_calls: Arc<AtomicUsize>,
+    pub(super) send_result: Result<(), MailSendProviderError>,
+    pub(super) body_gate: Option<BodyFetchGate>,
+    pub(super) delta_gate: Option<DeltaPageGate>,
+    pub(super) follow_up_flag_updates: Arc<Mutex<Vec<(MessageId, FollowUpFlagStatus)>>>,
+    pub(super) follow_up_flag_gate: FollowUpFlagGate,
+    pub(super) follow_up_flag_response: FollowUpFlagResponse,
+    pub(super) message_moves: Arc<Mutex<Vec<(FolderReference, MessageId, FolderReference)>>>,
+    pub(super) move_result: Arc<Mutex<Result<(), MailOperationError>>>,
+    pub(super) move_gate: ProviderGate,
+    pub(super) archive_folder_id: FolderId,
+    pub(super) deleted_items_folder_id: FolderId,
+    pub(super) well_known_folder_calls: Arc<AtomicUsize>,
+    pub(super) well_known_folder_gate: ProviderGate,
+    pub(super) send_gate: ProviderGate,
+    pub(super) calendar_gate: Option<CalendarSyncGate>,
+    pub(super) calendar_pages: Arc<Mutex<CalendarPageQueue>>,
+    pub(super) calendar_delete_result: Result<(), CalendarOperationError>,
+    pub(super) calendar_delete_calls: Arc<AtomicUsize>,
 }
 
-struct FixtureCacheFactory {
-    database_directory: std::path::PathBuf,
+pub(super) struct FixtureCacheFactory {
+    pub(super) database_directory: std::path::PathBuf,
 }
 
-struct RetainedCacheFactory {
-    account_id: AccountId,
-    cache: SqliteAccountCache,
+pub(super) struct RetainedCacheFactory {
+    pub(super) account_id: AccountId,
+    pub(super) cache: SqliteAccountCache,
 }
 
 impl AccountCacheFactory for FixtureCacheFactory {
@@ -146,27 +141,27 @@ impl AccountCacheFactory for RetainedCacheFactory {
 }
 
 #[derive(Clone)]
-struct BodyFetchGate {
-    started: smol::channel::Sender<()>,
-    release: smol::channel::Receiver<()>,
+pub(super) struct BodyFetchGate {
+    pub(super) started: smol::channel::Sender<()>,
+    pub(super) release: smol::channel::Receiver<()>,
 }
 
 #[derive(Clone)]
-struct DeltaPageGate {
-    request_count: Arc<AtomicUsize>,
-    request_index_to_block: usize,
-    started: smol::channel::Sender<()>,
-    release: smol::channel::Receiver<()>,
+pub(super) struct DeltaPageGate {
+    pub(super) request_count: Arc<AtomicUsize>,
+    pub(super) request_index_to_block: usize,
+    pub(super) started: smol::channel::Sender<()>,
+    pub(super) release: smol::channel::Receiver<()>,
 }
 
 #[derive(Clone)]
-struct CalendarSyncGate {
-    started: smol::channel::Sender<()>,
-    release: smol::channel::Receiver<()>,
+pub(super) struct CalendarSyncGate {
+    pub(super) started: smol::channel::Sender<()>,
+    pub(super) release: smol::channel::Receiver<()>,
 }
 
 impl FixtureProvider {
-    fn new(
+    pub(super) fn new(
         account_id: AccountId,
         folders: Vec<MailFolder>,
         pages: impl IntoIterator<Item = Result<MessageDeltaResponse, MailOperationError>>,
@@ -208,7 +203,7 @@ impl FixtureProvider {
         }
     }
 
-    fn with_calendar_pages(
+    pub(super) fn with_calendar_pages(
         mut self,
         pages: impl IntoIterator<Item = CalendarDeltaResponse>,
     ) -> Self {
@@ -216,12 +211,17 @@ impl FixtureProvider {
         self
     }
 
-    fn with_calendar_delete_result(mut self, result: Result<(), CalendarOperationError>) -> Self {
+    pub(super) fn with_calendar_delete_result(
+        mut self,
+        result: Result<(), CalendarOperationError>,
+    ) -> Self {
         self.calendar_delete_result = result;
         self
     }
 
-    fn hold_next_submission(&self) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+    pub(super) fn hold_next_submission(
+        &self,
+    ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
         let (started_tx, started_rx) = smol::channel::bounded(1);
         let (release_tx, release_rx) = smol::channel::bounded(1);
         *self
@@ -231,7 +231,9 @@ impl FixtureProvider {
         (started_rx, release_tx)
     }
 
-    fn hold_next_message_move(&self) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+    pub(super) fn hold_next_message_move(
+        &self,
+    ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
         let (started_tx, started_rx) = smol::channel::bounded(1);
         let (release_tx, release_rx) = smol::channel::bounded(1);
         *self
@@ -241,7 +243,7 @@ impl FixtureProvider {
         (started_rx, release_tx)
     }
 
-    fn hold_next_well_known_folder_lookup(
+    pub(super) fn hold_next_well_known_folder_lookup(
         &self,
     ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
         let (started_tx, started_rx) = smol::channel::bounded(1);
@@ -254,7 +256,9 @@ impl FixtureProvider {
         (started_rx, release_tx)
     }
 
-    fn hold_next_read_state(&self) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+    pub(super) fn hold_next_read_state(
+        &self,
+    ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
         let (started_tx, started_rx) = smol::channel::bounded(1);
         let (release_tx, release_rx) = smol::channel::bounded(1);
         *self
@@ -264,7 +268,9 @@ impl FixtureProvider {
         (started_rx, release_tx)
     }
 
-    fn hold_next_follow_up_flag(&self) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
+    pub(super) fn hold_next_follow_up_flag(
+        &self,
+    ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
         let (started_tx, started_rx) = smol::channel::bounded(1);
         let (release_tx, release_rx) = smol::channel::bounded(1);
         *self
@@ -274,7 +280,7 @@ impl FixtureProvider {
         (started_rx, release_tx)
     }
 
-    fn with_send_result(mut self, result: Result<(), MailSendProviderError>) -> Self {
+    pub(super) fn with_send_result(mut self, result: Result<(), MailSendProviderError>) -> Self {
         self.send_result = result;
         self
     }
@@ -683,11 +689,11 @@ impl CalendarProvider for FixtureProvider {
     }
 }
 
-fn account_id() -> AccountId {
+pub(super) fn account_id() -> AccountId {
     AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid")
 }
 
-fn folder(account_id: &AccountId) -> MailFolder {
+pub(super) fn folder(account_id: &AccountId) -> MailFolder {
     let reference = FolderReference::new(
         account_id.clone(),
         FolderId::try_from("folder-inbox".to_owned()).expect("synthetic folder ID is valid"),
@@ -696,7 +702,7 @@ fn folder(account_id: &AccountId) -> MailFolder {
         .expect("synthetic folder is valid")
 }
 
-fn archive_folder(account_id: &AccountId) -> MailFolder {
+pub(super) fn archive_folder(account_id: &AccountId) -> MailFolder {
     let reference = FolderReference::new(
         account_id.clone(),
         FolderId::try_from("folder-archive".to_owned()).expect("synthetic folder ID is valid"),
@@ -705,7 +711,7 @@ fn archive_folder(account_id: &AccountId) -> MailFolder {
         .expect("synthetic archive folder is valid")
 }
 
-fn deleted_items_folder(account_id: &AccountId) -> MailFolder {
+pub(super) fn deleted_items_folder(account_id: &AccountId) -> MailFolder {
     let reference = FolderReference::new(
         account_id.clone(),
         FolderId::try_from("deleted-items".to_owned()).expect("synthetic folder ID is valid"),
@@ -714,11 +720,11 @@ fn deleted_items_folder(account_id: &AccountId) -> MailFolder {
         .expect("synthetic Deleted Items folder is valid")
 }
 
-fn message_id() -> MessageId {
+pub(super) fn message_id() -> MessageId {
     MessageId::try_from("message-1".to_owned()).expect("synthetic message ID is valid")
 }
 
-fn draft(subject: &str, body: &str) -> MailDraft {
+pub(super) fn draft(subject: &str, body: &str) -> MailDraft {
     MailDraft::new(
         "ada@example.test"
             .parse::<MailRecipient>()
@@ -730,7 +736,7 @@ fn draft(subject: &str, body: &str) -> MailDraft {
     )
 }
 
-fn calendar_view(account: &AccountId) -> CalendarViewReference {
+pub(super) fn calendar_view(account: &AccountId) -> CalendarViewReference {
     let start_date = Date::from_calendar_date(2030, Month::January, 7)
         .expect("synthetic calendar view start is valid");
     let end_date = start_date
@@ -746,7 +752,7 @@ fn calendar_view(account: &AccountId) -> CalendarViewReference {
     CalendarViewReference::new(account.clone(), range)
 }
 
-fn completed_calendar_page(cursor: &str) -> CalendarDeltaResponse {
+pub(super) fn completed_calendar_page(cursor: &str) -> CalendarDeltaResponse {
     CalendarDeltaResponse::Page(CalendarDeltaPageResponse::new(
         CalendarDeltaPage::new(
             Vec::new(),
@@ -758,7 +764,7 @@ fn completed_calendar_page(cursor: &str) -> CalendarDeltaResponse {
     ))
 }
 
-fn editable_calendar_event(view: CalendarViewReference) -> EditableCalendarEvent {
+pub(super) fn editable_calendar_event(view: CalendarViewReference) -> EditableCalendarEvent {
     let mut patch = CalendarOccurrencePatch::new();
     patch.set_subject(Some("Synthetic event".to_owned()));
     let start = view.range().start() + time::Duration::hours(1);
@@ -779,7 +785,7 @@ fn editable_calendar_event(view: CalendarViewReference) -> EditableCalendarEvent
         .expect("synthetic timed calendar event is editable")
 }
 
-fn first_page(cutoff: SystemTime, next_link: MessageDeltaLink) -> MessageDeltaPage {
+pub(super) fn first_page(cutoff: SystemTime, next_link: MessageDeltaLink) -> MessageDeltaPage {
     let mut recent = MessageMetadataPatch::new();
     recent.set_subject(Some("Synthetic subject".to_owned()));
     recent.set_from(None);
@@ -808,7 +814,7 @@ fn first_page(cutoff: SystemTime, next_link: MessageDeltaLink) -> MessageDeltaPa
     )
 }
 
-fn final_page(delta_link: MessageDeltaLink) -> MessageDeltaPage {
+pub(super) fn final_page(delta_link: MessageDeltaLink) -> MessageDeltaPage {
     let mut patch = MessageMetadataPatch::new();
     patch.set_read_state(ReadState::Read);
     MessageDeltaPage::new(
@@ -820,7 +826,10 @@ fn final_page(delta_link: MessageDeltaLink) -> MessageDeltaPage {
     )
 }
 
-fn completed_message_delta_page(scope: &str, changes: Vec<MessageDeltaChange>) -> MessageDeltaPage {
+pub(super) fn completed_message_delta_page(
+    scope: &str,
+    changes: Vec<MessageDeltaChange>,
+) -> MessageDeltaPage {
     MessageDeltaPage::new(
         changes,
         MessageDeltaProgress::Complete(MessageDeltaLink::from_opaque(format!(
@@ -829,11 +838,11 @@ fn completed_message_delta_page(scope: &str, changes: Vec<MessageDeltaChange>) -
     )
 }
 
-fn page_response(page: MessageDeltaPage) -> MessageDeltaResponse {
+pub(super) fn page_response(page: MessageDeltaPage) -> MessageDeltaResponse {
     MessageDeltaResponse::Page(MessageDeltaPageResponse::new(page, 1_024))
 }
 
-fn provider_with_cached_message(
+pub(super) fn provider_with_cached_message(
     account: AccountId,
     folders: Vec<MailFolder>,
     started_at: SystemTime,
@@ -853,9 +862,9 @@ fn provider_with_cached_message(
     FixtureProvider::new(account, folders, [Ok(page_response(page))], body)
 }
 
-fn ignore_sync_progress(_: MailSyncProgress) {}
+pub(super) fn ignore_sync_progress(_: MailSyncProgress) {}
 
-fn assert_removal_completed(
+pub(super) fn assert_removal_completed(
     result: Result<(), AccountCacheRemovalError>,
     database_path: &std::path::Path,
 ) {
@@ -863,7 +872,7 @@ fn assert_removal_completed(
     assert!(!database_path.exists());
 }
 
-fn complete_patch(subject: String, received_at: SystemTime) -> MessageMetadataPatch {
+pub(super) fn complete_patch(subject: String, received_at: SystemTime) -> MessageMetadataPatch {
     let mut patch = MessageMetadataPatch::new();
     patch.set_subject(Some(subject));
     patch.set_from(None);
@@ -873,7 +882,7 @@ fn complete_patch(subject: String, received_at: SystemTime) -> MessageMetadataPa
     patch
 }
 
-async fn open_cache(directory: &TempDir, account_id: AccountId) -> SqliteAccountCache {
+pub(super) async fn open_cache(directory: &TempDir, account_id: AccountId) -> SqliteAccountCache {
     SqliteAccountCache::open_with_test_key(
         directory.path().join("mail.sqlite3"),
         account_id,
@@ -882,7 +891,7 @@ async fn open_cache(directory: &TempDir, account_id: AccountId) -> SqliteAccount
     .await
 }
 
-async fn open_session_over_retained_cache(
+pub(super) async fn open_session_over_retained_cache(
     provider: FixtureProvider,
     account_id: &AccountId,
     cache: &SqliteAccountCache,
