@@ -8,7 +8,9 @@ M9 EWS message read-state support is in draft [PR #276](https://github.com/1fach
 
 M10's native mail and calendar workspace is planned under [GitHub milestone 9](https://github.com/1fach/einfach-mail/milestone/9). [ADR 0059](../decisions/0059-native-mail-and-calendar-workspace.md) records the Wino-informed layout, Linux system decorations, and selective translucency limits; [ADR 0060](../decisions/0060-one-active-account-first-release.md) sets one active account at a time. The issue plan separates the persistent shell (#269), wide Mail and Calendar layouts (#270 and #271), their compact layouts (#278 and #279), connected-account details (#272), account setup and permission review (#280), Settings (#273), and the optional translucency experiment (#274). Issue #268's decision is in draft PR #277. The #269 shell is in draft [PR #281](https://github.com/1fach/einfach-mail/pull/281), stacked on #277; its focused Linux compile, 103 desktop tests, Clippy, rustdoc, formatting, and whitespace checks passed locally. Issue [#291](https://github.com/1fach/einfach-mail/issues/291) combines the destinations, active account identity, and mail folders in one contextual pane. Its implementation is on `feat/mail-contextual-navigation`, stacked on PR #281, and the full Linux local gate passes. GitHub Actions are unavailable and real-window review has not been done, so keep the draft unmerged.
 
-On 2026-11-10, the resizing implementation for [issue #292](https://github.com/1fach/einfach-mail/issues/292) passed all checks from `bash scripts/check-linux-local.sh` on `feat/mail-list-resizing`, stacked on `feat/mail-contextual-navigation`. The workspace test command needed local-socket permission for the existing EWS HTTP mocks. GitHub Actions are unavailable, and no real-window review has been done, so keep the stacked M10 PRs in draft. The next engineering goal is [issue #283](https://github.com/1fach/einfach-mail/issues/283), the first subissue of [issue #282](https://github.com/1fach/einfach-mail/issues/282). Follow #282's dependency order and tackle each issue separately. Keep the supplied screenshots as UI references for later desktop work, continue Linux-first implementation, and leave translucency in the separate #274 experiment.
+On 2026-11-10, the resizing implementation for [issue #292](https://github.com/1fach/einfach-mail/issues/292) passed all checks from `bash scripts/check-linux-local.sh` on `feat/mail-list-resizing`, stacked on `feat/mail-contextual-navigation`. The workspace test command needed local-socket permission for the existing EWS HTTP mocks. GitHub Actions are unavailable, and no real-window review has been done, so keep the stacked M10 PRs in draft.
+
+Engineering-health work is proceeding through [issue #283](https://github.com/1fach/einfach-mail/issues/283), the first subissue of [issue #282](https://github.com/1fach/einfach-mail/issues/282). Its docs-only plan is in [PR #301](https://github.com/1fach/einfach-mail/pull/301), stacked on `feat/mail-list-resizing`, and its reviewed path map is posted on #282. The full Linux local gate passed on the PR head while GitHub Actions remain disabled. The ADR and map will move with the M10 stack; #284 should use the updated branch, and #283 should remain linked until that stack reaches `main`. Keep the #282 subissues in dependency order. Keep the supplied screenshots as UI references for later desktop work, continue Linux-first implementation, and leave translucency in the separate #274 experiment.
 
 M7 Exchange Server EWS support provides a Linux read-only mail baseline and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. Linux Autodiscover merged into `main` in [PR #261](https://github.com/1fach/einfach-mail/pull/261) and remains tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258) for live verification.
 
@@ -32,6 +34,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 
 ## Active risks
 
+- GitHub Actions compute is unavailable. PR #301 has no CI runs; its full Linux local gate passed on the exact PR head.
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep live sign-in, initial mail sync, read-state, flag, send, reply, move, and calendar verification open under their existing issues.
 - No Exchange Server test host or sanitized EWS response recording is available. Synthetic EWS tests verify the request path and response mapping, but cannot prove server compatibility. Keep issue #257 open for live verification; issue #267 remains open for code review and merge.
 - No Exchange Server test host is available to verify Autodiscover's published candidate sequence, SRV behavior, redirects, and server response variants end to end. Keep issue #258 open for that live verification.
@@ -49,14 +52,15 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 
 ## Next actions
 
-1. Continue M10 with the next small wide-workspace issue after #291; keep the stacked draft PRs unmerged until required checks and Linux real-window review are available.
-2. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
-3. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
-4. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
-5. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
-6. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
-7. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
-8. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
+1. Continue #282 with #284 from the updated M10 resize branch; keep #283 linked until that stack reaches `main`, then follow the remaining subissues in dependency order.
+2. Continue M10 with the next small wide-workspace issue after #291; keep the stacked draft PRs unmerged until required checks and Linux real-window review are available.
+3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
+4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
+5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
+6. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
+7. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
+8. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
+9. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
 
 ## Update rule
 
