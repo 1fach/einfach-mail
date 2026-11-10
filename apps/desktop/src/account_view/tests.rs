@@ -1,4 +1,5 @@
 use std::{
+    fs,
     future::{Future, ready},
     sync::{
         Arc, Mutex,
@@ -10,13 +11,19 @@ use std::{
 
 use tokio::sync::oneshot;
 
+use gpui_kit::component::{Theme, ThemeMode};
+use gpui_kit::test::TestQueryExt;
 use gpui_kit::{
-    AppContext as _, Modifiers, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point,
-    px, size,
+    AppContext as _, Modifiers, Role, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext,
+    point, px, size,
 };
+use tempfile::tempdir;
 
 use super::WorkspaceSection;
 use super::{AccountContent, AccountServices, AccountStatus, AccountView, SetupIssue};
+use crate::appearance_settings::{
+    AppearancePreference, AppearanceSettingsNotice, AppearanceSettingsStore,
+};
 use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
@@ -682,6 +689,168 @@ fn workspace_navigation_stays_visible_and_supports_keyboard_switching(cx: &mut T
     assert_disconnected_workspace_routes(&view, context);
     connect_synthetic_workspace_account(&view, context);
     assert_keyboard_navigation_selects_calendar(&view, context);
+}
+
+#[gpui_kit::test]
+fn settings_navigation_applies_and_persists_appearance_preferences(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let directory = tempdir().expect("temporary settings directory is created");
+    let settings_path = directory.path().join("preferences.json");
+    let store = AppearanceSettingsStore::at_path(settings_path.clone());
+    let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
+    let factory = unused_account_session_factory();
+    let (view, context) = cx.add_window_view(move |window, cx| {
+        AccountView::new_with_appearance_store(
+            Ok(AccountServices::new(workflow, factory)),
+            Ok(store),
+            window,
+            cx,
+        )
+    });
+
+    draw_account_view(context);
+    click(context, "nav-settings");
+    assert!(
+        context.cx.update(|cx| {
+            view.read(cx).content.selected_section() == WorkspaceSection::Settings
+        })
+    );
+    assert_appearance_radio_is_selected(context, "System");
+    assert!(!settings_path.exists());
+
+    for (label, preference, mode) in [
+        ("Dark", AppearancePreference::Dark, ThemeMode::Dark),
+        ("Light", AppearancePreference::Light, ThemeMode::Light),
+    ] {
+        click_radio(context, label);
+        assert_appearance_radio_is_selected(context, label);
+        assert_eq!(
+            context.cx.update(|cx| Theme::global(cx).mode),
+            mode,
+            "the selected appearance updates the active GPUI theme"
+        );
+        assert_eq!(
+            AppearanceSettingsStore::at_path(settings_path.clone())
+                .load()
+                .expect("saved appearance can be reloaded"),
+            preference
+        );
+    }
+
+    click_radio(context, "System");
+    assert_appearance_radio_is_selected(context, "System");
+    assert_eq!(
+        context.cx.update(|cx| Theme::global(cx).mode),
+        context
+            .update(|window, _| { AppearancePreference::System.theme_mode(window.appearance()) }),
+        "System follows the current window appearance"
+    );
+    assert_eq!(
+        AppearanceSettingsStore::at_path(settings_path)
+            .load()
+            .expect("System preference can be reloaded"),
+        AppearancePreference::System
+    );
+}
+
+#[gpui_kit::test]
+fn saved_appearance_is_applied_when_the_window_opens(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let directory = tempdir().expect("temporary settings directory is created");
+    let settings_path = directory.path().join("preferences.json");
+    AppearanceSettingsStore::at_path(settings_path.clone())
+        .save(AppearancePreference::Dark)
+        .expect("saved appearance fixture is written");
+    let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
+    let factory = unused_account_session_factory();
+    let (view, context) = cx.add_window_view(move |window, cx| {
+        AccountView::new_with_appearance_store(
+            Ok(AccountServices::new(workflow, factory)),
+            Ok(AppearanceSettingsStore::at_path(settings_path)),
+            window,
+            cx,
+        )
+    });
+
+    draw_account_view(context);
+
+    assert_eq!(
+        context.cx.update(|cx| Theme::global(cx).mode),
+        ThemeMode::Dark
+    );
+    assert_eq!(
+        context.cx.update(|cx| view.read(cx).appearance_preference),
+        AppearancePreference::Dark
+    );
+    click(context, "nav-settings");
+    assert_appearance_radio_is_selected(context, "Dark");
+}
+
+#[gpui_kit::test]
+fn invalid_appearance_file_keeps_its_contents_and_falls_back_to_system(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let directory = tempdir().expect("temporary settings directory is created");
+    let settings_path = directory.path().join("preferences.json");
+    fs::write(&settings_path, b"invalid settings").expect("invalid settings fixture is written");
+    let store_path = settings_path.clone();
+    let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
+    let factory = unused_account_session_factory();
+    let (view, context) = cx.add_window_view(move |window, cx| {
+        AccountView::new_with_appearance_store(
+            Ok(AccountServices::new(workflow, factory)),
+            Ok(AppearanceSettingsStore::at_path(store_path)),
+            window,
+            cx,
+        )
+    });
+
+    draw_account_view(context);
+
+    assert_eq!(
+        context.cx.update(|cx| view.read(cx).appearance_preference),
+        AppearancePreference::System
+    );
+    assert_eq!(
+        context
+            .cx
+            .update(|cx| view.read(cx).appearance_settings_notice),
+        Some(AppearanceSettingsNotice::LoadFailed)
+    );
+    assert_eq!(
+        fs::read(settings_path).expect("invalid settings remain available for recovery"),
+        b"invalid settings"
+    );
+    click(context, "nav-settings");
+    assert_appearance_radio_is_selected(context, "System");
+}
+
+fn click_radio(context: &mut VisualTestContext, label: &str) {
+    let bounds = context.update(|window, _| window.find_by_label(label).bounds());
+    context.simulate_click(bounds.center(), Modifiers::default());
+    context.run_until_parked();
+    draw_account_view(context);
+}
+
+fn assert_appearance_radio_is_selected(context: &mut VisualTestContext, label: &str) {
+    let radios = context.update(|window, _| window.find_all_by_role(Role::RadioButton));
+    assert_eq!(
+        radios.len(),
+        3,
+        "Settings exposes only the three supported choices"
+    );
+    let selected: Vec<_> = radios
+        .iter()
+        .filter(|radio| radio.checked() == Some(true))
+        .collect();
+    assert_eq!(selected.len(), 1, "one appearance choice is selected");
+    assert_eq!(selected[0].label(), Some(label));
+    assert_eq!(
+        radios
+            .iter()
+            .filter_map(|radio| radio.label())
+            .collect::<Vec<_>>(),
+        ["System", "Light", "Dark"]
+    );
 }
 
 #[gpui_kit::test]

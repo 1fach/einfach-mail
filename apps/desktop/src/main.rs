@@ -16,6 +16,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 mod account_view;
+mod appearance_settings;
 mod calendar_time;
 mod calendar_view;
 mod calendar_week;
@@ -24,6 +25,7 @@ mod list_navigation;
 mod mail_composer;
 mod mail_view;
 mod message_body;
+mod settings_view;
 mod single_instance;
 mod sync_age;
 #[cfg(test)]
@@ -121,8 +123,8 @@ fn run_application() -> Result<(), std::io::Error> {
         calendar_view::bind_calendar_event_navigation_keys(cx);
         let account_services = configured_account_services();
 
-        let window_open_attempt = open_window(WindowOptions::default(), cx, |_, cx| {
-            cx.new(|cx| AccountView::new(account_services, cx))
+        let window_open_attempt = open_window(WindowOptions::default(), cx, |window, cx| {
+            cx.new(|cx| AccountView::new_for_window(account_services, window, cx))
         })
         .map(|_| ())
         .map_err(|error| {

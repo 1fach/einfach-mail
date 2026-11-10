@@ -14,7 +14,7 @@ The design should borrow the Windows mail workspace's clear hierarchy and densit
 
 ## Decision
 
-- Keep one shared desktop window with persistent destinations for Mail, Calendar, Accounts, and Settings. Show a destination only when it has working behavior. Add Settings to the visible navigation with the first persisted preference in issue #273. Use the system title bar on Linux.
+- Keep one shared desktop window with persistent destinations for Mail, Calendar, Accounts, and Settings. Show a destination only when it has working behavior. Add Settings to the visible navigation with the first persisted preference in issue #273. Store app-wide appearance in the Linux XDG config directory, separate from account credentials and the encrypted mail cache; System follows the active window's appearance. Use the system title bar on Linux.
 - Use a Wino-inspired mail workspace with one contextual navigation pane, a message list, and a reading pane. Put the current account identity and its folders in the contextual pane. Keep the app destinations in that pane rather than adding a fourth permanent column.
 - Use GPUI Kit semantic theme tokens in light and dark appearances. Keep hierarchy clear through spacing and grouping before color. Show navigation selection with the selected item's own surface and foreground, not a one-sided accent stripe.
 - Give the main regions minimum, preferred, and maximum widths. At narrow widths, collapse the contextual pane or reading pane while preserving a clear keyboard path back to it. Keep selection and message identity stable when panes change.
