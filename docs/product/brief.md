@@ -31,12 +31,15 @@ Develop and validate the first workflows on Linux for people who use Microsoft 3
 
 ## First-release scope
 
-The initial release plan covers one signed-in account, inbox and folder browsing, message reading, basic message actions, calendar viewing, and supported appointment editing and deletion. Calendar writes are limited to explicit timed, standalone appointments in the primary calendar with recoverable confirmation and sync states. On-premises Exchange accounts use EWS for mail and primary-calendar views. M9 adds read and unread state changes only when the server can suppress read receipts. EWS accounts do not expose other mail writes or calendar changes. Account setup can discover an EWS endpoint from the mailbox address or accept a manually entered HTTPS endpoint; external Autodiscover destinations require confirmation. Build and verify the first workflows on Linux. Add Windows desktop integration and macOS support in later milestones. The roadmap sequences these workflows. It does not promise all of them in the first runnable prototype.
+The first release supports one active signed-in account at a time. A user may connect a different identity after signing out through the existing account and cache removal flow; simultaneous accounts and in-app account switching are deferred. The Accounts destination shows the active identity without a selector. See [ADR 0060](../decisions/0060-one-active-account-first-release.md) and [issue #268](https://github.com/1fach/einfach-mail/issues/268).
+
+The initial release plan also covers inbox and folder browsing, message reading, basic message actions, calendar viewing, and supported appointment editing and deletion. Calendar writes are limited to explicit timed, standalone appointments in the primary calendar with recoverable confirmation and sync states. On-premises Exchange accounts use EWS for mail and primary-calendar views. M9 adds read and unread state changes only when the server can suppress read receipts. EWS accounts do not expose other mail writes or calendar changes. Account setup can discover an EWS endpoint from the mailbox address or accept a manually entered HTTPS endpoint; external Autodiscover destinations require confirmation. Build and verify the first workflows on Linux. Add Windows desktop integration and macOS support in later milestones. The roadmap sequences these workflows. It does not promise all of them in the first runnable prototype.
 
 ## Out of scope until a decision changes the brief
 
 - EWS mail writes other than the read-state action planned under M9, and EWS calendar changes.
 - Full Outlook or Thunderbird feature parity.
+- Multiple simultaneously connected accounts and in-app account switching; see [ADR 0060](../decisions/0060-one-active-account-first-release.md).
 - Mobile clients, team administration, and server-side multi-user access.
 - Add-ins, arbitrary plug-ins, and extensions that execute inside email content.
 - Application permissions that let the app access mailboxes without the signed-in user.
@@ -45,6 +48,5 @@ The initial release plan covers one signed-in account, inbox and folder browsing
 
 - Should the first account type include personal Outlook.com accounts as well as work or school accounts?
 - Which Windows-specific features matter most: notifications, taskbar unread count, startup behavior, or calendar reminders?
-- Should the first release support multiple accounts?
 - Which offline actions may queue, and how should the UI explain conflicts?
 - What license should the project use?

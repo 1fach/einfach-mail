@@ -42,7 +42,7 @@ ADRs [0015](../decisions/0015-idempotent-message-read-state-update.md), [0017](.
 | `crates/providers/exchange-ews/` | Unauthenticated HTTPS Autodiscover, explicit endpoint validation, EWS mail and calendar requests and mapping, NTLMv2 over verified HTTPS, channel binding, endpoint/mailbox settings, and the Linux Secret Service password | Graph requests, UI gating, persistence rules |
 | `crates/persistence/` | Linux XDG paths, Secret Service key references, SQLCipher schema and migrations, encrypted records, atomic mail/calendar sync and event/message updates, durable send/reply recovery markers, and cache removal | Graph or GPUI types |
 
-The dependency direction is desktop UI → application → domain, with provider and persistence adapters implementing application-owned ports. The account router selects either Graph or EWS for the single saved account. Views never call a provider or access the database directly.
+The dependency direction is desktop UI → application → domain, with provider and persistence adapters implementing application-owned ports. The account router selects either Graph or EWS for one active account. `AccountWorkflow` rejects a second connection until sign-out completes; the first release does not expose multiple accounts or account switching. See [ADR 0060](../decisions/0060-one-active-account-first-release.md). Views never call a provider or access the database directly.
 
 Mail and calendar views use GPUI Kit rem units for ordinary layout dimensions, so configured UI scaling applies consistently. The message list derives its row-height estimates from `Window::rem_size()` and rebuilds them when the scale or message count changes.
 

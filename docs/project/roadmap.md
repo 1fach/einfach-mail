@@ -34,6 +34,10 @@ Add a Linux read-only primary-calendar agenda for on-premises Exchange accounts.
 
 Allow an EWS account to mark a message read or unread only when the authenticated server reports a product version that supports receipt suppression. The Linux implementation models mail actions individually, keeps sends, replies, flags, moves, deletes, and calendar writes unavailable for EWS, and does not retry uncertain outcomes. Synthetic SOAP and HTTPS transport tests verify request construction, response mapping, and recovery signaling. Live compatibility remains unverified under issue #257. See [ADR 0058](../decisions/0058-per-operation-ews-mail-capabilities.md) and [issue #267](https://github.com/1fach/einfach-mail/issues/267).
 
+## M10: Native mail and calendar workspace
+
+Bring account setup, Mail, the weekly Calendar agenda, and working preferences into one adaptive native GPUI workspace. Keep the mail list and reading pane together at desktop widths, preserve keyboard navigation and session ownership, and provide a useful narrow-window layout. The first release supports one active account at a time, with the active identity shown without a switcher. Use Linux system decorations and limit optional translucency to compact or transient surfaces with an opaque fallback. See [ADR 0059](../decisions/0059-native-mail-and-calendar-workspace.md), [ADR 0060](../decisions/0060-one-active-account-first-release.md), and [issues #268–#274](https://github.com/1fach/einfach-mail/milestone/9).
+
 ## M5: Windows support and daily-use integration
 
 Add and verify Windows shell launch, authentication and credential storage, accessibility, installation, account removal, and operating-system integrations for mail and calendar use.

@@ -1,0 +1,214 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="720" viewBox="0 0 1500 720" role="img" aria-labelledby="title description">
+  <title id="title">Native workspace layout options</title>
+  <desc id="description">Three synthetic dark-theme wireframes compare a contextual navigation pane, a separate app rail, and a compact list-reader flow. The contextual navigation layout is selected for desktop; the compact flow is a narrow-window fallback.</desc>
+  <defs>
+    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#31515d" stop-opacity="0.92" />
+      <stop offset="1" stop-color="#26363f" stop-opacity="0.84" />
+    </linearGradient>
+    <style>
+      text { font-family: Inter, "DejaVu Sans", sans-serif; }
+      .title { fill: #f2f5f7; font-size: 24px; font-weight: 650; }
+      .subtitle { fill: #aab6bd; font-size: 13px; }
+      .card-title { fill: #f0f3f5; font-size: 16px; font-weight: 650; }
+      .card-note { fill: #bdc8ce; font-size: 12px; }
+      .pane-label { fill: #b7c4ca; font-size: 9px; font-weight: 600; letter-spacing: 0.6px; }
+      .row { fill: #cbd4d8; font-size: 8px; }
+      .muted { fill: #8e9ba2; font-size: 7px; }
+      .reader { fill: #e4e9eb; font-size: 8px; }
+    </style>
+  </defs>
+
+  <rect width="1500" height="720" fill="#11171b" />
+  <text class="title" x="32" y="38">Einfach Mail workspace exploration</text>
+  <text class="subtitle" x="32" y="59">Synthetic layouts · Linux-first · system title bar stays native · dark sample shown, theme tokens remain semantic</text>
+
+  <!-- Option A: one contextual pane, message list, and reader. -->
+  <g transform="translate(30 82)">
+    <rect width="460" height="590" rx="12" fill="#1a2227" stroke="#354148" />
+    <text class="card-title" x="20" y="31">A · Context navigation</text>
+    <rect x="345" y="13" width="96" height="23" rx="11" fill="#24563b" />
+    <text x="393" y="28" text-anchor="middle" fill="#c2f0d0" font-family="Inter, sans-serif" font-size="10" font-weight="650">SELECTED</text>
+    <rect x="18" y="53" width="424" height="295" rx="6" fill="#151c20" stroke="#3b474d" />
+    <rect x="18" y="53" width="424" height="28" rx="6" fill="#202a30" />
+    <circle cx="32" cy="67" r="5" fill="#88a9bb" />
+    <rect x="42" y="62" width="80" height="10" rx="4" fill="#35434b" />
+    <rect x="311" y="61" width="118" height="12" rx="6" fill="#35434b" />
+
+    <rect x="18" y="81" width="105" height="267" fill="url(#glass)" stroke="#58727d" stroke-opacity="0.45" />
+    <text class="pane-label" x="28" y="99">WORKSPACE</text>
+    <rect x="25" y="106" width="90" height="22" rx="4" fill="#40545d" />
+    <text class="row" x="35" y="120">Mail</text>
+    <text class="row" x="35" y="143">Calendar</text>
+    <text class="row" x="35" y="164">Accounts</text>
+    <text class="row" x="35" y="185">Settings</text>
+    <line x1="27" y1="198" x2="114" y2="198" stroke="#748892" stroke-opacity="0.45" />
+    <text class="pane-label" x="28" y="214">ACCOUNT</text>
+    <text class="row" x="28" y="231">Active account</text>
+    <text class="pane-label" x="28" y="253">FOLDERS</text>
+    <rect x="25" y="260" width="90" height="20" rx="4" fill="#3c4b53" />
+    <text class="row" x="35" y="274">Inbox</text>
+    <text class="row" x="35" y="294">Sent</text>
+    <text class="row" x="35" y="313">Drafts</text>
+    <text class="row" x="35" y="332">Archive</text>
+
+    <rect x="123" y="81" width="126" height="267" fill="#20292e" stroke="#303b40" />
+    <text class="pane-label" x="134" y="99">MESSAGE LIST</text>
+    <rect x="129" y="107" width="114" height="43" rx="4" fill="#35464f" />
+    <rect x="136" y="115" width="51" height="5" rx="2" fill="#d4dde1" />
+    <rect x="136" y="125" width="94" height="4" rx="2" fill="#aebbc1" />
+    <rect x="136" y="135" width="81" height="4" rx="2" fill="#829198" />
+    <line x1="132" y1="158" x2="240" y2="158" stroke="#3a454a" />
+    <rect x="136" y="168" width="48" height="5" rx="2" fill="#c5cfd3" />
+    <rect x="136" y="178" width="93" height="4" rx="2" fill="#9daab0" />
+    <rect x="136" y="188" width="77" height="4" rx="2" fill="#77858c" />
+    <line x1="132" y1="207" x2="240" y2="207" stroke="#3a454a" />
+    <rect x="136" y="217" width="43" height="5" rx="2" fill="#c5cfd3" />
+    <rect x="136" y="227" width="91" height="4" rx="2" fill="#9daab0" />
+    <rect x="136" y="237" width="75" height="4" rx="2" fill="#77858c" />
+    <line x1="132" y1="256" x2="240" y2="256" stroke="#3a454a" />
+    <rect x="136" y="266" width="56" height="5" rx="2" fill="#c5cfd3" />
+    <rect x="136" y="276" width="92" height="4" rx="2" fill="#9daab0" />
+    <rect x="136" y="286" width="78" height="4" rx="2" fill="#77858c" />
+
+    <rect x="249" y="81" width="193" height="267" fill="#192126" />
+    <text class="pane-label" x="263" y="100">READING PANE · OPAQUE</text>
+    <rect x="263" y="112" width="117" height="7" rx="3" fill="#e3e9eb" />
+    <rect x="263" y="127" width="78" height="5" rx="2" fill="#86959c" />
+    <line x1="263" y1="144" x2="427" y2="144" stroke="#344148" />
+    <rect x="263" y="158" width="151" height="5" rx="2" fill="#cbd4d8" />
+    <rect x="263" y="171" width="159" height="4" rx="2" fill="#aebbc1" />
+    <rect x="263" y="181" width="147" height="4" rx="2" fill="#aebbc1" />
+    <rect x="263" y="191" width="155" height="4" rx="2" fill="#aebbc1" />
+    <rect x="263" y="213" width="134" height="4" rx="2" fill="#aebbc1" />
+    <rect x="263" y="223" width="155" height="4" rx="2" fill="#aebbc1" />
+    <rect x="263" y="233" width="144" height="4" rx="2" fill="#aebbc1" />
+    <rect x="263" y="255" width="83" height="21" rx="3" fill="#356d4d" />
+    <text x="304" y="269" text-anchor="middle" fill="#e4f4e9" font-family="Inter, sans-serif" font-size="8">OPEN LINK</text>
+
+    <text class="card-note" x="20" y="384">One contextual pane keeps destinations and folders together.</text>
+    <text class="card-note" x="20" y="405">Balanced desktop width; the pane needs a clear hierarchy.</text>
+    <text class="card-note" x="20" y="426">Optional translucency stays on compact navigation.</text>
+    <rect x="20" y="455" width="420" height="92" rx="7" fill="#172126" stroke="#30434b" />
+    <text x="34" y="478" fill="#b6d4df" font-family="Inter, sans-serif" font-size="11" font-weight="650">Chosen desktop direction</text>
+    <text class="card-note" x="34" y="500">Keep mail list and reader visible together at comfortable widths.</text>
+    <text class="card-note" x="34" y="519">At compact widths, collapse a pane without losing selection.</text>
+  </g>
+
+  <!-- Option B: independent app rail plus account/folder pane. -->
+  <g transform="translate(520 82)">
+    <rect width="460" height="590" rx="12" fill="#1a2227" stroke="#354148" />
+    <text class="card-title" x="20" y="31">B · Separate app rail</text>
+    <rect x="18" y="53" width="424" height="295" rx="6" fill="#151c20" stroke="#3b474d" />
+    <rect x="18" y="53" width="424" height="28" rx="6" fill="#202a30" />
+    <circle cx="32" cy="67" r="5" fill="#88a9bb" />
+    <rect x="42" y="62" width="80" height="10" rx="4" fill="#35434b" />
+    <rect x="311" y="61" width="118" height="12" rx="6" fill="#35434b" />
+    <rect x="18" y="81" width="37" height="267" fill="#263238" />
+    <circle cx="36" cy="103" r="8" fill="#6ea6bd" />
+    <circle cx="36" cy="131" r="6" fill="#62727a" />
+    <circle cx="36" cy="157" r="6" fill="#62727a" />
+    <circle cx="36" cy="183" r="6" fill="#62727a" />
+    <rect x="55" y="81" width="84" height="267" fill="#27333a" />
+    <text class="pane-label" x="64" y="100">ACCOUNT</text>
+    <rect x="62" y="109" width="70" height="18" rx="4" fill="#3b4b53" />
+    <text class="muted" x="68" y="121">Active account</text>
+    <text class="pane-label" x="64" y="150">FOLDERS</text>
+    <text class="row" x="66" y="170">Inbox</text>
+    <text class="row" x="66" y="190">Sent</text>
+    <text class="row" x="66" y="210">Drafts</text>
+    <text class="row" x="66" y="230">Archive</text>
+    <rect x="139" y="81" width="125" height="267" fill="#20292e" stroke="#303b40" />
+    <text class="pane-label" x="149" y="100">MESSAGE LIST</text>
+    <rect x="145" y="107" width="113" height="43" rx="4" fill="#35464f" />
+    <rect x="152" y="115" width="50" height="5" rx="2" fill="#d4dde1" />
+    <rect x="152" y="125" width="94" height="4" rx="2" fill="#aebbc1" />
+    <rect x="152" y="135" width="81" height="4" rx="2" fill="#829198" />
+    <line x1="148" y1="158" x2="255" y2="158" stroke="#3a454a" />
+    <rect x="152" y="168" width="48" height="5" rx="2" fill="#c5cfd3" />
+    <rect x="152" y="178" width="93" height="4" rx="2" fill="#9daab0" />
+    <rect x="152" y="188" width="77" height="4" rx="2" fill="#77858c" />
+    <line x1="148" y1="207" x2="255" y2="207" stroke="#3a454a" />
+    <rect x="152" y="217" width="43" height="5" rx="2" fill="#c5cfd3" />
+    <rect x="152" y="227" width="91" height="4" rx="2" fill="#9daab0" />
+    <rect x="152" y="237" width="75" height="4" rx="2" fill="#77858c" />
+    <line x1="148" y1="256" x2="255" y2="256" stroke="#3a454a" />
+    <rect x="152" y="266" width="56" height="5" rx="2" fill="#c5cfd3" />
+    <rect x="152" y="276" width="92" height="4" rx="2" fill="#9daab0" />
+    <rect x="152" y="286" width="78" height="4" rx="2" fill="#77858c" />
+    <rect x="264" y="81" width="178" height="267" fill="#192126" />
+    <text class="pane-label" x="276" y="100">READING PANE</text>
+    <rect x="276" y="112" width="111" height="7" rx="3" fill="#e3e9eb" />
+    <rect x="276" y="127" width="75" height="5" rx="2" fill="#86959c" />
+    <line x1="276" y1="144" x2="428" y2="144" stroke="#344148" />
+    <rect x="276" y="158" width="140" height="5" rx="2" fill="#cbd4d8" />
+    <rect x="276" y="171" width="144" height="4" rx="2" fill="#aebbc1" />
+    <rect x="276" y="181" width="138" height="4" rx="2" fill="#aebbc1" />
+    <rect x="276" y="191" width="145" height="4" rx="2" fill="#aebbc1" />
+    <rect x="276" y="213" width="125" height="4" rx="2" fill="#aebbc1" />
+    <rect x="276" y="223" width="145" height="4" rx="2" fill="#aebbc1" />
+    <rect x="276" y="233" width="134" height="4" rx="2" fill="#aebbc1" />
+    <text class="card-note" x="20" y="384">Strongest separation between app sections and folders.</text>
+    <text class="card-note" x="20" y="405">Four permanent columns compete for list and reading width.</text>
+    <text class="card-note" x="20" y="426">Best only if the app later needs more global destinations.</text>
+    <rect x="20" y="455" width="420" height="92" rx="7" fill="#202a30" stroke="#354148" />
+    <text x="34" y="478" fill="#c2cbd0" font-family="Inter, sans-serif" font-size="11" font-weight="650">Not selected as the default</text>
+    <text class="card-note" x="34" y="500">Its extra rail reduces room for the core mail task.</text>
+    <text class="card-note" x="34" y="519">Avoid adding columns for destinations that do not exist yet.</text>
+  </g>
+
+  <!-- Option C: compact list and reader as separate states. -->
+  <g transform="translate(1010 82)">
+    <rect width="460" height="590" rx="12" fill="#1a2227" stroke="#354148" />
+    <text class="card-title" x="20" y="31">C · Compact list and reader</text>
+    <rect x="18" y="53" width="424" height="295" rx="6" fill="#151c20" stroke="#3b474d" />
+    <text class="pane-label" x="31" y="72">LIST STATE</text>
+    <text class="pane-label" x="244" y="72">READER STATE</text>
+    <rect x="28" y="81" width="186" height="254" rx="5" fill="#20292e" />
+    <rect x="28" y="81" width="186" height="25" rx="5" fill="#303c42" />
+    <circle cx="43" cy="93" r="5" fill="#88a9bb" />
+    <rect x="56" y="89" width="66" height="8" rx="3" fill="#53636a" />
+    <rect x="38" y="115" width="166" height="42" rx="4" fill="#3a4b54" />
+    <rect x="47" y="124" width="65" height="5" rx="2" fill="#d4dde1" />
+    <rect x="47" y="134" width="145" height="4" rx="2" fill="#aebbc1" />
+    <rect x="47" y="144" width="127" height="4" rx="2" fill="#829198" />
+    <line x1="39" y1="166" x2="203" y2="166" stroke="#3a454a" />
+    <rect x="47" y="177" width="60" height="5" rx="2" fill="#c5cfd3" />
+    <rect x="47" y="187" width="144" height="4" rx="2" fill="#9daab0" />
+    <rect x="47" y="197" width="121" height="4" rx="2" fill="#77858c" />
+    <line x1="39" y1="219" x2="203" y2="219" stroke="#3a454a" />
+    <rect x="47" y="230" width="55" height="5" rx="2" fill="#c5cfd3" />
+    <rect x="47" y="240" width="141" height="4" rx="2" fill="#9daab0" />
+    <rect x="47" y="250" width="120" height="4" rx="2" fill="#77858c" />
+    <line x1="39" y1="272" x2="203" y2="272" stroke="#3a454a" />
+    <rect x="47" y="283" width="66" height="5" rx="2" fill="#c5cfd3" />
+    <rect x="47" y="293" width="142" height="4" rx="2" fill="#9daab0" />
+    <rect x="47" y="303" width="117" height="4" rx="2" fill="#77858c" />
+
+    <path d="M220 207 H231 M226 202 L231 207 L226 212" fill="none" stroke="#8faab5" stroke-width="2" />
+
+    <rect x="238" y="81" width="194" height="254" rx="5" fill="#192126" />
+    <rect x="238" y="81" width="194" height="25" rx="5" fill="#303c42" />
+    <path d="M254 93 H246 M250 89 L246 93 L250 97" fill="none" stroke="#d1dade" stroke-width="1.5" />
+    <text class="muted" x="263" y="96">Back to list</text>
+    <rect x="250" y="119" width="142" height="7" rx="3" fill="#e3e9eb" />
+    <rect x="250" y="134" width="87" height="5" rx="2" fill="#86959c" />
+    <line x1="250" y1="151" x2="419" y2="151" stroke="#344148" />
+    <rect x="250" y="166" width="158" height="5" rx="2" fill="#cbd4d8" />
+    <rect x="250" y="179" width="164" height="4" rx="2" fill="#aebbc1" />
+    <rect x="250" y="189" width="151" height="4" rx="2" fill="#aebbc1" />
+    <rect x="250" y="199" width="160" height="4" rx="2" fill="#aebbc1" />
+    <rect x="250" y="221" width="139" height="4" rx="2" fill="#aebbc1" />
+    <rect x="250" y="231" width="160" height="4" rx="2" fill="#aebbc1" />
+    <rect x="250" y="241" width="148" height="4" rx="2" fill="#aebbc1" />
+    <text class="card-note" x="20" y="384">Keeps the reader wide at compact window sizes.</text>
+    <text class="card-note" x="20" y="405">Reading hides the list; Back returns to the same selection.</text>
+    <text class="card-note" x="20" y="426">Useful as the narrow-window fallback, not as desktop default.</text>
+    <rect x="20" y="455" width="420" height="92" rx="7" fill="#202a30" stroke="#354148" />
+    <text x="34" y="478" fill="#c2cbd0" font-family="Inter, sans-serif" font-size="11" font-weight="650">Pair with option A at narrow widths</text>
+    <text class="card-note" x="34" y="500">Collapse to one focused surface with a visible return path.</text>
+    <text class="card-note" x="34" y="519">Preserve the selected message when switching states.</text>
+  </g>
+
+  <text x="32" y="700" fill="#98a8af" font-family="Inter, sans-serif" font-size="12">Material rule: keep message and calendar surfaces opaque; try translucency only for compact navigation or transient menus, always with an opaque fallback.</text>
+</svg>

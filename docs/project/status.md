@@ -4,7 +4,9 @@ Last updated: 2026-11-10
 
 ## Current milestone
 
-M9 EWS message read-state support is the current development milestone. [Issue #267](https://github.com/1fach/einfach-mail/issues/267) tracks the implementation; see [ADR 0058](../decisions/0058-per-operation-ews-mail-capabilities.md).
+M9 EWS message read-state support is in draft [PR #276](https://github.com/1fach/einfach-mail/pull/276), stacked on the M8 calendar draft [PR #275](https://github.com/1fach/einfach-mail/pull/275). No check runs are present because the repository has no available GitHub Actions compute quota; do not merge before required checks pass. See [issue #267](https://github.com/1fach/einfach-mail/issues/267) and [ADR 0058](../decisions/0058-per-operation-ews-mail-capabilities.md).
+
+M10's native mail and calendar workspace is planned under [GitHub milestone 9](https://github.com/1fach/einfach-mail/milestone/9). [ADR 0059](../decisions/0059-native-mail-and-calendar-workspace.md) records the Wino-inspired adaptive layout and Linux system decorations; [ADR 0060](../decisions/0060-one-active-account-first-release.md) sets one active account at a time. The work is split into [issues #268–#274](https://github.com/1fach/einfach-mail/milestone/9). Issue #268's decision is ready for review; issue #272 owns the account identity screen. The persistent shell in #269 is next.
 
 M7 Exchange Server EWS support provides a Linux read-only mail baseline and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. Linux Autodiscover merged into `main` in [PR #261](https://github.com/1fach/einfach-mail/pull/261) and remains tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258) for live verification.
 
@@ -45,7 +47,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 
 ## Next actions
 
-1. Continue review of the issue #267 implementation, then start M10 with the persistent workspace shell in [issue #269](https://github.com/1fach/einfach-mail/issues/269).
+1. Continue M10 with the persistent workspace shell in [issue #269](https://github.com/1fach/einfach-mail/issues/269); keep #268 and its account-scope decision linked for review.
 2. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 3. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 4. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
