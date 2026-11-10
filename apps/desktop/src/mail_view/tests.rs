@@ -24,11 +24,12 @@ use einfach_mail_domain::{
 use gpui_kit::base::TextSelection;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::prelude::*;
+use gpui_kit::test::TestEventExt as _;
 use gpui_kit::test::TestQueryExt as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AppContext, Entity, Modifiers, MouseButton, ScrollStrategy, TestAppContext, VisualTestContext,
-    point, px,
+    point, px, size,
 };
 
 use super::{
@@ -1509,6 +1510,10 @@ fn draw_mail_view(context: &mut VisualTestContext) {
     });
 }
 
+fn message_list_width(context: &mut VisualTestContext) -> gpui_kit::Pixels {
+    context.update(|window, _| window.find("mail-message-list").bounds().size.width)
+}
+
 fn open_cached_html_message(cx: &mut TestAppContext, content: String) -> &mut VisualTestContext {
     let account =
         AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
@@ -1623,6 +1628,13 @@ fn append_synthetic_messages(cache: &FixtureCache, message_count: usize) -> Vec<
 
 fn press_window_key(context: &mut VisualTestContext, key: &str) {
     context.simulate_keystrokes(key);
+}
+
+fn activate_focused_control(context: &mut VisualTestContext) {
+    context.update(|window, cx| {
+        window.key_down("enter", false, cx);
+        window.key_up("enter", cx);
+    });
 }
 
 const SYNTHETIC_MESSAGE_LABEL_PREFIX: &str = "Ada Example <ada@example.test>. Synthetic subject";
@@ -1851,6 +1863,203 @@ async fn cached_message_list_navigates_by_keyboard_and_keeps_one_tab_stop(cx: &m
 }
 
 #[gpui_kit::test]
+async fn message_list_width_controls_are_focusable_and_bounded(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        bind_message_navigation_keys(cx);
+    });
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, message_id) = fixture(account);
+    let provider = OfflineProvider {
+        body_fetches: Arc::new(AtomicUsize::new(0)),
+    };
+    let body_fetches = Arc::clone(&provider.body_fetches);
+    let workflow = Arc::new(MailWorkflow::new(profile.id().clone(), provider, cache));
+    let mut mail_view = None;
+    let (_, context) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
+        mail_view = Some(view.clone());
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    let view = mail_view.expect("mail view is created with the test window");
+
+    context.simulate_resize(size(px(1600.), px(900.)));
+    wait_for_mail_sync_to_finish(context, &view).await;
+    draw_mail_view(context);
+
+    assert_eq!(message_list_width(context), px(352.));
+    context.update(|_, app| {
+        view.update(app, |mail_view, cx| {
+            mail_view.select_message(message_id.clone(), cx)
+        });
+    });
+    wait_for_ui_condition(context, |_, app| {
+        matches!(
+            &view.read(app).message_detail_state,
+            MessageDetailState::Opened(_)
+        )
+    })
+    .await;
+    context.run_until_parked();
+    draw_mail_view(context);
+    assert!(context.cx.update(|cx| {
+        matches!(
+            &view.read(cx).message_detail_state,
+            MessageDetailState::Opened(_)
+        ) && view.read(cx).selected_message_id() == Some(&message_id)
+    }));
+
+    context.update(gpui_kit::Window::focus_next);
+    let mut narrower_focused = false;
+    for _ in 0..20 {
+        narrower_focused =
+            context.update(|window, _| window.find_by_label("Narrow list").focused() == Some(true));
+        if narrower_focused {
+            break;
+        }
+        press_window_key(context, "tab");
+    }
+    assert!(narrower_focused, "Tab reaches the Narrow list button");
+    assert_eq!(
+        context.update(|window, _| window.find_by_label("Narrow list").role()),
+        Some(gpui_kit::Role::Button)
+    );
+
+    activate_focused_control(context);
+    context.run_until_parked();
+    draw_mail_view(context);
+    assert_eq!(message_list_width(context), px(336.));
+
+    press_window_key(context, "tab");
+    assert_eq!(
+        context.update(|window, _| window.find_by_label("Widen list").focused()),
+        Some(true)
+    );
+    assert_eq!(
+        context.update(|window, _| window.find_by_label("Widen list").role()),
+        Some(gpui_kit::Role::Button)
+    );
+    activate_focused_control(context);
+    context.run_until_parked();
+    draw_mail_view(context);
+    assert_eq!(message_list_width(context), px(352.));
+
+    for _ in 0..4 {
+        let position =
+            context.update(|window, _| window.find_by_label("Narrow list").bounds().center());
+        context.simulate_click(position, Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+    }
+    assert_eq!(message_list_width(context), px(288.));
+    assert_eq!(
+        context.update(|window, _| window.find_by_label("Narrow list").disabled()),
+        Some(true)
+    );
+
+    let position =
+        context.update(|window, _| window.find_by_label("Narrow list").bounds().center());
+    context.simulate_click(position, Modifiers::default());
+    context.run_until_parked();
+    draw_mail_view(context);
+    assert_eq!(message_list_width(context), px(288.));
+
+    for _ in 0..12 {
+        let position =
+            context.update(|window, _| window.find_by_label("Widen list").bounds().center());
+        context.simulate_click(position, Modifiers::default());
+        context.run_until_parked();
+        draw_mail_view(context);
+    }
+    assert_eq!(message_list_width(context), px(480.));
+    assert_eq!(
+        context.update(|window, _| window.find_by_label("Widen list").disabled()),
+        Some(true)
+    );
+    assert!(
+        context.update(|window, _| { window.find("mail-reader").bounds().size.width >= px(480.) })
+    );
+    assert!(context.cx.update(|cx| {
+        matches!(
+            &view.read(cx).message_detail_state,
+            MessageDetailState::Opened(_)
+        ) && view.read(cx).selected_message_id() == Some(&message_id)
+    }));
+    assert_eq!(body_fetches.load(Ordering::Relaxed), 0);
+}
+
+#[gpui_kit::test]
+async fn dragged_message_list_width_keeps_its_rem_size_after_zoom(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let account =
+        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let (profile, cache, _) = fixture(account);
+    let workflow = Arc::new(MailWorkflow::new(
+        profile.id().clone(),
+        OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        cache,
+    ));
+    let mut mail_view = None;
+    let (_, context) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
+        mail_view = Some(view.clone());
+        gpui_kit::base::Root::new(view, window, cx)
+    });
+    let view = mail_view.expect("mail view is created with the test window");
+
+    context.simulate_resize(size(px(1600.), px(900.)));
+    wait_for_mail_sync_to_finish(context, &view).await;
+    draw_mail_view(context);
+    let handle = context.update(|window, _| window.find(("resizable-handle", 0usize)).bounds());
+    let start = handle.center();
+    let end = point(start.x + px(32.), start.y);
+    context.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_move(
+        point(start.x + px(10.), start.y),
+        Some(MouseButton::Left),
+        Modifiers::default(),
+    );
+    context.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+    context.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    context.run_until_parked();
+    draw_mail_view(context);
+
+    assert_eq!(message_list_width(context), px(384.5));
+    assert_eq!(
+        context.cx.update(|cx| {
+            view.read(cx)
+                .pane_layout
+                .message_list_width
+                .to_pixels(px(16.))
+        }),
+        px(384.5)
+    );
+    context.cx.update(|cx| {
+        gpui_kit::component::Theme::update(cx, |theme| theme.font_size = px(24.));
+    });
+    context.run_until_parked();
+    draw_mail_view(context);
+
+    assert_eq!(
+        context.cx.update(|cx| {
+            view.read(cx)
+                .pane_layout
+                .message_list_width
+                .to_pixels(px(24.))
+        }),
+        px(576.75)
+    );
+    let scaled_width = message_list_width(context);
+    assert!(
+        (px(576.5)..=px(577.)).contains(&scaled_width),
+        "rem-based width scales with the window zoom: {scaled_width:?}"
+    );
+}
+
+#[gpui_kit::test]
 async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
@@ -1882,7 +2091,7 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
         .expect("the first cached message is visible");
     assert_eq!(first_row.size.height, px(72.));
     let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
-    assert_eq!(list_bounds.size.width, px(343.));
+    assert_eq!(list_bounds.size.width, px(351.));
 
     context.cx.update(|cx| {
         gpui_kit::component::Theme::update(cx, |theme| theme.font_size = px(24.));
@@ -1899,7 +2108,7 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
         .update(|cx| view.read(cx).message_row_sizes[0].height);
     assert_eq!(scaled_row_estimate, px(108.));
     let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
-    assert_eq!(list_bounds.size.width, px(515.));
+    assert_eq!(list_bounds.size.width, px(527.));
 
     context.cx.update(|cx| {
         view.update(cx, |view, _| {

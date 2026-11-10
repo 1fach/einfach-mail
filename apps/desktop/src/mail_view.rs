@@ -17,6 +17,7 @@ use einfach_mail_domain::{
 use gpui_kit::base::VirtualListScrollHandle;
 use gpui_kit::component::StyledExt;
 use gpui_kit::component::WindowExt;
+use gpui_kit::component::resizable::ResizableState;
 use gpui_kit::{
     App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, KeyBinding, Pixels, Rems, Role,
     ScrollStrategy, Subscription, Task, Window, div, prelude::*, rems, size,
@@ -34,6 +35,11 @@ gpui_kit::actions!(
 
 const MESSAGE_LIST_CONTEXT: &str = "MailMessageList";
 const MESSAGE_ROW_HEIGHT: Rems = rems(4.5);
+const MESSAGE_LIST_DEFAULT_WIDTH: Rems = rems(22.);
+const MESSAGE_LIST_MIN_WIDTH: Rems = rems(18.);
+const MESSAGE_LIST_MAX_WIDTH: Rems = rems(30.);
+const MESSAGE_LIST_WIDTH_STEP: Rems = rems(1.);
+const MESSAGE_READER_MIN_WIDTH: Rems = rems(30.);
 const MAIL_COMPOSER_SHEET_WIDTH: Rems = rems(30.);
 const ACCOUNT_SYNC_REQUIRED_MESSAGE: &str = "Complete a successful mail sync for this account before archiving, moving, or deleting messages.";
 
@@ -69,6 +75,7 @@ pub(crate) struct MailView {
     selected_folder: Option<FolderReference>,
     messages: Vec<MailMessage>,
     message_list_state: MessageListState,
+    pane_layout: MailPaneLayout,
     message_row_sizes: Rc<Vec<gpui_kit::Size<gpui_kit::Pixels>>>,
     message_row_rem_size: Option<Pixels>,
     message_list_focus: FocusHandle,
@@ -85,6 +92,115 @@ pub(crate) struct MailView {
     well_known_folder_action_status: WellKnownFolderActionStatus,
     move_recovery_reason: Option<MoveRecoveryReason>,
     selected_folder_write_sync_required: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct MessageListWidth(Rems);
+
+impl MessageListWidth {
+    const DEFAULT: Self = Self(MESSAGE_LIST_DEFAULT_WIDTH);
+
+    fn with_step(self, change: MessageListWidthChange) -> Self {
+        let width = match change {
+            MessageListWidthChange::Narrower => self.0.0 - MESSAGE_LIST_WIDTH_STEP.0,
+            MessageListWidthChange::Wider => self.0.0 + MESSAGE_LIST_WIDTH_STEP.0,
+        };
+        Self(rems(
+            width.clamp(MESSAGE_LIST_MIN_WIDTH.0, MESSAGE_LIST_MAX_WIDTH.0),
+        ))
+    }
+
+    fn from_pixels(width: Pixels, rem_size: Pixels) -> Self {
+        Self(rems(
+            (width / rem_size).clamp(MESSAGE_LIST_MIN_WIDTH.0, MESSAGE_LIST_MAX_WIDTH.0),
+        ))
+    }
+
+    fn to_pixels(self, rem_size: Pixels) -> Pixels {
+        self.0.to_pixels(rem_size)
+    }
+
+    fn is_min(self) -> bool {
+        self.0 == MESSAGE_LIST_MIN_WIDTH
+    }
+
+    fn is_max(self) -> bool {
+        self.0 == MESSAGE_LIST_MAX_WIDTH
+    }
+
+    fn is_disabled_for(self, change: MessageListWidthChange) -> bool {
+        match change {
+            MessageListWidthChange::Narrower => self.is_min(),
+            MessageListWidthChange::Wider => self.is_max(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MessageListWidthChange {
+    Narrower,
+    Wider,
+}
+
+impl MessageListWidthChange {
+    fn button_id(self) -> &'static str {
+        match self {
+            Self::Narrower => "message-list-narrower",
+            Self::Wider => "message-list-wider",
+        }
+    }
+
+    fn button_label(self) -> &'static str {
+        match self {
+            Self::Narrower => "Narrow list",
+            Self::Wider => "Widen list",
+        }
+    }
+}
+
+struct MailPaneLayout {
+    resizable_state: Entity<ResizableState>,
+    message_list_width: MessageListWidth,
+    rem_size: Option<Pixels>,
+}
+
+impl MailPaneLayout {
+    fn new(cx: &mut Context<MailView>) -> Self {
+        Self {
+            resizable_state: cx.new(|_| ResizableState::default()),
+            message_list_width: MessageListWidth::DEFAULT,
+            rem_size: None,
+        }
+    }
+
+    fn sync_rem_size(&mut self, rem_size: Pixels, cx: &mut Context<MailView>) {
+        if self.rem_size.is_some_and(|previous| previous != rem_size) {
+            self.resizable_state.update(cx, |state, _| state.clear());
+        }
+        self.rem_size = Some(rem_size);
+    }
+
+    fn resize(
+        &mut self,
+        change: MessageListWidthChange,
+        window: &mut Window,
+        cx: &mut Context<MailView>,
+    ) {
+        let width = self.message_list_width.with_step(change);
+        if width == self.message_list_width {
+            return;
+        }
+
+        self.message_list_width = width;
+        let width = width.to_pixels(window.rem_size());
+        self.resizable_state
+            .update(cx, |state, cx| state.resize_panel(0, width, window, cx));
+        cx.notify();
+    }
+
+    fn record_dragged_width(&mut self, width: Pixels, rem_size: Pixels) {
+        self.message_list_width = MessageListWidth::from_pixels(width, rem_size);
+    }
 }
 
 pub(crate) struct MailFolderNavigation {
@@ -400,6 +516,7 @@ impl MailView {
             selected_folder: None,
             messages: Vec::new(),
             message_list_state: MessageListState::Loading,
+            pane_layout: MailPaneLayout::new(cx),
             message_row_sizes: Rc::new(Vec::new()),
             message_row_rem_size: None,
             message_list_focus: cx.focus_handle().tab_stop(true),

@@ -8,18 +8,20 @@ use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Selectable, StyledExt,
     button::{Button, ButtonVariants},
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
+    resizable::{ResizableState, h_resizable, resizable_panel},
     scroll::ScrollableElement,
 };
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, Context, Div, IntoElement, Rems, Render, Role, Stateful, WeakEntity, Window, div,
-    prelude::*, rems,
+    AnyElement, App, Context, Div, Entity, IntoElement, Pixels, Rems, Render, Role, Stateful,
+    WeakEntity, Window, div, prelude::*, rems,
 };
 
 use super::{
-    FollowUpFlagUpdateStatus, MESSAGE_LIST_CONTEXT, MESSAGE_ROW_HEIGHT, MailFolderNavigation,
-    MailView, MailViewEvent, MessageDetailState, MessageListState, MessageMoveMenuAction,
+    FollowUpFlagUpdateStatus, MESSAGE_LIST_CONTEXT, MESSAGE_LIST_MAX_WIDTH, MESSAGE_LIST_MIN_WIDTH,
+    MESSAGE_READER_MIN_WIDTH, MESSAGE_ROW_HEIGHT, MailFolderNavigation, MailView, MailViewEvent,
+    MessageDetailState, MessageListState, MessageListWidthChange, MessageMoveMenuAction,
     MessageMoveStatus, MoveRecoveryReason, ReadStateFeedback, SyncStatus,
     WellKnownFolderActionStatus, empty_message_detail_copy, follow_up_flag_cache_sync_message,
     follow_up_flag_confirmed_message, follow_up_flag_failure_message,
@@ -27,7 +29,6 @@ use super::{
     well_known_folder_mail_action,
 };
 
-const MESSAGE_LIST_WIDTH: Rems = rems(21.5);
 const MAIL_HEADER_HEIGHT: Rems = rems(3.625);
 
 impl MailView {
@@ -131,11 +132,111 @@ impl MailView {
     }
 
     fn render_message_list(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
+        let header = self.render_message_list_header(cx);
+        let content = self.render_message_list_content(colors, cx);
+        let message_list = div()
+            .id("mail-message-list")
+            .role(Role::Group)
+            .aria_label("Message list")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(colors.border);
+        #[cfg(test)]
+        let message_list = message_list.test_support();
+        message_list
+            .child(header)
+            .child(div().flex_1().min_h_0().flex().flex_col().child(content))
+    }
+
+    fn render_resizable_message_panes(
+        &self,
+        rem_size: Pixels,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let resizable_state = self.pane_layout.resizable_state.clone();
+        let mail_view = cx.entity().downgrade();
+        h_resizable("mail-message-reader-layout")
+            .with_state(&resizable_state)
+            .on_resize(move |state, window, cx| {
+                record_resized_message_list_width(state, &mail_view, window, cx);
+            })
+            .child(
+                resizable_panel()
+                    .size(self.pane_layout.message_list_width.to_pixels(rem_size))
+                    .size_range(
+                        MESSAGE_LIST_MIN_WIDTH.to_pixels(rem_size)
+                            ..MESSAGE_LIST_MAX_WIDTH.to_pixels(rem_size),
+                    )
+                    .fixed()
+                    .child(self.render_message_list(colors, cx)),
+            )
+            .child(
+                resizable_panel()
+                    .size_range(MESSAGE_READER_MIN_WIDTH.to_pixels(rem_size)..Pixels::MAX)
+                    .child(self.render_message_detail(colors, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn render_message_list_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let width_controls = self.render_message_list_width_controls(cx);
+        div()
+            .id("mail-message-list-header")
+            .role(Role::Group)
+            .aria_label("Message list controls")
+            .w_full()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .child(div().text_sm().font_semibold().child("Messages"))
+            .child(width_controls)
+            .into_any_element()
+    }
+
+    fn render_message_list_width_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let narrower = self.render_message_list_width_button(MessageListWidthChange::Narrower, cx);
+        let wider = self.render_message_list_width_button(MessageListWidthChange::Wider, cx);
+        div()
+            .tab_group()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(narrower)
+            .child(wider)
+            .into_any_element()
+    }
+
+    fn render_message_list_width_button(
+        &self,
+        change: MessageListWidthChange,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        Button::new(change.button_id())
+            .ghost()
+            .label(change.button_label())
+            .disabled(self.pane_layout.message_list_width.is_disabled_for(change))
+            .on_click(cx.listener(move |view, _, window, cx| {
+                view.pane_layout.resize(change, window, cx);
+            }))
+    }
+
+    fn render_message_list_content(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match &self.message_list_state {
             MessageListState::Ready => {}
             MessageListState::Loading => {
                 let loading = div()
-                    .w(MESSAGE_LIST_WIDTH)
                     .min_h_0()
                     .p_4()
                     .id("mail-list-loading")
@@ -149,10 +250,9 @@ impl MailView {
             }
             MessageListState::Failed(error) => {
                 if self.selected_folder.is_none() {
-                    return div().w(MESSAGE_LIST_WIDTH).min_h_0().into_any_element();
+                    return div().min_h_0().into_any_element();
                 }
                 let list_error = div()
-                    .w(MESSAGE_LIST_WIDTH)
                     .min_h_0()
                     .p_4()
                     .id("mail-list-error")
@@ -169,7 +269,6 @@ impl MailView {
         let Some(folder) = self.selected_folder.as_ref() else {
             let empty = div()
                 .id("mail-list-empty-folders")
-                .w(MESSAGE_LIST_WIDTH)
                 .min_h_0()
                 .p_4()
                 .text_color(colors.muted_foreground)
@@ -182,7 +281,6 @@ impl MailView {
         };
         if self.messages.is_empty() {
             return div()
-                .w(MESSAGE_LIST_WIDTH)
                 .min_h_0()
                 .p_4()
                 .text_color(colors.muted_foreground)
@@ -192,119 +290,102 @@ impl MailView {
 
         let folder_reference = folder.clone();
         let sizes = Rc::clone(&self.message_row_sizes);
-        div()
-            .w(MESSAGE_LIST_WIDTH)
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .border_r_1()
-            .border_color(colors.border)
-            .child(div().px_4().py_3().text_sm().font_bold().child("Messages"))
-            .child({
-                let message_list = div().id("cached-message-list").flex_1().min_h_0();
-                #[cfg(test)]
-                let message_list = message_list.test_support();
-                message_list
-                    .track_focus(&self.message_list_focus)
-                    .key_context(MESSAGE_LIST_CONTEXT)
-                    .role(Role::ListBox)
-                    .aria_label("Messages")
-                    .on_action(cx.listener(Self::on_select_previous_message))
-                    .on_action(cx.listener(Self::on_select_next_message))
-                    .on_action(cx.listener(Self::on_select_first_message))
-                    .on_action(cx.listener(Self::on_select_last_message))
-                    .child(
-                        v_virtual_list(
-                            cx.entity(),
-                            "cached-message-options",
-                            sizes,
-                            move |view, range, _, cx| {
-                                let list_size = view.messages.len();
-                                range
-                                    .filter_map(|index| {
-                                        let message = view.messages.get(index)?;
-                                        let message_id = message.id().clone();
-                                        let selected =
-                                            view.selected_message_id() == Some(&message_id);
-                                        let sender = message_sender(message);
-                                        let subject = message
-                                            .metadata()
-                                            .subject()
-                                            .unwrap_or("(No subject)")
-                                            .to_owned();
-                                        let accessible_label = format!("{sender}. {subject}");
-                                        let expected_folder = folder_reference.clone();
-                                        let option = div()
-                                            .id(format!("message-option-{}", message_id.as_str()))
-                                            .debug_selector(|| {
-                                                format!("message-row-{}", message_id.as_str())
-                                            })
-                                            .w_full()
-                                            .h(MESSAGE_ROW_HEIGHT)
-                                            .px_3()
-                                            .py_3()
-                                            .rounded_md()
-                                            .text_color(colors.foreground)
-                                            .role(Role::ListBoxOption)
-                                            .aria_label(if view.message_update_in_progress() {
-                                                format!("{accessible_label}, mail action pending")
-                                            } else {
-                                                accessible_label
-                                            })
-                                            .aria_position_in_set(index + 1)
-                                            .aria_size_of_set(list_size)
-                                            .aria_selected(selected)
-                                            .when(selected, |option| {
-                                                option
-                                                    .aria_active_descendant()
-                                                    .bg(colors.accent)
-                                                    .text_color(colors.accent_foreground)
-                                            })
-                                            .hover(|option| {
-                                                option.bg(if selected {
-                                                    colors.accent
-                                                } else {
-                                                    colors.muted
-                                                })
-                                            })
-                                            .child(
-                                                div()
-                                                    .w_full()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap_1()
-                                                    .child(
-                                                        div()
-                                                            .w_full()
-                                                            .text_sm()
-                                                            .font_bold()
-                                                            .child(sender),
-                                                    )
-                                                    .child(div().w_full().text_sm().child(subject)),
-                                            )
-                                            .when(!view.message_update_in_progress(), |option| {
-                                                option.on_click(cx.listener(
-                                                    move |view, _, window, cx| {
-                                                        view.select_message_from_option(
-                                                            message_id.clone(),
-                                                            &expected_folder,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                ))
-                                            });
-                                        #[cfg(test)]
-                                        let option = option.test_support();
-                                        Some(option)
+        let message_list = div().id("cached-message-list").flex_1().min_h_0();
+        #[cfg(test)]
+        let message_list = message_list.test_support();
+        message_list
+            .track_focus(&self.message_list_focus)
+            .key_context(MESSAGE_LIST_CONTEXT)
+            .role(Role::ListBox)
+            .aria_label("Messages")
+            .on_action(cx.listener(Self::on_select_previous_message))
+            .on_action(cx.listener(Self::on_select_next_message))
+            .on_action(cx.listener(Self::on_select_first_message))
+            .on_action(cx.listener(Self::on_select_last_message))
+            .child(
+                v_virtual_list(
+                    cx.entity(),
+                    "cached-message-options",
+                    sizes,
+                    move |view, range, _, cx| {
+                        let list_size = view.messages.len();
+                        range
+                            .filter_map(|index| {
+                                let message = view.messages.get(index)?;
+                                let message_id = message.id().clone();
+                                let selected = view.selected_message_id() == Some(&message_id);
+                                let sender = message_sender(message);
+                                let subject = message
+                                    .metadata()
+                                    .subject()
+                                    .unwrap_or("(No subject)")
+                                    .to_owned();
+                                let accessible_label = format!("{sender}. {subject}");
+                                let expected_folder = folder_reference.clone();
+                                let option = div()
+                                    .id(format!("message-option-{}", message_id.as_str()))
+                                    .debug_selector(|| {
+                                        format!("message-row-{}", message_id.as_str())
                                     })
-                                    .collect()
-                            },
-                        )
-                        .track_scroll(&self.message_list_scroll),
-                    )
-                    .focus_visible(|style| style.border_1().border_color(colors.ring))
-            })
+                                    .w_full()
+                                    .h(MESSAGE_ROW_HEIGHT)
+                                    .px_3()
+                                    .py_3()
+                                    .rounded_md()
+                                    .text_color(colors.foreground)
+                                    .role(Role::ListBoxOption)
+                                    .aria_label(if view.message_update_in_progress() {
+                                        format!("{accessible_label}, mail action pending")
+                                    } else {
+                                        accessible_label
+                                    })
+                                    .aria_position_in_set(index + 1)
+                                    .aria_size_of_set(list_size)
+                                    .aria_selected(selected)
+                                    .when(selected, |option| {
+                                        option
+                                            .aria_active_descendant()
+                                            .bg(colors.accent)
+                                            .text_color(colors.accent_foreground)
+                                    })
+                                    .hover(|option| {
+                                        option.bg(if selected {
+                                            colors.accent
+                                        } else {
+                                            colors.muted
+                                        })
+                                    })
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div().w_full().text_sm().font_bold().child(sender),
+                                            )
+                                            .child(div().w_full().text_sm().child(subject)),
+                                    )
+                                    .when(!view.message_update_in_progress(), |option| {
+                                        option.on_click(cx.listener(move |view, _, window, cx| {
+                                            view.select_message_from_option(
+                                                message_id.clone(),
+                                                &expected_folder,
+                                                window,
+                                                cx,
+                                            );
+                                        }))
+                                    });
+                                #[cfg(test)]
+                                let option = option.test_support();
+                                Some(option)
+                            })
+                            .collect()
+                    },
+                )
+                .track_scroll(&self.message_list_scroll),
+            )
+            .focus_visible(|style| style.border_1().border_color(colors.ring))
             .into_any_element()
     }
 
@@ -1043,10 +1124,32 @@ fn render_message_pending_feedback(selector: &'static str, message: String) -> A
     feedback.into_any_element()
 }
 
+fn record_resized_message_list_width(
+    state: &Entity<ResizableState>,
+    mail_view: &WeakEntity<MailView>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(width) = state.read(cx).sizes().first().copied() else {
+        return;
+    };
+    let Some(mail_view) = mail_view.upgrade() else {
+        return;
+    };
+    mail_view.update(cx, |view, cx| {
+        view.pane_layout
+            .record_dragged_width(width, window.rem_size());
+        cx.notify();
+    });
+}
+
 impl Render for MailView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.update_message_row_sizes(window.rem_size());
+        let rem_size = window.rem_size();
+        self.pane_layout.sync_rem_size(rem_size, cx);
+        self.update_message_row_sizes(rem_size);
         let colors = cx.theme().semantic_tokens().colors;
+        let panes = self.render_resizable_message_panes(rem_size, colors, cx);
         div()
             .size_full()
             .flex()
@@ -1054,14 +1157,7 @@ impl Render for MailView {
             .bg(colors.background)
             .text_color(colors.foreground)
             .child(self.render_header(colors, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(self.render_message_list(colors, cx))
-                    .child(self.render_message_detail(colors, cx)),
-            )
+            .child(div().flex_1().min_h_0().min_w_0().child(panes))
     }
 }
 
