@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::message_body::render_message_body;
+use super::super::body::render_message_body;
 use einfach_mail_application::{MailOperationError, MailWorkflowError, WellKnownMailFolder};
 use einfach_mail_domain::{FolderReference, MailAction, MailFolder, MessageId, ReadState};
 use gpui_kit::base::v_virtual_list;
