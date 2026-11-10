@@ -11,7 +11,7 @@ use einfach_mail_domain::AccountId;
 const CREDENTIAL_SERVICE: &str = "com.1fach.einfach-mail";
 const CREDENTIAL_ACCOUNT: &str = "microsoft-365-refresh-token";
 
-pub(super) trait RefreshTokenStore: Send + Sync {
+pub trait RefreshTokenStore: Send + Sync {
     fn load(&self) -> Result<Option<SavedRefreshToken>, AccountOperationError>;
     fn save(
         &self,
@@ -23,7 +23,7 @@ pub(super) trait RefreshTokenStore: Send + Sync {
 
 /// Records whether Graph has verified the account associated with a refresh token.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum CredentialIdentity {
+pub enum CredentialIdentity {
     /// Graph `/me` confirmed the account ID.
     Verified(AccountId),
     /// Graph has not confirmed the account ID.
@@ -54,27 +54,27 @@ impl CredentialIdentity {
 
 /// Keeps a refresh token beside the identity state that constrains its use.
 #[derive(Clone)]
-pub(super) struct SavedRefreshToken {
+pub struct SavedRefreshToken {
     identity: CredentialIdentity,
     token: RefreshToken,
 }
 
 impl SavedRefreshToken {
-    pub(super) fn with_identity(identity: CredentialIdentity, token: RefreshToken) -> Self {
+    pub fn with_identity(identity: CredentialIdentity, token: RefreshToken) -> Self {
         Self { identity, token }
     }
 
     /// Returns an account ID only after Graph has verified it.
-    pub(super) fn account_id(&self) -> Option<&AccountId> {
+    pub fn account_id(&self) -> Option<&AccountId> {
         self.identity.verified_account_id()
     }
 
     /// Returns the account ID that a restored Graph profile must match, if known.
-    pub(super) fn expected_account_id(&self) -> Option<&AccountId> {
+    pub fn expected_account_id(&self) -> Option<&AccountId> {
         self.identity.expected_account_id()
     }
 
-    pub(super) fn token(&self) -> &RefreshToken {
+    pub fn token(&self) -> &RefreshToken {
         &self.token
     }
 }
@@ -98,12 +98,12 @@ struct EncodedCredential<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct SecretServiceRefreshTokenStore {
+pub struct SecretServiceRefreshTokenStore {
     account: String,
 }
 
 impl SecretServiceRefreshTokenStore {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             account: CREDENTIAL_ACCOUNT.to_owned(),
         }
@@ -111,7 +111,7 @@ impl SecretServiceRefreshTokenStore {
 
     /// Creates an isolated store for Secret Service integration tests.
     #[cfg(test)]
-    pub(super) fn with_account(account: String) -> Self {
+    pub fn with_account(account: String) -> Self {
         Self { account }
     }
 
@@ -123,12 +123,12 @@ impl SecretServiceRefreshTokenStore {
 
 /// Removes a synthetic credential from Secret Service when the test ends.
 #[cfg(test)]
-pub(super) struct SecretServiceCredentialCleanup(SecretServiceRefreshTokenStore);
+pub struct SecretServiceCredentialCleanup(SecretServiceRefreshTokenStore);
 
 #[cfg(test)]
 impl SecretServiceCredentialCleanup {
     /// Retains the store so its credential can be removed when the guard drops.
-    pub(super) fn new(store: SecretServiceRefreshTokenStore) -> Self {
+    pub fn new(store: SecretServiceRefreshTokenStore) -> Self {
         Self(store)
     }
 }

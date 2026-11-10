@@ -37,9 +37,10 @@ use super::{
     },
     pagination::{MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget},
 };
+use crate::test_support::{http_base_url, http_url};
 use crate::{
     error::GraphError,
-    graph_url::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority},
+    transport::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority},
     transport::{GraphTransport, GraphTransportHandle},
 };
 
@@ -49,14 +50,6 @@ fn synthetic_access_token() -> Arc<AccessToken> {
         SystemTime::now(),
         Some(std::time::Duration::from_secs(3600)),
     )))
-}
-
-fn http_url(server: &MockServer, path: &str) -> String {
-    format!("http://{}{path}", server.address())
-}
-
-fn http_base_url(server: &MockServer) -> String {
-    http_url(server, "")
 }
 
 fn synthetic_view() -> CalendarViewReference {

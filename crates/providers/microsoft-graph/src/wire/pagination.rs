@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use huskarl::token::AccessToken;
 use serde::Deserialize;
 
-use crate::{error::GraphError, graph_url::GraphUrl, transport::GraphReadOperation};
+use crate::{
+    error::GraphError,
+    transport::{GraphReadOperation, GraphUrl},
+};
 
 use super::GraphApi;
 

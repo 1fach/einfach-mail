@@ -26,7 +26,11 @@ use super::{
     authorization_header, calendar_reset_location, fallback_delay, parse_retry_after,
     retry_after_hint, retry_decision_for,
 };
-use crate::{error::GraphError, graph_url::GraphUrl};
+use crate::{
+    error::GraphError,
+    test_support::{http_base_url, http_url},
+    transport::GraphUrl,
+};
 
 const SYSTEM_PROXY_CHILD: &str = "EINFACH_MAIL_GRAPH_PROVIDER_PROXY_TEST_CHILD";
 const REQUEST_WAIT: Duration = Duration::from_secs(3);
@@ -63,14 +67,6 @@ fn rejects_ambiguous_calendar_reset_locations() {
 
 fn graph_url(value: &str) -> GraphUrl {
     GraphUrl::fixture(Url::parse(value).expect("synthetic Graph URL is valid"))
-}
-
-fn http_url(server: &MockServer, path: &str) -> String {
-    format!("http://{}{path}", server.address())
-}
-
-fn http_base_url(server: &MockServer) -> String {
-    http_url(server, "")
 }
 
 #[test]

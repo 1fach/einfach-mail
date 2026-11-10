@@ -32,14 +32,14 @@ const CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
     "User.Read",
     "offline_access",
 ];
-pub(super) const SEND_MAIL_AUTHORIZATION_SCOPES: [&str; 5] = [
+pub const SEND_MAIL_AUTHORIZATION_SCOPES: [&str; 5] = [
     "Calendars.Read",
     "Mail.Read",
     "Mail.Send",
     "User.Read",
     "offline_access",
 ];
-pub(super) const MAIL_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
+pub const MAIL_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
     "Calendars.Read",
     "Mail.ReadWrite",
     "User.Read",
@@ -47,14 +47,14 @@ pub(super) const MAIL_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
 ];
 
 #[derive(Clone)]
-pub(super) struct Endpoints {
-    pub(super) authorization: Url,
-    pub(super) token: Url,
-    pub(super) graph_me: Url,
+pub struct Endpoints {
+    pub authorization: Url,
+    pub token: Url,
+    pub graph_me: Url,
 }
 
 impl Endpoints {
-    pub(super) fn microsoft() -> Self {
+    pub fn microsoft() -> Self {
         Self {
             authorization: Url::parse(
                 "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize",
@@ -70,20 +70,20 @@ impl Endpoints {
     }
 }
 
-pub(super) trait BrowserLauncher: Send + Sync {
+pub trait BrowserLauncher: Send + Sync {
     fn open(&self, authorization_url: &Url) -> Result<(), AccountOperationError>;
 }
 
-pub(super) struct AuthorizationContext<'context> {
-    pub(super) client_id: Uuid,
-    pub(super) callback_port: CallbackPort,
-    pub(super) endpoints: &'context Endpoints,
-    pub(super) client: reqwest::Client,
-    pub(super) browser: &'context dyn BrowserLauncher,
+pub struct AuthorizationContext<'context> {
+    pub client_id: Uuid,
+    pub callback_port: CallbackPort,
+    pub endpoints: &'context Endpoints,
+    pub client: reqwest::Client,
+    pub browser: &'context dyn BrowserLauncher,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct SystemBrowser;
+pub struct SystemBrowser;
 
 impl BrowserLauncher for SystemBrowser {
     fn open(&self, authorization_url: &Url) -> Result<(), AccountOperationError> {
@@ -92,7 +92,7 @@ impl BrowserLauncher for SystemBrowser {
     }
 }
 
-pub(super) async fn authorize(
+pub async fn authorize(
     context: AuthorizationContext<'_>,
     request: AccountPermissionRequest,
 ) -> Result<TokenResponse, AccountOperationError> {
@@ -170,7 +170,7 @@ async fn complete_authorization(
     Ok(completed.token_response)
 }
 
-pub(super) async fn refresh(
+pub async fn refresh(
     client_id: Uuid,
     endpoints: &Endpoints,
     client: reqwest::Client,
@@ -308,7 +308,7 @@ impl AuthorizationParameters {
     }
 }
 
-pub(super) fn authorization_scopes(request: AccountPermissionRequest) -> &'static [&'static str] {
+pub fn authorization_scopes(request: AccountPermissionRequest) -> &'static [&'static str] {
     match request {
         AccountPermissionRequest::Current => &BASE_AUTHORIZATION_SCOPES,
         AccountPermissionRequest::MailReadWrite => &MAIL_READ_WRITE_AUTHORIZATION_SCOPES,

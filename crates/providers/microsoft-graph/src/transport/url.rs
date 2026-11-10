@@ -11,11 +11,11 @@ use einfach_mail_domain::CalendarViewRange;
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
 const FOLDER_SELECT: &str = "id,displayName,isHidden";
 const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead,flag";
-pub(super) const CALENDAR_EVENT_EDIT_SELECT: &str = "id,subject,location,start,end,isAllDay,originalStartTimeZone,originalEndTimeZone,type,isOrganizer,attendees,isOnlineMeeting,changeKey";
-pub(super) const MAX_GRAPH_CALENDAR_DELTA_URL_BYTES: usize = 16 * 1024;
+pub const CALENDAR_EVENT_EDIT_SELECT: &str = "id,subject,location,start,end,isAllDay,originalStartTimeZone,originalEndTimeZone,type,isOrganizer,attendees,isOnlineMeeting,changeKey";
+pub const MAX_GRAPH_CALENDAR_DELTA_URL_BYTES: usize = 16 * 1024;
 
 #[derive(Clone)]
-pub(super) struct GraphAuthority {
+pub struct GraphAuthority {
     base_url: Url,
     origin: GraphOrigin,
 }
@@ -28,7 +28,7 @@ struct GraphOrigin {
 }
 
 impl GraphAuthority {
-    pub(super) fn from_profile_endpoint(endpoint: &Url) -> Result<Self, GraphError> {
+    pub fn from_profile_endpoint(endpoint: &Url) -> Result<Self, GraphError> {
         if endpoint.path() != "/v1.0/me" {
             return Err(GraphError::UnsafeLink);
         }
@@ -39,11 +39,11 @@ impl GraphAuthority {
         Self::from_base_url(base_url)
     }
 
-    pub(super) fn profile_url(&self, endpoint: &Url) -> Result<GraphUrl, GraphError> {
+    pub fn profile_url(&self, endpoint: &Url) -> Result<GraphUrl, GraphError> {
         self.opaque_link(endpoint.as_str())
     }
 
-    pub(super) fn root_folders_path(&self) -> Result<GraphUrl, GraphError> {
+    pub fn root_folders_path(&self) -> Result<GraphUrl, GraphError> {
         let mut url = self
             .base_url
             .join("me/mailFolders")
@@ -52,7 +52,7 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub(super) fn well_known_folder_path(
+    pub fn well_known_folder_path(
         &self,
         folder: WellKnownMailFolder,
     ) -> Result<GraphUrl, GraphError> {
@@ -69,16 +69,13 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub(super) fn child_folders_path(&self, folder_id: &str) -> Result<GraphUrl, GraphError> {
+    pub fn child_folders_path(&self, folder_id: &str) -> Result<GraphUrl, GraphError> {
         let mut url = self.folder_path(folder_id, "childFolders")?;
         url.query_pairs_mut().append_pair("$select", FOLDER_SELECT);
         self.validated_url(url)
     }
 
-    pub(super) fn folder_message_delta_path(
-        &self,
-        folder_id: &str,
-    ) -> Result<GraphUrl, GraphError> {
+    pub fn folder_message_delta_path(&self, folder_id: &str) -> Result<GraphUrl, GraphError> {
         let mut url = self.folder_path(folder_id, "messages")?;
         url.path_segments_mut()
             .map_err(|()| GraphError::UnsafeLink)?
@@ -87,17 +84,17 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub(super) fn message_body_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
+    pub fn message_body_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
         let mut url = self.message_path(message_id)?;
         url.query_pairs_mut().append_pair("$select", "body");
         self.validated_url(url)
     }
 
-    pub(super) fn message_update_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
+    pub fn message_update_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
         self.validated_url(self.message_path(message_id)?)
     }
 
-    pub(super) fn message_move_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
+    pub fn message_move_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
         let mut url = self.message_path(message_id)?;
         url.path_segments_mut()
             .map_err(|()| GraphError::UnsafeLink)?
@@ -105,7 +102,7 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub(super) fn message_reply_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
+    pub fn message_reply_path(&self, message_id: &str) -> Result<GraphUrl, GraphError> {
         let mut url = self.message_path(message_id)?;
         url.path_segments_mut()
             .map_err(|()| GraphError::UnsafeLink)?
@@ -113,7 +110,7 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub(super) fn mail_send_path(&self) -> Result<GraphUrl, GraphError> {
+    pub fn mail_send_path(&self) -> Result<GraphUrl, GraphError> {
         let url = self
             .base_url
             .join("me/sendMail")
@@ -121,7 +118,7 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub(super) fn calendar_view_delta_path(
+    pub fn calendar_view_delta_path(
         &self,
         range: &CalendarViewRange,
     ) -> Result<GraphUrl, GraphError> {
@@ -143,7 +140,7 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub(super) fn primary_calendar_events_path(&self) -> Result<GraphUrl, GraphError> {
+    pub fn primary_calendar_events_path(&self) -> Result<GraphUrl, GraphError> {
         let url = self
             .base_url
             .join("me/calendar/events")
@@ -151,14 +148,11 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub(super) fn calendar_event_path(&self, event_id: &str) -> Result<GraphUrl, GraphError> {
+    pub fn calendar_event_path(&self, event_id: &str) -> Result<GraphUrl, GraphError> {
         self.validated_url(self.calendar_event_url(event_id)?)
     }
 
-    pub(super) fn editable_calendar_event_path(
-        &self,
-        event_id: &str,
-    ) -> Result<GraphUrl, GraphError> {
+    pub fn editable_calendar_event_path(&self, event_id: &str) -> Result<GraphUrl, GraphError> {
         let mut url = self.calendar_event_url(event_id)?;
         url.query_pairs_mut()
             .append_pair("$select", CALENDAR_EVENT_EDIT_SELECT);
@@ -177,7 +171,7 @@ impl GraphAuthority {
         Ok(url)
     }
 
-    pub(super) fn opaque_link(&self, link: &str) -> Result<GraphUrl, GraphError> {
+    pub fn opaque_link(&self, link: &str) -> Result<GraphUrl, GraphError> {
         if has_user_info_separator(link) {
             return Err(GraphError::UnsafeLink);
         }
@@ -186,14 +180,14 @@ impl GraphAuthority {
         Ok(GraphUrl(link.to_owned()))
     }
 
-    pub(super) fn calendar_delta_opaque_link(&self, link: &str) -> Result<GraphUrl, GraphError> {
+    pub fn calendar_delta_opaque_link(&self, link: &str) -> Result<GraphUrl, GraphError> {
         if link.len() > MAX_GRAPH_CALENDAR_DELTA_URL_BYTES {
             return Err(GraphError::ResponseTooLarge);
         }
         self.opaque_link(link)
     }
 
-    pub(super) fn calendar_delta_reset_link(
+    pub fn calendar_delta_reset_link(
         &self,
         range: &CalendarViewRange,
         location: &str,
@@ -244,7 +238,7 @@ impl GraphAuthority {
         Ok(reset_link)
     }
 
-    pub(super) fn message_delta_reset_link(
+    pub fn message_delta_reset_link(
         &self,
         folder_id: &str,
         location: &str,
@@ -390,15 +384,15 @@ fn has_valid_percent_encoding(value: &str) -> bool {
 }
 
 #[derive(Clone)]
-pub(super) struct GraphUrl(String);
+pub struct GraphUrl(String);
 
 impl GraphUrl {
-    pub(super) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
     #[cfg(test)]
-    pub(super) fn fixture(url: Url) -> Self {
+    pub fn fixture(url: Url) -> Self {
         Self(url.to_string())
     }
 }

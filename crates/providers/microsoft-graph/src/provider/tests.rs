@@ -19,16 +19,18 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
+use crate::test_support::{http_base_url, http_url};
 use crate::{
     CallbackPort,
-    credential::{
-        CredentialIdentity, RefreshTokenStore, SavedRefreshToken, SecretServiceCredentialCleanup,
-        SecretServiceRefreshTokenStore,
+    auth::{
+        credential::{
+            CredentialIdentity, RefreshTokenStore, SavedRefreshToken,
+            SecretServiceCredentialCleanup, SecretServiceRefreshTokenStore,
+        },
+        identity::{BrowserLauncher, Endpoints},
     },
     error::GraphError,
-    graph_url::GraphAuthority,
-    identity::{BrowserLauncher, Endpoints},
-    transport::GraphTransport,
+    transport::{GraphAuthority, GraphTransport},
 };
 use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
@@ -176,14 +178,6 @@ fn access_token(token_text: &str) -> Arc<AccessToken> {
         SystemTime::now(),
         Some(Duration::from_secs(3_600)),
     )))
-}
-
-fn http_url(server: &MockServer, path: &str) -> String {
-    format!("http://{}{path}", server.address())
-}
-
-fn http_base_url(server: &MockServer) -> String {
-    http_url(server, "")
 }
 
 fn synthetic_provider<C>(

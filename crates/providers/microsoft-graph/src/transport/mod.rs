@@ -18,14 +18,18 @@ use tokio::{
     task::JoinSet,
 };
 
-use crate::{
-    error::GraphError,
-    graph_url::{GraphUrl, MAX_GRAPH_CALENDAR_DELTA_URL_BYTES},
-    http_client,
-};
+use crate::error::GraphError;
 
 #[cfg(test)]
 mod tests;
+
+mod client;
+mod url;
+
+pub(super) use self::client::build_client;
+#[cfg(test)]
+pub(super) use self::url::CALENDAR_EVENT_EDIT_SELECT;
+pub(super) use self::url::{GraphAuthority, GraphUrl, MAX_GRAPH_CALENDAR_DELTA_URL_BYTES};
 
 const REQUEST_CHANNEL_CAPACITY: usize = 16;
 const MAX_ACTIVE_REQUESTS: usize = 16;
@@ -469,12 +473,12 @@ fn worker_resources(
 }
 
 fn build_system_client() -> Result<Client, GraphError> {
-    configured_client(http_client::build_client())
+    configured_client(build_client())
 }
 
 #[cfg(test)]
 fn build_fixture_client() -> Result<Client, GraphError> {
-    configured_client(http_client::build_fixture_client())
+    configured_client(client::build_fixture_client())
 }
 
 fn configured_client(client: Result<Client, reqwest::Error>) -> Result<Client, GraphError> {
