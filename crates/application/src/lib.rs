@@ -20,6 +20,8 @@ mod mail;
 mod mail_cache;
 mod mail_workflow;
 mod shared;
+#[cfg(test)]
+mod test_support;
 
 use shared::recovery as account_recovery;
 
