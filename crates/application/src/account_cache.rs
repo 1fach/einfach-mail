@@ -5,7 +5,7 @@ use einfach_mail_domain::AccountId;
 use thiserror::Error;
 
 use crate::MailCacheError;
-use crate::operation_reservations::{ActiveOperations, reserve_account};
+use crate::shared::reservations::{ActiveOperations, reserve_account};
 
 /// Errors returned while opening a cache shared by account features.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -94,13 +94,13 @@ impl From<MailCacheError> for AccountCacheRemovalError {
     }
 }
 
-impl From<crate::operation_reservations::AccountReservationError> for AccountCacheRemovalError {
-    fn from(error: crate::operation_reservations::AccountReservationError) -> Self {
+impl From<crate::shared::reservations::AccountReservationError> for AccountCacheRemovalError {
+    fn from(error: crate::shared::reservations::AccountReservationError) -> Self {
         match error {
-            crate::operation_reservations::AccountReservationError::OperationInProgress => {
+            crate::shared::reservations::AccountReservationError::OperationInProgress => {
                 Self::OperationInProgress
             }
-            crate::operation_reservations::AccountReservationError::StateUnavailable => {
+            crate::shared::reservations::AccountReservationError::StateUnavailable => {
                 Self::Unavailable
             }
         }

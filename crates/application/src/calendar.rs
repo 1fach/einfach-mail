@@ -12,17 +12,17 @@ use einfach_mail_domain::{
 };
 use thiserror::Error;
 
-use crate::account_recovery::{AccountWorkflowRecovery, CalendarWriteReadiness};
+use crate::shared::recovery::{AccountWorkflowRecovery, CalendarWriteReadiness};
 use crate::{
     calendar_cache::{CalendarCache, CalendarCacheError, CalendarSyncState},
     calendar_provider::{
         CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
         CalendarSyncStrategy,
     },
-    operation_reservations::{
+    shared::reservations::{
         AccountReservationError, ActiveOperations, reserve_account, reserve_calendar_view,
     },
-    sync_budget::{
+    shared::sync_budget::{
         MAX_DELTA_PAGES_PER_ATTEMPT, MAX_DELTA_RESETS_PER_ATTEMPT, response_bytes_after,
     },
 };
