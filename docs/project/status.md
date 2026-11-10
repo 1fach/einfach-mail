@@ -10,7 +10,7 @@ M10's native mail and calendar workspace is planned under [GitHub milestone 9](h
 
 On 2026-11-10, the resizing implementation for [issue #292](https://github.com/1fach/einfach-mail/issues/292) passed all checks from `bash scripts/check-linux-local.sh` on `feat/mail-list-resizing`, stacked on `feat/mail-contextual-navigation`. The workspace test command needed local-socket permission for the existing EWS HTTP mocks. GitHub Actions are unavailable, and no real-window review has been done, so keep the stacked M10 PRs in draft.
 
-Engineering-health work continues through [issue #282](https://github.com/1fach/einfach-mail/issues/282). [PR #301](https://github.com/1fach/einfach-mail/pull/301) records ADR 0061 on `feat/mail-list-resizing`, and the reviewed path map is posted on #282. [PR #302](https://github.com/1fach/einfach-mail/pull/302) moves the domain modules and tests on that stack; its full Linux local gate passed while GitHub Actions remain disabled. Keep #283 linked until the stack reaches `main`, then continue the #282 subissues in dependency order. Keep the supplied screenshots as UI references for later desktop work, continue Linux-first implementation, and leave translucency in the separate #274 experiment.
+Engineering-health work continues through [issue #282](https://github.com/1fach/einfach-mail/issues/282). [PR #301](https://github.com/1fach/einfach-mail/pull/301) records ADR 0061 on `feat/mail-list-resizing`, and the reviewed path map is posted on #282. [PR #302](https://github.com/1fach/einfach-mail/pull/302) moves the domain modules and tests on that stack; its full Linux local gate passed while GitHub Actions remain disabled. Keep #283 linked until the stack reaches `main`. The #285 application layout work is split into ordered child issues #303–#309. The #303 shared-module refactor passed the full Linux local gate, with 494 workspace test names unchanged and no Actions run. Continue with #304 on the updated stack. Keep the supplied screenshots as UI references for later desktop work, continue Linux-first implementation, and leave translucency in the separate #274 experiment.
 
 M7 Exchange Server EWS support provides a Linux read-only mail baseline and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. Linux Autodiscover merged into `main` in [PR #261](https://github.com/1fach/einfach-mail/pull/261) and remains tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258) for live verification.
 
@@ -52,7 +52,7 @@ PR #265 contains the locally verified Linux implementation for issue #262. Runti
 
 ## Next actions
 
-1. Continue #282 with #284 from the updated M10 resize branch; keep #283 linked until that stack reaches `main`, then follow the remaining subissues in dependency order.
+1. Continue #282 with #304 from the updated M10 resize branch; keep #283 linked until that stack reaches `main`, then follow the remaining #285 subissues in dependency order.
 2. Continue M10 with the next small wide-workspace issue after #291; keep the stacked draft PRs unmerged until required checks and Linux real-window review are available.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.

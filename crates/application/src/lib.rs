@@ -4,7 +4,6 @@
 
 mod account;
 mod account_cache;
-mod account_recovery;
 mod account_session;
 mod calendar;
 mod calendar_cache;
@@ -14,8 +13,9 @@ mod exchange_ews_settings;
 mod mail;
 mod mail_cache;
 mod mail_workflow;
-mod operation_reservations;
-mod sync_budget;
+mod shared;
+
+use shared::recovery as account_recovery;
 
 pub use account::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,

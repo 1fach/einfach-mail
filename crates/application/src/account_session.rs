@@ -15,8 +15,8 @@ use einfach_mail_domain::{
     ReadState,
 };
 
-use crate::account_recovery::AccountWorkflowRecovery;
-use crate::operation_reservations::{ActiveOperations, reserve_account};
+use crate::shared::recovery::AccountWorkflowRecovery;
+use crate::shared::reservations::{ActiveOperations, reserve_account};
 use crate::{
     AccountCache, AccountCacheOpenError, AccountCacheRemovalError, CalendarCache,
     CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,

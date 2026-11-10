@@ -16,8 +16,8 @@ use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
 use crate::{
     CalendarDeltaPageResponse, CalendarSyncMode, CalendarSyncStrategy,
-    CalendarViewSnapshotResponse, account_recovery::AccountWorkflowRecovery,
-    operation_reservations::ActiveOperations, sync_budget::MAX_SYNC_RESPONSE_BYTES,
+    CalendarViewSnapshotResponse, shared::recovery::AccountWorkflowRecovery,
+    shared::reservations::ActiveOperations, shared::sync_budget::MAX_SYNC_RESPONSE_BYTES,
 };
 
 use super::{

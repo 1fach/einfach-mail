@@ -14,16 +14,16 @@ use einfach_mail_domain::{
 };
 use thiserror::Error;
 
-use crate::account_recovery::AccountWorkflowRecovery;
+use crate::shared::recovery::AccountWorkflowRecovery;
 use crate::{
     MailCache, MailCacheError, MailOperationError, MailProvider, MailSendProviderError,
     MessageBodyForDisplay, MessageDeltaResponse, WellKnownMailFolder,
-    operation_reservations::{
+    prepare_message_body_for_display,
+    shared::reservations::{
         AccountReservationError, ActiveOperations, OperationReservation, reserve_account,
         reserve_folders,
     },
-    prepare_message_body_for_display,
-    sync_budget::{
+    shared::sync_budget::{
         MAX_DELTA_PAGES_PER_ATTEMPT, MAX_DELTA_RESETS_PER_ATTEMPT, response_bytes_after,
     },
 };
