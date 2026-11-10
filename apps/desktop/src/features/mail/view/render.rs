@@ -19,17 +19,24 @@ use gpui_kit::{
 };
 
 use super::{
-    FollowUpFlagUpdateStatus, MESSAGE_LIST_CONTEXT, MESSAGE_LIST_MAX_WIDTH, MESSAGE_LIST_MIN_WIDTH,
-    MESSAGE_READER_MIN_WIDTH, MESSAGE_ROW_HEIGHT, MailFolderNavigation, MailView, MailViewEvent,
-    MessageDetailState, MessageListState, MessageListWidthChange, MessageMoveMenuAction,
-    MessageMoveStatus, MoveRecoveryReason, ReadStateFeedback, SyncStatus,
-    WellKnownFolderActionStatus, empty_message_detail_copy, follow_up_flag_cache_sync_message,
-    follow_up_flag_confirmed_message, follow_up_flag_failure_message,
-    follow_up_flag_progress_message, mail_error_message, message_sender,
-    well_known_folder_mail_action,
+    CompactMailPane, FollowUpFlagUpdateStatus, MAIL_SHELL_NAVIGATION_WIDTH,
+    MAIL_SPLIT_HANDLE_RESERVE, MESSAGE_LIST_CONTEXT, MESSAGE_LIST_MAX_WIDTH,
+    MESSAGE_LIST_MIN_WIDTH, MESSAGE_READER_CONTEXT, MESSAGE_READER_MIN_WIDTH, MESSAGE_ROW_HEIGHT,
+    MailFolderNavigation, MailView, MailViewEvent, MessageDetailState, MessageListState,
+    MessageListWidthChange, MessageMoveMenuAction, MessageMoveStatus, MoveRecoveryReason,
+    ReadStateFeedback, SyncStatus, WellKnownFolderActionStatus, empty_message_detail_copy,
+    follow_up_flag_cache_sync_message, follow_up_flag_confirmed_message,
+    follow_up_flag_failure_message, follow_up_flag_progress_message, mail_error_message,
+    message_sender, well_known_folder_mail_action,
 };
 
 const MAIL_HEADER_HEIGHT: Rems = rems(3.625);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MessageListLayout {
+    Split,
+    Compact,
+}
 
 impl MailView {
     fn render_reply_action(&self, message_id: &MessageId, cx: &mut Context<Self>) -> AnyElement {
@@ -131,8 +138,13 @@ impl MailView {
             )
     }
 
-    fn render_message_list(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = self.render_message_list_header(cx);
+    fn render_message_list(
+        &self,
+        layout: MessageListLayout,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let header = self.render_message_list_header(layout, cx);
         let content = self.render_message_list_content(colors, cx);
         let message_list = div()
             .id("mail-message-list")
@@ -173,7 +185,7 @@ impl MailView {
                             ..MESSAGE_LIST_MAX_WIDTH.to_pixels(rem_size),
                     )
                     .fixed()
-                    .child(self.render_message_list(colors, cx)),
+                    .child(self.render_message_list(MessageListLayout::Split, colors, cx)),
             )
             .child(
                 resizable_panel()
@@ -183,8 +195,102 @@ impl MailView {
             .into_any_element()
     }
 
-    fn render_message_list_header(&self, cx: &mut Context<Self>) -> AnyElement {
-        let width_controls = self.render_message_list_width_controls(cx);
+    fn render_message_panes(
+        &mut self,
+        window: &mut Window,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let rem_size = window.rem_size();
+        self.pane_layout.sync_rem_size(rem_size, cx);
+        self.update_message_row_sizes(rem_size);
+
+        if self.uses_compact_mail_layout(window, rem_size) {
+            self.render_compact_message_pane(colors, cx)
+        } else {
+            self.render_resizable_message_panes(rem_size, colors, cx)
+        }
+    }
+
+    fn render_compact_message_pane(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match self.compact_pane {
+            CompactMailPane::MessageList => div()
+                .id("mail-compact-message-list")
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(self.render_message_list(MessageListLayout::Compact, colors, cx))
+                .into_any_element(),
+            CompactMailPane::MessageReader => self.render_compact_message_reader(colors, cx),
+        }
+    }
+
+    fn uses_compact_mail_layout(&self, window: &Window, rem_size: Pixels) -> bool {
+        let wide_minimum_width = MAIL_SHELL_NAVIGATION_WIDTH.to_pixels(rem_size)
+            + self.pane_layout.message_list_width.0.to_pixels(rem_size)
+            + MESSAGE_READER_MIN_WIDTH.to_pixels(rem_size)
+            + MAIL_SPLIT_HANDLE_RESERVE.to_pixels(rem_size);
+        window.bounds().size.width < wide_minimum_width
+    }
+
+    fn render_compact_message_reader(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id("mail-compact-reader")
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(colors.background)
+            .key_context(MESSAGE_READER_CONTEXT)
+            .on_action(cx.listener(Self::on_return_to_message_list))
+            .child(self.render_compact_reader_toolbar(colors, cx))
+            .child(self.render_message_detail(colors, cx))
+            .into_any_element()
+    }
+
+    fn render_compact_reader_toolbar(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("mail-compact-reader-toolbar")
+            .w_full()
+            .flex()
+            .items_center()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(colors.border)
+            .child(self.render_back_to_messages_button(cx))
+    }
+
+    fn render_back_to_messages_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("mail-reader-back")
+            .ghost()
+            .label("Back to messages")
+            .track_focus(&self.message_list_focus)
+            .on_click(cx.listener(|view, _, window, cx| {
+                view.return_to_message_list(window, cx);
+            }))
+    }
+
+    fn render_message_list_header(
+        &self,
+        layout: MessageListLayout,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .id("mail-message-list-header")
             .role(Role::Group)
@@ -197,7 +303,9 @@ impl MailView {
             .px_3()
             .py_2()
             .child(div().text_sm().font_semibold().child("Messages"))
-            .child(width_controls)
+            .when(layout == MessageListLayout::Split, |header| {
+                header.child(self.render_message_list_width_controls(cx))
+            })
             .into_any_element()
     }
 
@@ -302,6 +410,7 @@ impl MailView {
             .on_action(cx.listener(Self::on_select_next_message))
             .on_action(cx.listener(Self::on_select_first_message))
             .on_action(cx.listener(Self::on_select_last_message))
+            .on_action(cx.listener(Self::on_open_selected_message))
             .child(
                 v_virtual_list(
                     cx.entity(),
@@ -1145,11 +1254,8 @@ fn record_resized_message_list_width(
 
 impl Render for MailView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rem_size = window.rem_size();
-        self.pane_layout.sync_rem_size(rem_size, cx);
-        self.update_message_row_sizes(rem_size);
         let colors = cx.theme().semantic_tokens().colors;
-        let panes = self.render_resizable_message_panes(rem_size, colors, cx);
+        let panes = self.render_message_panes(window, colors, cx);
         div()
             .size_full()
             .flex()

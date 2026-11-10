@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-11-10
+Last updated: 2026-11-11
 
 ## Current milestone
 
@@ -42,6 +42,8 @@ The #321 Calendar composer split passes the full Linux local gate and preserves 
 
 Issue #322's Calendar agenda split preserves all 495 workspace test identifiers and the production and test string literals. [PR #327](https://github.com/1fach/einfach-mail/pull/327) merged into `feat/mail-list-resizing` at `d4593a8` after the full Linux local gate passed. No real window was launched; #290 remains open for safe-display screenshots. Keep #283 linked until the engineering-health stack reaches `main`.
 
+Issue #278's compact Mail layout is implemented on `feat/mail-compact-layout`, based on `feat/mail-list-resizing`. It keeps contextual navigation visible and switches the Mail content between the message list and reader below the three-pane minimum. Synthetic headless coverage checks folder reachability, pointer and keyboard navigation, selection continuity, and wide/compact resizing. The full Linux local gate passed on 2026-11-11 with localhost access for synthetic EWS HTTP mocks. No GitHub Actions or real window were used; #290 remains open for real-window screenshots and compositor accessibility review. This places both compact and wide Mail layouts on the working stack for #323.
+
 ## Active risks
 
 - GitHub Actions compute is unavailable. PR #301 has no CI runs; its full Linux local gate passed on the exact PR head. PR #320 also has no CI runs; its full Linux local gate passes on the current PR head.
@@ -62,7 +64,7 @@ Issue #322's Calendar agenda split preserves all 495 workspace test identifiers 
 
 ## Next actions
 
-1. Continue #290 with the #323 Mail feature split, then #324 for the Account feature. Keep #283 linked until the engineering-health stack reaches `main`.
+1. Merge the #278 compact Mail layout into `feat/mail-list-resizing`, then start #323's Mail feature split and continue with #324's Account split. Keep #290 open for real-window evidence and #283 linked until the engineering-health stack reaches `main`.
 2. Continue M10 with the next small wide-workspace issue after #291; keep the release stack unmerged until Linux real-window review is available.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
