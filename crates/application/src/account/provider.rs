@@ -6,6 +6,46 @@ use thiserror::Error;
 
 use super::workflow::AccountOperationCancellation;
 
+/// Identifies the provider that established a connected account.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountProviderKind {
+    /// Microsoft 365 through Microsoft Graph.
+    MicrosoftGraph,
+    /// Exchange Server through Exchange Web Services.
+    ExchangeEws,
+}
+
+/// Pairs a provider-independent profile with the provider that established it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectedAccount {
+    profile: AccountProfile,
+    provider_kind: AccountProviderKind,
+}
+
+impl ConnectedAccount {
+    /// Creates an account result for a provider workflow.
+    #[must_use]
+    pub const fn new(profile: AccountProfile, provider_kind: AccountProviderKind) -> Self {
+        Self {
+            profile,
+            provider_kind,
+        }
+    }
+
+    /// Returns the provider-independent account identity and capabilities.
+    #[must_use]
+    pub const fn profile(&self) -> &AccountProfile {
+        &self.profile
+    }
+
+    /// Returns the provider selected for this account.
+    #[must_use]
+    pub const fn provider_kind(&self) -> AccountProviderKind {
+        self.provider_kind
+    }
+}
+
 /// A user-safe category for an account workflow failure.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -251,7 +291,7 @@ pub enum AccountPermissionRequest {
 
 /// Operations the application needs from a connected-account provider.
 pub trait AccountProvider: Send + Sync {
-    /// Restores the saved account, if the provider has a refresh credential.
+    /// Restores the saved account and identifies its provider, if a credential exists.
     ///
     /// # Errors
     ///
@@ -259,7 +299,7 @@ pub trait AccountProvider: Send + Sync {
     /// or mapped to an account profile.
     fn restore_account(
         &self,
-    ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_;
+    ) -> impl Future<Output = Result<Option<ConnectedAccount>, AccountOperationError>> + Send + '_;
 
     /// Returns a verified account ID that can identify the cache to remove.
     ///
@@ -275,7 +315,7 @@ pub trait AccountProvider: Send + Sync {
         &self,
     ) -> impl Future<Output = Result<Option<AccountId>, AccountOperationError>> + Send + '_;
 
-    /// Connects the selected account through its provider's sign-in flow.
+    /// Connects the selected account and identifies the provider that signed it in.
     ///
     /// Implementations must call [`AccountOperationCancellation::begin_credential_commit`]
     /// immediately before storing the refresh credential.
@@ -292,7 +332,7 @@ pub trait AccountProvider: Send + Sync {
     fn connect_account(
         &self,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_;
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_;
 
     /// Connects the selected account through its provider's sign-in flow.
     ///
@@ -308,7 +348,7 @@ pub trait AccountProvider: Send + Sync {
         &self,
         request: AccountConnectionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         async move {
             match request {
                 AccountConnectionRequest::Microsoft365 => self.connect_account(cancellation).await,
@@ -338,7 +378,7 @@ pub trait AccountProvider: Send + Sync {
         async { Err(AccountOperationError::UnsupportedOperation) }
     }
 
-    /// Requests the selected delegated permissions again for the active account.
+    /// Reviews permissions and returns the active account with its provider kind.
     ///
     /// Implementations must preserve the existing credential and session when
     /// authorization is cancelled, denied, or returns another account.
@@ -356,7 +396,7 @@ pub trait AccountProvider: Send + Sync {
         expected_account_id: &AccountId,
         request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_;
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_;
 
     /// Removes the provider's locally saved refresh credential.
     ///

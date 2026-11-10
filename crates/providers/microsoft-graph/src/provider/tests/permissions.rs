@@ -80,7 +80,7 @@ async fn calendar_permission_renewal_requests_only_calendar_write_access() {
         .await
         .expect("calendar permission renewal task completes")
         .expect("same-account calendar permission renewal succeeds");
-    assert_eq!(profile.id(), &expected_account);
+    assert_eq!(profile.profile().id(), &expected_account);
     assert_eq!(
         credentials.token_value().as_deref(),
         Some("synthetic-calendar-write-refresh")
@@ -171,7 +171,7 @@ async fn permission_renewal_cancels_before_commit_and_commits_after_cancellation
         .await
         .expect("initial account restores")
         .expect("synthetic account is present");
-    let expected_account_id = active_profile.id().clone();
+    let expected_account_id = active_profile.profile().id().clone();
 
     let cancelled_operation = AccountOperationCancellation::new();
     let task_cancellation = cancelled_operation.clone();
@@ -241,7 +241,10 @@ async fn permission_renewal_cancels_before_commit_and_commits_after_cancellation
         .await
         .expect("permission workflow completes")
         .expect("commit wins the cancellation race");
-    assert_eq!(renewed_profile.id(), active_profile.id());
+    assert_eq!(
+        renewed_profile.profile().id(),
+        active_profile.profile().id()
+    );
     assert_eq!(
         credentials.token_value().as_deref(),
         Some("synthetic-renewed-refresh")
@@ -256,7 +259,10 @@ async fn permission_renewal_cancels_before_commit_and_commits_after_cancellation
         .await
         .expect("new workflow restores the renewed account")
         .expect("renewed account remains present");
-    assert_eq!(restored_profile.id(), renewed_profile.id());
+    assert_eq!(
+        restored_profile.profile().id(),
+        renewed_profile.profile().id()
+    );
     assert_eq!(
         credentials.token_value().as_deref(),
         Some("synthetic-final-refresh")
@@ -328,7 +334,7 @@ async fn permission_renewal_for_another_account_keeps_the_saved_session() {
         .expect("saved account restores")
         .expect("synthetic account is present");
 
-    let expected_account_id = active_profile.id().clone();
+    let expected_account_id = active_profile.profile().id().clone();
     let cancellation = AccountOperationCancellation::new();
     let renewal = provider.reauthorize_account(
         &expected_account_id,
@@ -365,7 +371,7 @@ async fn permission_renewal_for_another_account_keeps_the_saved_session() {
     let session = session
         .as_ref()
         .expect("mismatched authorization preserves the active session");
-    assert_eq!(session.account_id, *active_profile.id());
+    assert_eq!(session.account_id, *active_profile.profile().id());
     assert_eq!(
         session
             .access_token

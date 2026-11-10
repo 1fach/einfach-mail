@@ -10,8 +10,8 @@ async fn provider_credential_lifecycle_uses_secret_service_across_restore() {
         uuid::Uuid::new_v4()
     )));
     let _cleanup = SecretServiceCredentialCleanup::new(credentials.as_ref().clone());
-    let (provider, profile) = connect_with_secret_service(&server, Arc::clone(&credentials)).await;
-    let account_id = profile.id().clone();
+    let (provider, account) = connect_with_secret_service(&server, Arc::clone(&credentials)).await;
+    let account_id = account.profile().id().clone();
 
     assert_eq!(account_id.as_str(), "synthetic-account");
     assert_saved_refresh_token(&credentials, &account_id, "synthetic-connect-refresh");
@@ -20,7 +20,7 @@ async fn provider_credential_lifecycle_uses_secret_service_across_restore() {
     let (provider, restored_profile) =
         restore_with_secret_service(&server, Arc::clone(&credentials)).await;
 
-    assert_eq!(restored_profile.id(), &account_id);
+    assert_eq!(restored_profile.profile().id(), &account_id);
     assert_saved_refresh_token(&credentials, &account_id, "synthetic-rotated-refresh");
     provider
         .sign_out()
@@ -72,7 +72,9 @@ async fn restore_persists_rotated_refresh_token_and_loads_profile() {
         .restore_account()
         .await
         .expect("saved synthetic account is restored");
-    let profile = restored.expect("saved refresh token identifies an account");
+    let account = restored.expect("saved refresh token identifies an account");
+    assert_eq!(account.provider_kind(), AccountProviderKind::MicrosoftGraph);
+    let profile = account.profile();
 
     assert_eq!(profile.label(), "Grace Example");
     assert_eq!(

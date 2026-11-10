@@ -21,14 +21,14 @@ use super::{AccountContent, AccountServices, AccountStatus, AccountView, SetupIs
 use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    AccountSession, AccountSessionFactory, AccountSessionFuture, AccountWorkflow,
-    CalendarCacheError, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
-    CalendarEventUpdateOutcome, CalendarSession, CalendarSnapshot, CalendarSyncReport,
-    CalendarWorkflowError, ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest,
-    ExchangeEwsDiscoveryResult, FollowUpFlagUpdateOutcome, MailCacheError, MailSendOutcome,
-    MailSendResolutionError, MailSendWorkflowError, MailSession, MailSyncProgress, MailSyncReport,
-    MailSyncState, MailWorkflowError, MessageMoveOutcome, ReadStateUpdateOutcome,
-    WellKnownFolderMoveOutcome, WellKnownMailFolder,
+    AccountProviderKind, AccountSession, AccountSessionFactory, AccountSessionFuture,
+    AccountWorkflow, CalendarCacheError, CalendarEventCreationOutcome,
+    CalendarEventDeletionOutcome, CalendarEventUpdateOutcome, CalendarSession, CalendarSnapshot,
+    CalendarSyncReport, CalendarWorkflowError, ConnectedAccount, ExchangeEwsDiscoveryConfirmation,
+    ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult, FollowUpFlagUpdateOutcome,
+    MailCacheError, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError, MailSession,
+    MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflowError, MessageMoveOutcome,
+    ReadStateUpdateOutcome, WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, CalendarAccess, CalendarEventCreation,
@@ -400,7 +400,7 @@ impl TestProvider {
 impl AccountProvider for TestProvider {
     fn restore_account(
         &self,
-    ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<Option<ConnectedAccount>, AccountOperationError>> + Send + '_
     {
         let restore_error = *self
             .restore_error
@@ -411,7 +411,7 @@ impl AccountProvider for TestProvider {
             .lock()
             .expect("synthetic restored profile mutex is healthy")
             .clone();
-        ready(restore_error.map_or(Ok(restore_profile), Err))
+        ready(restore_error.map_or(Ok(restore_profile.map(connected_account)), Err))
     }
 
     fn saved_credential_account_id(
@@ -428,7 +428,7 @@ impl AccountProvider for TestProvider {
     fn connect_account(
         &self,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         let pause_connection = Arc::clone(&self.pause_connection);
         let connection_error = self
             .connect_error
@@ -474,7 +474,7 @@ impl AccountProvider for TestProvider {
                 .lock()
                 .expect("synthetic saved account ID mutex is healthy") = Some(account_id);
             signed_out.store(false, Ordering::SeqCst);
-            Ok(profile)
+            Ok(connected_account(profile))
         }
     }
 
@@ -482,7 +482,7 @@ impl AccountProvider for TestProvider {
         &self,
         request: AccountConnectionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         let ews_connect_requests = Arc::clone(&self.ews_connect_requests);
         let ews_input_valid = Arc::clone(&self.ews_input_valid);
         let saved_account_id = Arc::clone(&self.saved_account_id);
@@ -509,7 +509,7 @@ impl AccountProvider for TestProvider {
                         Some("ada@example.test".to_owned()),
                         Some("EXAMPLE\\ada".to_owned()),
                         AccountCapabilities::new(
-                            MailCapabilities::read_only(),
+                            MailCapabilities::from_actions([MailAction::SetReadState]),
                             CalendarAccess::ReadOnly,
                         ),
                     )
@@ -519,7 +519,10 @@ impl AccountProvider for TestProvider {
                         .expect("synthetic saved account ID mutex is healthy") =
                         Some(profile.id().clone());
                     signed_out.store(false, Ordering::SeqCst);
-                    Ok(profile)
+                    Ok(ConnectedAccount::new(
+                        profile,
+                        AccountProviderKind::ExchangeEws,
+                    ))
                 }
             }
         }
@@ -562,7 +565,7 @@ impl AccountProvider for TestProvider {
         expected_account_id: &AccountId,
         request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         *self
             .last_permission_request
             .lock()
@@ -601,7 +604,7 @@ impl AccountProvider for TestProvider {
                     .await
                     .map_err(|_| AccountOperationError::ServiceUnavailable)?;
             }
-            Ok(profile)
+            Ok(connected_account(profile))
         }
     }
 
@@ -694,7 +697,7 @@ fn mail_workspace_places_folders_before_the_message_list_and_reader(cx: &mut Tes
         .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(mail_only_profile());
+            view.status = AccountStatus::Connected(connected_account(mail_only_profile()));
             cx.notify();
         });
     });
@@ -739,7 +742,7 @@ fn unavailable_calendar_navigation_explains_why_it_is_disabled(cx: &mut TestAppC
     let profile = mail_only_profile();
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(profile);
+            view.status = AccountStatus::Connected(connected_account(profile));
             cx.notify();
         });
     });
@@ -772,6 +775,10 @@ fn mail_only_profile() -> AccountProfile {
         AccountCapabilities::read_only_mail(),
     )
     .expect("synthetic mail-only account profile is valid")
+}
+
+fn connected_account(profile: AccountProfile) -> ConnectedAccount {
+    ConnectedAccount::new(profile, AccountProviderKind::MicrosoftGraph)
 }
 
 fn assert_workspace_navigation_is_visible(context: &mut VisualTestContext) {
@@ -837,7 +844,7 @@ fn connect_synthetic_workspace_account(view: &WorkspaceTestView, context: &mut V
     .expect("synthetic account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(profile);
+            view.status = AccountStatus::Connected(connected_account(profile));
             cx.notify();
         });
     });
@@ -935,7 +942,7 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
     .expect("synthetic account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(profile);
+            view.status = AccountStatus::Connected(connected_account(profile));
             cx.notify();
         });
     });
@@ -1005,7 +1012,7 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
     .expect("replacement account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(profile);
+            view.status = AccountStatus::Connected(connected_account(profile));
             cx.notify();
         });
     });
@@ -1018,7 +1025,7 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
             view.content = AccountContent::Opening(super::OpeningContent::Mail);
-            view.status = AccountStatus::Connected(replacement_profile);
+            view.status = AccountStatus::Connected(connected_account(replacement_profile));
             cx.notify();
         });
     });
@@ -1031,7 +1038,8 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
         let view = view.read(cx);
         matches!(
             &view.status,
-            AccountStatus::Connected(profile) if profile.id() == &replacement_account_id
+            AccountStatus::Connected(account)
+                if account.profile().id() == &replacement_account_id
         ) && matches!(
             view.content,
             AccountContent::Opening(super::OpeningContent::Mail)
@@ -1066,22 +1074,39 @@ fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
     let connected = context.cx.update(|cx| {
         matches!(
             &view.read(cx).status,
-            super::AccountStatus::Connected(profile) if profile.label() == "Ada Example"
+            super::AccountStatus::Connected(account)
+                if account.provider_kind() == AccountProviderKind::MicrosoftGraph
+                    && account.profile().label() == "Ada Example"
         )
     });
     assert!(connected);
+    assert!(context.debug_bounds("account-provider").is_some());
+    assert!(context.debug_bounds("account-mail-capabilities").is_some());
+    assert!(
+        context
+            .debug_bounds("account-calendar-capabilities")
+            .is_some()
+    );
 
     click(context, "sign-out");
     let retryable_failure = context.cx.update(|cx| {
         matches!(
             &view.read(cx).status,
             super::AccountStatus::SignOutFailed {
+                account: Some(account),
                 error: AccountOperationError::CredentialStoreUnavailable,
-            }
+            } if account.provider_kind() == AccountProviderKind::MicrosoftGraph
         )
     });
     assert!(retryable_failure);
     assert!(context.debug_bounds("sign-out").is_some());
+    assert!(context.debug_bounds("account-provider").is_some());
+    assert!(context.debug_bounds("account-mail-capabilities").is_some());
+    assert!(
+        context
+            .debug_bounds("account-calendar-capabilities")
+            .is_some()
+    );
     assert!(!signed_out.load(Ordering::SeqCst));
 
     click(context, "sign-out");
@@ -1106,6 +1131,40 @@ fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
             .expect("synthetic sign-out event log mutex is healthy"),
         vec!["cache_removed", "cache_removed", "credential_removed"]
     );
+}
+
+#[gpui_kit::test]
+fn signing_out_keeps_active_account_details_visible(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
+    let (view, context) = cx.add_window_view(|_, cx| {
+        AccountView::new(
+            Ok(AccountServices::new(
+                workflow,
+                unused_account_session_factory(),
+            )),
+            cx,
+        )
+    });
+
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::SigningOut {
+                account: Some(connected_account(mail_only_profile())),
+            };
+            cx.notify();
+        });
+    });
+    draw_account_view(context);
+
+    assert!(context.debug_bounds("account-provider").is_some());
+    assert!(context.debug_bounds("account-mail-capabilities").is_some());
+    assert!(
+        context
+            .debug_bounds("account-calendar-capabilities")
+            .is_some()
+    );
+    assert!(context.debug_bounds("account-operation-progress").is_some());
 }
 
 #[gpui_kit::test]
@@ -1295,7 +1354,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
     context.run_until_parked();
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(profile_a);
+            view.status = AccountStatus::Connected(connected_account(profile_a));
             view.account_session = Some(Arc::clone(&session_a));
             cx.notify();
         });
@@ -1330,7 +1389,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
 
     assert!(context.cx.update(|cx| matches!(
         &view.read(cx).status,
-        AccountStatus::Connected(profile) if profile.id() == &account_b_id
+        AccountStatus::Connected(account) if account.profile().id() == &account_b_id
     )));
     assert!(
         context
@@ -1360,7 +1419,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
         let view = view.read(cx);
         matches!(
             &view.status,
-            AccountStatus::Connected(profile) if profile.id() == &account_b_id
+            AccountStatus::Connected(account) if account.profile().id() == &account_b_id
         ) && view
             .account_session
             .as_ref()
@@ -1434,7 +1493,7 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
     let account_id = profile.id().clone();
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(profile);
+            view.status = AccountStatus::Connected(connected_account(profile));
             cx.notify();
         });
     });
@@ -1466,7 +1525,7 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
         let account_view = view.read(cx);
         matches!(
             &account_view.status,
-            AccountStatus::Connected(profile) if profile.id() == &account_id
+            AccountStatus::Connected(account) if account.profile().id() == &account_id
         ) && account_view
             .account_session
             .as_ref()
@@ -1527,7 +1586,7 @@ fn partial_mail_profile_rejects_graph_permission_review(cx: &mut TestAppContext)
 
     cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(profile);
+            view.status = AccountStatus::Connected(connected_account(profile));
             view.prepare_permission_review(AccountPermissionRequest::MailReadWrite, cx);
         });
     });
@@ -1563,7 +1622,7 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
     .expect("synthetic account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(profile);
+            view.status = AccountStatus::Connected(connected_account(profile));
             cx.notify();
         });
     });
@@ -1732,7 +1791,8 @@ fn connection_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
     let connected = context.cx.update(|cx| {
         matches!(
             &view.read(cx).status,
-            super::AccountStatus::Connected(profile) if profile.label() == "Ada Example"
+            super::AccountStatus::Connected(account)
+                if account.profile().label() == "Ada Example"
         )
     });
     assert!(connected);
@@ -1773,9 +1833,9 @@ fn permission_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
         matches!(
             &view.read(cx).status,
             super::AccountStatus::ReauthorizationFailed {
-                profile,
+                account,
                 error: AccountOperationError::SignInCancelled,
-            } if profile.label() == "Ada Example"
+            } if account.profile().label() == "Ada Example"
         )
     });
     assert!(cancelled_with_profile);
@@ -1793,8 +1853,8 @@ fn permission_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
     let cancelling_with_profile = context.cx.update(|cx| {
         matches!(
             &view.read(cx).status,
-            super::AccountStatus::CancellingReauthorization { profile }
-                if profile.label() == "Ada Example"
+            super::AccountStatus::CancellingReauthorization { account }
+                if account.profile().label() == "Ada Example"
         )
     });
     assert!(cancelling_with_profile);
@@ -1809,7 +1869,8 @@ fn permission_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
     let connected = context.cx.update(|cx| {
         matches!(
             &view.read(cx).status,
-            super::AccountStatus::Connected(profile) if profile.label() == "Ada Example"
+            super::AccountStatus::Connected(account)
+                if account.profile().label() == "Ada Example"
         )
     });
     assert!(connected);
@@ -1965,13 +2026,21 @@ fn exchange_server_form_connects_without_microsoft_client_configuration(cx: &mut
 
     assert!(context.cx.update(|cx| matches!(
         &view.read(cx).status,
-        AccountStatus::Connected(profile)
-            if profile.capabilities()
+        AccountStatus::Connected(account)
+            if account.provider_kind() == AccountProviderKind::ExchangeEws
+                && account.profile().capabilities()
                 == AccountCapabilities::new(
-                    MailCapabilities::read_only(),
+                    MailCapabilities::from_actions([MailAction::SetReadState]),
                     CalendarAccess::ReadOnly,
                 )
     )));
+    assert!(context.debug_bounds("account-provider").is_some());
+    assert!(context.debug_bounds("account-mail-capabilities").is_some());
+    assert!(
+        context
+            .debug_bounds("account-calendar-capabilities")
+            .is_some()
+    );
     assert_eq!(ews_connect_requests.load(Ordering::SeqCst), 1);
     assert!(ews_input_valid.load(Ordering::SeqCst));
     assert!(context.debug_bounds("nav-mail").is_some());

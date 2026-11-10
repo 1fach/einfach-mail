@@ -10,7 +10,7 @@ use einfach_mail_domain::{AccountId, AccountProfile};
 
 use super::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError, AccountProvider,
-    AccountWorkflow, ExchangeEwsConnectionInput,
+    AccountProviderKind, AccountWorkflow, ConnectedAccount, ExchangeEwsConnectionInput,
 };
 
 #[test]
@@ -81,14 +81,18 @@ fn synthetic_profile() -> AccountProfile {
 struct FakeProvider {
     fail_next_sign_out: Arc<AtomicBool>,
     pause_sign_out: Arc<AtomicBool>,
+    restore_missing: Arc<AtomicBool>,
 }
 
 impl AccountProvider for FakeProvider {
     fn restore_account(
         &self,
-    ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<Option<ConnectedAccount>, AccountOperationError>> + Send + '_
     {
-        ready(Ok(Some(synthetic_profile())))
+        let restore_missing = self.restore_missing.load(Ordering::SeqCst);
+        ready(Ok((!restore_missing).then(|| {
+            ConnectedAccount::new(synthetic_profile(), AccountProviderKind::MicrosoftGraph)
+        })))
     }
 
     fn saved_credential_account_id(
@@ -100,8 +104,11 @@ impl AccountProvider for FakeProvider {
     fn connect_account(
         &self,
         _: super::AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
-        ready(Ok(synthetic_profile()))
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
+        ready(Ok(ConnectedAccount::new(
+            synthetic_profile(),
+            AccountProviderKind::MicrosoftGraph,
+        )))
     }
 
     fn reauthorize_account(
@@ -109,8 +116,11 @@ impl AccountProvider for FakeProvider {
         _: &AccountId,
         _: super::AccountPermissionRequest,
         _: super::AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
-        ready(Ok(synthetic_profile()))
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
+        ready(Ok(ConnectedAccount::new(
+            synthetic_profile(),
+            AccountProviderKind::MicrosoftGraph,
+        )))
     }
 
     fn sign_out(&self) -> impl Future<Output = Result<(), AccountOperationError>> + Send + '_ {
@@ -134,7 +144,7 @@ struct PendingProvider;
 impl AccountProvider for PendingProvider {
     fn restore_account(
         &self,
-    ) -> impl Future<Output = Result<Option<AccountProfile>, AccountOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<Option<ConnectedAccount>, AccountOperationError>> + Send + '_
     {
         ready(Ok(None))
     }
@@ -148,7 +158,7 @@ impl AccountProvider for PendingProvider {
     fn connect_account(
         &self,
         _: super::AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         std::future::pending()
     }
 
@@ -157,7 +167,7 @@ impl AccountProvider for PendingProvider {
         _: &AccountId,
         _: super::AccountPermissionRequest,
         _: super::AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         std::future::pending()
     }
 
@@ -203,11 +213,36 @@ async fn does_not_connect_when_restore_finds_an_active_account() {
 
     assert_eq!(
         workflow.restore_account().await,
-        Ok(Some(synthetic_profile()))
+        Ok(Some(ConnectedAccount::new(
+            synthetic_profile(),
+            AccountProviderKind::MicrosoftGraph,
+        )))
     );
     assert_eq!(
         workflow.connect_account().await,
         Err(AccountOperationError::AccountAlreadyConnected)
+    );
+}
+
+#[tokio::test]
+async fn restore_without_saved_account_clears_active_account() {
+    let provider = FakeProvider::default();
+    let restore_missing = Arc::clone(&provider.restore_missing);
+    let workflow = AccountWorkflow::new(provider);
+
+    workflow
+        .connect_account()
+        .await
+        .expect("synthetic account connection succeeds");
+    restore_missing.store(true, Ordering::SeqCst);
+
+    assert_eq!(workflow.restore_account().await, Ok(None));
+    assert_eq!(
+        workflow.connect_account().await,
+        Ok(ConnectedAccount::new(
+            synthetic_profile(),
+            AccountProviderKind::MicrosoftGraph,
+        ))
     );
 }
 
@@ -265,7 +300,10 @@ async fn cancelling_sign_out_releases_its_reservation_and_keeps_the_account() {
     provider.pause_sign_out.store(false, Ordering::SeqCst);
     assert_eq!(
         workflow
-            .reauthorize_account(profile.id(), super::AccountPermissionRequest::Current)
+            .reauthorize_account(
+                profile.profile().id(),
+                super::AccountPermissionRequest::Current,
+            )
             .await,
         Ok(profile)
     );
@@ -281,7 +319,10 @@ async fn renews_consent_without_changing_the_active_account() {
         .expect("synthetic profile is available");
 
     let renewed = workflow
-        .reauthorize_account(profile.id(), super::AccountPermissionRequest::Current)
+        .reauthorize_account(
+            profile.profile().id(),
+            super::AccountPermissionRequest::Current,
+        )
         .await
         .expect("synthetic consent renewal succeeds");
 

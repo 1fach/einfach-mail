@@ -10,6 +10,7 @@ use crate::{
 };
 use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
+    AccountProviderKind, ConnectedAccount,
 };
 use einfach_mail_domain::{AccountId, AccountProfile};
 use einfach_mail_provider_runtime as worker;
@@ -34,10 +35,8 @@ impl AccountProvider for MicrosoftGraphProvider {
     /// provider already has an active account session.
     fn restore_account(
         &self,
-    ) -> impl Future<
-        Output = Result<Option<einfach_mail_domain::AccountProfile>, AccountOperationError>,
-    > + Send
-    + '_ {
+    ) -> impl Future<Output = Result<Option<ConnectedAccount>, AccountOperationError>> + Send + '_
+    {
         let config = Arc::clone(&self.config);
 
         worker::run(move |_cancellation: CancellationToken| async move {
@@ -92,7 +91,10 @@ impl AccountProvider for MicrosoftGraphProvider {
                 account_id: profile.id().clone(),
                 access_token: Some(access_token),
             });
-            Ok(Some(profile))
+            Ok(Some(ConnectedAccount::new(
+                profile,
+                AccountProviderKind::MicrosoftGraph,
+            )))
         })
     }
 
@@ -131,7 +133,7 @@ impl AccountProvider for MicrosoftGraphProvider {
     fn connect_account(
         &self,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let commit_cancellation = cancellation.clone();
 
@@ -160,7 +162,10 @@ impl AccountProvider for MicrosoftGraphProvider {
                     account_id: authorized.profile.id().clone(),
                     access_token: Some(authorized.access_token),
                 });
-                Ok(authorized.profile)
+                Ok(ConnectedAccount::new(
+                    authorized.profile,
+                    AccountProviderKind::MicrosoftGraph,
+                ))
             },
             cancellation,
         )
@@ -171,7 +176,7 @@ impl AccountProvider for MicrosoftGraphProvider {
         expected_account_id: &einfach_mail_domain::AccountId,
         request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let expected_account_id = expected_account_id.clone();
         let commit_cancellation = cancellation.clone();
@@ -192,7 +197,10 @@ impl AccountProvider for MicrosoftGraphProvider {
                     account_id: authorized.profile.id().clone(),
                     access_token: Some(authorized.access_token),
                 });
-                Ok(authorized.profile)
+                Ok(ConnectedAccount::new(
+                    authorized.profile,
+                    AccountProviderKind::MicrosoftGraph,
+                ))
             },
             cancellation,
         )

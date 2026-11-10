@@ -109,10 +109,12 @@ async fn connect_runs_pkce_callback_graph_profile_and_token_storage() {
         .expect("loopback callback reaches the test listener");
     assert!(response.status().is_success());
 
-    let profile = connect_task
+    let account = connect_task
         .await
         .expect("provider task completes")
         .expect("synthetic account connection succeeds");
+    assert_eq!(account.provider_kind(), AccountProviderKind::MicrosoftGraph);
+    let profile = account.profile();
     assert_eq!(profile.id().as_str(), "account-123");
     assert_eq!(profile.label(), "Ada Example");
     assert_eq!(
@@ -438,11 +440,11 @@ async fn connection_cancellation_during_commit_returns_and_restores_the_profile(
     cancellation.cancel();
     finish_save.wait();
 
-    let connected_profile = connection
+    let connected_account = connection
         .await
         .expect("connection workflow completes")
         .expect("commit wins the cancellation race");
-    assert_eq!(connected_profile.id().as_str(), "account-123");
+    assert_eq!(connected_account.profile().id().as_str(), "account-123");
     assert_eq!(
         credentials.token_value().as_deref(),
         Some("synthetic-connect-refresh")
@@ -452,12 +454,15 @@ async fn connection_cancellation_during_commit_returns_and_restores_the_profile(
     let restored_provider =
         synthetic_provider(&server, restored_browser_sender, credentials.clone());
     let restored_workflow = AccountWorkflow::new(restored_provider);
-    let restored_profile = restored_workflow
+    let restored_account = restored_workflow
         .restore_account()
         .await
         .expect("new workflow restores the committed account")
         .expect("committed account is present");
-    assert_eq!(restored_profile.id(), connected_profile.id());
+    assert_eq!(
+        restored_account.profile().id(),
+        connected_account.profile().id()
+    );
     assert_eq!(
         credentials.token_value().as_deref(),
         Some("synthetic-recovered-refresh")

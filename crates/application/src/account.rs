@@ -5,8 +5,8 @@ mod workflow;
 
 pub use provider::{
     AccountConnectionRequest, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    ExchangeEwsConnectionInput, ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest,
-    ExchangeEwsDiscoveryResult,
+    AccountProviderKind, ConnectedAccount, ExchangeEwsConnectionInput,
+    ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
 };
 pub use workflow::{AccountOperationCancellation, AccountWorkflow};
 

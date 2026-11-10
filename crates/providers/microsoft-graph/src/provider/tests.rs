@@ -34,11 +34,12 @@ use crate::{
 };
 use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    AccountWorkflow, CalendarProvider, MailOperationError, MailProvider, MailSendProviderError,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    AccountProviderKind, AccountWorkflow, CalendarProvider, ConnectedAccount, MailOperationError,
+    MailProvider, MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse,
+    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, CalendarEventCreation, CalendarEventDraft, CalendarOccurrenceTime,
+    AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrenceTime,
     CalendarViewRange, CalendarViewReference, FolderId, FolderReference, MailReplyDraft,
     MailReplySource, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaProgress,
     MessageId,
@@ -276,7 +277,7 @@ async fn complete_test_authorization(
 async fn connect_with_secret_service(
     server: &MockServer,
     credentials: Arc<SecretServiceRefreshTokenStore>,
-) -> (MicrosoftGraphProvider, AccountProfile) {
+) -> (MicrosoftGraphProvider, ConnectedAccount) {
     let token_exchange = server
         .mock_async(|when, then| {
             when.method(POST)
@@ -319,7 +320,7 @@ async fn connect_with_secret_service(
 async fn restore_with_secret_service(
     server: &MockServer,
     credentials: Arc<SecretServiceRefreshTokenStore>,
-) -> (MicrosoftGraphProvider, AccountProfile) {
+) -> (MicrosoftGraphProvider, ConnectedAccount) {
     let token_exchange = server
         .mock_async(|when, then| {
             when.method(POST)
