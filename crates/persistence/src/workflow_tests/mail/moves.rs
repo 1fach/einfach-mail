@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn confirmed_message_move_reconciles_duplicate_cache_rows_and_preserves_body() {
     smol::block_on(async {

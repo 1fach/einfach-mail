@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn delete_message_requires_a_current_sync_before_resolving_deleted_items() {
     smol::block_on(async {

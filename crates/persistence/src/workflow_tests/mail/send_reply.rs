@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn unknown_send_marker_survives_encrypted_restart_and_blocks_duplicate_send_and_removal() {
     smol::block_on(async {

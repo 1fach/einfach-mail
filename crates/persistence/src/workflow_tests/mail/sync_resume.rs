@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn interrupted_sync_resumes_its_checkpoint_and_body_reopens_from_encrypted_cache() {
     smol::block_on(async {

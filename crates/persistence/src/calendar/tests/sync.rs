@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn calendar_cursor_and_sparse_event_updates_survive_restart_and_stay_range_scoped() {
     smol::block_on(async {
