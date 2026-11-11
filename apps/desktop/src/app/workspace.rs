@@ -36,12 +36,13 @@ use gpui_kit::component::{
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    App, AsyncApp, Context, Entity, FocusHandle, IntoElement, Render, Role, Subscription, Task,
-    Window, div, prelude::*, rems,
+    App, AsyncApp, Background, Context, Entity, FocusHandle, IntoElement, Render, Role,
+    Subscription, Task, Window, WindowBackgroundAppearance, div, prelude::*, rems,
 };
 
 pub(super) struct AccountView<P: AccountProvider + 'static> {
     services: Result<AccountServices<P>, SetupIssue>,
+    navigation_surface_appearance: NavigationSurfaceAppearance,
     account_session: Option<Arc<dyn AccountSession>>,
     status: AccountStatus,
     pending_permission_review: Option<AccountPermissionRequest>,
@@ -66,6 +67,31 @@ enum WorkspaceSection {
     Calendar,
     Accounts,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NavigationSurfaceAppearance {
+    Opaque,
+    Translucent,
+}
+
+impl NavigationSurfaceAppearance {
+    fn navigation_background(self, sidebar: Background) -> Background {
+        match self {
+            Self::Opaque => sidebar,
+            Self::Translucent => sidebar.opacity(NAVIGATION_SURFACE_OPACITY),
+        }
+    }
+
+    pub(super) fn window_background(self) -> WindowBackgroundAppearance {
+        match self {
+            Self::Opaque => WindowBackgroundAppearance::Opaque,
+            Self::Translucent => WindowBackgroundAppearance::Transparent,
+        }
+    }
+}
+
+/// The navigation surface stays mostly opaque while letting a restrained desktop tint through.
+const NAVIGATION_SURFACE_OPACITY: f32 = 0.88;
 
 impl WorkspaceSection {
     fn navigation_identity(self) -> (&'static str, &'static str, IconName) {
@@ -126,6 +152,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         };
         let mut view = Self {
             services,
+            navigation_surface_appearance: NavigationSurfaceAppearance::Opaque,
             account_session: None,
             status,
             pending_permission_review: None,
@@ -139,6 +166,14 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         };
         view.start_restore(cx);
         view
+    }
+
+    pub(super) fn with_navigation_surface_appearance(
+        mut self,
+        appearance: NavigationSurfaceAppearance,
+    ) -> Self {
+        self.navigation_surface_appearance = appearance;
+        self
     }
 
     fn sign_out(&mut self, cx: &mut Context<Self>) {
@@ -479,7 +514,9 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .flex()
             .flex_col()
             .flex_shrink_0()
-            .bg(cx.theme().tokens.sidebar)
+            .bg(self
+                .navigation_surface_appearance
+                .navigation_background(cx.theme().tokens.sidebar.into()))
             .text_color(cx.theme().sidebar_foreground)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)

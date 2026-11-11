@@ -12,12 +12,14 @@ use tokio::sync::oneshot;
 
 use gpui_kit::test::TestQueryExt as _;
 use gpui_kit::{
-    AppContext as _, Modifiers, ScrollDelta, ScrollEvent, TestAppContext, VisualTestContext, point,
-    px, size,
+    AppContext as _, Background, Hsla, Modifiers, ScrollDelta, ScrollEvent, TestAppContext,
+    VisualTestContext, point, px, size,
 };
 
-use super::WorkspaceSection;
-use super::{AccountContent, AccountServices, AccountStatus, AccountView, SetupIssue};
+use super::{
+    AccountContent, AccountServices, AccountStatus, AccountView, NavigationSurfaceAppearance,
+    SetupIssue, WorkspaceSection,
+};
 use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
