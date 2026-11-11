@@ -695,52 +695,6 @@ impl MailView {
         !self.message_update_in_progress()
     }
 
-    fn select_folder(&mut self, folder: FolderReference, cx: &mut Context<Self>) {
-        if self.message_update_in_progress() {
-            return;
-        }
-        self.compact_pane = CompactMailPane::MessageList;
-        if self.selected_folder.as_ref() == Some(&folder) {
-            cx.notify();
-            return;
-        }
-        self.message_move_status = MessageMoveStatus::Idle;
-        self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
-        self.selected_folder = Some(folder.clone());
-        self.selected_folder_write_sync_required = true;
-        self.sync_state = None;
-        self.message_list_state = MessageListState::Loading;
-        self.message_detail_state = MessageDetailState::Empty;
-        self.read_state_update = ReadStateUpdateStatus::Idle;
-        self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
-        self.set_messages(Vec::new());
-        let workflow = Arc::clone(&self.workflow);
-        self.message_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let snapshot = load_folder_snapshot(workflow.as_ref(), &folder).await;
-            let _ = this.update(cx, |view, cx| {
-                if view.selected_folder.as_ref() != Some(&folder) {
-                    return;
-                }
-                match snapshot {
-                    Ok(snapshot) => {
-                        view.set_messages(snapshot.messages);
-                        view.sync_state = snapshot.sync_state;
-                        view.selected_folder_write_sync_required =
-                            snapshot.folder_write_sync_required;
-                        view.message_list_state = MessageListState::Ready;
-                        view.message_detail_state = MessageDetailState::Empty;
-                    }
-                    Err(error) => {
-                        view.message_list_state = MessageListState::Failed(error);
-                    }
-                }
-                view.message_task = None;
-                cx.notify();
-            });
-        }));
-        cx.notify();
-    }
-
     fn select_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
         if self.message_update_in_progress() {
             return;

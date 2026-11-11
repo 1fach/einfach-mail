@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use einfach_mail_domain::{FolderReference, MailFolder};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Selectable, StyledExt,
@@ -7,10 +9,15 @@ use gpui_kit::component::{
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, Context, Entity, IntoElement, Render, Role, Subscription, Window, div, prelude::*,
+    AnyElement, AsyncApp, Context, Entity, IntoElement, Render, Role, Subscription, Window, div,
+    prelude::*,
 };
 
-use super::{MailView, SyncStatus};
+use super::{
+    CompactMailPane, FollowUpFlagUpdateStatus, MailView, MessageDetailState, MessageListState,
+    MessageMoveStatus, ReadStateUpdateStatus, SyncStatus, WellKnownFolderActionStatus,
+    load_folder_snapshot,
+};
 
 pub(crate) struct MailFolderNavigation {
     mail_view: Entity<MailView>,
@@ -24,6 +31,54 @@ impl MailFolderNavigation {
             mail_view,
             _subscription,
         }
+    }
+}
+
+impl MailView {
+    pub(super) fn select_folder(&mut self, folder: FolderReference, cx: &mut Context<Self>) {
+        if self.message_update_in_progress() {
+            return;
+        }
+        self.compact_pane = CompactMailPane::MessageList;
+        if self.selected_folder.as_ref() == Some(&folder) {
+            cx.notify();
+            return;
+        }
+        self.message_move_status = MessageMoveStatus::Idle;
+        self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
+        self.selected_folder = Some(folder.clone());
+        self.selected_folder_write_sync_required = true;
+        self.sync_state = None;
+        self.message_list_state = MessageListState::Loading;
+        self.message_detail_state = MessageDetailState::Empty;
+        self.read_state_update = ReadStateUpdateStatus::Idle;
+        self.follow_up_flag_update = FollowUpFlagUpdateStatus::Idle;
+        self.set_messages(Vec::new());
+        let workflow = Arc::clone(&self.workflow);
+        self.message_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let snapshot = load_folder_snapshot(workflow.as_ref(), &folder).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.selected_folder.as_ref() != Some(&folder) {
+                    return;
+                }
+                match snapshot {
+                    Ok(snapshot) => {
+                        view.set_messages(snapshot.messages);
+                        view.sync_state = snapshot.sync_state;
+                        view.selected_folder_write_sync_required =
+                            snapshot.folder_write_sync_required;
+                        view.message_list_state = MessageListState::Ready;
+                        view.message_detail_state = MessageDetailState::Empty;
+                    }
+                    Err(error) => {
+                        view.message_list_state = MessageListState::Failed(error);
+                    }
+                }
+                view.message_task = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 }
 
