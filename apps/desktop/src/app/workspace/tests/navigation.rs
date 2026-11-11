@@ -90,7 +90,7 @@ fn unavailable_calendar_navigation_explains_why_it_is_disabled(cx: &mut TestAppC
 
 type WorkspaceTestView = gpui_kit::Entity<AccountView<TestProvider>>;
 fn assert_workspace_navigation_is_visible(context: &mut VisualTestContext) {
-    for selector in ["nav-mail", "nav-calendar", "nav-accounts"] {
+    for selector in ["nav-mail", "nav-calendar", "nav-accounts", "nav-settings"] {
         assert!(context.debug_bounds(selector).is_some());
     }
 }
