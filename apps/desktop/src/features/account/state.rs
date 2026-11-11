@@ -22,8 +22,8 @@ pub(in crate::app) enum SetupIssue {
 }
 
 pub(in crate::app) struct AccountServices<P> {
-    pub(in crate::app) workflow: Arc<AccountWorkflow<P>>,
-    pub(in crate::app) account_session_factory: Arc<dyn AccountSessionFactory>,
+    pub(super) workflow: Arc<AccountWorkflow<P>>,
+    pub(super) account_session_factory: Arc<dyn AccountSessionFactory>,
     pub(super) microsoft365_setup_issue: Option<SetupIssue>,
 }
 
