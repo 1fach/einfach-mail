@@ -59,5 +59,4 @@ impl Mailbox {
 }
 
 #[cfg(test)]
-#[path = "mailbox/tests.rs"]
 mod tests;

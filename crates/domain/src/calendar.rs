@@ -1,5 +1,9 @@
 //! Provider-independent calendar occurrence and view concepts.
 
+pub(super) mod creation;
+pub(super) mod edit;
+mod subject;
+
 use std::fmt;
 
 use thiserror::Error;

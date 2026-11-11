@@ -1,12 +1,14 @@
 //! Provider-independent mail concepts used by cached browsing and synchronization.
 
+pub(super) mod mailbox;
+mod send;
+
 use std::{fmt, time::SystemTime};
 
 use thiserror::Error;
 
-use crate::{AccountId, FolderId, Mailbox, MessageId};
-
-mod send;
+use self::mailbox::Mailbox;
+use crate::{AccountId, FolderId, MessageId};
 
 pub use send::{
     InvalidMailRecipient, InvalidMailSubject, MailDraft, MailRecipient, MailReplyDraft,
