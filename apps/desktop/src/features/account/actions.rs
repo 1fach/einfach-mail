@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use super::AccountView;
 use super::account_state::{AccountStatus, EwsDiscoveryState, ExchangeEwsConnectionForm};
-use super::{
+use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
-    AccountPermissionRequest, AccountProvider, AccountView, AccountWorkflow, ConnectedAccount,
+    AccountPermissionRequest, AccountProvider, AccountWorkflow, ConnectedAccount,
     ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
 };
 use gpui_kit::{AsyncApp, Context, Task, Window};
