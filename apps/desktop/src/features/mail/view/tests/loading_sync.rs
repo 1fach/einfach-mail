@@ -357,8 +357,19 @@ async fn contextual_folder_navigation_updates_mail_selection(cx: &mut TestAppCon
         context
             .update(|_, app| { view.read(app).selected_folder.as_ref() == Some(&inbox_reference) })
     );
-    let archive_button = context.update(|window, _| window.find_by_label("Archive"));
-    context.simulate_click(archive_button.bounds().center(), Modifiers::default());
+    context.update(gpui_kit::Window::focus_next);
+    assert_eq!(
+        context.update(|window, _| window.find_by_label("Inbox").focused()),
+        Some(true),
+        "Tab order starts at the Inbox folder button"
+    );
+    press_window_key(context, "tab");
+    assert_eq!(
+        context.update(|window, _| window.find_by_label("Archive").focused()),
+        Some(true),
+        "Tab reaches the Archive folder button"
+    );
+    activate_focused_control(context);
     wait_for_ui_condition(context, |_, app| {
         view.read(app).selected_folder.as_ref() == Some(&archive_reference)
     })
