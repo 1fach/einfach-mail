@@ -315,11 +315,12 @@ async fn mail_provider_reads_scoped_folders_delta_and_body() {
     ));
     let provider = synthetic_provider(&server, browser_sender, credentials.clone());
 
-    let profile = provider
+    let account = provider
         .restore_account()
         .await
         .expect("synthetic account restores")
         .expect("synthetic account is present");
+    let profile = account.profile();
     let folders = provider
         .list_folders(profile.id())
         .await

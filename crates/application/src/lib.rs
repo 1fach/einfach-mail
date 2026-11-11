@@ -31,8 +31,9 @@ use shared::recovery as account_recovery;
 
 pub use account::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
-    AccountPermissionRequest, AccountProvider, AccountWorkflow, ExchangeEwsConnectionInput,
-    ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
+    AccountPermissionRequest, AccountProvider, AccountProviderKind, AccountWorkflow,
+    ConnectedAccount, ExchangeEwsConnectionInput, ExchangeEwsDiscoveryConfirmation,
+    ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
 };
 pub use account_cache::{AccountCache, AccountCacheOpenError, AccountCacheRemovalError};
 pub use account_recovery::CalendarWriteReadiness;

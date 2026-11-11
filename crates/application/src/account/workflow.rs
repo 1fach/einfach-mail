@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::provider::{
     AccountConnectionRequest, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
+    ConnectedAccount, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
 };
 
 /// Signals cancellation for one account connection or permission renewal.
@@ -133,11 +133,11 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     /// another account operation is running. Returns
     /// [`AccountOperationError::AccountStateUnavailable`] if local workflow
     /// state cannot be read or updated.
-    pub async fn restore_account(&self) -> Result<Option<AccountProfile>, AccountOperationError> {
+    pub async fn restore_account(&self) -> Result<Option<ConnectedAccount>, AccountOperationError> {
         let operation = self.begin(AccountOperation::Restoring)?;
         let restore_result = self.provider.restore_account().await;
         if let Ok(account) = &restore_result {
-            operation.complete(account.clone())?;
+            operation.complete(account.as_ref().map(|account| account.profile().clone()))?;
         }
         restore_result
     }
@@ -181,7 +181,7 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     ///
     /// Dropping this future releases its operation reservation without
     /// changing the workflow's active account.
-    pub async fn connect_account(&self) -> Result<AccountProfile, AccountOperationError> {
+    pub async fn connect_account(&self) -> Result<ConnectedAccount, AccountOperationError> {
         self.connect_account_with_cancellation(AccountOperationCancellation::new())
             .await
     }
@@ -197,7 +197,7 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     pub async fn connect_account_with_request(
         &self,
         request: AccountConnectionRequest,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         self.connect_account_with_request_and_cancellation(
             request,
             AccountOperationCancellation::new(),
@@ -218,7 +218,7 @@ impl<P: AccountProvider> AccountWorkflow<P> {
     pub async fn connect_account_with_cancellation(
         &self,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         self.connect_account_with_request_and_cancellation(
             AccountConnectionRequest::Microsoft365,
             cancellation,
@@ -237,14 +237,14 @@ impl<P: AccountProvider> AccountWorkflow<P> {
         &self,
         request: AccountConnectionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         let operation = self.begin(AccountOperation::Connecting)?;
         let connect_result = self
             .provider
             .connect_account_with_request(request, cancellation)
             .await;
         if let Ok(account) = &connect_result {
-            operation.complete(Some(account.clone()))?;
+            operation.complete(Some(account.profile().clone()))?;
         }
         connect_result
     }
@@ -291,7 +291,7 @@ impl<P: AccountProvider> AccountWorkflow<P> {
         &self,
         expected_account_id: &AccountId,
         request: AccountPermissionRequest,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         self.reauthorize_account_with_cancellation(
             expected_account_id,
             request,
@@ -313,18 +313,18 @@ impl<P: AccountProvider> AccountWorkflow<P> {
         expected_account_id: &AccountId,
         request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         let operation = self.begin(AccountOperation::Reauthorizing)?;
         self.ensure_active_account_matches(expected_account_id)?;
         let reauthorization_result = self
             .provider
             .reauthorize_account(expected_account_id, request, cancellation)
             .await;
-        if let Ok(profile) = &reauthorization_result {
-            if profile.id() != expected_account_id {
+        if let Ok(account) = &reauthorization_result {
+            if account.profile().id() != expected_account_id {
                 return Err(AccountOperationError::AccountMismatch);
             }
-            operation.complete(Some(profile.clone()))?;
+            operation.complete(Some(account.profile().clone()))?;
         }
         reauthorization_result
     }
