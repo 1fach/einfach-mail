@@ -92,6 +92,4 @@ impl<S> EventEmitter<CalendarViewEvent> for CalendarView<S> where
 }
 
 #[cfg(test)]
-mod composer_tests;
-#[cfg(test)]
 mod tests;
