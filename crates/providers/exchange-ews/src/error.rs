@@ -74,13 +74,15 @@ impl From<EwsError> for CalendarOperationError {
     fn from(error: EwsError) -> Self {
         match error {
             EwsError::AccessDenied => Self::AccessDenied,
+            EwsError::InvalidResponse => Self::InvalidResponse,
+            EwsError::ResourceLimitExceeded => Self::ResourceLimitExceeded,
             EwsError::InvalidConnectionDetails
             | EwsError::CredentialStoreUnavailable
-            | EwsError::InvalidResponse
-            | EwsError::ResourceLimitExceeded
             | EwsError::ServiceUnavailable
             | EwsError::AutodiscoverFailed
             | EwsError::SyncStateExpired => Self::ServiceUnavailable,
         }
     }
 }
+#[cfg(test)]
+mod tests;

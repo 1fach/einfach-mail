@@ -15,6 +15,7 @@ ews.workspace = true
 hex.workspace = true
 hyper-util.workspace = true
 hickory-resolver.workspace = true
+jiff.workspace = true
 keyring.workspace = true
 quick-xml.workspace = true
 reqwest.workspace = true
@@ -28,6 +29,7 @@ time.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 url.workspace = true
+windows-timezones.workspace = true
 x509-parser.workspace = true
 zeroize.workspace = true
 

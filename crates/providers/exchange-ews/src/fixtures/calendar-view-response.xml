@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope
+  xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+  xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+  xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+  <soap:Header>
+    <t:ServerVersionInfo Version="Exchange2013_SP1" />
+  </soap:Header>
+  <soap:Body>
+    <m:FindItemResponse>
+      <m:ResponseMessages>
+        <m:FindItemResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:RootFolder IncludesLastItemInRange="true" TotalItemsInView="3">
+            <t:Items>
+              <t:CalendarItem>
+                <t:ItemId Id="synthetic-recurring-occurrence" />
+                <t:Subject>Synthetic recurring occurrence</t:Subject>
+                <t:Location>Synthetic room</t:Location>
+                <t:Start>2026-11-01T05:30:00Z</t:Start>
+                <t:End>2026-11-01T06:30:00Z</t:End>
+                <t:IsAllDayEvent>false</t:IsAllDayEvent>
+                <t:CalendarItemType>Occurrence</t:CalendarItemType>
+                <t:StartTimeZoneId>Eastern Standard Time</t:StartTimeZoneId>
+                <t:EndTimeZoneId>Eastern Standard Time</t:EndTimeZoneId>
+              </t:CalendarItem>
+              <t:CalendarItem>
+                <t:ItemId Id="synthetic-recurring-exception" />
+                <t:Subject>Synthetic recurring exception</t:Subject>
+                <t:Location>Synthetic room</t:Location>
+                <t:Start>2026-11-02T15:00:00Z</t:Start>
+                <t:End>2026-11-02T16:00:00Z</t:End>
+                <t:IsAllDayEvent>false</t:IsAllDayEvent>
+                <t:CalendarItemType>Exception</t:CalendarItemType>
+                <t:StartTimeZoneId>Eastern Standard Time</t:StartTimeZoneId>
+                <t:EndTimeZoneId>Eastern Standard Time</t:EndTimeZoneId>
+              </t:CalendarItem>
+              <t:CalendarItem>
+                <t:ItemId Id="synthetic-all-day" />
+                <t:Subject>Synthetic all-day event</t:Subject>
+                <t:Location>Test workspace</t:Location>
+                <t:Start>2026-11-01T04:00:00Z</t:Start>
+                <t:End>2026-11-02T05:00:00Z</t:End>
+                <t:IsAllDayEvent>true</t:IsAllDayEvent>
+                <t:CalendarItemType>Single</t:CalendarItemType>
+                <t:StartTimeZoneId>Eastern Standard Time</t:StartTimeZoneId>
+                <t:EndTimeZoneId>Eastern Standard Time</t:EndTimeZoneId>
+              </t:CalendarItem>
+            </t:Items>
+          </m:RootFolder>
+        </m:FindItemResponseMessage>
+      </m:ResponseMessages>
+    </m:FindItemResponse>
+  </soap:Body>
+</soap:Envelope>

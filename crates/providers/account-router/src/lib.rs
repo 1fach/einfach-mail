@@ -5,12 +5,13 @@ use std::future::Future;
 use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
     AccountPermissionRequest, AccountProvider, CalendarDeltaRequest, CalendarDeltaResponse,
-    CalendarOperationError, CalendarProvider, ExchangeEwsDiscoveryRequest,
-    ExchangeEwsDiscoveryResult, MailOperationError, MailProvider, MailSendProviderError,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    CalendarOperationError, CalendarProvider, CalendarSyncStrategy, CalendarViewSnapshotResponse,
+    ConnectedAccount, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult, MailOperationError,
+    MailProvider, MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse,
+    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
+    AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
     CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
     MailFolder, MailReplyDraft, MessageBody, MessageId, ReadState,
 };
@@ -58,7 +59,7 @@ impl<E> AccountProvider for AccountProviderRouter<E>
 where
     E: einfach_mail_application::ExchangeEwsAccountSettingsStore + 'static,
 {
-    async fn restore_account(&self) -> Result<Option<AccountProfile>, AccountOperationError> {
+    async fn restore_account(&self) -> Result<Option<ConnectedAccount>, AccountOperationError> {
         if self.ews.saved_credential_account_id().await?.is_some() {
             *self.active_provider.write().await = Some(ProviderKind::ExchangeEws);
             return self.ews.restore_account().await;
@@ -84,7 +85,7 @@ where
     async fn connect_account(
         &self,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         if self.selected_provider().await.is_some() {
             return Err(AccountOperationError::AccountAlreadyConnected);
         }
@@ -100,7 +101,7 @@ where
         &self,
         request: AccountConnectionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         if self.selected_provider().await.is_some() {
             return Err(AccountOperationError::AccountAlreadyConnected);
         }
@@ -142,7 +143,7 @@ where
         expected_account_id: &AccountId,
         request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         let expected_account_id = expected_account_id.clone();
         async move {
             match self.selected_provider().await {
@@ -374,6 +375,14 @@ impl<E> CalendarProvider for AccountProviderRouter<E>
 where
     E: einfach_mail_application::ExchangeEwsAccountSettingsStore + 'static,
 {
+    async fn calendar_sync_strategy(&self) -> Result<CalendarSyncStrategy, CalendarOperationError> {
+        match self.selected_provider().await {
+            Some(ProviderKind::MicrosoftGraph) => self.graph.calendar_sync_strategy().await,
+            Some(ProviderKind::ExchangeEws) => self.ews.calendar_sync_strategy().await,
+            None => Err(CalendarOperationError::SignInRequired),
+        }
+    }
+
     fn calendar_delta_page(
         &self,
         view: &CalendarViewReference,
@@ -389,6 +398,23 @@ where
                 Some(ProviderKind::ExchangeEws) => {
                     self.ews.calendar_delta_page(&view, request).await
                 }
+                None => Err(CalendarOperationError::SignInRequired),
+            }
+        }
+    }
+
+    fn calendar_view_snapshot(
+        &self,
+        view: &CalendarViewReference,
+    ) -> impl Future<Output = Result<CalendarViewSnapshotResponse, CalendarOperationError>> + Send + '_
+    {
+        let view = view.clone();
+        async move {
+            match self.selected_provider().await {
+                Some(ProviderKind::MicrosoftGraph) => {
+                    self.graph.calendar_view_snapshot(&view).await
+                }
+                Some(ProviderKind::ExchangeEws) => self.ews.calendar_view_snapshot(&view).await,
                 None => Err(CalendarOperationError::SignInRequired),
             }
         }
@@ -456,8 +482,8 @@ where
 mod tests {
     use einfach_mail_application::{
         AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
-        AccountProvider, ExchangeEwsAccountSettings, ExchangeEwsAccountSettingsStore,
-        ExchangeEwsSettingsError,
+        AccountProvider, CalendarProvider, CalendarSyncStrategy, ExchangeEwsAccountSettings,
+        ExchangeEwsAccountSettingsStore, ExchangeEwsSettingsError,
     };
     use einfach_mail_exchange_ews::ExchangeEwsProvider;
     use einfach_mail_microsoft_graph::MicrosoftGraphProvider;
@@ -512,6 +538,31 @@ mod tests {
         assert_eq!(
             legacy_result,
             Err(AccountOperationError::AccountAlreadyConnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_the_selected_provider_calendar_strategy() {
+        let router = AccountProviderRouter::new(
+            MicrosoftGraphProvider::new_unconfigured(),
+            ExchangeEwsProvider::new(EmptySettingsStore),
+            false,
+        );
+        assert_eq!(
+            router.calendar_sync_strategy().await,
+            Err(einfach_mail_application::CalendarOperationError::SignInRequired)
+        );
+
+        *router.active_provider.write().await = Some(ProviderKind::MicrosoftGraph);
+        assert_eq!(
+            router.calendar_sync_strategy().await,
+            Ok(CalendarSyncStrategy::Delta)
+        );
+
+        *router.active_provider.write().await = Some(ProviderKind::ExchangeEws);
+        assert_eq!(
+            router.calendar_sync_strategy().await,
+            Ok(CalendarSyncStrategy::Snapshot)
         );
     }
 }
