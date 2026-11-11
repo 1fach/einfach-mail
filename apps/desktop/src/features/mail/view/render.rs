@@ -17,15 +17,17 @@ use gpui_kit::{
     WeakEntity, Window, div, prelude::*, rems,
 };
 
+use super::follow_up_flag::{
+    follow_up_flag_cache_sync_message, follow_up_flag_confirmed_message,
+    follow_up_flag_failure_message, follow_up_flag_progress_message,
+};
 use super::{
     CompactMailPane, FollowUpFlagUpdateStatus, MAIL_SHELL_NAVIGATION_WIDTH,
     MAIL_SPLIT_HANDLE_RESERVE, MESSAGE_LIST_CONTEXT, MESSAGE_LIST_MAX_WIDTH,
     MESSAGE_LIST_MIN_WIDTH, MESSAGE_READER_CONTEXT, MESSAGE_READER_MIN_WIDTH, MESSAGE_ROW_HEIGHT,
     MailView, MailViewEvent, MessageDetailState, MessageListState, MessageListWidthChange,
     MessageMoveMenuAction, MessageMoveStatus, MoveRecoveryReason, ReadStateFeedback, SyncStatus,
-    WellKnownFolderActionStatus, empty_message_detail_copy, follow_up_flag_cache_sync_message,
-    follow_up_flag_confirmed_message, follow_up_flag_failure_message,
-    follow_up_flag_progress_message, mail_error_message, message_sender,
+    WellKnownFolderActionStatus, empty_message_detail_copy, mail_error_message, message_sender,
     well_known_folder_mail_action,
 };
 

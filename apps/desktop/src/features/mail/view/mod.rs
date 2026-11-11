@@ -6,13 +6,12 @@ use super::composer::{
 #[cfg(test)]
 use einfach_mail_application::MailSyncProgress;
 use einfach_mail_application::{
-    FollowUpFlagUpdateOutcome, MailCacheError, MailOperationError, MailSession, MailSyncState,
-    MailWorkflowError, MessageMoveOutcome, OpenedMessage, WellKnownFolderMoveOutcome,
-    WellKnownMailFolder,
+    MailCacheError, MailSession, MailSyncState, MailWorkflowError, MessageMoveOutcome,
+    OpenedMessage, WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountProfile, FolderReference, FollowUpFlagStatus, MailAction, MailFolder, MailMessage,
-    MailReplySource, MessageId, MessageMetadataPatch, PendingMailSend,
+    AccountProfile, FolderReference, MailAction, MailFolder, MailMessage, MailReplySource,
+    MessageId, PendingMailSend,
 };
 use gpui_kit::base::VirtualListScrollHandle;
 use gpui_kit::component::StyledExt;
@@ -23,10 +22,14 @@ use gpui_kit::{
     Subscription, Task, Window, div, prelude::*, rems, size,
 };
 
+mod follow_up_flag;
 mod message_navigation;
 mod read_state;
 mod synchronization;
 
+use follow_up_flag::FollowUpFlagUpdateStatus;
+#[cfg(test)]
+use follow_up_flag::follow_up_flag_failure_message;
 pub(crate) use message_navigation::bind_message_navigation_keys;
 use message_navigation::{MESSAGE_LIST_CONTEXT, MESSAGE_READER_CONTEXT};
 #[cfg(test)]
@@ -294,60 +297,6 @@ struct MessageMoveMenuAction {
     destination_label: String,
 }
 
-enum FollowUpFlagUpdateStatus {
-    Idle,
-    Pending {
-        message_id: MessageId,
-        requested: FollowUpFlagStatus,
-    },
-    Confirmed {
-        message_id: MessageId,
-        status: FollowUpFlagStatus,
-    },
-    ConfirmedNeedsSync {
-        message_id: MessageId,
-        status: FollowUpFlagStatus,
-    },
-    Failed {
-        message_id: MessageId,
-        requested: FollowUpFlagStatus,
-        error: MailWorkflowError,
-    },
-}
-
-struct FollowUpFlagUpdateRequest {
-    folder: FolderReference,
-    message_id: MessageId,
-    requested: FollowUpFlagStatus,
-}
-
-impl FollowUpFlagUpdateStatus {
-    fn is_pending_for(&self, message_id: &MessageId) -> bool {
-        matches!(
-            self,
-            Self::Pending {
-                message_id: pending_id,
-                ..
-            } if pending_id == message_id
-        )
-    }
-
-    fn action_label(
-        &self,
-        message_id: &MessageId,
-        flag_status: Option<FollowUpFlagStatus>,
-    ) -> &'static str {
-        if self.is_pending_for(message_id) {
-            return "Updating…";
-        }
-        match flag_status {
-            Some(FollowUpFlagStatus::Flagged) => "Clear flag",
-            Some(FollowUpFlagStatus::Complete) => "Reopen flag",
-            Some(FollowUpFlagStatus::NotFlagged) | None => "Flag",
-        }
-    }
-}
-
 struct MailFolderSnapshot {
     messages: Vec<MailMessage>,
     sync_state: Option<MailSyncState>,
@@ -445,42 +394,6 @@ impl MailView {
 
     pub(crate) fn can_navigate_away(&self) -> bool {
         !self.message_update_in_progress()
-    }
-
-    fn update_selected_follow_up_flag(&mut self, cx: &mut Context<Self>) {
-        if self.sync_status.is_sync_active() || self.message_update_in_progress() {
-            return;
-        }
-        let Some(request) = self.selected_follow_up_flag_request() else {
-            return;
-        };
-        let workflow = Arc::clone(&self.workflow);
-        self.follow_up_flag_update = FollowUpFlagUpdateStatus::Pending {
-            message_id: request.message_id.clone(),
-            requested: request.requested,
-        };
-        self.message_update_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let flag_update_outcome = workflow
-                .set_message_follow_up_flag_status(
-                    &request.folder,
-                    &request.message_id,
-                    request.requested,
-                )
-                .await;
-            let write_sync_required = workflow
-                .folder_write_sync_required(&request.folder)
-                .await
-                .unwrap_or(true);
-            let _ = this.update(cx, |view, cx| {
-                view.finish_follow_up_flag_update(
-                    request,
-                    flag_update_outcome,
-                    write_sync_required,
-                );
-                cx.notify();
-            });
-        }));
-        cx.notify();
     }
 
     fn move_selected_message_to(
@@ -825,92 +738,6 @@ impl MailView {
         }
     }
 
-    fn selected_follow_up_flag_request(&self) -> Option<FollowUpFlagUpdateRequest> {
-        let folder = self.selected_folder.as_ref()?;
-        if !self.can_update_message_in(folder, MailAction::SetFollowUpFlagStatus) {
-            return None;
-        }
-        let folder = folder.clone();
-        let message_id = self.selected_message_id()?.clone();
-        let current_status = self
-            .messages
-            .iter()
-            .find(|message| message.id() == &message_id)?
-            .metadata()
-            .follow_up_flag_status();
-        let requested = match current_status {
-            Some(FollowUpFlagStatus::Flagged) => FollowUpFlagStatus::NotFlagged,
-            Some(FollowUpFlagStatus::NotFlagged | FollowUpFlagStatus::Complete) | None => {
-                FollowUpFlagStatus::Flagged
-            }
-        };
-        Some(FollowUpFlagUpdateRequest {
-            folder,
-            message_id,
-            requested,
-        })
-    }
-
-    fn finish_follow_up_flag_update(
-        &mut self,
-        request: FollowUpFlagUpdateRequest,
-        flag_update_outcome: Result<FollowUpFlagUpdateOutcome, MailWorkflowError>,
-        write_sync_required: bool,
-    ) {
-        self.follow_up_flag_update = if self.selected_folder.as_ref() == Some(&request.folder) {
-            self.selected_folder_write_sync_required = write_sync_required;
-            self.apply_follow_up_flag_result(request, flag_update_outcome)
-        } else {
-            FollowUpFlagUpdateStatus::Idle
-        };
-        self.message_update_task = None;
-    }
-
-    fn apply_follow_up_flag_result(
-        &mut self,
-        request: FollowUpFlagUpdateRequest,
-        flag_update_outcome: Result<FollowUpFlagUpdateOutcome, MailWorkflowError>,
-    ) -> FollowUpFlagUpdateStatus {
-        match flag_update_outcome {
-            Ok(FollowUpFlagUpdateOutcome::ConfirmedAndCached(status)) => {
-                self.apply_follow_up_flag_to_message(&request.message_id, status);
-                FollowUpFlagUpdateStatus::Confirmed {
-                    message_id: request.message_id,
-                    status,
-                }
-            }
-            Ok(FollowUpFlagUpdateOutcome::ConfirmedNeedsSync { status, .. }) => {
-                self.apply_follow_up_flag_to_message(&request.message_id, status);
-                FollowUpFlagUpdateStatus::ConfirmedNeedsSync {
-                    message_id: request.message_id,
-                    status,
-                }
-            }
-            Err(error) => FollowUpFlagUpdateStatus::Failed {
-                message_id: request.message_id,
-                requested: request.requested,
-                error,
-            },
-        }
-    }
-
-    fn apply_follow_up_flag_to_message(
-        &mut self,
-        message_id: &MessageId,
-        status: FollowUpFlagStatus,
-    ) {
-        let Some(message) = self
-            .messages
-            .iter_mut()
-            .find(|message| message.id() == message_id)
-        else {
-            return;
-        };
-        let mut patch = MessageMetadataPatch::new();
-        patch.set_follow_up_flag_status(Some(status));
-        message.apply_patch(patch);
-    }
-
     fn open_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self
             .profile
@@ -1042,67 +869,6 @@ fn open_composer_sheet(
 }
 
 impl EventEmitter<MailViewEvent> for MailView {}
-
-fn follow_up_flag_progress_message(status: FollowUpFlagStatus) -> String {
-    match status {
-        FollowUpFlagStatus::NotFlagged => "Clearing the follow-up flag…".to_owned(),
-        FollowUpFlagStatus::Flagged => "Flagging the message for follow-up…".to_owned(),
-        FollowUpFlagStatus::Complete => "Marking follow-up complete…".to_owned(),
-    }
-}
-
-fn follow_up_flag_confirmed_message(status: FollowUpFlagStatus) -> &'static str {
-    match status {
-        FollowUpFlagStatus::NotFlagged => "Follow-up flag cleared",
-        FollowUpFlagStatus::Flagged => "Flagged for follow-up",
-        FollowUpFlagStatus::Complete => "Follow-up marked complete",
-    }
-}
-
-fn follow_up_flag_cache_sync_message(status: FollowUpFlagStatus) -> &'static str {
-    match status {
-        FollowUpFlagStatus::NotFlagged => {
-            "Microsoft cleared the follow-up flag. Sync this folder to update the encrypted cache."
-        }
-        FollowUpFlagStatus::Flagged => {
-            "Microsoft flagged this message. Sync this folder to update the encrypted cache."
-        }
-        FollowUpFlagStatus::Complete => {
-            "Microsoft marked follow-up complete. Sync this folder to update the encrypted cache."
-        }
-    }
-}
-
-fn follow_up_flag_failure_message(status: FollowUpFlagStatus, error: MailWorkflowError) -> String {
-    match error {
-        MailWorkflowError::Provider(MailOperationError::AccessDenied) => {
-            "Microsoft denied the flag change. Review mail permissions or check your organization's consent policies.".to_owned()
-        }
-        MailWorkflowError::Provider(MailOperationError::SignInRequired) => {
-            "Your Microsoft sign-in needs attention. Return to Accounts and reconnect.".to_owned()
-        }
-        MailWorkflowError::Provider(MailOperationError::RateLimited { .. }) => {
-            "Microsoft asked Einfach Mail to wait before retrying. Try again later.".to_owned()
-        }
-        MailWorkflowError::Provider(MailOperationError::MessageUpdateOutcomeUnknown) => {
-            "Microsoft may have changed this message's follow-up flag, but Einfach Mail could not confirm it. Sync this folder before trying again.".to_owned()
-        }
-        MailWorkflowError::FolderSyncRequired => {
-            "Sync this folder before changing message state again.".to_owned()
-        }
-        MailWorkflowError::Provider(MailOperationError::ServiceUnavailable) => {
-            "Couldn’t update the follow-up flag. Check your connection and try again.".to_owned()
-        }
-        _ => format!(
-            "Couldn’t {} the follow-up flag. Sync this folder and try again.",
-            match status {
-                FollowUpFlagStatus::NotFlagged => "clear",
-                FollowUpFlagStatus::Flagged => "set",
-                FollowUpFlagStatus::Complete => "complete",
-            }
-        ),
-    }
-}
 
 async fn load_folder_snapshot(
     workflow: &dyn MailSession,
