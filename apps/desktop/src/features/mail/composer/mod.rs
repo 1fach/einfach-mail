@@ -1,11 +1,9 @@
 mod copy;
+mod presentation;
 mod recovery;
 
 use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
 
-use copy::{
-    ComposerStatusAction, composer_status_presentation, format_system_time, pending_send_copy,
-};
 use einfach_mail_application::{
     AccountOperationError, AccountPermissionRequest, AccountProvider, AccountWorkflow,
     MailCacheError, MailSendOutcome, MailSendProviderError, MailSendResolutionError,
@@ -13,7 +11,7 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, InvalidMailSubject, MailDraft, MailRecipient, MailReplyDraft, MailReplySource,
-    MailSendTarget, MailSubject, PendingMailSend,
+    MailSubject, PendingMailSend,
 };
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
@@ -21,11 +19,9 @@ use gpui_kit::component::{
     input::{Input, InputState, Textarea, TextareaState},
     scroll::ScrollableElement,
 };
-#[cfg(test)]
-use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
     AnyElement, App, AsyncApp, Context, Entity, EventEmitter, IntoElement, KeyBinding, Rems,
-    Render, Role, Task, Window, div, prelude::*, rems,
+    Render, Task, Window, div, prelude::*, rems,
 };
 use recovery::{PendingSendCertainty, PendingSendState};
 
@@ -456,102 +452,6 @@ impl MailComposer {
             .child(input)
     }
 
-    fn render_pending(&self, colors: ColorTokens, cx: &mut Context<Self>) -> AnyElement {
-        let Some(marker) = self.pending_send.marker() else {
-            return div().into_any_element();
-        };
-        let pending = &marker.pending;
-        let copy = pending_send_copy(marker.certainty);
-        let mut pending_view = div()
-            .id("mail-pending-send")
-            .debug_selector(|| "mail-pending-send".to_owned())
-            .role(Role::Alert)
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_3()
-            .bg(colors.muted)
-            .text_color(colors.foreground)
-            .child(copy.message);
-        pending_view = match pending.target() {
-            MailSendTarget::NewMessage { recipient, subject } => pending_view
-                .child(format!("To: {}", recipient.as_str()))
-                .child(format!("Subject: {}", subject.as_str())),
-            MailSendTarget::Reply { subject, .. } => {
-                let pending_view = pending_view.child("Reply to the source message");
-                if let Some(subject) = subject {
-                    pending_view.child(format!("Original subject: {subject}"))
-                } else {
-                    pending_view.child("Original message has no subject")
-                }
-            }
-        };
-        let pending_view = pending_view
-            .child(format!(
-                "Started: {}",
-                format_system_time(pending.created_at())
-            ))
-            .child(
-                Button::new("resolve-pending-mail-send")
-                    .debug_selector(|| "resolve-pending-mail-send".to_owned())
-                    .ghost()
-                    .label(copy.button_label)
-                    .disabled(self.task.is_some())
-                    .on_click(cx.listener(|composer, _, _, cx| composer.resolve_pending(cx))),
-            );
-        #[cfg(test)]
-        let pending_view = pending_view.test_support();
-        pending_view.into_any_element()
-    }
-
-    fn render_status(&self, colors: ColorTokens, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let presentation = composer_status_presentation(self.status)?;
-        let mut children = vec![presentation.text.into_any_element()];
-        match presentation.action {
-            Some(ComposerStatusAction::ReviewPermission) => {
-                children.push(" The request is limited to sending as the signed-in account. Microsoft may show a consent screen in your system browser; approval grants permission but does not send this message. Return here and press Send to submit it.".into_any_element());
-                children.push(self.permission_review_button(cx));
-            }
-            Some(ComposerStatusAction::ConfirmDuplicateRisk) => {
-                children.push(self.duplicate_confirmation_button(cx));
-            }
-            None => {}
-        }
-        let feedback = div()
-            .id("mail-composer-status")
-            .debug_selector(|| "mail-composer-status".to_owned())
-            .role(presentation.role)
-            .text_sm()
-            .text_color(if presentation.role == Role::Alert {
-                colors.destructive
-            } else {
-                colors.muted_foreground
-            })
-            .children(children);
-        #[cfg(test)]
-        let feedback = feedback.test_support();
-        Some(feedback.into_any_element())
-    }
-
-    fn permission_review_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        Button::new("review-send-permission")
-            .ghost()
-            .debug_selector(|| "review-send-permission".to_owned())
-            .label("Review Microsoft send permission…")
-            .disabled(self.task.is_some() || self.pending_send.pending().is_some())
-            .on_click(cx.listener(|composer, _, _, cx| composer.request_permission(cx)))
-            .into_any_element()
-    }
-
-    fn duplicate_confirmation_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        Button::new("confirm-duplicate-risk")
-            .debug_selector(|| "confirm-duplicate-risk".to_owned())
-            .label("Allow another send")
-            .disabled(self.task.is_some())
-            .on_click(cx.listener(|composer, _, _, cx| composer.confirm_duplicate_risk(cx)))
-            .into_any_element()
-    }
-
     fn fields_disabled(&self) -> bool {
         self.pending_send.pending().is_some()
             || !self.pending_send.is_available()
@@ -589,10 +489,10 @@ impl MailComposer {
         fields_disabled: bool,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let mut children = vec![self.render_pending(colors, cx)];
+        let mut children = vec![self.render_pending(&colors, cx)];
         children.extend(self.render_target_fields(fields_disabled));
         children.push(self.render_body_field(fields_disabled));
-        children.extend(self.render_status(colors, cx));
+        children.extend(self.render_status(&colors, cx));
         children.push(self.render_disclaimer(colors));
         children.push(self.render_send_action(cx));
         children
