@@ -40,6 +40,8 @@ The #282 feature-first module refactor progressed through several reviewable PRs
 
 Issue #288 aligns the EWS provider with ADR 0061. Account, mail, calendar, session, authentication, Autodiscover, transport, and version code now live in role modules, with tests grouped by behavior. The public export and all 494 workspace test names match the baseline. `account-router` and provider runtime remain unchanged because each has one responsibility. The full Linux local gate passes on Rust 1.95. Existing HTTP mock tests needed localhost socket access and passed in the socket-enabled run. GitHub Actions are unavailable and no Actions ran.
 
+Issue [#336](https://github.com/1fach/einfach-mail/issues/336) tracks the follow-up that aligns Rust module declarations with the feature-first directory tree. [ADR 0061](../decisions/0061-feature-first-module-layout-and-test-placement.md) now requires `foo.rs` and `foo/`, forbids `mod.rs` and `#[path]`, and keeps account-router in one `lib.rs`.
+
 Issue #289 moved desktop startup, workspace, mail and calendar features, Linux process locking, shared helpers, and GPUI test support under their agreed ownership paths in [PR #320](https://github.com/1fach/einfach-mail/pull/320), targeting `feat/mail-list-resizing`. All 494 test function identifiers match the baseline. The full Linux local gate passes with localhost socket access for synthetic HTTP tests. Existing headless account and workspace tests passed. No real window was launched because Xvfb and Weston are unavailable. The #290 plan has children #321 through #324.
 
 The #321 Calendar composer split passes the full Linux local gate and preserves all 494 workspace test identifiers. Issue #279's compact Calendar agenda implementation passes the Linux local gate and 492 workspace tests (3 ignored); its headless coverage checks 340px and 520px layouts, navigation bounds, accessible event labels, and keyboard focus behavior. [PR #326](https://github.com/1fach/einfach-mail/pull/326) merged it into `feat/mail-list-resizing` at `84a42ee`, unblocking #322.
@@ -71,13 +73,14 @@ Issue #324's Account split merged in [PR #331](https://github.com/1fach/einfach-
 ## Next actions
 
 1. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux; keep #273's theme review and #274's named-compositor check open.
-2. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
-3. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
-4. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
-5. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
-6. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
-7. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
-8. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
+2. Complete the behavior-preserving module-tree work tracked in issue [#336](https://github.com/1fach/einfach-mail/issues/336).
+3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
+4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
+5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
+6. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
+7. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
+8. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
+9. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
 
 ## Update rule
 
