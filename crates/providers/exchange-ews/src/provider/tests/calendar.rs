@@ -1,0 +1,32 @@
+#[tokio::test]
+async fn ews_provider_rejects_calendar_event_writes() {
+    let provider = ExchangeEwsProvider::new(EmptySettingsStore);
+    let view = synthetic_calendar_view();
+    let creation = synthetic_event_creation(&view);
+    let editable = synthetic_editable_event(&view);
+    let update_draft = CalendarEventUpdateDraft::timed(
+        "Changed event".to_owned(),
+        view.range().start() + time::Duration::hours(2),
+        view.range().start() + time::Duration::hours(3),
+    )
+    .expect("synthetic event update is valid");
+    let update = CalendarEventUpdate::new(editable.clone(), update_draft)
+        .expect("synthetic update changes the event");
+
+    assert!(matches!(
+        provider.create_event(&creation).await,
+        Err(CalendarOperationError::UnsupportedOperation)
+    ));
+    assert!(matches!(
+        provider.editable_event(editable.occurrence()).await,
+        Err(CalendarOperationError::UnsupportedOperation)
+    ));
+    assert!(matches!(
+        provider.update_event(&update).await,
+        Err(CalendarOperationError::UnsupportedOperation)
+    ));
+    assert!(matches!(
+        provider.delete_event(&editable).await,
+        Err(CalendarOperationError::UnsupportedOperation)
+    ));
+}

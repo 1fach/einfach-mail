@@ -6,9 +6,12 @@ use huskarl::token::AccessToken;
 use reqwest::Client;
 
 use crate::{
-    credential::{CredentialIdentity, SavedRefreshToken},
+    auth::{
+        credential::{CredentialIdentity, SavedRefreshToken},
+        identity,
+    },
     error::GraphError,
-    http_client, identity,
+    transport::build_client,
 };
 
 use super::{ProviderConfig, ProviderSession};
@@ -49,7 +52,7 @@ pub(super) async fn ensure_access_token(
     if saved_credential.account_id() != Some(account_id) {
         return Err(AccessTokenError::AccountMismatch);
     }
-    let client = http_client::build_client().map_err(|_| AccessTokenError::ServiceUnavailable)?;
+    let client = build_client().map_err(|_| AccessTokenError::ServiceUnavailable)?;
     refresh_access_token(config, &mut session, saved_credential, client).await
 }
 
