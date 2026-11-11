@@ -126,7 +126,7 @@ cargo test --locked --package einfach-mail-persistence
 The default tests include a child-process check that verifies production cache opening leaves new and existing cache files unchanged when Secret Service is unavailable. The ignored lifecycle test uses the production cache API to create, encrypt, reopen, preserve through key loss, and remove a synthetic cache. It requires an unlocked Linux Secret Service and can be run explicitly with:
 
 ```sh
-cargo test --locked --package einfach-mail-persistence --lib security::production_tests::production_secret_service_cache_lifecycle -- --ignored --exact
+cargo test --locked --package einfach-mail-persistence --lib platform::linux::security::tests::production::production_secret_service_cache_lifecycle -- --ignored --exact
 ```
 
 The test uses a random synthetic account ID, isolated XDG storage in a child process, and synthetic folder data. The earlier Windows Credential Manager proof in PR #15 is platform-specific evidence; Windows support remains deferred.

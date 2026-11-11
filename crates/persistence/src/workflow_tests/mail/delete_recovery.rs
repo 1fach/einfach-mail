@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn unknown_delete_outcome_requires_sync_before_another_move_request() {
     smol::block_on(async {

@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::SqliteAccountCache;
 
-use super::{KEY_BYTES, cache_paths, credential_entry, remove_credential, with_suffix};
+use super::super::{KEY_BYTES, cache_paths, credential_entry, remove_credential, with_suffix};
 
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 const CHILD_MODE: &str = "EINFACH_MAIL_PERSISTENCE_TEST_CHILD";
@@ -20,8 +20,8 @@ const ACCOUNT_ID: &str = "EINFACH_MAIL_PERSISTENCE_TEST_ACCOUNT_ID";
 const NEW_ACCOUNT_ID: &str = "EINFACH_MAIL_PERSISTENCE_NEW_ACCOUNT_ID";
 const EXISTING_ACCOUNT_ID: &str = "EINFACH_MAIL_PERSISTENCE_EXISTING_ACCOUNT_ID";
 const CACHE_LIFECYCLE_TEST: &str =
-    "platform::linux::security::production_tests::production_secret_service_cache_lifecycle";
-const UNAVAILABLE_SERVICE_TEST: &str = "platform::linux::security::production_tests::unavailable_secret_service_preserves_production_caches";
+    "platform::linux::security::tests::production::production_secret_service_cache_lifecycle";
+const UNAVAILABLE_SERVICE_TEST: &str = "platform::linux::security::tests::production::unavailable_secret_service_preserves_production_caches";
 const LEGACY_SQLCIPHER_FIXTURE: &[u8] =
     include_bytes!("../../../../../tests/fixtures/legacy-sqlcipher-4.14-v1.db");
 

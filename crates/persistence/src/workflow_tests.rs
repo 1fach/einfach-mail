@@ -21,11 +21,7 @@ use einfach_mail_domain::{
 use tempfile::TempDir;
 
 use crate::SqliteAccountCache;
+use crate::test_support::*;
 
-mod account_lifecycle;
-mod mail_actions;
-mod mail_sync;
-
-#[path = "../test_support.rs"]
-mod test_support;
-use test_support::*;
+mod account;
+mod mail;

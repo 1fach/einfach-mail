@@ -137,5 +137,5 @@ async fn open_cache(directory: &TempDir, account: AccountId) -> SqliteAccountCac
     .await
 }
 
-include!("sync.rs");
-include!("event_writes.rs");
+mod event_writes;
+mod sync;

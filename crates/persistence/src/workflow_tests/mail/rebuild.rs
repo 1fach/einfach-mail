@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn expired_delta_cursor_rebuild_keeps_cached_mail_until_the_snapshot_commits() {
     smol::block_on(async {

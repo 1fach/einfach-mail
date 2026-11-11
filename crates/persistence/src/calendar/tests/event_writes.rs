@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 fn event_write_recovery_markers_survive_restart_and_clear_per_completed_view() {
     smol::block_on(async {
