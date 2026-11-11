@@ -3,7 +3,6 @@ use std::{rc::Rc, sync::Arc, time::SystemTime};
 use super::composer::{
     ComposerTarget, MailComposer, MailComposerContext, MailComposerEvent, MailPermissionRequester,
 };
-use crate::components::ListNavigation;
 use crate::shared::relative_age_label;
 use einfach_mail_application::{
     FollowUpFlagUpdateOutcome, MailCacheError, MailOperationError, MailSession, MailSyncProgress,
@@ -19,24 +18,15 @@ use gpui_kit::component::StyledExt;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::resizable::ResizableState;
 use gpui_kit::{
-    App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, KeyBinding, Pixels, Rems, Role,
-    ScrollStrategy, Subscription, Task, Window, div, prelude::*, rems, size,
+    App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Pixels, Rems, Role, ScrollStrategy,
+    Subscription, Task, Window, div, prelude::*, rems, size,
 };
 
-gpui_kit::actions!(
-    mail_message_list,
-    [
-        SelectPreviousMessage,
-        SelectNextMessage,
-        SelectFirstMessage,
-        SelectLastMessage,
-        OpenSelectedMessage,
-        ReturnToMessageList,
-    ]
-);
+mod message_navigation;
 
-const MESSAGE_LIST_CONTEXT: &str = "MailMessageList";
-const MESSAGE_READER_CONTEXT: &str = "MailMessageReader";
+pub(crate) use message_navigation::bind_message_navigation_keys;
+use message_navigation::{MESSAGE_LIST_CONTEXT, MESSAGE_READER_CONTEXT};
+
 const MESSAGE_ROW_HEIGHT: Rems = rems(4.5);
 const MESSAGE_LIST_DEFAULT_WIDTH: Rems = rems(22.);
 const MESSAGE_LIST_MIN_WIDTH: Rems = rems(18.);
@@ -59,18 +49,6 @@ fn well_known_folder_mail_action(destination: WellKnownMailFolder) -> MailAction
         WellKnownMailFolder::Archive => MailAction::Move,
         WellKnownMailFolder::DeletedItems => MailAction::Delete,
     }
-}
-
-pub(crate) fn bind_message_navigation_keys(cx: &mut App) {
-    let context = Some(MESSAGE_LIST_CONTEXT);
-    cx.bind_keys([
-        KeyBinding::new("up", SelectPreviousMessage, context),
-        KeyBinding::new("down", SelectNextMessage, context),
-        KeyBinding::new("home", SelectFirstMessage, context),
-        KeyBinding::new("end", SelectLastMessage, context),
-        KeyBinding::new("enter", OpenSelectedMessage, context),
-        KeyBinding::new("escape", ReturnToMessageList, Some(MESSAGE_READER_CONTEXT)),
-    ]);
 }
 
 pub(crate) enum MailViewEvent {
@@ -693,148 +671,6 @@ impl MailView {
 
     pub(crate) fn can_navigate_away(&self) -> bool {
         !self.message_update_in_progress()
-    }
-
-    fn select_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
-        if self.message_update_in_progress() {
-            return;
-        }
-        if !self
-            .messages
-            .iter()
-            .any(|message| message.id() == &message_id)
-        {
-            return;
-        }
-        let Some(folder) = self.selected_folder.clone() else {
-            return;
-        };
-        self.message_detail_state = MessageDetailState::Loading(message_id.clone());
-        let workflow = Arc::clone(&self.workflow);
-        let request_message_id = message_id.clone();
-        self.message_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            // Keep HTML sanitization off GPUI's event-loop executor.
-            let opened = cx
-                .background_executor()
-                .spawn(async move { workflow.open_message(&folder, &request_message_id).await })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                if view.selected_message_id() != Some(&message_id) {
-                    return;
-                }
-                view.message_detail_state = match opened {
-                    Ok(message) => MessageDetailState::Opened(Box::new(message)),
-                    Err(error) => MessageDetailState::Failed { message_id, error },
-                };
-                view.message_task = None;
-                cx.notify();
-            });
-        }));
-        cx.notify();
-    }
-
-    fn navigate_message(&mut self, navigation: ListNavigation, cx: &mut Context<Self>) {
-        if self.message_update_in_progress() {
-            return;
-        }
-        let selected_index = self.selected_message_id().and_then(|selected| {
-            self.messages
-                .iter()
-                .position(|message| message.id() == selected)
-        });
-        let Some(target_index) = navigation.target_index(selected_index, self.messages.len())
-        else {
-            return;
-        };
-        let Some(message) = self.messages.get(target_index) else {
-            return;
-        };
-        if self.selected_message_id() == Some(message.id()) {
-            return;
-        }
-        self.message_list_scroll
-            .scroll_to_item(target_index, ScrollStrategy::Nearest);
-        self.select_message(message.id().clone(), cx);
-    }
-
-    fn select_message_from_option(
-        &mut self,
-        message_id: MessageId,
-        expected_folder: &FolderReference,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.selected_folder.as_ref() != Some(expected_folder) {
-            return;
-        }
-        self.message_list_focus.focus(window, cx);
-        self.compact_pane = CompactMailPane::MessageReader;
-        self.select_message(message_id, cx);
-    }
-
-    fn on_open_selected_message(
-        &mut self,
-        _: &OpenSelectedMessage,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.message_update_in_progress() || self.selected_message_id().is_none() {
-            return;
-        }
-        self.compact_pane = CompactMailPane::MessageReader;
-        self.message_list_focus.focus(window, cx);
-        cx.notify();
-    }
-
-    fn on_return_to_message_list(
-        &mut self,
-        _: &ReturnToMessageList,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.return_to_message_list(window, cx);
-    }
-
-    fn return_to_message_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.compact_pane = CompactMailPane::MessageList;
-        self.message_list_focus.focus(window, cx);
-        cx.notify();
-    }
-
-    fn on_select_previous_message(
-        &mut self,
-        _: &SelectPreviousMessage,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.navigate_message(ListNavigation::Previous, cx);
-    }
-
-    fn on_select_next_message(
-        &mut self,
-        _: &SelectNextMessage,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.navigate_message(ListNavigation::Next, cx);
-    }
-
-    fn on_select_first_message(
-        &mut self,
-        _: &SelectFirstMessage,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.navigate_message(ListNavigation::First, cx);
-    }
-
-    fn on_select_last_message(
-        &mut self,
-        _: &SelectLastMessage,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.navigate_message(ListNavigation::Last, cx);
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
