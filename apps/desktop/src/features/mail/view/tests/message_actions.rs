@@ -5,8 +5,7 @@ async fn read_only_account_hides_mail_mutations_and_rejects_composer_entry(
     cx: &mut TestAppContext,
 ) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (_, cache, _) = fixture(account.clone());
     let profile = mail_profile_with_capabilities(account, MailCapabilities::read_only());
     let workflow = Arc::new(MailWorkflow::new(
@@ -73,8 +72,7 @@ async fn partial_mail_capabilities_render_and_allow_only_supported_actions(
     cx: &mut TestAppContext,
 ) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (_, cache, _) = fixture(account.clone());
     let profile = mail_profile_with_capabilities(
         account,
@@ -155,8 +153,7 @@ async fn partial_mail_capabilities_render_and_allow_only_supported_actions(
 #[gpui_kit::test]
 async fn message_delete_action_moves_cached_message_to_deleted_items(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account.clone());
     let calls = Arc::new(AtomicUsize::new(0));
     let provider = message_move_provider(
@@ -226,8 +223,7 @@ async fn message_delete_action_moves_cached_message_to_deleted_items(cx: &mut Te
 #[gpui_kit::test]
 async fn denied_message_delete_shows_permission_recovery_and_keeps_source(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account.clone());
     let calls = Arc::new(AtomicUsize::new(0));
     let provider = message_move_provider(
@@ -314,8 +310,7 @@ async fn denied_message_delete_shows_permission_recovery_and_keeps_source(cx: &m
 #[gpui_kit::test]
 async fn native_archive_action_moves_cached_message_to_archive(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account.clone());
     let calls = Arc::new(AtomicUsize::new(0));
     let provider = message_move_provider(
@@ -398,8 +393,7 @@ async fn native_archive_action_moves_cached_message_to_archive(cx: &mut TestAppC
 #[gpui_kit::test]
 async fn pending_message_delete_keeps_the_native_action_busy(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     let calls = Arc::new(AtomicUsize::new(0));
     let provider = message_move_provider(
@@ -447,8 +441,7 @@ async fn pending_message_delete_keeps_the_native_action_busy(cx: &mut TestAppCon
 #[gpui_kit::test]
 async fn unknown_message_delete_requires_sync_and_keeps_source_cached(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account.clone());
     let calls = Arc::new(AtomicUsize::new(0));
     let provider = message_move_provider(

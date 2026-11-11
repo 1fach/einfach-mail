@@ -3,8 +3,7 @@ use super::*;
 #[gpui_kit::test]
 async fn confirmed_read_state_updates_the_view_and_encrypted_cache(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let folder = FolderReference::new(
         account.clone(),
         FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
@@ -56,8 +55,7 @@ async fn confirmed_read_state_updates_the_view_and_encrypted_cache(cx: &mut Test
 #[gpui_kit::test]
 fn failed_initial_mail_sync_keeps_read_state_changes_disabled(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     let updates = Arc::new(Mutex::new(Vec::new()));
     let workflow = Arc::new(MailWorkflow::new(
@@ -107,8 +105,7 @@ fn failed_initial_mail_sync_keeps_read_state_changes_disabled(cx: &mut TestAppCo
 #[gpui_kit::test]
 async fn confirmed_read_state_stays_visible_when_cache_write_fails(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let folder = FolderReference::new(
         account.clone(),
         FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
@@ -166,8 +163,7 @@ async fn confirmed_read_state_stays_visible_when_cache_write_fails(cx: &mut Test
 #[gpui_kit::test]
 fn uncertain_read_state_shows_sync_guidance_and_blocks_another_write(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     let updates = Arc::new(Mutex::new(Vec::new()));
     let workflow = Arc::new(MailWorkflow::new(
@@ -215,8 +211,7 @@ fn uncertain_read_state_shows_sync_guidance_and_blocks_another_write(cx: &mut Te
 #[gpui_kit::test]
 fn pending_read_state_does_not_render_duplicate_account_navigation(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let workflow = Arc::new(MailWorkflow::new(
         profile.id().clone(),
@@ -255,8 +250,7 @@ fn pending_read_state_does_not_render_duplicate_account_navigation(cx: &mut Test
 #[gpui_kit::test]
 fn denied_read_state_offers_account_permission_review(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     let workflow = Arc::new(MailWorkflow::new(
         profile.id().clone(),
@@ -301,8 +295,7 @@ fn denied_read_state_offers_account_permission_review(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn offline_read_state_shows_retry_guidance(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let workflow = Arc::new(MailWorkflow::new(
         profile.id().clone(),

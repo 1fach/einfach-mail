@@ -1,8 +1,27 @@
-use super::*;
+use std::{
+    future::{Future, pending, ready},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
+
+use einfach_mail_application::{
+    MailOperationError, MailProvider, MailSendProviderError, MessageDeltaPageResponse,
+    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+};
+use einfach_mail_domain::{
+    AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
+    MailReplyDraft, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
+    MessageId, ReadState,
+};
+
+use super::super::synthetic_account_id;
+use super::cache::FixtureCache;
 
 #[derive(Clone)]
-pub(super) struct OfflineProvider {
-    pub(super) body_fetches: Arc<AtomicUsize>,
+pub(crate) struct OfflineProvider {
+    pub(crate) body_fetches: Arc<AtomicUsize>,
 }
 
 impl MailProvider for OfflineProvider {
@@ -91,7 +110,7 @@ impl MailProvider for OfflineProvider {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum ReadStateActionResponse {
+pub(crate) enum ReadStateActionResponse {
     Confirm,
     Unconfirmed,
     Pending,
@@ -99,7 +118,7 @@ pub(super) enum ReadStateActionResponse {
     Offline,
 }
 
-pub(super) struct ReadStateProvider {
+pub(crate) struct ReadStateProvider {
     response: ReadStateActionResponse,
     updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
     flag_updates: Arc<Mutex<Vec<(MessageId, FollowUpFlagStatus)>>>,
@@ -115,7 +134,7 @@ struct SyncGate {
 }
 
 impl ReadStateProvider {
-    pub(super) fn new(
+    pub(crate) fn new(
         response: ReadStateActionResponse,
         updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
     ) -> Self {
@@ -132,12 +151,12 @@ impl ReadStateProvider {
         }
     }
 
-    pub(super) fn with_folders(mut self, folders: Vec<MailFolder>) -> Self {
+    pub(crate) fn with_folders(mut self, folders: Vec<MailFolder>) -> Self {
         self.folders = Some(folders);
         self
     }
 
-    pub(super) fn hold_sync_until_released(
+    pub(crate) fn hold_sync_until_released(
         mut self,
         started: tokio::sync::oneshot::Sender<()>,
         release: tokio::sync::oneshot::Receiver<()>,
@@ -146,7 +165,7 @@ impl ReadStateProvider {
         self
     }
 
-    pub(super) fn with_flag_updates(
+    pub(crate) fn with_flag_updates(
         mut self,
         updates: Arc<Mutex<Vec<(MessageId, FollowUpFlagStatus)>>>,
     ) -> Self {
@@ -154,7 +173,7 @@ impl ReadStateProvider {
         self
     }
 
-    pub(super) fn with_sync_failure(mut self) -> Self {
+    pub(crate) fn with_sync_failure(mut self) -> Self {
         self.sync_failure = true;
         self
     }
@@ -322,7 +341,7 @@ impl MailProvider for ReadStateProvider {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum MessageMoveActionResponse {
+pub(crate) enum MessageMoveActionResponse {
     Confirm,
     AccessDenied,
     Unknown,
@@ -330,12 +349,12 @@ pub(super) enum MessageMoveActionResponse {
 }
 
 #[derive(Clone)]
-pub(super) struct MessageMoveProvider {
-    pub(super) account_id: AccountId,
-    pub(super) folders: Vec<MailFolder>,
-    pub(super) offline: OfflineProvider,
-    pub(super) response: MessageMoveActionResponse,
-    pub(super) calls: Arc<AtomicUsize>,
+pub(crate) struct MessageMoveProvider {
+    account_id: AccountId,
+    folders: Vec<MailFolder>,
+    offline: OfflineProvider,
+    response: MessageMoveActionResponse,
+    calls: Arc<AtomicUsize>,
 }
 
 impl MailProvider for MessageMoveProvider {
@@ -463,23 +482,23 @@ impl MailProvider for MessageMoveProvider {
     }
 }
 
-pub(super) struct SendGate {
+pub(crate) struct SendGate {
     started: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
 }
 
 #[derive(Clone)]
-pub(super) struct PermissionProvider {
-    pub(super) offline: OfflineProvider,
-    pub(super) can_send: Arc<AtomicBool>,
-    pub(super) send_calls: Arc<AtomicUsize>,
-    pub(super) send_gate: Arc<Mutex<Option<SendGate>>>,
-    pub(super) reply_sources: Arc<Mutex<Vec<(String, String, String)>>>,
-    pub(super) reply_error: Arc<Mutex<Option<MailSendProviderError>>>,
+pub(crate) struct PermissionProvider {
+    pub(crate) offline: OfflineProvider,
+    pub(crate) can_send: Arc<AtomicBool>,
+    pub(crate) send_calls: Arc<AtomicUsize>,
+    pub(crate) send_gate: Arc<Mutex<Option<SendGate>>>,
+    pub(crate) reply_sources: Arc<Mutex<Vec<(String, String, String)>>>,
+    pub(crate) reply_error: Arc<Mutex<Option<MailSendProviderError>>>,
 }
 
 impl PermissionProvider {
-    pub(super) fn hold_next_send(
+    pub(crate) fn hold_next_send(
         &self,
     ) -> (
         tokio::sync::oneshot::Receiver<()>,
@@ -565,7 +584,7 @@ impl MailProvider for PermissionProvider {
         account_id: &AccountId,
         _: MailDraft,
     ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
-        let matches_account = account_id.as_str() == "synthetic-account";
+        let matches_account = account_id == &synthetic_account_id();
         let can_send = Arc::clone(&self.can_send);
         let send_calls = Arc::clone(&self.send_calls);
         let send_gate = self
@@ -600,7 +619,7 @@ impl MailProvider for PermissionProvider {
         draft: MailReplyDraft,
     ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
         let matches_account =
-            account_id.as_str() == "synthetic-account" && draft.source().account_id() == account_id;
+            account_id == &synthetic_account_id() && draft.source().account_id() == account_id;
         let can_send = Arc::clone(&self.can_send);
         let send_calls = Arc::clone(&self.send_calls);
         let reply_sources = Arc::clone(&self.reply_sources);
@@ -646,43 +665,36 @@ impl MailProvider for PermissionProvider {
     }
 }
 
-pub(super) struct PermissionGate {
-    pub(super) started: tokio::sync::oneshot::Sender<()>,
-    pub(super) release: tokio::sync::oneshot::Receiver<()>,
-}
-
-pub(super) struct FixturePermissionRequester {
-    pub(super) account_id: AccountId,
-    pub(super) requests: Arc<AtomicUsize>,
-    pub(super) gate: Mutex<Option<PermissionGate>>,
-}
-
-impl MailPermissionRequester for FixturePermissionRequester {
-    fn request_send_permission<'a>(
-        &'a self,
-        account_id: &'a AccountId,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AccountOperationError>> + Send + 'a>> {
-        let matches_account = account_id == &self.account_id;
-        let requests = Arc::clone(&self.requests);
-        let gate = self
-            .gate
-            .lock()
-            .expect("fixture permission-gate mutex is healthy")
-            .take();
-        Box::pin(async move {
-            if !matches_account {
-                return Err(AccountOperationError::AccountMismatch);
-            }
-            requests.fetch_add(1, Ordering::Relaxed);
-            if let Some(gate) = gate {
-                gate.started
-                    .send(())
-                    .expect("the permission review test is waiting at its requester gate");
-                gate.release
-                    .await
-                    .expect("the permission review test releases its requester gate");
-            }
-            Ok(())
-        })
+pub(crate) fn message_move_provider(
+    cache: &FixtureCache,
+    response: MessageMoveActionResponse,
+    calls: Arc<AtomicUsize>,
+) -> MessageMoveProvider {
+    let cache_state = cache.0.lock().expect("fixture cache mutex is healthy");
+    let account_id = cache_state
+        .account_id
+        .clone()
+        .expect("fixture cache has an account");
+    let mut folders = cache_state.folders.clone();
+    folders.push(
+        MailFolder::new(
+            FolderReference::new(
+                account_id.clone(),
+                FolderId::try_from("deleted-items".to_owned())
+                    .expect("synthetic Deleted Items ID is valid"),
+            ),
+            None,
+            "Gelöschte Elemente".to_owned(),
+        )
+        .expect("synthetic Deleted Items folder is valid"),
+    );
+    MessageMoveProvider {
+        account_id,
+        folders,
+        offline: OfflineProvider {
+            body_fetches: Arc::new(AtomicUsize::new(0)),
+        },
+        response,
+        calls,
     }
 }

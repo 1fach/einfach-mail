@@ -17,6 +17,47 @@ fn unexpected_permission_requester() -> Arc<dyn MailPermissionRequester> {
     Arc::new(UnexpectedPermissionRequester)
 }
 
+pub(super) struct PermissionGate {
+    pub(super) started: tokio::sync::oneshot::Sender<()>,
+    pub(super) release: tokio::sync::oneshot::Receiver<()>,
+}
+
+pub(super) struct FixturePermissionRequester {
+    pub(super) account_id: AccountId,
+    pub(super) requests: Arc<AtomicUsize>,
+    pub(super) gate: Mutex<Option<PermissionGate>>,
+}
+
+impl MailPermissionRequester for FixturePermissionRequester {
+    fn request_send_permission<'a>(
+        &'a self,
+        account_id: &'a AccountId,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AccountOperationError>> + Send + 'a>> {
+        let matches_account = account_id == &self.account_id;
+        let requests = Arc::clone(&self.requests);
+        let gate = self
+            .gate
+            .lock()
+            .expect("fixture permission-gate mutex is healthy")
+            .take();
+        Box::pin(async move {
+            if !matches_account {
+                return Err(AccountOperationError::AccountMismatch);
+            }
+            requests.fetch_add(1, Ordering::Relaxed);
+            if let Some(gate) = gate {
+                gate.started
+                    .send(())
+                    .expect("the permission review test is waiting at its requester gate");
+                gate.release
+                    .await
+                    .expect("the permission review test releases its requester gate");
+            }
+            Ok(())
+        })
+    }
+}
+
 pub(super) fn test_mail_view(
     profile: AccountProfile,
     workflow: Arc<dyn MailSession>,
@@ -71,20 +112,6 @@ pub(super) fn test_mail_workspace(
     (gpui_kit::base::Root::new(workspace, window, cx), view)
 }
 
-pub(super) fn mail_profile_with_capabilities(
-    account: AccountId,
-    mail: MailCapabilities,
-) -> AccountProfile {
-    AccountProfile::try_new_with_capabilities(
-        account,
-        Some("Ada Example".to_owned()),
-        Some("ada@example.test".to_owned()),
-        Some("ada@tenant.example.test".to_owned()),
-        AccountCapabilities::new(mail, CalendarAccess::ReadOnly),
-    )
-    .expect("synthetic account profile has an identity")
-}
-
 pub(super) async fn wait_for_mail_sync_to_finish(
     context: &mut VisualTestContext,
     view: &Entity<MailView>,
@@ -109,8 +136,7 @@ pub(super) fn open_cached_html_message(
     cx: &mut TestAppContext,
     content: String,
 ) -> &mut VisualTestContext {
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     cache.0.lock().expect("fixture cache mutex is healthy").body =
         Some(MessageBody::new(MessageBodyType::Html, content));
@@ -194,38 +220,6 @@ pub(super) fn click_composer_sheet_close(context: &mut VisualTestContext) {
     );
 }
 
-pub(super) fn append_synthetic_messages(
-    cache: &FixtureCache,
-    message_count: usize,
-) -> Vec<MessageId> {
-    let mut state = cache.0.lock().expect("fixture cache mutex is healthy");
-    let template = state
-        .messages
-        .first()
-        .cloned()
-        .expect("fixture cache has a synthetic message");
-    let mut message_ids = vec![template.id().clone()];
-    for index in 2..=message_count {
-        let message_id =
-            MessageId::try_from(format!("message-{index}")).expect("synthetic message ID is valid");
-        let template_metadata = template.metadata();
-        let metadata = einfach_mail_domain::MessageMetadata::new(
-            Some(format!("Synthetic subject {index}")),
-            template_metadata.origin().clone(),
-            *template_metadata.received_at(),
-            template_metadata.read_state(),
-            template_metadata.follow_up_flag_status(),
-        );
-        state.messages.push(MailMessage::new(
-            template.folder().clone(),
-            message_id.clone(),
-            metadata,
-        ));
-        message_ids.push(message_id);
-    }
-    message_ids
-}
-
 pub(super) fn press_window_key(context: &mut VisualTestContext, key: &str) {
     context.simulate_keystrokes(key);
 }
@@ -236,9 +230,6 @@ pub(super) fn activate_focused_control(context: &mut VisualTestContext) {
         window.key_up("enter", cx);
     });
 }
-
-pub(super) const SYNTHETIC_MESSAGE_LABEL_PREFIX: &str =
-    "Ada Example <ada@example.test>. Synthetic subject";
 
 pub(super) fn assert_accessible_message_list(context: &mut VisualTestContext) {
     let (lists, options) = context.update(|window, _| {

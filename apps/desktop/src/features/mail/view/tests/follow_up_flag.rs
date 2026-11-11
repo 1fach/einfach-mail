@@ -3,8 +3,7 @@ use super::*;
 #[gpui_kit::test]
 async fn confirmed_follow_up_flag_updates_the_view_and_encrypted_cache(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let folder = FolderReference::new(
         account.clone(),
         FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
@@ -66,8 +65,7 @@ async fn confirmed_follow_up_flag_updates_the_view_and_encrypted_cache(cx: &mut 
 #[gpui_kit::test]
 fn uncertain_follow_up_flag_blocks_a_second_write(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     let updates = Arc::new(Mutex::new(Vec::new()));
     let workflow = Arc::new(MailWorkflow::new(
