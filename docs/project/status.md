@@ -46,11 +46,11 @@ Issue #322's Calendar agenda split preserves all 495 workspace test identifiers 
 
 PR #328 merged issue #278's compact Mail layout into `feat/mail-list-resizing` at `1106048e9b70f1b8a7ce37276e7249b2596241b5`. It keeps contextual navigation visible and switches Mail between the message list and reader below the live three-pane minimum. Synthetic headless coverage checks folder reachability, pointer and keyboard navigation, selection continuity, and wide/compact resizing. The full Linux local gate passed on 2026-11-11 with localhost access for synthetic EWS HTTP mocks. Issues #278 and #292 are closed as implemented on the working stack; #290 remains open for real-window screenshots and compositor accessibility review. No GitHub Actions or real window were used.
 
-Issue #324 completes the Account split on `refactor/account-feature-split`, with the root workspace retaining `AccountSession`, navigation, and view lifecycle. The 498 workspace test names match the post-#272/#280 baseline, and account production modules and tests stay within the size limits. The full Linux local gate passed on 2026-11-11 with localhost access for synthetic EWS HTTP mocks. Review found no behavior regression; no GitHub Actions or real window was used. Keep #290 and #282 open for their safe-display evidence.
+Issue #324's Account split is in [PR #331](https://github.com/1fach/einfach-mail/pull/331) on `refactor/account-feature-split`, with the root workspace retaining `AccountSession`, navigation, and view lifecycle. The 498 workspace test names match the post-#272/#280 baseline, and account production modules and tests stay within the size limits. The full Linux local gate passed on 2026-11-11 with localhost access for synthetic EWS HTTP mocks. Review found no behavior regression; GitHub Actions and real-window review were unavailable. Keep #324 open until its PR is merged; keep #290 and #282 open for safe-display evidence.
 
 ## Active risks
 
-- GitHub Actions compute is unavailable. PRs #301, #320, and #328 have no CI runs; their full Linux local gates passed on their exact heads.
+- GitHub Actions compute is unavailable. PRs #301, #320, #328, and #331 have no CI runs; their full Linux local gates passed on their exact heads. Do not merge PR #331 until its required checks can pass.
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep live sign-in, initial mail sync, read-state, flag, send, reply, move, and calendar verification open under their existing issues.
 - No Exchange Server test host or sanitized EWS response recording is available. Synthetic EWS tests verify the request path and response mapping, but cannot prove server compatibility. Keep issue #257 open for live verification; issue #267 remains open for code review and merge.
 - No Exchange Server test host is available to verify Autodiscover's published candidate sequence, SRV behavior, redirects, and server response variants end to end. Keep issue #258 open for that live verification.
@@ -68,7 +68,7 @@ Issue #324 completes the Account split on `refactor/account-feature-split`, with
 
 ## Next actions
 
-1. Review and land #324 on `feat/mail-list-resizing`. Keep #290 and #282 open until account, mail, calendar, and composer behavior has safe-display evidence; keep #283 linked until the engineering-health stack reaches `main`.
+1. Merge [PR #331](https://github.com/1fach/einfach-mail/pull/331) into `feat/mail-list-resizing` after its required CI checks pass. Keep #290 and #282 open until account, mail, calendar, and composer behavior has safe-display evidence; keep #283 linked until the engineering-health stack reaches `main`.
 2. Plan small M10 UI issues from the supplied Windows Mail and Wino Mail references, starting with shell/navigation and mail/calendar layouts. Keep translucent materials in the separate #274 experiment and continue Linux-first implementation.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
