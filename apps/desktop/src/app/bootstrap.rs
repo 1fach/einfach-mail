@@ -1,5 +1,6 @@
 use std::{
     env::{self, VarError},
+    ffi::OsStr,
     sync::{Arc, mpsc},
 };
 
@@ -13,7 +14,7 @@ use einfach_mail_persistence::{SqliteAccountCacheFactory, XdgExchangeEwsAccountS
 use gpui_kit::*;
 use uuid::Uuid;
 
-use super::workspace::{AccountServices, AccountView, SetupIssue};
+use super::workspace::{AccountServices, AccountView, NavigationSurfaceAppearance, SetupIssue};
 use crate::features::{
     bind_calendar_event_navigation_keys, bind_event_composer_keys, bind_mail_composer_keys,
     bind_message_navigation_keys,
@@ -21,6 +22,42 @@ use crate::features::{
 
 const CLIENT_ID_ENV: &str = "EINFACH_MAIL_ENTRA_CLIENT_ID";
 const CALLBACK_PORT_ENV: &str = "EINFACH_MAIL_ENTRA_CALLBACK_PORT";
+const EXPERIMENTAL_TRANSLUCENCY_ENV: &str = "EINFACH_MAIL_EXPERIMENTAL_TRANSLUCENCY";
+const WAYLAND_DISPLAY_ENV: &str = "WAYLAND_DISPLAY";
+
+fn navigation_surface_appearance_from_environment(
+    experimental_opt_in: Option<&OsStr>,
+    wayland_display: Option<&OsStr>,
+) -> NavigationSurfaceAppearance {
+    let opted_in = experimental_opt_in == Some(OsStr::new("1"));
+    let wayland_display_is_available = wayland_display.is_some_and(|display| !display.is_empty());
+    if opted_in && wayland_display_is_available {
+        NavigationSurfaceAppearance::Translucent
+    } else {
+        NavigationSurfaceAppearance::Opaque
+    }
+}
+
+fn configured_navigation_surface_appearance() -> NavigationSurfaceAppearance {
+    #[cfg(target_os = "linux")]
+    {
+        navigation_surface_appearance_from_environment(
+            env::var_os(EXPERIMENTAL_TRANSLUCENCY_ENV).as_deref(),
+            env::var_os(WAYLAND_DISPLAY_ENV).as_deref(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        NavigationSurfaceAppearance::Opaque
+    }
+}
+
+fn window_options(appearance: NavigationSurfaceAppearance) -> WindowOptions {
+    WindowOptions {
+        window_background: appearance.window_background(),
+        ..WindowOptions::default()
+    }
+}
 
 fn configured_account_services()
 -> Result<AccountServices<AccountProviderRouter<XdgExchangeEwsAccountSettingsStore>>, SetupIssue> {
@@ -104,10 +141,18 @@ pub(crate) fn run_application() -> Result<(), std::io::Error> {
         bind_event_composer_keys(cx);
         bind_calendar_event_navigation_keys(cx);
         let account_services = configured_account_services();
+        let navigation_surface_appearance = configured_navigation_surface_appearance();
 
-        let window_open_attempt = open_window(WindowOptions::default(), cx, |_, cx| {
-            cx.new(|cx| AccountView::new(account_services, cx))
-        })
+        let window_open_attempt = open_window(
+            window_options(navigation_surface_appearance),
+            cx,
+            |_, cx| {
+                cx.new(|cx| {
+                    AccountView::new(account_services, cx)
+                        .with_navigation_surface_appearance(navigation_surface_appearance)
+                })
+            },
+        )
         .map(|_| ())
         .map_err(|error| {
             std::io::Error::other(format!("failed to open the Einfach Mail window: {error:#}"))

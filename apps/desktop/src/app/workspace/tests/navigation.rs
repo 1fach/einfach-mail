@@ -185,3 +185,33 @@ fn press_enter(context: &mut VisualTestContext) {
     context.simulate_event(gpui_kit::KeyUpEvent { keystroke });
     context.run_until_parked();
 }
+
+#[test]
+fn opaque_navigation_keeps_the_theme_sidebar_unchanged() {
+    let sidebar = Background::from(Hsla {
+        h: 0.62,
+        s: 0.34,
+        l: 0.31,
+        a: 1.0,
+    });
+
+    assert_eq!(
+        NavigationSurfaceAppearance::Opaque.navigation_background(sidebar),
+        sidebar
+    );
+}
+
+#[test]
+fn translucent_navigation_applies_alpha_to_the_theme_sidebar() {
+    let sidebar = Background::from(Hsla {
+        h: 0.62,
+        s: 0.34,
+        l: 0.31,
+        a: 1.0,
+    });
+
+    assert_eq!(
+        NavigationSurfaceAppearance::Translucent.navigation_background(sidebar),
+        sidebar.opacity(super::super::NAVIGATION_SURFACE_OPACITY)
+    );
+}
