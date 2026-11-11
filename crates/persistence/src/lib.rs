@@ -3,26 +3,24 @@
 //! The application layer uses [`SqliteAccountCache`] through its provider-independent
 //! cache port and never receives a database or encryption-key handle.
 
+#[cfg(target_os = "linux")]
+mod account;
+#[cfg(target_os = "linux")]
+mod calendar;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "calendar/tests/mod.rs"]
 mod calendar_tests;
 #[cfg(target_os = "linux")]
-#[path = "account/ews_settings.rs"]
-mod exchange_ews_settings;
+mod mail;
 #[cfg(target_os = "linux")]
-#[path = "shared/schema/mod.rs"]
-mod schema;
+mod platform;
 #[cfg(target_os = "linux")]
-#[path = "platform/linux/security.rs"]
-mod security;
-#[cfg(target_os = "linux")]
-#[path = "shared/store/mod.rs"]
-mod store;
+mod shared;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "workflow_tests/mod.rs"]
 mod workflow_tests;
 
 #[cfg(target_os = "linux")]
-pub use exchange_ews_settings::XdgExchangeEwsAccountSettingsStore;
+pub use account::XdgExchangeEwsAccountSettingsStore;
 #[cfg(target_os = "linux")]
-pub use store::{SqliteAccountCache, SqliteAccountCacheFactory};
+pub use shared::store::{SqliteAccountCache, SqliteAccountCacheFactory};

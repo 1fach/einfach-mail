@@ -1,7 +1,7 @@
 use async_sqlite::rusqlite::Connection;
 
 use super::migrations;
-use crate::store::CacheFailure;
+use crate::shared::store::CacheFailure;
 
 const FLAG_SCHEMA_VERSION: usize = 5;
 const REPLY_SCHEMA_BASE_VERSION: usize = 7;

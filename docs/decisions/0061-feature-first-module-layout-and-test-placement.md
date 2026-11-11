@@ -22,7 +22,7 @@ Organize each crate by feature, then by role:
 | --- | --- |
 | `crates/domain` | `account/`, `mail/`, `calendar/`, and `shared/` for identifiers used across features |
 | `crates/application` | `account/`, `mail/`, and `calendar/`; keep each workflow separate from its provider and cache ports; put shared reservations and recovery in `shared/` |
-| `crates/persistence` | `account/`, `mail/`, and `calendar/` adapters; put shared SQL schema and store code in `shared/`; put Linux paths, file locks, and key storage under `platform/linux/` |
+| `crates/persistence` | `account/`, `mail/`, and `calendar/` adapters; put shared SQL schema and store code in `shared/`; keep `SqliteAccountCache` in `shared/store` because one account-scoped handle implements all three cache ports; put Linux paths, file locks, and key storage under `platform/linux/` |
 | `crates/providers/microsoft-graph` and `crates/providers/exchange-ews` | `config`, `auth` or `identity`, `transport`, `wire`, `provider/{account,mail,calendar}`, and `error`; omit roles a provider does not use |
 | `crates/providers/account-router` | Keep provider selection in `lib.rs`; preserve the current crate-root exports |
 | `crates/providers/runtime` | Keep shared provider worker and cancellation behavior in the crate root while it remains a small, single-purpose module |
@@ -38,7 +38,7 @@ In the desktop feature folders, keep view state, actions, rendering, user-facing
 
 Keep private unit tests in a sibling `tests.rs` or `tests/` directory next to the module they test. Keep tests inline only when the small test set remains easy to read with its implementation; move larger test modules beside it. Split a test file above about 800 lines by behavior. Split a production module above about 1,000 lines by owned behavior. Record a reason in the PR when a file stays above either limit. Put public API tests in the crate's `tests/` directory. Give each crate one test-only `test_support` module when multiple test modules share builders.
 
-Private module paths and imports may change during restructuring. Keep every crate-root `lib.rs` public re-export and every item's visibility unchanged. If a sibling module needs access to a private item, add the narrowest `pub(super)` re-export. Never widen an item to `pub(crate)` or `pub`. Keep test names and the total `cargo test --workspace -- --list` count unchanged. Do not change implementation logic while moving items.
+Private module paths and imports may change during restructuring. Keep every crate-root `lib.rs` public re-export and every externally visible item's visibility unchanged. Prefer private items and the narrowest `pub(super)` re-export. Rust cannot express visibility to a union of sibling modules; when a shared type must be used directly by distinct top-level features, use `pub(crate)` only for the specific items required at that boundary and record why in the PR. Never widen an item to `pub`. Keep test names and the total `cargo test --workspace -- --list` count unchanged. Do not change implementation logic while moving items.
 
 ## Alternatives
 

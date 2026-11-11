@@ -20,7 +20,7 @@ use einfach_mail_domain::{
 };
 use tempfile::TempDir;
 
-use crate::store::SqliteAccountCache;
+use crate::SqliteAccountCache;
 
 mod account_lifecycle;
 mod mail_actions;

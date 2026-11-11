@@ -2,7 +2,7 @@
 
 use async_sqlite::Client;
 
-use crate::store::{CacheFailure, CacheResult};
+use crate::shared::store::{CacheFailure, CacheResult};
 
 mod compatibility;
 mod migrations;
@@ -12,9 +12,9 @@ mod tests;
 use compatibility::apply_parallel_schema_compatibility;
 use migrations::migrations;
 
-pub(super) const MESSAGE_QUERY_VERSION: i64 = 2;
+pub(crate) const MESSAGE_QUERY_VERSION: i64 = 2;
 
-pub(super) async fn apply(client: &Client) -> CacheResult<()> {
+pub(crate) async fn apply(client: &Client) -> CacheResult<()> {
     client
         .conn_mut_and_then(|connection| {
             apply_parallel_schema_compatibility(connection)?;

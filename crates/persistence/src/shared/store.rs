@@ -16,19 +16,14 @@ use einfach_mail_application::{
 use einfach_mail_domain::AccountId;
 use thiserror::Error;
 
-use crate::security;
+use crate::platform::linux::security;
 
-#[path = "../../calendar/store/mod.rs"]
-mod calendar;
-#[path = "../../mail/store/mod.rs"]
-mod mail;
-#[path = "time.rs"]
-mod system_time;
+pub(crate) mod time;
 
-pub(super) type CacheResult<T> = Result<T, CacheFailure>;
+pub(crate) type CacheResult<T> = Result<T, CacheFailure>;
 
 #[derive(Debug, Error)]
-pub(super) enum CacheFailure {
+pub(crate) enum CacheFailure {
     #[error("the database operation failed")]
     Unavailable,
     #[error("the database value is invalid")]
@@ -48,14 +43,14 @@ impl From<async_sqlite::rusqlite::Error> for CacheFailure {
 }
 
 impl CacheFailure {
-    pub(super) fn mail_public(self) -> MailCacheError {
+    pub(crate) fn mail_public(self) -> MailCacheError {
         match self {
             Self::Unavailable => MailCacheError::Unavailable,
             Self::InvalidData => MailCacheError::InvalidData,
         }
     }
 
-    fn calendar_public(self) -> CalendarCacheError {
+    pub(crate) fn calendar_public(self) -> CalendarCacheError {
         match self {
             Self::Unavailable => CalendarCacheError::Unavailable,
             Self::InvalidData => CalendarCacheError::InvalidData,
@@ -73,19 +68,19 @@ impl CacheFailure {
 /// One account's encrypted SQLCipher database and operating-system key reference.
 #[derive(Clone)]
 pub struct SqliteAccountCache {
-    account_id: AccountId,
-    client: Client,
-    database_path: std::path::PathBuf,
-    database_identity: security::DatabaseIdentity,
+    pub(crate) account_id: AccountId,
+    pub(crate) client: Client,
+    pub(crate) database_path: std::path::PathBuf,
+    pub(crate) database_identity: security::DatabaseIdentity,
     credential_account: String,
     lifecycle_lock_path: std::path::PathBuf,
     account_lock: Arc<std::fs::File>,
     #[cfg(test)]
-    fail_next_pending_send_clear: Arc<AtomicBool>,
+    pub(crate) fail_next_pending_send_clear: Arc<AtomicBool>,
     #[cfg(test)]
     removal_gate: Arc<Mutex<Option<TestOperationGate>>>,
     #[cfg(test)]
-    pending_send_read_gate: Arc<Mutex<Option<TestOperationGate>>>,
+    pub(crate) pending_send_read_gate: Arc<Mutex<Option<TestOperationGate>>>,
 }
 
 #[cfg(test)]
@@ -165,7 +160,7 @@ impl SqliteAccountCache {
     }
 
     #[cfg(test)]
-    pub(super) async fn open_with_test_key(
+    pub(crate) async fn open_with_test_key(
         database_path: std::path::PathBuf,
         account_id: AccountId,
         key_byte: u8,
@@ -188,7 +183,7 @@ impl SqliteAccountCache {
     }
 
     #[cfg(test)]
-    pub(super) fn hold_removal_after_marker_check_for_tests(
+    pub(crate) fn hold_removal_after_marker_check_for_tests(
         &self,
     ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
         let (checked_tx, checked_rx) = smol::channel::bounded(1);
@@ -202,7 +197,7 @@ impl SqliteAccountCache {
     }
 
     #[cfg(test)]
-    pub(super) fn hold_pending_send_read_for_tests(
+    pub(crate) fn hold_pending_send_read_for_tests(
         &self,
     ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
         let (started_tx, started_rx) = smol::channel::bounded(1);
@@ -216,13 +211,13 @@ impl SqliteAccountCache {
     }
 
     #[cfg(test)]
-    pub(super) fn fail_next_pending_send_clear(&self) {
+    pub(crate) fn fail_next_pending_send_clear(&self) {
         self.fail_next_pending_send_clear
             .store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]
-    pub(super) async fn close_for_tests(&self) {
+    pub(crate) async fn close_for_tests(&self) {
         self.client
             .close()
             .await
@@ -230,7 +225,7 @@ impl SqliteAccountCache {
     }
 
     #[cfg(test)]
-    pub(super) async fn execute_batch_for_tests(&self, sql: &str) -> Result<(), MailCacheError> {
+    pub(crate) async fn execute_batch_for_tests(&self, sql: &str) -> Result<(), MailCacheError> {
         let sql = sql.to_owned();
         self.client
             .conn_mut_and_then(move |connection| {
@@ -243,7 +238,7 @@ impl SqliteAccountCache {
     }
 
     #[cfg(test)]
-    pub(super) async fn set_message_move_failure_for_tests(&self, enabled: bool) {
+    pub(crate) async fn set_message_move_failure_for_tests(&self, enabled: bool) {
         let statement = if enabled {
             "CREATE TRIGGER fail_message_move BEFORE DELETE ON mail_messages BEGIN SELECT RAISE(ABORT, 'synthetic move failure'); END;"
         } else {
@@ -258,7 +253,7 @@ impl SqliteAccountCache {
             .expect("synthetic message move trigger can be updated");
     }
 
-    fn check_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
+    pub(crate) fn check_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
         if &self.account_id == account_id {
             Ok(())
         } else {

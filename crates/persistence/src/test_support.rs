@@ -27,7 +27,7 @@ use einfach_mail_domain::{
 use tempfile::TempDir;
 use time::{Date, Month};
 
-use crate::store::SqliteAccountCache;
+use crate::SqliteAccountCache;
 
 pub(super) const DATABASE_KEY_BYTE: u8 = 0x62;
 
