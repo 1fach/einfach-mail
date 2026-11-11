@@ -691,9 +691,13 @@ fn scroll_account_view(context: &mut VisualTestContext, delta_y: f32) {
     draw_account_view(context);
 }
 
+#[path = "../../../features/account/tests/account_setup.rs"]
 mod account_setup;
+#[path = "../../../features/account/tests/account_state.rs"]
 mod account_state;
 mod navigation;
+#[path = "../../../features/account/tests/permission_review.rs"]
 mod permission_review;
 mod session_lifecycle;
+#[path = "../../../features/account/tests/status_copy.rs"]
 mod status_copy;
