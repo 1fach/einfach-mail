@@ -4,7 +4,8 @@ use einfach_mail_application::{AccountOperationError, MailCacheError, MailSendPr
 use einfach_mail_domain::InvalidMailSubject;
 use gpui_kit::Role;
 
-use super::{ComposerStatus, DraftError, PendingSendCertainty};
+use super::recovery::PendingSendCertainty;
+use super::{ComposerStatus, DraftError};
 
 pub(super) struct ComposerStatusPresentation {
     pub(super) role: Role,

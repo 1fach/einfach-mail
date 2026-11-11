@@ -1,4 +1,5 @@
 mod copy;
+mod recovery;
 
 use std::{future::Future, pin::Pin, sync::Arc, time::SystemTime};
 
@@ -26,6 +27,7 @@ use gpui_kit::{
     AnyElement, App, AsyncApp, Context, Entity, EventEmitter, IntoElement, KeyBinding, Rems,
     Render, Role, Task, Window, div, prelude::*, rems,
 };
+use recovery::{PendingSendCertainty, PendingSendState};
 
 const MAIL_COMPOSER_WRITE_PENDING_CONTEXT: &str = "MailComposerWritePending";
 const MAIL_COMPOSER_BODY_HEIGHT: Rems = rems(13.75);
@@ -98,17 +100,6 @@ struct ComposerFields {
     body: Entity<TextareaState>,
 }
 
-enum PendingSendState {
-    Available(Option<PendingSendMarker>),
-    Unavailable(Option<PendingSendMarker>),
-}
-
-#[derive(Clone)]
-struct PendingSendMarker {
-    pending: PendingMailSend,
-    certainty: PendingSendCertainty,
-}
-
 enum ComposerSubmission {
     NewMessage(MailDraft),
     Reply(MailReplyDraft),
@@ -135,79 +126,9 @@ enum ComposerStatus {
 }
 
 #[derive(Clone, Copy)]
-enum PendingSendCertainty {
-    Accepted,
-    Rejected(MailSendProviderError),
-    Unknown,
-}
-
-#[derive(Clone, Copy)]
 enum DraftError {
     InvalidRecipient,
     InvalidSubject(InvalidMailSubject),
-}
-
-impl PendingSendState {
-    fn from_result(pending: Result<Option<PendingMailSend>, MailCacheError>) -> Self {
-        match pending {
-            Ok(pending) => Self::Available(pending.map(|pending| PendingSendMarker {
-                pending,
-                certainty: PendingSendCertainty::Unknown,
-            })),
-            Err(_) => Self::Unavailable(None),
-        }
-    }
-
-    fn marker(&self) -> Option<&PendingSendMarker> {
-        match self {
-            Self::Available(marker) | Self::Unavailable(marker) => marker.as_ref(),
-        }
-    }
-
-    fn pending(&self) -> Option<&PendingMailSend> {
-        self.marker().map(|marker| &marker.pending)
-    }
-
-    fn is_available(&self) -> bool {
-        matches!(self, Self::Available(_))
-    }
-
-    fn set_marker(&mut self, pending: PendingMailSend, certainty: PendingSendCertainty) {
-        let marker = Some(PendingSendMarker { pending, certainty });
-        *self = match self {
-            Self::Available(_) => Self::Available(marker),
-            Self::Unavailable(_) => Self::Unavailable(marker),
-        };
-    }
-
-    fn clear_marker(&mut self) {
-        *self = match self {
-            Self::Available(_) => Self::Available(None),
-            Self::Unavailable(_) => Self::Unavailable(None),
-        };
-    }
-
-    fn apply_snapshot(&mut self, pending_result: Result<Option<PendingMailSend>, MailCacheError>) {
-        match pending_result {
-            Ok(pending) => {
-                let marker = pending.map(|pending| {
-                    let certainty = self
-                        .marker()
-                        .filter(|marker| marker.pending.operation_id() == pending.operation_id())
-                        .map_or(PendingSendCertainty::Unknown, |marker| marker.certainty);
-                    PendingSendMarker { pending, certainty }
-                });
-                *self = Self::Available(marker);
-            }
-            Err(_) => {
-                let marker = self.marker().cloned().map(|mut marker| {
-                    marker.certainty = PendingSendCertainty::Unknown;
-                    marker
-                });
-                *self = Self::Unavailable(marker);
-            }
-        }
-    }
 }
 
 async fn submit_composer_message(
