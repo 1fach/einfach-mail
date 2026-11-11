@@ -432,5 +432,4 @@ impl fmt::Debug for PendingMailSend {
 }
 
 #[cfg(test)]
-#[path = "send/tests.rs"]
 mod recipient_tests;

@@ -58,5 +58,4 @@ define_identifier!(MessageId, "An opaque identifier for a mail message.");
 define_identifier!(EventId, "An opaque identifier for a calendar event.");
 
 #[cfg(test)]
-#[path = "identifiers/tests.rs"]
 mod tests;

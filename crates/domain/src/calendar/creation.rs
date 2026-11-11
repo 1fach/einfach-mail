@@ -6,9 +6,8 @@ use thiserror::Error;
 use time::{OffsetDateTime, PrimitiveDateTime};
 use uuid::Uuid;
 
-use crate::{
-    CalendarOccurrenceTime, CalendarViewReference, calendar_subject::normalized_event_subject,
-};
+use super::subject::normalized_event_subject;
+use crate::{CalendarOccurrenceTime, CalendarViewReference};
 
 /// A stable identifier for one calendar event creation attempt.
 ///
@@ -326,5 +325,4 @@ pub struct InvalidCalendarEventCreation;
 pub struct InvalidCalendarEventDraft;
 
 #[cfg(test)]
-#[path = "creation/tests.rs"]
 mod tests;

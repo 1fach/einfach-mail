@@ -5,9 +5,8 @@ use std::fmt;
 use thiserror::Error;
 use time::OffsetDateTime;
 
-use crate::{
-    CalendarOccurrence, CalendarOccurrenceTime, calendar_subject::normalized_event_subject,
-};
+use super::subject::normalized_event_subject;
+use crate::{CalendarOccurrence, CalendarOccurrenceTime};
 
 /// The provider version captured when an event is opened for editing.
 ///
@@ -206,5 +205,4 @@ impl CalendarEventUpdate {
 pub struct NoCalendarEventChanges;
 
 #[cfg(test)]
-#[path = "edit/tests.rs"]
 mod tests;
