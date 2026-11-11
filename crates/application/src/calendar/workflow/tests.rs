@@ -21,7 +21,6 @@ use crate::test_support::{
     view_for_week, workflow_account_id, workflows_sharing_account_state,
 };
 
-// Keep `calendar::tests::<name>` stable while storing each behavior group in its own file.
 include!("tests/sync.rs");
 include!("tests/replacement_recovery.rs");
 include!("tests/creation.rs");

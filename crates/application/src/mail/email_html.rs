@@ -346,5 +346,4 @@ fn bounded_prefix(content: &str, max_bytes: usize) -> &str {
 }
 
 #[cfg(test)]
-#[path = "email_html/tests.rs"]
 mod tests;

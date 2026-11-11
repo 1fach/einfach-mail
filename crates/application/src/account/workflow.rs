@@ -496,3 +496,6 @@ impl Drop for AccountOperationGuard {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;
