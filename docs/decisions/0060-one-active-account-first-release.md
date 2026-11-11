@@ -18,6 +18,8 @@ Support one active connected account at a time in the first release. The active 
 
 Do not expose an account selector, add-account action while connected, combined inbox, parallel account sessions, or background synchronization for another account. The Accounts destination shows the current account identity and its supported account actions. Issue [#272](https://github.com/1fach/einfach-mail/issues/272) owns that UI behavior. Keep each account cache bound to its opaque `AccountId`; this decision does not change cache identity or persistence.
 
+Expose the active provider kind beside the provider-independent `AccountProfile` through an application-owned `ConnectedAccount` value. Return the pair from restore, connect, and permission-review workflows so the Accounts view displays metadata from the same completed operation. Keep provider kind out of the domain profile.
+
 Defer multiple simultaneously connected accounts and in-app account switching to a future product decision. That work must define an account inventory, per-provider credential identity, restore ordering, session ownership, cache lifecycle, and concurrent synchronization before adding a selector.
 
 ## Alternatives
@@ -28,12 +30,23 @@ Defer multiple simultaneously connected accounts and in-app account switching to
 | Multiple active accounts with an in-app switcher | Matches the Wino account list and allows simultaneous mailboxes. | Requires account enumeration and coordinated changes to provider credentials, routing, sessions, sign-out, cache ownership, and synchronization. |
 | Save multiple identities but activate one at a time | Could make switching faster without showing combined data. | Still requires a credential inventory, identity-safe restore, cache retention policy, and per-account session lifecycle; it adds most of the account-management complexity without a first-release user need. |
 
+### Provider identity
+
+| Option | Benefits | Costs and risks |
+| --- | --- | --- |
+| Put provider kind in `AccountProfile` | Every profile consumer can read the provider directly. | Makes a domain identity depend on a provider adapter and removes the profile's provider-independent contract. |
+| Query provider kind separately from the workflow result | Leaves `AccountProfile` unchanged. | Splits one account result across operations and can observe provider state after it changes. |
+| Return an application-owned `ConnectedAccount` | Keeps the domain profile neutral and returns provider metadata with the account operation that established it. | Updates the account workflow result types and their callers together. |
+
+Use `ConnectedAccount`. The application workflow owns provider selection, and the desktop needs provider metadata to explain the active account. Pairing both values at that boundary keeps their identity and timing aligned.
+
 ## Consequences
 
 - The first release has one active account identity and one active provider-backed session.
 - Connecting a different identity requires successful sign-out first. Sign-out removes the active account's local cache before deleting its provider credential; failures preserve the existing retry path.
 - Mail and Calendar keep using focused ports from the same account session and the same account-scoped cache.
 - The native Accounts destination may show the active identity, but must not imply that users can switch or add another connected account.
+- `ConnectedAccount` pairs the provider kind with `AccountProfile` in the application layer. Domain account identity remains provider-independent.
 - Multi-account support requires a separate decision and an explicit migration and recovery design. This decision adds no schema or credential-store migration.
 
 ## Sources
