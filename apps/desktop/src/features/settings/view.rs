@@ -3,18 +3,36 @@ use gpui_kit::component::{
     radio::{Radio, RadioGroup},
     scroll::ScrollableElement,
 };
+#[cfg(test)]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{App, IntoElement, Pixels, Role, Window, div, prelude::*};
 
-use crate::appearance_settings::{AppearancePreference, AppearanceSettingsNotice};
+use super::{AppearancePreference, AppearanceSettingsNotice};
 
-pub(super) struct SettingsViewState {
-    pub(super) appearance: AppearancePreference,
-    pub(super) notice: Option<AppearanceSettingsNotice>,
-    pub(super) colors: ColorTokens,
-    pub(super) radius: Pixels,
+pub(crate) struct SettingsViewState {
+    appearance: AppearancePreference,
+    notice: Option<AppearanceSettingsNotice>,
+    colors: ColorTokens,
+    radius: Pixels,
 }
 
-pub(super) fn render(
+impl SettingsViewState {
+    pub(crate) fn new(
+        appearance: AppearancePreference,
+        notice: Option<AppearanceSettingsNotice>,
+        colors: ColorTokens,
+        radius: Pixels,
+    ) -> Self {
+        Self {
+            appearance,
+            notice,
+            colors,
+            radius,
+        }
+    }
+}
+
+pub(crate) fn render(
     state: SettingsViewState,
     on_change: impl Fn(&usize, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -137,10 +155,14 @@ fn render_appearance_description(colors: ColorTokens) -> impl IntoElement {
 }
 
 fn render_notice(notice: AppearanceSettingsNotice, colors: ColorTokens) -> impl IntoElement {
-    div()
+    let message = notice.message();
+    let notice = div()
         .id("settings-appearance-notice")
+        .debug_selector(|| "settings-appearance-notice".to_owned())
         .role(Role::Status)
         .text_sm()
-        .text_color(colors.destructive)
-        .child(notice.message())
+        .text_color(colors.destructive);
+    #[cfg(test)]
+    let notice = notice.test_support();
+    notice.child(message)
 }

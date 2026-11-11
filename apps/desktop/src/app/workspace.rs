@@ -10,8 +10,9 @@ mod account_render;
 mod account_state;
 
 use crate::features::{
-    CalendarView, CalendarViewEvent, MailFolderNavigation, MailPermissionRequester, MailView,
-    MailViewEvent,
+    AppearancePreference, AppearanceSettingsNotice, AppearanceSettingsStore, CalendarView,
+    CalendarViewEvent, MailFolderNavigation, MailPermissionRequester, MailView, MailViewEvent,
+    SettingsViewState, render_settings,
 };
 #[cfg(test)]
 use account_copy::{
@@ -47,9 +48,14 @@ pub(super) struct AccountView<P: AccountProvider + 'static> {
     status: AccountStatus,
     pending_permission_review: Option<AccountPermissionRequest>,
     content: AccountContent,
+    appearance_preference: AppearancePreference,
+    appearance_settings_store: Option<AppearanceSettingsStore>,
+    appearance_settings_notice: Option<AppearanceSettingsNotice>,
+    _appearance_subscription: Option<Subscription>,
     mail_navigation_focus: FocusHandle,
     calendar_navigation_focus: FocusHandle,
     accounts_navigation_focus: FocusHandle,
+    settings_navigation_focus: FocusHandle,
     session_open_error: Option<AccountViewCacheError>,
     exchange_ews_form: Option<ExchangeEwsConnectionForm>,
     task: Option<Task<()>>,
@@ -66,6 +72,7 @@ enum WorkspaceSection {
     Mail,
     Calendar,
     Accounts,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,12 +106,14 @@ impl WorkspaceSection {
             Self::Mail => ("nav-mail", "Mail", IconName::Inbox),
             Self::Calendar => ("nav-calendar", "Calendar", IconName::Calendar),
             Self::Accounts => ("nav-accounts", "Accounts", IconName::User),
+            Self::Settings => ("nav-settings", "Settings", IconName::Settings),
         }
     }
 }
 
 enum AccountContent {
     Account,
+    Settings,
     Opening(OpeningContent),
     Mail {
         view: Entity<MailView>,
@@ -125,7 +134,7 @@ impl AccountContent {
     fn opening_kind(&self) -> Option<OpeningContent> {
         match self {
             Self::Opening(opening) => Some(*opening),
-            Self::Account | Self::Mail { .. } | Self::Calendar { .. } => None,
+            Self::Account | Self::Settings | Self::Mail { .. } | Self::Calendar { .. } => None,
         }
     }
 
@@ -133,6 +142,7 @@ impl AccountContent {
         match self {
             Self::Mail { .. } => WorkspaceSection::Mail,
             Self::Calendar { .. } => WorkspaceSection::Calendar,
+            Self::Settings => WorkspaceSection::Settings,
             Self::Opening(OpeningContent::Mail) => WorkspaceSection::Mail,
             Self::Opening(OpeningContent::Calendar) => WorkspaceSection::Calendar,
             Self::Account => WorkspaceSection::Accounts,
@@ -157,15 +167,89 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             status,
             pending_permission_review: None,
             content: AccountContent::Account,
+            appearance_preference: AppearancePreference::System,
+            appearance_settings_store: None,
+            appearance_settings_notice: None,
+            _appearance_subscription: None,
             mail_navigation_focus: cx.focus_handle().tab_stop(true),
             calendar_navigation_focus: cx.focus_handle().tab_stop(true),
             accounts_navigation_focus: cx.focus_handle().tab_stop(true),
+            settings_navigation_focus: cx.focus_handle().tab_stop(true),
             session_open_error: None,
             exchange_ews_form: None,
             task: None,
         };
         view.start_restore(cx);
         view
+    }
+
+    pub(super) fn new_for_window(
+        services: Result<AccountServices<P>, SetupIssue>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_appearance_store(services, AppearanceSettingsStore::new(), window, cx)
+    }
+
+    fn new_with_appearance_store(
+        services: Result<AccountServices<P>, SetupIssue>,
+        store: std::io::Result<AppearanceSettingsStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::new(services, cx);
+        view.load_appearance_settings(store);
+        view.apply_appearance(window, cx);
+        view._appearance_subscription =
+            Some(cx.observe_window_appearance(window, |view, window, cx| {
+                if view.appearance_preference == AppearancePreference::System {
+                    view.apply_appearance(window, cx);
+                }
+            }));
+        view
+    }
+
+    fn load_appearance_settings(&mut self, store: std::io::Result<AppearanceSettingsStore>) {
+        match store {
+            Ok(store) => {
+                self.appearance_preference = match store.load() {
+                    Ok(appearance) => appearance,
+                    Err(_) => {
+                        self.appearance_settings_notice =
+                            Some(AppearanceSettingsNotice::LoadFailed);
+                        AppearancePreference::System
+                    }
+                };
+                self.appearance_settings_store = Some(store);
+            }
+            Err(_) => {
+                self.appearance_settings_notice = Some(AppearanceSettingsNotice::LoadFailed);
+            }
+        }
+    }
+
+    fn apply_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = self.appearance_preference.theme_mode(window.appearance());
+        gpui_kit::component::Theme::change(mode, Some(window), cx);
+    }
+
+    fn change_appearance(
+        &mut self,
+        appearance: AppearancePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.appearance_preference == appearance && self.appearance_settings_notice.is_none() {
+            return;
+        }
+
+        self.appearance_preference = appearance;
+        self.appearance_settings_notice = match &self.appearance_settings_store {
+            Some(store) if store.save(appearance).is_ok() => None,
+            Some(_) | None => Some(AppearanceSettingsNotice::SaveFailed),
+        };
+        self.apply_appearance(window, cx);
+        cx.notify();
     }
 
     pub(super) fn with_navigation_surface_appearance(
@@ -310,8 +394,13 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         }
 
         drop(self.close_content_view(cx));
+        self.content = AccountContent::Account;
         match section {
             WorkspaceSection::Accounts => cx.notify(),
+            WorkspaceSection::Settings => {
+                self.content = AccountContent::Settings;
+                cx.notify();
+            }
             WorkspaceSection::Mail => self.open_mail(cx),
             WorkspaceSection::Calendar => self.open_calendar(cx),
         }
@@ -332,7 +421,10 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn section_disabled_reason(&self, section: WorkspaceSection) -> Option<&'static str> {
-        if section == WorkspaceSection::Accounts {
+        if matches!(
+            section,
+            WorkspaceSection::Accounts | WorkspaceSection::Settings
+        ) {
             return None;
         }
         if let Err(issue) = &self.services {
@@ -362,6 +454,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             WorkspaceSection::Mail => &self.mail_navigation_focus,
             WorkspaceSection::Calendar => &self.calendar_navigation_focus,
             WorkspaceSection::Accounts => &self.accounts_navigation_focus,
+            WorkspaceSection::Settings => &self.settings_navigation_focus,
         }
     }
 
@@ -369,6 +462,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         match &self.content {
             AccountContent::Mail { view, .. } => view.read(cx).can_navigate_away(),
             AccountContent::Account
+            | AccountContent::Settings
             | AccountContent::Opening(_)
             | AccountContent::Calendar { .. } => true,
         }
@@ -536,7 +630,9 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         } else {
             navigation = navigation.child(div().flex_1());
         }
-        navigation.child(self.render_account_navigation(cx))
+        navigation
+            .child(self.render_account_navigation(cx))
+            .child(self.render_settings_navigation(cx))
     }
 
     fn render_navigation_brand(&self) -> impl IntoElement {
@@ -621,6 +717,15 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .child(self.render_navigation_button(WorkspaceSection::Accounts, cx))
     }
 
+    fn render_settings_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("workspace-settings-navigation")
+            .border_t_1()
+            .border_color(cx.theme().sidebar_border)
+            .p_2()
+            .child(self.render_navigation_button(WorkspaceSection::Settings, cx))
+    }
+
     fn render_navigation_button(
         &self,
         section: WorkspaceSection,
@@ -654,10 +759,35 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             AccountContent::Calendar { view, .. } => {
                 div().size_full().child(view.clone()).into_any_element()
             }
+            AccountContent::Settings => self.render_settings_workspace_content(colors, cx),
             AccountContent::Account | AccountContent::Opening(_) => {
                 self.render_account_workspace_content(colors, cx)
             }
         }
+    }
+
+    fn render_settings_workspace_content(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let on_change = cx.listener(|view, index, window, cx| {
+            if let Some(appearance) = AppearancePreference::from_radio_index(*index) {
+                view.change_appearance(appearance, window, cx);
+            }
+        });
+        div()
+            .size_full()
+            .child(render_settings(
+                SettingsViewState::new(
+                    self.appearance_preference,
+                    self.appearance_settings_notice,
+                    colors,
+                    cx.theme().radius,
+                ),
+                on_change,
+            ))
+            .into_any_element()
     }
 }
 

@@ -146,9 +146,9 @@ pub(crate) fn run_application() -> Result<(), std::io::Error> {
         let window_open_attempt = open_window(
             window_options(navigation_surface_appearance),
             cx,
-            |_, cx| {
+            |window, cx| {
                 cx.new(|cx| {
-                    AccountView::new(account_services, cx)
+                    AccountView::new_for_window(account_services, window, cx)
                         .with_navigation_surface_appearance(navigation_surface_appearance)
                 })
             },
