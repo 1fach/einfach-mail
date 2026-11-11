@@ -217,21 +217,6 @@ impl MailPaneLayout {
     }
 }
 
-pub(crate) struct MailFolderNavigation {
-    mail_view: Entity<MailView>,
-    _subscription: Subscription,
-}
-
-impl MailFolderNavigation {
-    pub(crate) fn new(mail_view: Entity<MailView>, cx: &mut Context<Self>) -> Self {
-        let _subscription = cx.observe(&mail_view, |_, _, cx| cx.notify());
-        Self {
-            mail_view,
-            _subscription,
-        }
-    }
-}
-
 struct MailComposerPresentation {
     title: &'static str,
     context: MailComposerContext,
@@ -1986,7 +1971,10 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
     }
 }
 
+mod folder_navigation;
 mod render;
+
+pub(crate) use folder_navigation::MailFolderNavigation;
 
 #[cfg(test)]
 mod tests;
