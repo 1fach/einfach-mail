@@ -61,6 +61,7 @@ Use `ConnectedAccount`. The application workflow owns provider selection, and th
 - [ADR 0059: Use a shared, adaptive mail and calendar workspace](0059-native-mail-and-calendar-workspace.md)
 - `crates/application/src/account.rs`: one active profile and connection reservation
 - `crates/providers/account-router/src/lib.rs`: one selected provider
-- `apps/desktop/src/account_view.rs`: one account status and session owner
+- `apps/desktop/src/app/workspace.rs`: account view, shared session, and lifecycle owner
+- `apps/desktop/src/features/account/state.rs`: one account status and provider metadata
 - `crates/application/src/account_session.rs`: account-bound shared Mail and Calendar session
 - `crates/providers/microsoft-graph/src/credential.rs` and `crates/persistence/src/exchange_ews_settings.rs`: provider-specific saved credentials and settings
