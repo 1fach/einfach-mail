@@ -1068,8 +1068,45 @@ fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
         .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
 
     context.run_until_parked();
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::Restoring;
+            cx.notify();
+        });
+    });
+    draw_account_view(context);
+    assert!(context.debug_bounds("account-operation-progress").is_some());
+    assert_eq!(
+        context
+            .cx
+            .update(|cx| view.read(cx).account_header_description()),
+        "Checking for a saved account."
+    );
+    context.cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.status = AccountStatus::Disconnected;
+            cx.notify();
+        });
+    });
     draw_account_view(context);
     assert!(context.debug_bounds("connect-account").is_some());
+    assert!(
+        context
+            .debug_bounds("microsoft365-provider-description")
+            .is_some()
+    );
+    assert!(
+        context
+            .debug_bounds("exchange-ews-provider-description")
+            .is_some()
+    );
+    assert!(context.debug_bounds("account-requested-access").is_some());
+    assert_eq!(
+        context
+            .cx
+            .update(|cx| view.read(cx).account_header_description()),
+        "Choose Microsoft 365 or Exchange Server to connect an account."
+    );
     click(context, "connect-account");
     let connected = context.cx.update(|cx| {
         matches!(
@@ -1080,6 +1117,23 @@ fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
         )
     });
     assert!(connected);
+    assert!(
+        context
+            .debug_bounds("microsoft365-provider-description")
+            .is_none()
+    );
+    assert!(
+        context
+            .debug_bounds("exchange-ews-provider-description")
+            .is_none()
+    );
+    assert!(context.debug_bounds("account-requested-access").is_none());
+    assert_eq!(
+        context
+            .cx
+            .update(|cx| view.read(cx).account_header_description()),
+        "Manage the active account, review permissions, or sign out."
+    );
     assert!(context.debug_bounds("account-provider").is_some());
     assert!(context.debug_bounds("account-mail-capabilities").is_some());
     assert!(
@@ -1099,6 +1153,23 @@ fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
         )
     });
     assert!(retryable_failure);
+    assert_eq!(
+        context
+            .cx
+            .update(|cx| view.read(cx).account_header_description()),
+        "Sign-out needs attention. Retry it below."
+    );
+    assert!(
+        context
+            .debug_bounds("microsoft365-provider-description")
+            .is_none()
+    );
+    assert!(
+        context
+            .debug_bounds("exchange-ews-provider-description")
+            .is_none()
+    );
+    assert!(context.debug_bounds("account-requested-access").is_none());
     assert!(context.debug_bounds("sign-out").is_some());
     assert!(context.debug_bounds("account-provider").is_some());
     assert!(context.debug_bounds("account-mail-capabilities").is_some());
@@ -1114,6 +1185,17 @@ fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
         .cx
         .update(|cx| matches!(&view.read(cx).status, super::AccountStatus::Disconnected));
     assert!(disconnected);
+    assert!(
+        context
+            .debug_bounds("microsoft365-provider-description")
+            .is_some()
+    );
+    assert!(
+        context
+            .debug_bounds("exchange-ews-provider-description")
+            .is_some()
+    );
+    assert!(context.debug_bounds("account-requested-access").is_some());
     assert!(signed_out.load(Ordering::SeqCst));
     assert_eq!(
         *removal_account_ids
@@ -1165,6 +1247,23 @@ fn signing_out_keeps_active_account_details_visible(cx: &mut TestAppContext) {
             .is_some()
     );
     assert!(context.debug_bounds("account-operation-progress").is_some());
+    assert!(
+        context
+            .debug_bounds("microsoft365-provider-description")
+            .is_none()
+    );
+    assert!(
+        context
+            .debug_bounds("exchange-ews-provider-description")
+            .is_none()
+    );
+    assert!(context.debug_bounds("account-requested-access").is_none());
+    assert_eq!(
+        context
+            .cx
+            .update(|cx| view.read(cx).account_header_description()),
+        "Sign-out is in progress. Account details remain visible until it finishes."
+    );
 }
 
 #[gpui_kit::test]
@@ -1254,6 +1353,12 @@ fn failed_restore_without_verified_identity_preserves_credential(cx: &mut TestAp
     assert!(context.debug_bounds("connect-account").is_none());
     assert!(context.debug_bounds("sign-out").is_none());
     assert!(context.debug_bounds("retry-account-restore").is_some());
+    assert_eq!(
+        context
+            .cx
+            .update(|cx| view.read(cx).account_header_description()),
+        "Retry account restore before removing or replacing the saved sign-in."
+    );
     assert!(
         removal_account_ids
             .lock()
@@ -1307,6 +1412,12 @@ fn connect_mismatch_keeps_saved_sign_in_and_requires_restore(cx: &mut TestAppCon
     )));
     assert!(context.debug_bounds("connect-account").is_none());
     assert!(context.debug_bounds("retry-account-restore").is_some());
+    assert_eq!(
+        context
+            .cx
+            .update(|cx| view.read(cx).account_header_description()),
+        "Retry account restore before removing or replacing the saved sign-in."
+    );
 }
 
 #[gpui_kit::test]
@@ -2004,7 +2115,24 @@ fn exchange_server_form_connects_without_microsoft_client_configuration(cx: &mut
     context.run_until_parked();
     draw_account_view(context);
     assert!(context.debug_bounds("connect-account").is_none());
+    assert!(
+        context
+            .debug_bounds("microsoft365-provider-description")
+            .is_some()
+    );
+    assert!(
+        context
+            .debug_bounds("exchange-ews-provider-description")
+            .is_some()
+    );
     click(context, "connect-exchange-ews");
+    draw_account_view(context);
+    assert_eq!(
+        context
+            .cx
+            .update(|cx| view.read(cx).account_header_description()),
+        "Complete or cancel the Exchange Server connection below."
+    );
 
     for (selector, value) in [
         (
