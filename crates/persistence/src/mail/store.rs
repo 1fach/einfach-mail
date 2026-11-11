@@ -16,11 +16,13 @@ use einfach_mail_domain::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::{
-    CacheFailure, CacheResult, SqliteAccountCache,
-    system_time::{system_time_from_parts, system_time_parts},
+use crate::shared::{
+    schema,
+    store::{
+        CacheFailure, CacheResult, SqliteAccountCache,
+        time::{system_time_from_parts, system_time_parts},
+    },
 };
-use crate::schema;
 
 mod folders;
 mod messages;

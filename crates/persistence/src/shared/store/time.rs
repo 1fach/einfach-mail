@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{CacheFailure, CacheResult};
 
-pub(super) fn system_time_parts(timestamp: SystemTime) -> CacheResult<(i64, i64)> {
+pub(crate) fn system_time_parts(timestamp: SystemTime) -> CacheResult<(i64, i64)> {
     match timestamp.duration_since(UNIX_EPOCH) {
         Ok(duration) => positive_system_time_parts(duration),
         Err(error) => negative_system_time_parts(error.duration()),
@@ -27,7 +27,7 @@ fn negative_system_time_parts(duration: Duration) -> CacheResult<(i64, i64)> {
     Ok((seconds, 1_000_000_000 - nanoseconds))
 }
 
-pub(super) fn system_time_from_parts(seconds: i64, nanoseconds: i64) -> CacheResult<SystemTime> {
+pub(crate) fn system_time_from_parts(seconds: i64, nanoseconds: i64) -> CacheResult<SystemTime> {
     if !(0..1_000_000_000).contains(&nanoseconds) {
         return Err(CacheFailure::InvalidData);
     }

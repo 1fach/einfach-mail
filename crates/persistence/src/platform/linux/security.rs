@@ -16,18 +16,18 @@ use sha2::{Digest, Sha256};
 use xdg::BaseDirectories;
 use zeroize::Zeroizing;
 
-use crate::schema;
+use crate::shared::{schema, store::CacheFailure};
 
 const KEY_BYTES: usize = 32;
 const CREDENTIAL_SERVICE: &str = "com.1fach.einfach-mail";
 
-pub(super) struct OpenDatabase {
-    pub(super) client: Client,
-    pub(super) database_path: PathBuf,
-    pub(super) database_identity: DatabaseIdentity,
-    pub(super) lifecycle_lock_path: PathBuf,
-    pub(super) credential_account: String,
-    pub(super) account_lock: Arc<File>,
+pub(crate) struct OpenDatabase {
+    pub(crate) client: Client,
+    pub(crate) database_path: PathBuf,
+    pub(crate) database_identity: DatabaseIdentity,
+    pub(crate) lifecycle_lock_path: PathBuf,
+    pub(crate) credential_account: String,
+    pub(crate) account_lock: Arc<File>,
 }
 
 struct CachePaths {
@@ -43,7 +43,7 @@ struct CacheOpenLocks {
 }
 
 /// Holds the lifecycle gate while an open cache attempts account removal.
-pub(super) struct AccountRemovalLock {
+pub(crate) struct AccountRemovalLock {
     account_lock: Arc<File>,
     lifecycle_lock: Option<File>,
     restore_shared_on_drop: bool,
@@ -57,7 +57,7 @@ impl AccountRemovalLock {
     /// Returns [`MailCacheError::InUse`] when another cache handle or lifecycle operation
     /// prevents removal.
     /// Returns [`MailCacheError::Unavailable`] when lock state cannot be restored.
-    pub(super) fn acquire(
+    pub(crate) fn acquire(
         lifecycle_lock_path: &Path,
         account_lock: Arc<File>,
     ) -> Result<Self, MailCacheError> {
@@ -81,14 +81,14 @@ impl AccountRemovalLock {
     ///
     /// Returns [`MailCacheError::InUse`] when the account lock cannot be reacquired.
     /// Returns [`MailCacheError::Unavailable`] when shared ownership cannot be restored.
-    pub(super) fn restore_shared(mut self) -> Result<(), MailCacheError> {
+    pub(crate) fn restore_shared(mut self) -> Result<(), MailCacheError> {
         restore_shared_account_lock(&self.account_lock)?;
         self.restore_shared_on_drop = false;
         Ok(())
     }
 
     /// Keeps exclusive ownership after successful removal until the cache handle drops.
-    pub(super) fn retain_exclusive(mut self) {
+    pub(crate) fn retain_exclusive(mut self) {
         self.restore_shared_on_drop = false;
     }
 }
@@ -116,13 +116,13 @@ fn take_lifecycle_lock_if_restore_failed(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct DatabaseIdentity {
+pub(crate) struct DatabaseIdentity {
     device: u64,
     inode: u64,
 }
 
 impl DatabaseIdentity {
-    pub(super) fn read(path: &Path) -> Result<Self, MailCacheError> {
+    pub(crate) fn read(path: &Path) -> Result<Self, MailCacheError> {
         let metadata = fs::metadata(path).map_err(|_| MailCacheError::Unavailable)?;
         Ok(Self {
             device: metadata.dev(),
@@ -130,7 +130,7 @@ impl DatabaseIdentity {
         })
     }
 
-    pub(super) fn matches_path(self, path: &Path) -> Result<bool, MailCacheError> {
+    pub(crate) fn matches_path(self, path: &Path) -> Result<bool, MailCacheError> {
         let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -175,7 +175,7 @@ impl DatabaseKey {
     }
 }
 
-pub(super) async fn open_database(account_id: &AccountId) -> Result<OpenDatabase, MailCacheError> {
+pub(crate) async fn open_database(account_id: &AccountId) -> Result<OpenDatabase, MailCacheError> {
     let paths = cache_paths(account_id)?;
     let CacheOpenLocks {
         account_lock,
@@ -214,7 +214,7 @@ async fn open_database_with_key(
     let client = open_encrypted_client(&paths.database, &key).await?;
     schema::apply(&client)
         .await
-        .map_err(super::store::CacheFailure::mail_public)?;
+        .map_err(CacheFailure::mail_public)?;
     let database_identity = DatabaseIdentity::read(&paths.database)?;
     Ok(OpenDatabase {
         client,
@@ -279,7 +279,7 @@ async fn open_encrypted_client(
 }
 
 #[cfg(test)]
-pub(super) async fn open_test_database(
+pub(crate) async fn open_test_database(
     database_path: &Path,
     key_byte: u8,
 ) -> Result<OpenDatabase, MailCacheError> {
@@ -359,22 +359,22 @@ fn path_exists(path: &Path) -> Result<bool, MailCacheError> {
     path.try_exists().map_err(|_| MailCacheError::Unavailable)
 }
 
-pub(super) fn account_database_exists(account_id: &AccountId) -> Result<bool, MailCacheError> {
+pub(crate) fn account_database_exists(account_id: &AccountId) -> Result<bool, MailCacheError> {
     encrypted_data_exists(&cache_paths(account_id)?.database)
 }
 
-pub(super) fn credential_entry(account: &str) -> Result<Entry, MailCacheError> {
+fn credential_entry(account: &str) -> Result<Entry, MailCacheError> {
     Entry::new(CREDENTIAL_SERVICE, account).map_err(|_| MailCacheError::Unavailable)
 }
 
-pub(super) fn remove_credential(account: &str) -> Result<(), MailCacheError> {
+pub(crate) fn remove_credential(account: &str) -> Result<(), MailCacheError> {
     match credential_entry(account)?.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
         Err(_) => Err(MailCacheError::Unavailable),
     }
 }
 
-pub(super) async fn delete_database_files(
+pub(crate) async fn delete_database_files(
     client: &Client,
     database_path: &Path,
 ) -> Result<(), MailCacheError> {
@@ -385,7 +385,7 @@ pub(super) async fn delete_database_files(
     remove_database_files(database_path)
 }
 
-pub(super) fn remove_account_without_open_client(
+pub(crate) fn remove_account_without_open_client(
     account_id: &AccountId,
 ) -> Result<(), MailCacheError> {
     let paths = cache_paths(account_id)?;
@@ -422,7 +422,7 @@ fn restore_shared_account_lock(file: &File) -> Result<(), MailCacheError> {
 ///
 /// Returns [`MailCacheError::InUse`] when an account removal owns the lock.
 /// Returns [`MailCacheError::Unavailable`] when the lock file cannot be opened or locked.
-pub(super) fn lock_account_directory_shared(path: &Path) -> Result<File, MailCacheError> {
+fn lock_account_directory_shared(path: &Path) -> Result<File, MailCacheError> {
     let file = open_account_lock_file(path)?;
     file.try_lock_shared().map_err(lock_error)?;
     Ok(file)

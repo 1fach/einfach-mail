@@ -16,9 +16,9 @@ use einfach_mail_domain::{
 use thiserror::Error;
 use time::{Date, OffsetDateTime, PrimitiveDateTime};
 
-use super::{
+use crate::shared::store::{
     CacheFailure, CacheResult, SqliteAccountCache,
-    system_time::{system_time_from_parts, system_time_parts},
+    time::{system_time_from_parts, system_time_parts},
 };
 
 mod events;

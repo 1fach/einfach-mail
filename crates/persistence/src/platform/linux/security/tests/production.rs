@@ -20,9 +20,8 @@ const ACCOUNT_ID: &str = "EINFACH_MAIL_PERSISTENCE_TEST_ACCOUNT_ID";
 const NEW_ACCOUNT_ID: &str = "EINFACH_MAIL_PERSISTENCE_NEW_ACCOUNT_ID";
 const EXISTING_ACCOUNT_ID: &str = "EINFACH_MAIL_PERSISTENCE_EXISTING_ACCOUNT_ID";
 const CACHE_LIFECYCLE_TEST: &str =
-    "security::production_tests::production_secret_service_cache_lifecycle";
-const UNAVAILABLE_SERVICE_TEST: &str =
-    "security::production_tests::unavailable_secret_service_preserves_production_caches";
+    "platform::linux::security::production_tests::production_secret_service_cache_lifecycle";
+const UNAVAILABLE_SERVICE_TEST: &str = "platform::linux::security::production_tests::unavailable_secret_service_preserves_production_caches";
 const LEGACY_SQLCIPHER_FIXTURE: &[u8] =
     include_bytes!("../../../../../tests/fixtures/legacy-sqlcipher-4.14-v1.db");
 
