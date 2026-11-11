@@ -1,22 +1,35 @@
 use std::sync::Arc;
 
+#[path = "../features/account/copy.rs"]
+mod account_copy;
+#[path = "../features/account/state.rs"]
+mod account_state;
+
 use crate::features::{
     CalendarView, CalendarViewEvent, MailFolderNavigation, MailPermissionRequester, MailView,
     MailViewEvent,
 };
-use einfach_mail_application::{
-    AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
-    AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
-    AccountProviderKind, AccountSession, AccountSessionFactory, AccountWorkflow, ConnectedAccount,
-    ExchangeEwsConnectionInput, ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest,
-    ExchangeEwsDiscoveryResult,
+use account_copy::{
+    account_cache_open_error_message, account_cache_removal_error_message, mail_access_summary,
+    permission_review_disclosure,
 };
-use einfach_mail_domain::{AccountProfile, CalendarAccess, MailAction, MailCapabilities};
+pub(super) use account_state::{AccountServices, SetupIssue};
+use account_state::{
+    AccountSignOutError, AccountStatus, AccountViewCacheError, EwsDiscoveryState,
+    ExchangeEwsConnectionForm,
+};
+use einfach_mail_application::{
+    AccountCacheRemovalError, AccountConnectionRequest, AccountOperationCancellation,
+    AccountOperationError, AccountPermissionRequest, AccountProvider, AccountProviderKind,
+    AccountSession, AccountSessionFactory, AccountWorkflow, ConnectedAccount,
+    ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
+};
+use einfach_mail_domain::{AccountProfile, CalendarAccess};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Icon, IconName, Selectable, StyledExt,
     button::{Button, ButtonVariants},
     form::{Field, Form},
-    input::{Input, InputState},
+    input::Input,
     scroll::ScrollableElement,
 };
 #[cfg(test)]
@@ -25,200 +38,6 @@ use gpui_kit::{
     App, AsyncApp, Context, Div, Entity, FocusHandle, IntoElement, Render, Role, Stateful,
     Subscription, Task, Window, div, prelude::*, rems,
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SetupIssue {
-    MissingClientId,
-    InvalidClientId,
-    MissingCallbackPort,
-    InvalidCallbackPort,
-    ExchangeSettingsUnavailable,
-}
-
-impl SetupIssue {
-    fn message(self) -> &'static str {
-        match self {
-            Self::MissingClientId => {
-                "Account sign-in is not configured. Set EINFACH_MAIL_ENTRA_CLIENT_ID to a Microsoft public client app ID."
-            }
-            Self::InvalidClientId => {
-                "The Microsoft public client app ID is invalid. Check EINFACH_MAIL_ENTRA_CLIENT_ID."
-            }
-            Self::MissingCallbackPort => {
-                "Sign-in needs a registered loopback port. Set EINFACH_MAIL_ENTRA_CALLBACK_PORT to the port registered for http://127.0.0.1."
-            }
-            Self::InvalidCallbackPort => {
-                "The OAuth callback port must be a nonzero TCP port registered for http://127.0.0.1."
-            }
-            Self::ExchangeSettingsUnavailable => {
-                "Exchange account settings are unavailable. Check the Linux configuration directory and try again."
-            }
-        }
-    }
-}
-
-pub(super) struct AccountServices<P> {
-    pub(super) workflow: Arc<AccountWorkflow<P>>,
-    pub(super) account_session_factory: Arc<dyn AccountSessionFactory>,
-    microsoft365_setup_issue: Option<SetupIssue>,
-}
-
-impl<P> AccountServices<P> {
-    pub(super) fn new(
-        workflow: Arc<AccountWorkflow<P>>,
-        account_session_factory: Arc<dyn AccountSessionFactory>,
-    ) -> Self {
-        Self {
-            workflow,
-            account_session_factory,
-            microsoft365_setup_issue: None,
-        }
-    }
-
-    pub(super) fn with_microsoft365_setup_issue(mut self, issue: SetupIssue) -> Self {
-        self.microsoft365_setup_issue = Some(issue);
-        self
-    }
-}
-
-#[derive(Clone)]
-enum AccountStatus {
-    Restoring,
-    Disconnected,
-    Connecting {
-        saved_credential_may_exist: bool,
-        cancellation: AccountOperationCancellation,
-    },
-    CancellingConnect {
-        saved_credential_may_exist: bool,
-    },
-    SigningOut {
-        account: Option<ConnectedAccount>,
-    },
-    Connected(ConnectedAccount),
-    Reauthorizing {
-        account: ConnectedAccount,
-        cancellation: AccountOperationCancellation,
-    },
-    CancellingReauthorization {
-        account: ConnectedAccount,
-    },
-    ReauthorizationFailed {
-        account: ConnectedAccount,
-        error: AccountOperationError,
-    },
-    SignOutFailed {
-        account: Option<ConnectedAccount>,
-        error: AccountOperationError,
-    },
-    Failed {
-        error: AccountOperationError,
-        saved_credential_may_exist: bool,
-    },
-}
-
-impl AccountStatus {
-    fn saved_credential_may_exist(&self) -> bool {
-        match self {
-            Self::Connecting {
-                saved_credential_may_exist,
-                ..
-            }
-            | Self::CancellingConnect {
-                saved_credential_may_exist,
-            }
-            | Self::Failed {
-                saved_credential_may_exist,
-                ..
-            } => *saved_credential_may_exist,
-            Self::SigningOut { .. }
-            | Self::Connected(_)
-            | Self::Reauthorizing { .. }
-            | Self::CancellingReauthorization { .. }
-            | Self::ReauthorizationFailed { .. }
-            | Self::SignOutFailed { .. }
-            | Self::Restoring => true,
-            Self::Disconnected => false,
-        }
-    }
-
-    fn connected_profile(&self) -> Option<&AccountProfile> {
-        self.connected_account().map(ConnectedAccount::profile)
-    }
-
-    fn connected_account(&self) -> Option<&ConnectedAccount> {
-        match self {
-            Self::Connected(account)
-            | Self::Reauthorizing { account, .. }
-            | Self::CancellingReauthorization { account }
-            | Self::ReauthorizationFailed { account, .. } => Some(account),
-            Self::SigningOut {
-                account: Some(account),
-            }
-            | Self::SignOutFailed {
-                account: Some(account),
-                ..
-            } => Some(account),
-            _ => None,
-        }
-    }
-
-    fn error_message(error: AccountOperationError) -> &'static str {
-        match error {
-            AccountOperationError::SignInCancelled => "Sign-in was cancelled.",
-            AccountOperationError::AccessDenied => {
-                "The server denied access. Check the account details and your organization's policies."
-            }
-            AccountOperationError::InvalidConnectionDetails => {
-                "The Exchange endpoint or sign-in details are invalid. Check them and try again."
-            }
-            AccountOperationError::AutodiscoverFailed => {
-                "Autodiscover could not find an EWS endpoint. Enter the HTTPS address manually."
-            }
-            AccountOperationError::AccessTokenRejected => {
-                "The server rejected the saved sign-in. Connect your account again."
-            }
-            AccountOperationError::SignInExpired => {
-                "The saved sign-in has expired. Connect your account again."
-            }
-            AccountOperationError::CredentialStoreUnavailable => {
-                "Linux Secret Service is unavailable. Unlock your keyring and try again."
-            }
-            AccountOperationError::ProfileUnavailable => {
-                "The server did not return the account details needed to identify this account."
-            }
-            AccountOperationError::ServiceUnavailable => {
-                "The account service is unavailable. Check your connection and try again."
-            }
-            AccountOperationError::SignInFailed => "Sign-in could not be completed. Try again.",
-            AccountOperationError::AccountAlreadyConnected => "An account is already connected.",
-            AccountOperationError::AccountNotConnected => "No account is connected.",
-            AccountOperationError::AccountMismatch => {
-                "Microsoft returned a different account. Restore the expected account before replacing this saved sign-in."
-            }
-            AccountOperationError::SavedAccountIdentityUnavailable => {
-                "The saved sign-in has no verified account identity. Retry restore before removing it or signing in with another account."
-            }
-            AccountOperationError::AccountOperationInProgress => {
-                "An account operation is already running. Wait for it to finish and try again."
-            }
-            AccountOperationError::AccountStateUnavailable => {
-                "The account workflow is unavailable. Restart Einfach Mail and try again."
-            }
-            _ => "The account operation failed. Try again.",
-        }
-    }
-
-    fn reauthorization_error_message(error: AccountOperationError) -> &'static str {
-        match error {
-            AccountOperationError::SignInCancelled => "Permission review was cancelled.",
-            AccountOperationError::AccountMismatch => {
-                "Microsoft returned a different account. Your saved sign-in was not changed."
-            }
-            _ => Self::error_message(error),
-        }
-    }
-}
 
 pub(super) struct AccountView<P: AccountProvider + 'static> {
     services: Result<AccountServices<P>, SetupIssue>,
@@ -232,99 +51,6 @@ pub(super) struct AccountView<P: AccountProvider + 'static> {
     session_open_error: Option<AccountViewCacheError>,
     exchange_ews_form: Option<ExchangeEwsConnectionForm>,
     task: Option<Task<()>>,
-}
-
-struct ExchangeEwsConnectionForm {
-    endpoint: Entity<InputState>,
-    mailbox_address: Entity<InputState>,
-    username: Entity<InputState>,
-    password: Entity<InputState>,
-    discovery: EwsDiscoveryState,
-}
-
-enum EwsDiscoveryState {
-    Idle,
-    Searching,
-    Confirmation(ExchangeEwsDiscoveryConfirmation),
-    Cancelling,
-    Found,
-    Failed,
-}
-
-impl EwsDiscoveryState {
-    fn allows_start(&self) -> bool {
-        matches!(self, Self::Idle | Self::Failed | Self::Found)
-    }
-
-    fn is_busy(&self) -> bool {
-        matches!(self, Self::Searching | Self::Cancelling)
-    }
-
-    fn requires_confirmation(&self) -> bool {
-        matches!(self, Self::Confirmation(_))
-    }
-
-    fn feedback_message(&self) -> Option<&'static str> {
-        match self {
-            Self::Idle | Self::Confirmation(_) => None,
-            Self::Searching => Some("Searching for an EWS endpoint…"),
-            Self::Cancelling => Some("Cancelling discovery…"),
-            Self::Found => Some("Endpoint found. Review it before connecting."),
-            Self::Failed => Some(
-                "Autodiscover could not find an endpoint. Enter the HTTPS EWS address manually.",
-            ),
-        }
-    }
-
-    fn button_label(&self) -> &'static str {
-        if self.is_busy() {
-            "Discovering…"
-        } else {
-            "Discover endpoint"
-        }
-    }
-
-    fn from_result(
-        discovery_result: Result<ExchangeEwsDiscoveryResult, AccountOperationError>,
-    ) -> Self {
-        match discovery_result {
-            Ok(ExchangeEwsDiscoveryResult::ConfirmationRequired(confirmation)) => {
-                Self::Confirmation(confirmation)
-            }
-            Ok(ExchangeEwsDiscoveryResult::Cancelled) => Self::Idle,
-            _ => Self::Failed,
-        }
-    }
-}
-
-impl ExchangeEwsConnectionForm {
-    fn new<P: AccountProvider + 'static>(
-        window: &mut Window,
-        cx: &mut Context<AccountView<P>>,
-    ) -> Self {
-        Self {
-            endpoint: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("https://mail.example/EWS/Exchange.asmx")
-            }),
-            mailbox_address: cx
-                .new(|cx| InputState::new(window, cx).placeholder("name@example.com")),
-            username: cx.new(|cx| InputState::new(window, cx).placeholder("DOMAIN\\username")),
-            password: cx.new(|cx| InputState::new(window, cx).masked(true)),
-            discovery: EwsDiscoveryState::Idle,
-        }
-    }
-
-    fn request<P: AccountProvider + 'static>(
-        &self,
-        cx: &Context<AccountView<P>>,
-    ) -> AccountConnectionRequest {
-        AccountConnectionRequest::ExchangeEws(ExchangeEwsConnectionInput::new(
-            self.endpoint.read(cx).value().to_string(),
-            self.mailbox_address.read(cx).value().to_string(),
-            self.username.read(cx).value().to_string(),
-            self.password.read(cx).value().to_string(),
-        ))
-    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -383,35 +109,6 @@ impl AccountContent {
             Self::Opening(OpeningContent::Mail) => WorkspaceSection::Mail,
             Self::Opening(OpeningContent::Calendar) => WorkspaceSection::Calendar,
             Self::Account => WorkspaceSection::Accounts,
-        }
-    }
-}
-
-enum AccountSignOutError {
-    Identity(AccountOperationError),
-    CacheRemoval(AccountCacheRemovalError),
-    CredentialRemoval(AccountOperationError),
-}
-
-#[derive(Clone, Copy)]
-enum AccountViewCacheError {
-    Open(AccountCacheOpenError),
-    Removal(AccountCacheRemovalError),
-}
-
-fn permission_review_disclosure(request: AccountPermissionRequest) -> &'static str {
-    match request {
-        AccountPermissionRequest::Current => {
-            "Microsoft will review the existing delegated access: User.Read, Mail.Read, Calendars.Read, and offline_access."
-        }
-        AccountPermissionRequest::MailReadWrite => {
-            "Microsoft grants Mail.ReadWrite, which can create, read, update, and delete mail in this account. Einfach Mail requests it when Microsoft denies a read-state change, follow-up flag change, message move, or message deletion. It uses the permission to set read state, update or clear follow-up flags, move messages between folders, and delete selected messages after confirmation. This permission review does not perform the action or send mail, and it does not request Mail.Send. Continue opens Microsoft in your system browser."
-        }
-        AccountPermissionRequest::CalendarReadWrite => {
-            "Microsoft grants Calendars.ReadWrite the ability to create, read, update, and delete calendar events. Einfach Mail requests it for supported one-off timed appointments after Microsoft denies an event change. This review does not repeat the failed action. Continue opens Microsoft in your system browser. Reopen Calendar and retry the event after review."
-        }
-        AccountPermissionRequest::SendMail => {
-            "Microsoft grants Mail.Send so Einfach Mail can send mail as this account. It does not grant permission to read or change mail. Continue opens Microsoft in your system browser."
         }
     }
 }
@@ -2296,26 +1993,6 @@ impl<P: AccountProvider + 'static> Render for AccountView<P> {
     }
 }
 
-fn mail_access_summary(capabilities: MailCapabilities) -> String {
-    let mut actions = vec!["read messages"];
-    for (action, label) in [
-        (MailAction::SetReadState, "mark read or unread"),
-        (
-            MailAction::SetFollowUpFlagStatus,
-            "set or clear follow-up flags",
-        ),
-        (MailAction::Send, "send"),
-        (MailAction::Reply, "reply"),
-        (MailAction::Move, "move or archive"),
-        (MailAction::Delete, "delete"),
-    ] {
-        if capabilities.supports(action) {
-            actions.push(label);
-        }
-    }
-    format!("Mail actions: {}.", actions.join(", "))
-}
-
 async fn remove_account_cache(
     account_session: Option<Arc<dyn AccountSession>>,
     account_session_factory: Arc<dyn AccountSessionFactory>,
@@ -2350,49 +2027,6 @@ async fn remove_verified_account_cache_and_sign_out<P: AccountProvider>(
         .sign_out()
         .await
         .map_err(AccountSignOutError::CredentialRemoval)
-}
-
-fn account_cache_open_error_message(error: AccountCacheOpenError) -> &'static str {
-    match error {
-        AccountCacheOpenError::InUse => {
-            "Another Einfach Mail operation is opening or using this account cache. Wait for it to finish, or close the other account view and try again."
-        }
-        AccountCacheOpenError::MissingEncryptionKey => {
-            "The encrypted account cache key is missing. Remove the local cache before syncing again."
-        }
-        AccountCacheOpenError::Unavailable => {
-            "The encrypted account cache could not be opened. Check that the cache files are accessible and your Linux keyring is unlocked, then try again."
-        }
-        AccountCacheOpenError::InvalidData | AccountCacheOpenError::AccountMismatch => {
-            "The account cache could not be opened. Try again."
-        }
-    }
-}
-
-fn account_cache_removal_error_message(error: AccountCacheRemovalError) -> &'static str {
-    match error {
-        AccountCacheRemovalError::InUse => {
-            "Another Einfach Mail operation is opening or using this account cache. Wait for it to finish, or close the other account view and try again."
-        }
-        AccountCacheRemovalError::OperationInProgress => {
-            "A mail or calendar operation is still active. Wait for it to finish, then try signing out again."
-        }
-        AccountCacheRemovalError::PendingMailSend => {
-            "A previous send needs review. Open Mail, check Sent Items, and resolve it before signing out."
-        }
-        AccountCacheRemovalError::PendingCalendarEventCreation => {
-            "A calendar event may already exist in Microsoft. Open Calendar and resolve the saved operation before signing out."
-        }
-        AccountCacheRemovalError::MissingEncryptionKey => {
-            "The encrypted account cache key is missing. Remove the local cache before syncing again."
-        }
-        AccountCacheRemovalError::InvalidData | AccountCacheRemovalError::AccountMismatch => {
-            "The account cache could not be verified for removal. Your account is still signed in."
-        }
-        AccountCacheRemovalError::Unavailable => {
-            "The encrypted cache could not be read or removed. Check that the cache files are accessible and your Linux keyring is unlocked, then try again."
-        }
-    }
 }
 
 #[cfg(test)]
