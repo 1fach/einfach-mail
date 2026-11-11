@@ -6,11 +6,12 @@ use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
     AccountPermissionRequest, AccountProvider, CalendarDeltaRequest, CalendarDeltaResponse,
     CalendarOperationError, CalendarProvider, CalendarSyncStrategy, CalendarViewSnapshotResponse,
-    ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult, MailOperationError, MailProvider,
-    MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    ConnectedAccount, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult, MailOperationError,
+    MailProvider, MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse,
+    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, AccountProfile, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
+    AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
     CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
     MailFolder, MailReplyDraft, MessageBody, MessageId, ReadState,
 };
@@ -58,7 +59,7 @@ impl<E> AccountProvider for AccountProviderRouter<E>
 where
     E: einfach_mail_application::ExchangeEwsAccountSettingsStore + 'static,
 {
-    async fn restore_account(&self) -> Result<Option<AccountProfile>, AccountOperationError> {
+    async fn restore_account(&self) -> Result<Option<ConnectedAccount>, AccountOperationError> {
         if self.ews.saved_credential_account_id().await?.is_some() {
             *self.active_provider.write().await = Some(ProviderKind::ExchangeEws);
             return self.ews.restore_account().await;
@@ -84,7 +85,7 @@ where
     async fn connect_account(
         &self,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         if self.selected_provider().await.is_some() {
             return Err(AccountOperationError::AccountAlreadyConnected);
         }
@@ -100,7 +101,7 @@ where
         &self,
         request: AccountConnectionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> Result<AccountProfile, AccountOperationError> {
+    ) -> Result<ConnectedAccount, AccountOperationError> {
         if self.selected_provider().await.is_some() {
             return Err(AccountOperationError::AccountAlreadyConnected);
         }
@@ -142,7 +143,7 @@ where
         expected_account_id: &AccountId,
         request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         let expected_account_id = expected_account_id.clone();
         async move {
             match self.selected_provider().await {

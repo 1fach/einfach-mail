@@ -1,6 +1,6 @@
 # Rust dependency review
 
-Last reviewed: 2026-11-09. These notes record dependency evidence and adopted choices. Recheck versions and project fit before adding or upgrading a crate.
+Last reviewed: 2026-11-10. These notes record dependency evidence and adopted choices. Recheck versions and project fit before adding or upgrading a crate.
 
 ## Review rules
 
@@ -79,6 +79,12 @@ The 2026-11-08 recheck found no GPUI Kit update that resolves these findings. Th
 I found no worthwhile app-owned dependency update. Each finding comes from a dependency whose package name or major API is set by GPUI or its Linux integrations. A local shim or fork would make Einfach Mail maintain compatibility code for its UI framework. The remaining findings need coordinated renderer, TLS, and zbus updates from their owners. The audit found no vulnerable or yanked versions, so no local patch or suppression is justified. No ADR is needed for the advisory review itself. Recheck the graph when GPUI Kit or its Linux integration dependencies publish compatible releases. [Issue #206](https://github.com/1fach/einfach-mail/issues/206) records this follow-up; [issue #128](https://github.com/1fach/einfach-mail/issues/128) tracked the initial review.
 
 ## Candidates
+
+### Desktop appearance settings persistence — 2026-11-10
+
+The desktop needs one small app-wide setting with Linux XDG placement and atomic replacement. [`confy` 2.0.0](https://docs.rs/crate/confy/2.0.0) is maintained, supports Serde, defaults to TOML, and is licensed MIT OR Apache-2.0. Its [`store_path` implementation](https://docs.rs/confy/2.0.0/src/confy/lib.rs.html) opens the active file with truncate before writing; a failed write can leave a partial preferences file. [`Figment` 0.10.19](https://docs.rs/crate/figment/0.10.19) loads layered configuration but does not provide persistence. [`directories` 6.0.0](https://docs.rs/crate/directories/6.0.0) locates platform directories but does not serialize or save settings.
+
+Reuse the already selected `xdg`, `serde`, `serde_json`, and `tempfile` crates. The desktop settings store serializes one bounded JSON value and atomically replaces it through a same-directory temporary file, following the established [`XdgExchangeEwsAccountSettingsStore`](../../crates/persistence/src/exchange_ews_settings.rs) pattern. This adds no package or lockfile entry and keeps the preference separate from account credentials and the encrypted mail cache.
 
 ### Per-operation mail capabilities — 2026-11-09
 

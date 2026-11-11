@@ -3,9 +3,14 @@ use std::{future::Future, sync::Arc};
 use huskarl::token::{AccessToken, RefreshToken};
 use tokio_util::sync::CancellationToken;
 
-use crate::{credential::CredentialIdentity, error::GraphError, http_client, identity};
+use crate::{
+    auth::{credential::CredentialIdentity, identity},
+    error::GraphError,
+    transport::build_client,
+};
 use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
+    AccountProviderKind, ConnectedAccount,
 };
 use einfach_mail_domain::{AccountId, AccountProfile};
 use einfach_mail_provider_runtime as worker;
@@ -30,10 +35,8 @@ impl AccountProvider for MicrosoftGraphProvider {
     /// provider already has an active account session.
     fn restore_account(
         &self,
-    ) -> impl Future<
-        Output = Result<Option<einfach_mail_domain::AccountProfile>, AccountOperationError>,
-    > + Send
-    + '_ {
+    ) -> impl Future<Output = Result<Option<ConnectedAccount>, AccountOperationError>> + Send + '_
+    {
         let config = Arc::clone(&self.config);
 
         worker::run(move |_cancellation: CancellationToken| async move {
@@ -48,8 +51,7 @@ impl AccountProvider for MicrosoftGraphProvider {
                 .client_id
                 .ok_or(AccountOperationError::ServiceUnavailable)?;
             let expected_account_id = saved_credential.expected_account_id().cloned();
-            let client = http_client::build_client()
-                .map_err(|_| AccountOperationError::ServiceUnavailable)?;
+            let client = build_client().map_err(|_| AccountOperationError::ServiceUnavailable)?;
             let response = identity::refresh(
                 client_id,
                 &config.endpoints,
@@ -89,7 +91,10 @@ impl AccountProvider for MicrosoftGraphProvider {
                 account_id: profile.id().clone(),
                 access_token: Some(access_token),
             });
-            Ok(Some(profile))
+            Ok(Some(ConnectedAccount::new(
+                profile,
+                AccountProviderKind::MicrosoftGraph,
+            )))
         })
     }
 
@@ -128,7 +133,7 @@ impl AccountProvider for MicrosoftGraphProvider {
     fn connect_account(
         &self,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let commit_cancellation = cancellation.clone();
 
@@ -157,7 +162,10 @@ impl AccountProvider for MicrosoftGraphProvider {
                     account_id: authorized.profile.id().clone(),
                     access_token: Some(authorized.access_token),
                 });
-                Ok(authorized.profile)
+                Ok(ConnectedAccount::new(
+                    authorized.profile,
+                    AccountProviderKind::MicrosoftGraph,
+                ))
             },
             cancellation,
         )
@@ -168,7 +176,7 @@ impl AccountProvider for MicrosoftGraphProvider {
         expected_account_id: &einfach_mail_domain::AccountId,
         request: AccountPermissionRequest,
         cancellation: AccountOperationCancellation,
-    ) -> impl Future<Output = Result<AccountProfile, AccountOperationError>> + Send + '_ {
+    ) -> impl Future<Output = Result<ConnectedAccount, AccountOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let expected_account_id = expected_account_id.clone();
         let commit_cancellation = cancellation.clone();
@@ -189,7 +197,10 @@ impl AccountProvider for MicrosoftGraphProvider {
                     account_id: authorized.profile.id().clone(),
                     access_token: Some(authorized.access_token),
                 });
-                Ok(authorized.profile)
+                Ok(ConnectedAccount::new(
+                    authorized.profile,
+                    AccountProviderKind::MicrosoftGraph,
+                ))
             },
             cancellation,
         )
@@ -284,8 +295,7 @@ async fn authorize_profile(
     config: &ProviderConfig,
     request: AccountPermissionRequest,
 ) -> Result<AuthorizedAccount, AccountOperationError> {
-    let client =
-        http_client::build_client().map_err(|_| AccountOperationError::ServiceUnavailable)?;
+    let client = build_client().map_err(|_| AccountOperationError::ServiceUnavailable)?;
     let response = identity::authorize(
         identity::AuthorizationContext {
             client_id: config

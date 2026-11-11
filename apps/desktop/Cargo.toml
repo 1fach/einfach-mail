@@ -19,6 +19,9 @@ einfach-mail-exchange-ews = { path = "../../crates/providers/exchange-ews" }
 einfach-mail-persistence = { path = "../../crates/persistence" }
 einfach-mail-microsoft-graph = { path = "../../crates/providers/microsoft-graph" }
 jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 time.workspace = true
 uuid.workspace = true
 tokio.workspace = true

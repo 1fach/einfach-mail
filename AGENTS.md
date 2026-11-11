@@ -30,6 +30,7 @@ When a need comes up, first look for a maintained Rust library that fits it. For
 ## Use project skills
 
 - Use `Einfach Mail` as the product name in user-facing text and project documents. Use the `einfach-` prefix for Cargo package names.
+- Follow [ADR 0061](docs/decisions/0061-feature-first-module-layout-and-test-placement.md) and the reviewed [issue #282 path map](https://github.com/1fach/einfach-mail/issues/282) when moving modules or tests. Preserve crate boundaries, public re-exports, and item visibility.
 - Use the relevant pstack skill for design and investigation. Use `architect` for new boundaries, ownership, and data flow. Use `how` and `why` to inspect existing behavior and rationale. Use `blast-radius` for changes that cross callers, persistence, providers, or lifecycle boundaries. Apply the relevant `principle-*` skills when their design problem appears.
 - Run the `clean-code-guard` pass after code edits and when reviewing code, before presenting or committing the result.
 - Use `rust-best-practices` when writing or refactoring Rust and `rust-review` when reviewing Rust. Do not force unrelated skills onto a task.

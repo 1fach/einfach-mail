@@ -43,6 +43,7 @@ The in-memory registry also cannot coordinate separate desktop processes. [ADR 0
 - [GitHub issue #43: Serialize account removal with active mail operations](https://github.com/1fach/einfach-mail/issues/43)
 - [ADR 0028: Allow one Linux desktop process per user data directory](0028-single-linux-desktop-process.md)
 - [ADR 0029: Keep cache removal retryable after a sidecar failure](0029-retry-cache-removal-after-sidecar-failure.md)
-- `apps/desktop/src/account_view.rs`: retained account session and sign-out retry
+- `apps/desktop/src/app/workspace.rs`: retained account session
+- `apps/desktop/src/features/account/actions.rs`: sign-out ordering and retry
 - `crates/application/src/mail_workflow.rs`: shared reservations and account cache removal
 - `crates/persistence/src/store.rs`: durable pending-send check and cache deletion
