@@ -23,6 +23,7 @@ use gpui_kit::{
 };
 
 mod follow_up_flag;
+mod message_actions;
 mod message_move;
 mod message_navigation;
 mod read_state;
