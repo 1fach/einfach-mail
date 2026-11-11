@@ -17,7 +17,7 @@ fn settings_navigation_applies_and_persists_appearance_preferences(cx: &mut Test
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
     let (view, context) = cx.add_window_view(move |window, cx| {
-        AccountView::new_with_appearance_store(
+        AccountView::new_with_appearance_store_for_test(
             Ok(AccountServices::new(workflow, factory)),
             Ok(store),
             window,
@@ -28,11 +28,9 @@ fn settings_navigation_applies_and_persists_appearance_preferences(cx: &mut Test
     draw_account_view(context);
     click(context, "nav-settings");
 
-    assert!(
-        context.cx.update(|cx| {
-            view.read(cx).content.selected_section() == WorkspaceSection::Settings
-        })
-    );
+    assert!(context.cx.update(|cx| {
+        view.read(cx).test_selected_section() == AccountViewTestSection::Settings
+    }));
     assert_appearance_radio_is_selected(context, "System");
     assert!(!settings_path.exists());
 
@@ -82,7 +80,7 @@ fn saved_appearance_is_applied_when_the_window_opens(cx: &mut TestAppContext) {
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
     let (view, context) = cx.add_window_view(move |window, cx| {
-        AccountView::new_with_appearance_store(
+        AccountView::new_with_appearance_store_for_test(
             Ok(AccountServices::new(workflow, factory)),
             Ok(AppearanceSettingsStore::at_path(settings_path)),
             window,
@@ -97,7 +95,9 @@ fn saved_appearance_is_applied_when_the_window_opens(cx: &mut TestAppContext) {
         ThemeMode::Dark
     );
     assert_eq!(
-        context.cx.update(|cx| view.read(cx).appearance_preference),
+        context
+            .cx
+            .update(|cx| view.read(cx).test_appearance_preference()),
         AppearancePreference::Dark
     );
     click(context, "nav-settings");
@@ -114,7 +114,7 @@ fn invalid_appearance_file_is_preserved_and_falls_back_to_system(cx: &mut TestAp
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
     let (view, context) = cx.add_window_view(move |window, cx| {
-        AccountView::new_with_appearance_store(
+        AccountView::new_with_appearance_store_for_test(
             Ok(AccountServices::new(workflow, factory)),
             Ok(AppearanceSettingsStore::at_path(store_path)),
             window,
@@ -125,13 +125,15 @@ fn invalid_appearance_file_is_preserved_and_falls_back_to_system(cx: &mut TestAp
     draw_account_view(context);
 
     assert_eq!(
-        context.cx.update(|cx| view.read(cx).appearance_preference),
+        context
+            .cx
+            .update(|cx| view.read(cx).test_appearance_preference()),
         AppearancePreference::System
     );
     assert_eq!(
         context
             .cx
-            .update(|cx| view.read(cx).appearance_settings_notice),
+            .update(|cx| view.read(cx).test_appearance_settings_notice()),
         Some(AppearanceSettingsNotice::LoadFailed)
     );
     assert_eq!(
@@ -154,7 +156,7 @@ fn appearance_save_failure_keeps_the_session_theme_and_reports_the_failure(
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
     let (view, context) = cx.add_window_view(move |window, cx| {
-        AccountView::new_with_appearance_store(
+        AccountView::new_with_appearance_store_for_test(
             Ok(AccountServices::new(workflow, factory)),
             Ok(AppearanceSettingsStore::at_path(settings_path)),
             window,
@@ -167,13 +169,15 @@ fn appearance_save_failure_keeps_the_session_theme_and_reports_the_failure(
     click_radio(context, "Dark");
 
     assert_eq!(
-        context.cx.update(|cx| view.read(cx).appearance_preference),
+        context
+            .cx
+            .update(|cx| view.read(cx).test_appearance_preference()),
         AppearancePreference::Dark
     );
     assert_eq!(
         context
             .cx
-            .update(|cx| view.read(cx).appearance_settings_notice),
+            .update(|cx| view.read(cx).test_appearance_settings_notice()),
         Some(AppearanceSettingsNotice::SaveFailed)
     );
     assert_eq!(

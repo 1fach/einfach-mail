@@ -24,7 +24,7 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
     .expect("synthetic account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(connected_account(profile));
+            view.test_set_connected_account(connected_account(profile));
             cx.notify();
         });
     });
@@ -33,14 +33,12 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
     click(context, "nav-calendar");
 
     assert!(context.debug_bounds("account-cache-error").is_some());
-    assert!(context.cx.update(|cx| matches!(
-        view.read(cx).session_open_error,
-        Some(super::super::AccountViewCacheError::Open(
-            AccountCacheOpenError::InvalidData
-        ))
-    )));
+    assert!(context.cx.update(|cx| {
+        view.read(cx)
+            .test_session_open_failed_with(AccountCacheOpenError::InvalidData)
+    }));
     let message =
-        super::super::account_cache_open_error_message(AccountCacheOpenError::InvalidData);
+        crate::features::test_account_cache_open_error_message(AccountCacheOpenError::InvalidData);
     assert!(message.contains("account cache"));
     assert!(!message.contains("mail"));
 
@@ -48,13 +46,13 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
     assert!(
         context
             .cx
-            .update(|cx| { view.read(cx).pending_permission_review.is_some() })
+            .update(|cx| view.read(cx).test_has_pending_permission_review())
     );
     click(context, "cancel-permission-review");
     assert!(
         context
             .cx
-            .update(|cx| { view.read(cx).pending_permission_review.is_none() })
+            .update(|cx| view.read(cx).test_pending_permission_review_is(None))
     );
 }
 
@@ -95,7 +93,7 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
     .expect("replacement account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(connected_account(profile));
+            view.test_set_connected_account(connected_account(profile));
             cx.notify();
         });
     });
@@ -107,8 +105,8 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
         .expect("the account session open starts");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.content = AccountContent::Opening(super::super::OpeningContent::Mail);
-            view.status = AccountStatus::Connected(connected_account(replacement_profile));
+            view.test_set_opening_mail_content();
+            view.test_set_connected_account(connected_account(replacement_profile));
             cx.notify();
         });
     });
@@ -119,14 +117,9 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
 
     let stale_error_ignored = context.cx.update(|cx| {
         let view = view.read(cx);
-        matches!(
-            &view.status,
-            AccountStatus::Connected(account)
-                if account.profile().id() == &replacement_account_id
-        ) && matches!(
-            view.content,
-            AccountContent::Opening(super::super::OpeningContent::Mail)
-        ) && view.session_open_error.is_none()
+        view.test_status_is_connected_to(&replacement_account_id)
+            && view.test_content() == AccountViewTestContent::OpeningMail
+            && view.test_session_open_error_is_none()
     });
     assert!(stale_error_ignored);
 }
@@ -176,8 +169,8 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
     context.run_until_parked();
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(connected_account(profile_a));
-            view.account_session = Some(Arc::clone(&session_a));
+            view.test_set_connected_account(connected_account(profile_a));
+            view.test_set_account_session(Some(Arc::clone(&session_a)));
             cx.notify();
         });
     });
@@ -185,19 +178,19 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
 
     click(context, "sign-out");
 
-    assert!(context.cx.update(|cx| matches!(
-        &view.read(cx).status,
-        AccountStatus::Failed {
-            error: AccountOperationError::SavedAccountIdentityUnavailable,
-            saved_credential_may_exist: true,
-        }
-    )));
-    assert!(context.cx.update(|cx| {
-        view.read(cx)
-            .account_session
-            .as_ref()
-            .is_some_and(|retained| Arc::ptr_eq(retained, &session_a))
-    }));
+    assert!(
+        context
+            .cx
+            .update(|cx| view.read(cx).test_status_is_failed_with(
+                &AccountOperationError::SavedAccountIdentityUnavailable,
+                true,
+            ))
+    );
+    assert!(
+        context
+            .cx
+            .update(|cx| view.read(cx).test_session_matches(&session_a))
+    );
 
     *provider
         .saved_account_id
@@ -209,14 +202,15 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
         .expect("synthetic restored profile mutex is healthy") = Some(profile_b.clone());
     click(context, "retry-account-restore");
 
-    assert!(context.cx.update(|cx| matches!(
-        &view.read(cx).status,
-        AccountStatus::Connected(account) if account.profile().id() == &account_b_id
-    )));
     assert!(
         context
             .cx
-            .update(|cx| view.read(cx).account_session.is_none())
+            .update(|cx| view.read(cx).test_status_is_connected_to(&account_b_id))
+    );
+    assert!(
+        context
+            .cx
+            .update(|cx| !view.read(cx).test_has_account_session())
     );
 
     click(context, "nav-mail");
@@ -227,25 +221,18 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
             .expect("synthetic opened-account ID mutex is healthy"),
         vec![account_b_id.clone()]
     );
-    assert!(context.cx.update(|cx| {
-        view.read(cx)
-            .account_session
-            .as_ref()
-            .is_some_and(|retained| Arc::ptr_eq(retained, &session_b))
-    }));
+    assert!(
+        context
+            .cx
+            .update(|cx| view.read(cx).test_session_matches(&session_b))
+    );
 
     click(context, "nav-accounts");
     click(context, "sign-out");
 
     let retry_state_is_bound_to_account_b = context.cx.update(|cx| {
         let view = view.read(cx);
-        matches!(
-            &view.status,
-            AccountStatus::Connected(account) if account.profile().id() == &account_b_id
-        ) && view
-            .account_session
-            .as_ref()
-            .is_some_and(|retained| Arc::ptr_eq(retained, &session_b))
+        view.test_status_is_connected_to(&account_b_id) && view.test_session_matches(&session_b)
     });
     assert!(retry_state_is_bound_to_account_b);
     assert!(
@@ -266,7 +253,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
     assert!(
         context
             .cx
-            .update(|cx| matches!(&view.read(cx).status, AccountStatus::Disconnected))
+            .update(|cx| view.read(cx).test_status_is_disconnected())
     );
     assert!(signed_out.load(Ordering::SeqCst));
     assert_eq!(
@@ -315,7 +302,7 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
     let account_id = profile.id().clone();
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(connected_account(profile));
+            view.test_set_connected_account(connected_account(profile));
             cx.notify();
         });
     });
@@ -324,34 +311,26 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
     click(context, "nav-calendar");
     let calendar_open = context
         .cx
-        .update(|cx| matches!(&view.read(cx).content, AccountContent::Calendar { .. }));
+        .update(|cx| view.read(cx).test_content() == AccountViewTestContent::Calendar);
     assert!(calendar_open);
 
     click(context, "nav-accounts");
     let returned_to_account = context
         .cx
-        .update(|cx| matches!(&view.read(cx).content, AccountContent::Account));
+        .update(|cx| view.read(cx).test_content() == AccountViewTestContent::Account);
     assert!(returned_to_account);
 
-    let session_retained_after_return = context.cx.update(|cx| {
-        view.read(cx)
-            .account_session
-            .as_ref()
-            .is_some_and(|retained| Arc::ptr_eq(retained, &session))
-    });
+    let session_retained_after_return = context
+        .cx
+        .update(|cx| view.read(cx).test_session_matches(&session));
     assert!(session_retained_after_return);
 
     click(context, "sign-out");
 
     let retry_state_kept = context.cx.update(|cx| {
         let account_view = view.read(cx);
-        matches!(
-            &account_view.status,
-            AccountStatus::Connected(account) if account.profile().id() == &account_id
-        ) && account_view
-            .account_session
-            .as_ref()
-            .is_some_and(|retained| Arc::ptr_eq(retained, &session))
+        account_view.test_status_is_connected_to(&account_id)
+            && account_view.test_session_matches(&session)
     });
     assert!(retry_state_kept);
     assert_eq!(
@@ -366,8 +345,7 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
 
     let state_cleared = context.cx.update(|cx| {
         let account_view = view.read(cx);
-        matches!(&account_view.status, AccountStatus::Disconnected)
-            && account_view.account_session.is_none()
+        account_view.test_status_is_disconnected() && !account_view.test_has_account_session()
     });
     assert!(state_cleared);
     assert!(signed_out.load(Ordering::SeqCst));

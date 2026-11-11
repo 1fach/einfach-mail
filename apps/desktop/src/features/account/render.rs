@@ -1,8 +1,8 @@
-use super::account_copy::{
+use super::copy::{
     account_cache_open_error_message, account_cache_removal_error_message, mail_access_summary,
     permission_review_disclosure,
 };
-use super::account_state::{
+use super::state::{
     AccountStatus, AccountViewCacheError, EwsDiscoveryState, ExchangeEwsConnectionForm,
 };
 use super::{AccountView, OpeningContent, SetupIssue};

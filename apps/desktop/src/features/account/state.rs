@@ -13,7 +13,7 @@ use gpui_kit::{AppContext, Context, Entity, Window};
 use super::AccountView;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::app) enum SetupIssue {
+pub(crate) enum SetupIssue {
     MissingClientId,
     InvalidClientId,
     MissingCallbackPort,
@@ -21,14 +21,14 @@ pub(in crate::app) enum SetupIssue {
     ExchangeSettingsUnavailable,
 }
 
-pub(in crate::app) struct AccountServices<P> {
+pub(crate) struct AccountServices<P> {
     pub(super) workflow: Arc<AccountWorkflow<P>>,
     pub(super) account_session_factory: Arc<dyn AccountSessionFactory>,
     pub(super) microsoft365_setup_issue: Option<SetupIssue>,
 }
 
 impl<P> AccountServices<P> {
-    pub(in crate::app) fn new(
+    pub(crate) fn new(
         workflow: Arc<AccountWorkflow<P>>,
         account_session_factory: Arc<dyn AccountSessionFactory>,
     ) -> Self {
@@ -39,7 +39,7 @@ impl<P> AccountServices<P> {
         }
     }
 
-    pub(in crate::app) fn with_microsoft365_setup_issue(mut self, issue: SetupIssue) -> Self {
+    pub(crate) fn with_microsoft365_setup_issue(mut self, issue: SetupIssue) -> Self {
         self.microsoft365_setup_issue = Some(issue);
         self
     }

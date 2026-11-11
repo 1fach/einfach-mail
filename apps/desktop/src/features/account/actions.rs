@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::AccountView;
-use super::account_state::{AccountStatus, EwsDiscoveryState, ExchangeEwsConnectionForm};
+use super::state::{AccountStatus, EwsDiscoveryState, ExchangeEwsConnectionForm};
 use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
     AccountPermissionRequest, AccountProvider, AccountWorkflow, ConnectedAccount,

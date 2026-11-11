@@ -19,7 +19,7 @@ pub(crate) fn test_element_is_visible(window: &Window, id: &'static str) -> bool
     window.try_find(id).is_some_and(|element| element.visible())
 }
 
-mod account;
+pub(crate) mod account;
 
 pub(crate) mod calendar;
 pub(crate) mod mail;
