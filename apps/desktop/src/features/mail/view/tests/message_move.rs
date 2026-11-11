@@ -3,8 +3,7 @@ use super::*;
 #[gpui_kit::test]
 async fn message_move_menu_moves_cached_message_and_opens_destination(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     let destination = cache
         .0
@@ -104,8 +103,7 @@ async fn message_move_menu_moves_cached_message_and_opens_destination(cx: &mut T
 #[gpui_kit::test]
 async fn folder_write_sync_requirement_disables_and_blocks_message_move(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account.clone());
     let destination = cache
         .0
@@ -185,8 +183,7 @@ async fn folder_write_sync_requirement_disables_and_blocks_message_move(cx: &mut
 #[gpui_kit::test]
 async fn unknown_message_move_shows_sync_recovery_and_keeps_source_cached(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account.clone());
     let destination = cache
         .0
@@ -260,8 +257,7 @@ async fn unknown_message_move_shows_sync_recovery_and_keeps_source_cached(cx: &m
 #[gpui_kit::test]
 async fn confirmed_message_move_with_cache_failure_requests_sync(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account.clone());
     let destination = cache
         .0

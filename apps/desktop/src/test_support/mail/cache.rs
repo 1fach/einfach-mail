@@ -1,33 +1,49 @@
-use super::*;
+use std::{
+    future::{Future, ready},
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use einfach_mail_application::{
+    AccountCache, AccountCacheRemovalError, MailCache, MailCacheError, MailSyncState,
+};
+use einfach_mail_domain::{
+    AccountCapabilities, AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus,
+    MailFolder, MailMessage, MailSendOperationId, Mailbox, MessageBody, MessageBodyType,
+    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
+    PendingMailSend, ReadState,
+};
+
+use super::super::synthetic_account_profile;
 
 #[derive(Clone, Default)]
-pub(super) struct FixtureCache(pub(super) Arc<Mutex<FixtureData>>);
+pub(crate) struct FixtureCache(pub(crate) Arc<Mutex<FixtureData>>);
 
 #[derive(Default)]
-pub(super) struct FixtureData {
-    pub(super) account_id: Option<AccountId>,
-    pub(super) folders: Vec<MailFolder>,
-    pub(super) messages: Vec<MailMessage>,
-    pub(super) list_folders_error: Option<MailCacheError>,
-    pub(super) list_folders_gate: Option<FolderListGate>,
-    pub(super) body: Option<MessageBody>,
-    pub(super) list_messages_error: Option<MailCacheError>,
-    pub(super) sync_state: Option<MailSyncState>,
-    pub(super) read_state_write_error: Option<MailCacheError>,
-    pub(super) folder_write_sync_required: bool,
-    pub(super) pending_send: Option<PendingMailSend>,
-    pub(super) fail_next_pending_send_stage: bool,
-    pub(super) fail_next_pending_send_clear: bool,
-    pub(super) move_error: Option<MailCacheError>,
+pub(crate) struct FixtureData {
+    pub(crate) account_id: Option<AccountId>,
+    pub(crate) folders: Vec<MailFolder>,
+    pub(crate) messages: Vec<MailMessage>,
+    pub(crate) list_folders_error: Option<MailCacheError>,
+    list_folders_gate: Option<FolderListGate>,
+    pub(crate) body: Option<MessageBody>,
+    pub(crate) list_messages_error: Option<MailCacheError>,
+    pub(crate) sync_state: Option<MailSyncState>,
+    pub(crate) read_state_write_error: Option<MailCacheError>,
+    pub(crate) folder_write_sync_required: bool,
+    pub(crate) pending_send: Option<PendingMailSend>,
+    pub(crate) fail_next_pending_send_stage: bool,
+    pub(crate) fail_next_pending_send_clear: bool,
+    pub(crate) move_error: Option<MailCacheError>,
 }
 
-pub(super) struct FolderListGate {
+struct FolderListGate {
     started: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
 }
 
 impl FixtureCache {
-    pub(super) fn hold_next_folder_list(
+    pub(crate) fn hold_next_folder_list(
         &self,
     ) -> (
         tokio::sync::oneshot::Receiver<()>,
@@ -486,7 +502,7 @@ impl AccountCache for FixtureCache {
     }
 }
 
-pub(super) fn fixture(profile_account: AccountId) -> (AccountProfile, FixtureCache, MessageId) {
+pub(crate) fn fixture(profile_account: AccountId) -> (AccountProfile, FixtureCache, MessageId) {
     let folder_reference = FolderReference::new(
         profile_account.clone(),
         FolderId::try_from("inbox".to_owned()).expect("synthetic folder ID is valid"),
@@ -542,46 +558,11 @@ pub(super) fn fixture(profile_account: AccountId) -> (AccountProfile, FixtureCac
             .expect("synthetic sync checkpoint is valid"),
         );
     }
-    let profile = AccountProfile::try_new(
+    let profile = synthetic_account_profile(
         profile_account,
-        Some("Ada Example".to_owned()),
-        Some("ada@example.test".to_owned()),
         Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic account profile is valid");
     (profile, cache, message_id)
-}
-
-pub(super) fn message_move_provider(
-    cache: &FixtureCache,
-    response: MessageMoveActionResponse,
-    calls: Arc<AtomicUsize>,
-) -> MessageMoveProvider {
-    let cache_state = cache.0.lock().expect("fixture cache mutex is healthy");
-    let account_id = cache_state
-        .account_id
-        .clone()
-        .expect("fixture cache has an account");
-    let mut folders = cache_state.folders.clone();
-    folders.push(
-        MailFolder::new(
-            FolderReference::new(
-                account_id.clone(),
-                FolderId::try_from("deleted-items".to_owned())
-                    .expect("synthetic Deleted Items ID is valid"),
-            ),
-            None,
-            "Gelöschte Elemente".to_owned(),
-        )
-        .expect("synthetic Deleted Items folder is valid"),
-    );
-    MessageMoveProvider {
-        account_id,
-        folders,
-        offline: OfflineProvider {
-            body_fetches: Arc::new(AtomicUsize::new(0)),
-        },
-        response,
-        calls,
-    }
 }

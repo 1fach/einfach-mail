@@ -6,21 +6,20 @@ use einfach_mail_domain::{
 use gpui_kit::{Modifiers, VisualTestContext};
 use time::{Date, Month, OffsetDateTime};
 
+use super::super::{synthetic_account_id, synthetic_account_profile};
+
 pub(crate) fn profile() -> AccountProfile {
-    AccountProfile::try_new(
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
-        Some("Ada Example".to_owned()),
-        Some("ada@example.test".to_owned()),
+    synthetic_account_profile(
+        synthetic_account_id(),
         None,
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic account profile is valid")
 }
 
 pub(crate) fn read_only_calendar_profile() -> AccountProfile {
-    AccountProfile::try_new_with_capabilities(
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
-        Some("Ada Example".to_owned()),
-        Some("ada@example.test".to_owned()),
+    synthetic_account_profile(
+        synthetic_account_id(),
         None,
         AccountCapabilities::new(MailCapabilities::read_only(), CalendarAccess::ReadOnly),
     )
@@ -28,7 +27,7 @@ pub(crate) fn read_only_calendar_profile() -> AccountProfile {
 }
 
 pub(crate) fn workflow_account_id() -> AccountId {
-    profile().id().clone()
+    synthetic_account_id()
 }
 
 pub(crate) fn timed_event(start: OffsetDateTime, end: OffsetDateTime) -> CalendarOccurrence {
@@ -40,8 +39,7 @@ pub(crate) fn timed_event_with_id(
     start: OffsetDateTime,
     end: OffsetDateTime,
 ) -> CalendarOccurrence {
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let start_date = Date::from_calendar_date(2030, Month::January, 7)
         .expect("synthetic view start date is valid");
     let end_date = Date::from_calendar_date(2030, Month::January, 14)

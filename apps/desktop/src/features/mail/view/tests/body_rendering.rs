@@ -3,8 +3,7 @@ use super::*;
 #[gpui_kit::test]
 fn cached_html_mail_view_sanitizes_content_and_opens_links_on_click(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     cache.0.lock().expect("fixture cache mutex is healthy").body = Some(MessageBody::new(
         MessageBodyType::Html,
@@ -175,8 +174,7 @@ fn cached_html_links_menu_reports_when_safe_links_are_omitted(cx: &mut TestAppCo
 #[gpui_kit::test]
 fn cached_html_mail_view_does_not_open_unsafe_links(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     cache.0.lock().expect("fixture cache mutex is healthy").body = Some(MessageBody::new(
         MessageBodyType::Html,
@@ -236,8 +234,7 @@ fn cached_html_mail_view_does_not_open_unsafe_links(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn cached_html_mail_view_supports_selection_and_copy(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     cache.0.lock().expect("fixture cache mutex is healthy").body = Some(MessageBody::new(
         MessageBodyType::Html,
@@ -286,8 +283,7 @@ fn cached_html_mail_view_supports_selection_and_copy(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn oversized_sanitized_html_shows_selectable_noninteractive_text(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let body_content = format!(
         "<p>Readable fallback content. <a href=\"https://mail.example.test/path\">link destination</a> {}</p>",
@@ -355,8 +351,7 @@ fn oversized_sanitized_html_shows_selectable_noninteractive_text(cx: &mut TestAp
 #[gpui_kit::test]
 fn oversized_cached_html_shows_a_safe_reader_fallback(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     cache.0.lock().expect("fixture cache mutex is healthy").body = Some(MessageBody::new(
         MessageBodyType::Html,

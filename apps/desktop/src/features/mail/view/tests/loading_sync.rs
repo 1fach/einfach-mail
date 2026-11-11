@@ -3,8 +3,7 @@ use super::*;
 #[gpui_kit::test]
 async fn message_body_failure_keeps_the_cached_list_and_selection(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     cache.0.lock().expect("fixture cache mutex is healthy").body = None;
     let provider = OfflineProvider {
@@ -63,8 +62,7 @@ async fn message_body_failure_keeps_the_cached_list_and_selection(cx: &mut TestA
 #[gpui_kit::test]
 async fn folder_message_list_failure_does_not_claim_a_message_is_loading(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let workflow = Arc::new(MailWorkflow::new(
         profile.id().clone(),
@@ -118,8 +116,7 @@ async fn folder_message_list_failure_does_not_claim_a_message_is_loading(cx: &mu
 #[gpui_kit::test]
 fn offline_mail_view_opens_cached_message_without_provider_body_request(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     let provider = OfflineProvider {
         body_fetches: Arc::new(AtomicUsize::new(0)),
@@ -170,8 +167,7 @@ async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut T
         gpui_kit::init(cx);
         bind_message_navigation_keys(cx);
     });
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, inbox_message_id) = fixture(account.clone());
     let archive_reference = FolderReference::new(
         account,
@@ -324,8 +320,7 @@ async fn cached_folders_and_open_message_remain_available_during_sync(cx: &mut T
 #[gpui_kit::test]
 async fn contextual_folder_navigation_updates_mail_selection(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let inbox_reference = FolderReference::new(
         profile.id().clone(),
@@ -384,8 +379,7 @@ async fn contextual_folder_navigation_updates_mail_selection(cx: &mut TestAppCon
 #[gpui_kit::test]
 async fn initial_mail_snapshot_renders_loading_without_selected_folder(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let (started_receiver, release) = cache.hold_next_folder_list();
     let workflow = Arc::new(MailWorkflow::new(
@@ -416,8 +410,7 @@ async fn initial_mail_snapshot_renders_loading_without_selected_folder(cx: &mut 
 #[gpui_kit::test]
 fn initial_mail_snapshot_failure_renders_error_without_selected_folder(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     cache
         .0
@@ -469,8 +462,7 @@ fn initial_mail_snapshot_failure_renders_error_without_selected_folder(cx: &mut 
 #[gpui_kit::test]
 fn successful_empty_mail_snapshot_renders_no_folders(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     cache
         .0
@@ -502,8 +494,7 @@ fn successful_empty_mail_snapshot_renders_no_folders(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn cache_snapshot_failure_survives_a_successful_sync(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let workflow = Arc::new(MailWorkflow::new(
         profile.id().clone(),
@@ -537,8 +528,7 @@ fn cache_snapshot_failure_survives_a_successful_sync(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn reset_progress_is_announced_in_the_mail_status(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let workflow = Arc::new(MailWorkflow::new(
         profile.id().clone(),
@@ -563,8 +553,7 @@ fn reset_progress_is_announced_in_the_mail_status(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn failed_rebuild_status_explains_how_to_resume(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     {
         let mut data = cache.0.lock().expect("fixture cache mutex is healthy");

@@ -1,25 +1,22 @@
 use std::{
-    future::{Future, pending, ready},
+    future::Future,
     pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, UNIX_EPOCH},
 };
 
 use einfach_mail_application::{
-    AccountCache, AccountCacheRemovalError, AccountOperationError, MailCache, MailCacheError,
-    MailOperationError, MailProvider, MailSendProviderError, MailSession, MailSyncState,
-    MailWorkflow, MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    AccountOperationError, MailCache, MailCacheError, MailOperationError, MailSendProviderError,
+    MailSession, MailSyncState, MailWorkflow, MailWorkflowError, MessageBodyForDisplay,
+    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, CalendarAccess, FolderId, FolderReference,
-    FollowUpFlagStatus, MailAction, MailCapabilities, MailDraft, MailFolder, MailMessage,
-    MailReplyDraft, MailSendOperationId, Mailbox, MessageBody, MessageBodyType, MessageDeltaLink,
-    MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch, PendingMailSend,
-    ReadState,
+    AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus, MailAction,
+    MailCapabilities, MailMessage, Mailbox, MessageBody, MessageBodyType, MessageDeltaLink,
+    MessageId, ReadState,
 };
 use gpui_kit::base::TextSelection;
 use gpui_kit::component::WindowExt as _;
@@ -40,10 +37,15 @@ use super::{
     WellKnownFolderActionStatus, bind_message_navigation_keys, empty_message_detail_copy,
     follow_up_flag_failure_message, mail_error_message, read_state_failure_message,
 };
+use crate::test_support::mail::{
+    MessageMoveActionResponse, OfflineProvider, PermissionProvider, ReadStateActionResponse,
+    ReadStateProvider, SYNTHETIC_MESSAGE_LABEL_PREFIX, append_synthetic_messages, fixture,
+    mail_profile_with_capabilities, message_move_provider,
+};
+use crate::test_support::synthetic_account_id;
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
 
 mod body_rendering;
-mod cache;
 mod composer;
 mod follow_up_flag;
 mod helpers;
@@ -51,10 +53,7 @@ mod loading_sync;
 mod message_actions;
 mod message_list;
 mod message_move;
-mod providers;
 mod read_state;
 mod status_copy;
 
-use cache::*;
 use helpers::*;
-use providers::*;

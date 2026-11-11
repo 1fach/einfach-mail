@@ -20,8 +20,7 @@ fn active_mail_operation_explains_when_to_retry() {
 
 #[test]
 fn empty_message_detail_copy_reflects_message_availability() {
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (_, cache, _) = fixture(account);
     let messages = cache
         .0

@@ -10,8 +10,7 @@ async fn cached_message_list_navigates_by_keyboard_and_keeps_one_tab_stop(cx: &m
         gpui_kit::init(cx);
         bind_message_navigation_keys(cx);
     });
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let message_ids = append_synthetic_messages(&cache, 20);
     let workflow = Arc::new(MailWorkflow::new(
@@ -175,8 +174,7 @@ async fn message_list_width_controls_are_focusable_and_bounded(cx: &mut TestAppC
         gpui_kit::init(cx);
         bind_message_navigation_keys(cx);
     });
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     let provider = OfflineProvider {
         body_fetches: Arc::new(AtomicUsize::new(0)),
@@ -304,8 +302,7 @@ async fn compact_mail_keeps_folder_context_and_supports_pointer_and_keyboard_nav
         gpui_kit::init(cx);
         bind_message_navigation_keys(cx);
     });
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     let workflow = Arc::new(MailWorkflow::new(
         profile.id().clone(),
@@ -451,8 +448,7 @@ async fn compact_mail_keeps_folder_context_and_supports_pointer_and_keyboard_nav
 #[gpui_kit::test]
 async fn dragged_message_list_width_keeps_its_rem_size_after_zoom(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let workflow = Arc::new(MailWorkflow::new(
         profile.id().clone(),
@@ -525,8 +521,7 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
         gpui_kit::init(cx);
         bind_message_navigation_keys(cx);
     });
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let message_ids = append_synthetic_messages(&cache, 20);
     let workflow = Arc::new(MailWorkflow::new(

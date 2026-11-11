@@ -8,8 +8,7 @@ async fn reply_composer_uses_the_cached_source_and_requires_an_explicit_send(
         gpui_kit::init(cx);
         bind_mail_composer_keys(cx);
     });
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account.clone());
     let can_send = Arc::new(AtomicBool::new(false));
     let send_calls = Arc::new(AtomicUsize::new(0));
@@ -26,7 +25,7 @@ async fn reply_composer_uses_the_cached_source_and_requires_an_explicit_send(
         reply_error: Arc::default(),
     };
     let requester: Arc<dyn MailPermissionRequester> = Arc::new(FixturePermissionRequester {
-        account_id: account,
+        account_id: account.clone(),
         requests: Arc::clone(&permission_requests),
         gate: Mutex::new(None),
     });
@@ -96,12 +95,12 @@ async fn reply_composer_uses_the_cached_source_and_requires_an_explicit_send(
             .as_slice(),
         [
             (
-                "synthetic-account".to_owned(),
+                account.as_str().to_owned(),
                 "inbox".to_owned(),
                 message_id.as_str().to_owned(),
             ),
             (
-                "synthetic-account".to_owned(),
+                account.as_str().to_owned(),
                 "inbox".to_owned(),
                 message_id.as_str().to_owned(),
             ),
@@ -117,8 +116,7 @@ async fn unknown_reply_requires_sent_items_review_and_duplicate_confirmation(
         gpui_kit::init(cx);
         bind_mail_composer_keys(cx);
     });
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, message_id) = fixture(account);
     let send_calls = Arc::new(AtomicUsize::new(0));
     let reply_sources = Arc::new(Mutex::new(Vec::new()));
@@ -220,8 +218,7 @@ async fn permission_review_requires_a_separate_send_action(cx: &mut TestAppConte
         gpui_kit::init(cx);
         bind_mail_composer_keys(cx);
     });
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account.clone());
     let can_send = Arc::new(AtomicBool::new(false));
     let send_calls = Arc::new(AtomicUsize::new(0));
@@ -336,8 +333,7 @@ async fn pending_send_cannot_be_dismissed_by_escape_or_outside_click(cx: &mut Te
         gpui_kit::init(cx);
         bind_mail_composer_keys(cx);
     });
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account);
     let provider = PermissionProvider {
         offline: OfflineProvider {
@@ -418,8 +414,7 @@ async fn send_staging_failure_skips_provider_and_accepted_cleanup_failure_can_be
         gpui_kit::init(cx);
         bind_mail_composer_keys(cx);
     });
-    let account =
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid");
+    let account = synthetic_account_id();
     let (profile, cache, _) = fixture(account.clone());
     cache
         .0
