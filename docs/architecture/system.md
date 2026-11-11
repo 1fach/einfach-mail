@@ -32,15 +32,18 @@ ADRs [0015](../decisions/0015-idempotent-message-read-state-update.md), [0017](.
 
 ## Module ownership
 
-| Path | Owns | Must not own |
+| Target path | Owns | Must not own |
 | --- | --- | --- |
-| `apps/desktop/` | GPUI lifecycle, native views, keyboard actions, the Linux process lock, OS integration, and sanitized email rendering | Mail rules, Graph requests, database schema |
-| `crates/application/` | Account, mail, and calendar workflows, provider/cache ports, mail and calendar actions, application errors, and email sanitization | GPUI, Graph JSON, concrete database types |
-| `crates/domain/` | Provider-independent account, folder, message, calendar occurrence, and sync invariants | Framework and provider details |
-| `crates/providers/account-router/` | Selects the one saved account provider and enforces its declared account capabilities | EWS or Graph protocol details, UI state |
-| `crates/providers/microsoft-graph/` | Linux OAuth, Graph profile/folder/message/calendar-view and event requests, explicitly authorized mail and calendar writes, response mapping, private HTTP transport, and refresh-token storage | UI decisions, persistence policy, token access in application code |
-| `crates/providers/exchange-ews/` | Unauthenticated HTTPS Autodiscover, explicit endpoint validation, EWS mail and calendar requests and mapping, NTLMv2 over verified HTTPS, channel binding, endpoint/mailbox settings, and the Linux Secret Service password | Graph requests, UI gating, persistence rules |
-| `crates/persistence/` | Linux XDG paths, Secret Service key references, SQLCipher schema and migrations, encrypted records, atomic mail/calendar sync and event/message updates, durable send/reply recovery markers, and cache removal | Graph or GPUI types |
+| `apps/desktop/src/{app,platform,components,features/{account,mail,calendar},test_support}/` | GPUI lifecycle and shell, native feature views and actions, reusable GPUI widgets, Linux integration, and sanitized email rendering | Mail rules, Graph requests, database schema |
+| `crates/application/src/{account,mail,calendar,shared}/` | Account, mail, and calendar workflows and their provider/cache ports; shared workflow reservations and recovery | GPUI, Graph JSON, concrete database types |
+| `crates/domain/src/{account,mail,calendar,shared}/` | Provider-independent account, folder, message, calendar occurrence, and sync invariants | Framework and provider details |
+| `crates/providers/account-router/src/account/` | Selects the one saved account provider and enforces its declared account capabilities | EWS or Graph protocol details, UI state |
+| `crates/providers/microsoft-graph/src/{config.rs,auth/,transport/,wire/,provider/,error.rs}` | Linux OAuth and credential handling, Graph requests and response mapping, account/mail/calendar provider operations, private HTTP transport, and refresh-token storage | UI decisions, persistence policy, token access in application code |
+| `crates/providers/exchange-ews/src/{auth/,transport/,wire/,provider/,error.rs}` | Unauthenticated HTTPS Autodiscover, endpoint validation, EWS mail and calendar mapping, NTLMv2 over verified HTTPS, channel binding, and provider credential handling | Graph requests, UI gating, persistence rules |
+| `crates/providers/runtime/src/` | Isolated provider worker execution and account-operation cancellation | Provider protocol details, UI state |
+| `crates/persistence/src/{account,mail,calendar,shared,platform/linux}/` | Linux XDG paths and Secret Service key references, SQLCipher schema and migrations, encrypted records, atomic mail/calendar sync and event/message updates, durable send/reply recovery markers, and cache removal | Graph or GPUI types |
+
+These are target paths for the behavior-preserving refactor in [ADR 0061](../decisions/0061-feature-first-module-layout-and-test-placement.md). The source files move in the order tracked by [issue #282](https://github.com/1fach/einfach-mail/issues/282); the path map on that issue records each current path, target path, and split item. Until each sub-issue lands, the current source tree remains authoritative.
 
 The dependency direction is desktop UI → application → domain, with provider and persistence adapters implementing application-owned ports. The account router selects either Graph or EWS for one active account. `AccountWorkflow` rejects a second connection until sign-out completes; the first release does not expose multiple accounts or account switching. See [ADR 0060](../decisions/0060-one-active-account-first-release.md). Views never call a provider or access the database directly.
 

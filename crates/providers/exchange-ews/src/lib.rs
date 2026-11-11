@@ -1,12 +1,9 @@
 //! Exchange Server mail access through EWS on Linux.
 
-mod autodiscover;
-mod calendar;
+mod auth;
 mod error;
-mod ntlm;
 mod provider;
-mod read_state;
 mod transport;
-mod version;
+mod wire;
 
 pub use provider::ExchangeEwsProvider;

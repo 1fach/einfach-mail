@@ -4,11 +4,16 @@
 
 mod account;
 mod calendar;
+#[path = "calendar/creation.rs"]
 mod calendar_creation;
+#[path = "calendar/edit.rs"]
 mod calendar_edit;
+#[path = "calendar/subject.rs"]
 mod calendar_subject;
+#[path = "shared/identifiers.rs"]
 mod identifiers;
 mod mail;
+#[path = "mail/mailbox.rs"]
 mod mailbox;
 
 pub use account::{
