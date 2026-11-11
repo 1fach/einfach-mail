@@ -1,4 +1,4 @@
-use super::week::CalendarWeek;
+use super::super::super::week::CalendarWeek;
 use crate::test_support::calendar::profile;
 use einfach_mail_domain::CalendarViewReference;
 use jiff::{civil, tz::TimeZone};

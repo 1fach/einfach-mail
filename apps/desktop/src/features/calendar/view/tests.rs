@@ -14,10 +14,10 @@ use gpui_kit::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestCon
 use jiff::{Span, civil, tz::TimeZone};
 use time::{Date, Month};
 
-use super::super::support::{system_calendar_week, utc_fallback_calendar_week};
+use self::support::{system_calendar_week, utc_fallback_calendar_week};
 use super::{
-    AgendaEventKey, AgendaRow, CalendarStatus, CalendarView, bind_calendar_event_navigation_keys,
-    composer_tests, display_events,
+    AgendaEventKey, AgendaRow, CalendarStatus, CalendarView, CalendarViewEvent,
+    bind_calendar_event_navigation_keys, display_events,
 };
 use crate::test_support::calendar::{
     TestCache, TestProvider, agenda_events, draw_calendar_view, profile,
@@ -32,5 +32,7 @@ mod agenda_display;
 mod agenda_navigation;
 #[cfg(test)]
 mod composer;
+#[cfg(test)]
+mod support;
 #[cfg(test)]
 mod synchronization;
