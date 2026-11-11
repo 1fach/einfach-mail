@@ -1,7 +1,5 @@
 use std::rc::Rc;
 
-use super::super::body::render_message_body;
-use einfach_mail_application::WellKnownMailFolder;
 use einfach_mail_domain::MailAction;
 use gpui_kit::base::v_virtual_list;
 use gpui_kit::component::{
@@ -19,9 +17,8 @@ use gpui_kit::{
 use super::{
     CompactMailPane, MAIL_SHELL_NAVIGATION_WIDTH, MAIL_SPLIT_HANDLE_RESERVE, MESSAGE_LIST_CONTEXT,
     MESSAGE_LIST_MAX_WIDTH, MESSAGE_LIST_MIN_WIDTH, MESSAGE_READER_CONTEXT,
-    MESSAGE_READER_MIN_WIDTH, MESSAGE_ROW_HEIGHT, MailView, MessageDetailState, MessageListState,
-    MessageListWidthChange, SyncStatus, empty_message_detail_copy, mail_error_message,
-    message_sender,
+    MESSAGE_READER_MIN_WIDTH, MESSAGE_ROW_HEIGHT, MailView, MessageListState,
+    MessageListWidthChange, SyncStatus, mail_error_message, message_sender,
 };
 
 const MAIL_HEADER_HEIGHT: Rems = rems(3.625);
@@ -167,7 +164,7 @@ impl MailView {
             .child(
                 resizable_panel()
                     .size_range(MESSAGE_READER_MIN_WIDTH.to_pixels(rem_size)..Pixels::MAX)
-                    .child(self.render_message_detail(colors, cx)),
+                    .child(self.render_message_detail(&colors, cx)),
             )
             .into_any_element()
     }
@@ -232,7 +229,7 @@ impl MailView {
             .key_context(MESSAGE_READER_CONTEXT)
             .on_action(cx.listener(Self::on_return_to_message_list))
             .child(self.render_compact_reader_toolbar(colors, cx))
-            .child(self.render_message_detail(colors, cx))
+            .child(self.render_message_detail(&colors, cx))
             .into_any_element()
     }
 
@@ -473,212 +470,6 @@ impl MailView {
             )
             .focus_visible(|style| style.border_1().border_color(colors.ring))
             .into_any_element()
-    }
-
-    fn render_message_detail(&self, colors: ColorTokens, cx: &mut Context<Self>) -> AnyElement {
-        let detail = match &self.message_detail_state {
-            MessageDetailState::Empty => {
-                let empty_state = empty_message_detail_copy(
-                    &self.message_list_state,
-                    self.selected_folder.as_ref(),
-                    &self.messages,
-                );
-                let panel = div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .text_color(colors.muted_foreground);
-                if let Some(notice) = self.render_move_recovery_notice(cx) {
-                    panel.child(notice).into_any_element()
-                } else {
-                    panel.child(empty_state).into_any_element()
-                }
-            }
-            MessageDetailState::Loading(_) => div()
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .items_center()
-                .justify_center()
-                .text_color(colors.muted_foreground)
-                .child("Loading message…")
-                .into_any_element(),
-            MessageDetailState::Failed { error, .. } => {
-                let detail_error = div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .p_6()
-                    .id("mail-message-error")
-                    .role(Role::Alert)
-                    .aria_label(mail_error_message(*error))
-                    .child(mail_error_message(*error))
-                    .children(self.render_move_recovery_notice(cx));
-                #[cfg(test)]
-                let detail_error = detail_error.test_support();
-                detail_error.into_any_element()
-            }
-            MessageDetailState::Opened(opened) => {
-                let metadata = opened.message().metadata();
-                let message_id = opened.message().id();
-                let body = render_message_body(opened.body(), colors);
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .p_6()
-                            .border_b_1()
-                            .border_color(colors.border)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_3()
-                                    .child(div().text_lg().font_bold().child(
-                                        metadata.subject().unwrap_or("(No subject)").to_owned(),
-                                    ))
-                                    .child({
-                                        let mail = self.profile.capabilities().mail();
-                                        if mail.is_read_only() {
-                                            div().into_any_element()
-                                        } else {
-                                            let mut actions = div().flex().items_center().gap_2();
-                                            if mail.supports(MailAction::SetReadState) {
-                                                actions = actions.child(
-                                                    self.render_read_state_action(message_id, cx),
-                                                );
-                                            }
-                                            if mail.supports(MailAction::SetFollowUpFlagStatus) {
-                                                actions = actions.child(
-                                                    self.render_follow_up_flag_action(
-                                                        message_id, cx,
-                                                    ),
-                                                );
-                                            }
-                                            if mail.supports(MailAction::Move) {
-                                                actions = actions
-                                                    .child(self.render_well_known_folder_action(
-                                                        WellKnownMailFolder::Archive,
-                                                        message_id,
-                                                        cx,
-                                                    ))
-                                                    .child(self.render_move_action(message_id, cx));
-                                            }
-                                            if mail.supports(MailAction::Reply) {
-                                                actions = actions.child(
-                                                    self.render_reply_action(message_id, cx),
-                                                );
-                                            }
-                                            if mail.supports(MailAction::Delete) {
-                                                actions = actions.child(
-                                                    self.render_well_known_folder_action(
-                                                        WellKnownMailFolder::DeletedItems,
-                                                        message_id,
-                                                        cx,
-                                                    ),
-                                                );
-                                            }
-                                            #[cfg(test)]
-                                            let actions =
-                                                actions.id("message-actions").test_support();
-                                            actions.into_any_element()
-                                        }
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(colors.muted_foreground)
-                                    .child(message_sender(opened.message())),
-                            )
-                            .children(self.read_state_update.feedback_for(message_id).map(
-                                |feedback| self.render_read_state_feedback_element(feedback, cx),
-                            ))
-                            .children(self.render_follow_up_flag_feedback(message_id, cx))
-                            .children(self.render_message_move_feedback(message_id, cx))
-                            .children(self.render_well_known_folder_action_feedback(message_id, cx))
-                            .children(self.render_move_recovery_notice(cx))
-                            .children(self.render_read_state_reconciliation_notice()),
-                    )
-                    .child(body)
-                    .into_any_element()
-            }
-            MessageDetailState::MoveCompleted {
-                destination_folder,
-                destination_label,
-                open_action_label,
-            } => {
-                let completed = div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .id("message-move-completed")
-                    .debug_selector(|| "message-move-completed".to_owned())
-                    .role(Role::Status)
-                    .child(format!("Moved to {destination_label}."))
-                    .child(
-                        Button::new("open-moved-message-folder")
-                            .debug_selector(|| "open-moved-message-folder".to_owned())
-                            .label(*open_action_label)
-                            .on_click(cx.listener({
-                                let destination_folder = destination_folder.clone();
-                                move |view, _, _, cx| {
-                                    view.select_folder(destination_folder.clone(), cx);
-                                }
-                            })),
-                    );
-                #[cfg(test)]
-                let completed = completed.test_support();
-                completed.into_any_element()
-            }
-            MessageDetailState::DeleteCompleted => {
-                let completed = div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .id("message-delete-completed")
-                    .debug_selector(|| "message-delete-completed".to_owned())
-                    .role(Role::Status)
-                    .child("Moved to Deleted Items.");
-                #[cfg(test)]
-                let completed = completed.test_support();
-                completed.into_any_element()
-            }
-        };
-        let reader = div()
-            .id("mail-reader")
-            .role(Role::Group)
-            .aria_label("Message reader")
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .child(detail);
-        #[cfg(test)]
-        let reader = reader.test_support();
-        reader.into_any_element()
     }
 }
 

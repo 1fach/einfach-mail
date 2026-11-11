@@ -26,6 +26,7 @@ mod follow_up_flag;
 mod message_actions;
 mod message_move;
 mod message_navigation;
+mod message_reader;
 mod read_state;
 mod synchronization;
 
