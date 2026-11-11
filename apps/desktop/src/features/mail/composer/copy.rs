@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use einfach_mail_application::{AccountOperationError, MailCacheError, MailSendProviderError};
 use einfach_mail_domain::InvalidMailSubject;
 
-use super::DraftError;
+use super::draft::DraftError;
 use super::recovery::PendingSendCertainty;
 
 pub(super) struct PendingSendCopy {

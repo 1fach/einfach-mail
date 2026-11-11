@@ -6,8 +6,9 @@ use einfach_mail_application::{
 use einfach_mail_domain::PendingMailSend;
 use gpui_kit::{AsyncApp, Context};
 
+use super::draft::ComposerSubmission;
 use super::recovery::PendingSendCertainty;
-use super::{ComposerStatus, ComposerSubmission, MailComposer, MailComposerEvent};
+use super::{ComposerStatus, MailComposer, MailComposerEvent};
 
 async fn submit_composer_message(
     workflow: &dyn MailSession,

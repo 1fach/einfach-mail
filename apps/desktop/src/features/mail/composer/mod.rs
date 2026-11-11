@@ -1,4 +1,5 @@
 mod copy;
+mod draft;
 mod permission;
 mod presentation;
 mod recovery;
@@ -7,14 +8,12 @@ mod submission;
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
+use draft::{ComposerFields, DraftError};
 use einfach_mail_application::{
     AccountOperationError, AccountPermissionRequest, AccountProvider, AccountWorkflow,
     MailCacheError, MailSendProviderError, MailSession,
 };
-use einfach_mail_domain::{
-    AccountId, InvalidMailSubject, MailDraft, MailRecipient, MailReplyDraft, MailReplySource,
-    MailSubject, PendingMailSend,
-};
+use einfach_mail_domain::{AccountId, MailReplySource, PendingMailSend};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
@@ -92,17 +91,6 @@ pub(super) struct MailComposerContext {
     pub(super) target: ComposerTarget,
 }
 
-struct ComposerFields {
-    recipient: Entity<InputState>,
-    subject: Entity<InputState>,
-    body: Entity<TextareaState>,
-}
-
-enum ComposerSubmission {
-    NewMessage(MailDraft),
-    Reply(MailReplyDraft),
-}
-
 #[derive(Clone, Copy)]
 enum ComposerStatus {
     Editing,
@@ -123,19 +111,13 @@ enum ComposerStatus {
     DuplicateConfirmation,
 }
 
-#[derive(Clone, Copy)]
-enum DraftError {
-    InvalidRecipient,
-    InvalidSubject(InvalidMailSubject),
-}
-
 impl MailComposer {
     pub(crate) fn new(
         context: MailComposerContext,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let fields = Self::new_fields(&context.target, window, cx);
+        let fields = ComposerFields::new(&context.target, window, cx);
         Self::from_context(context, fields)
     }
 
@@ -160,62 +142,8 @@ impl MailComposer {
         }
     }
 
-    fn new_fields(
-        target: &ComposerTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> ComposerFields {
-        let recipient = cx.new(|cx| InputState::new(window, cx).placeholder("name@example.com"));
-        let subject = cx.new(|cx| InputState::new(window, cx).placeholder("Subject"));
-        let body = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder(match target {
-                    ComposerTarget::NewMessage => "Write a plain-text message",
-                    ComposerTarget::Reply { .. } => "Write a plain-text reply",
-                })
-                .rows(8)
-        });
-        ComposerFields {
-            recipient,
-            subject,
-            body,
-        }
-    }
-
     pub(crate) fn operation_in_progress(&self) -> bool {
         self.task.is_some()
-    }
-
-    fn build_submission(&self, cx: &gpui_kit::App) -> Result<ComposerSubmission, DraftError> {
-        let body = self.body.read(cx).value().to_string();
-        match &self.target {
-            ComposerTarget::NewMessage => self.build_new_message(cx, body),
-            ComposerTarget::Reply { source, .. } => Ok(ComposerSubmission::Reply(
-                MailReplyDraft::new(source.clone(), body),
-            )),
-        }
-    }
-
-    fn build_new_message(
-        &self,
-        cx: &gpui_kit::App,
-        body: String,
-    ) -> Result<ComposerSubmission, DraftError> {
-        let recipient = self
-            .recipient
-            .read(cx)
-            .value()
-            .parse::<MailRecipient>()
-            .map_err(|_| DraftError::InvalidRecipient)?;
-        let subject = self
-            .subject
-            .read(cx)
-            .value()
-            .parse::<MailSubject>()
-            .map_err(DraftError::InvalidSubject)?;
-        Ok(ComposerSubmission::NewMessage(MailDraft::new(
-            recipient, subject, body,
-        )))
     }
 
     fn can_send(&self) -> bool {
