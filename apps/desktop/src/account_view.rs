@@ -1336,6 +1336,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn render_permissions(&self, colors: ColorTokens) -> impl IntoElement {
         div()
+            .id("account-requested-access")
+            .debug_selector(|| "account-requested-access".to_owned())
             .flex()
             .flex_col()
             .gap_2()
@@ -1553,7 +1555,11 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         )
     }
 
-    fn render_primary_action(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_primary_action(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         match &self.status {
             AccountStatus::Restoring => Self::render_progress_action("Checking account…"),
             AccountStatus::SigningOut { .. } => Self::render_progress_action("Signing out…"),
@@ -1610,15 +1616,78 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             | AccountStatus::Failed {
                 saved_credential_may_exist: false,
                 ..
-            } => self.render_connect_options(cx),
+            } => self.render_connect_options(colors, cx),
             AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. } => div(),
         }
     }
 
-    fn render_connect_options(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let options = div().flex().flex_col().items_center().gap_2();
-        self.add_microsoft365_connect_option(options, cx)
+    fn render_connect_options(&self, colors: ColorTokens, cx: &mut Context<Self>) -> gpui_kit::Div {
+        div()
+            .w_full()
+            .max_w_48()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(self.render_microsoft365_choice(colors, cx))
+            .child(self.render_exchange_ews_choice(colors, cx))
+    }
+
+    fn render_microsoft365_choice(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let mut choice = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_base().font_semibold().child("Microsoft 365"))
+            .child(Self::render_microsoft365_provider_description(colors));
+        if matches!(
+            &self.services,
+            Ok(services) if services.microsoft365_setup_issue.is_none()
+        ) {
+            choice = choice.child(self.render_permissions(colors));
+        }
+        self.add_microsoft365_connect_option(choice, cx)
+    }
+
+    fn render_microsoft365_provider_description(colors: ColorTokens) -> Stateful<Div> {
+        div()
+            .id("microsoft365-provider-description")
+            .debug_selector(|| "microsoft365-provider-description".to_owned())
+            .text_sm()
+            .text_color(colors.muted_foreground)
+            .child(
+                "Connect a work or school Microsoft 365 account with Microsoft Graph through the system browser.",
+            )
+    }
+
+    fn render_exchange_ews_choice(
+        &self,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_base().font_semibold().child("Exchange Server"))
+            .child(Self::render_exchange_ews_provider_description(colors))
             .child(self.render_ews_connect_button(cx))
+    }
+
+    fn render_exchange_ews_provider_description(colors: ColorTokens) -> Stateful<Div> {
+        div()
+            .id("exchange-ews-provider-description")
+            .debug_selector(|| "exchange-ews-provider-description".to_owned())
+            .text_sm()
+            .text_color(colors.muted_foreground)
+            .child(
+                "Connect to an on-premises Exchange Server with EWS. Enter an HTTPS endpoint or discover one from your mailbox.",
+            )
     }
 
     fn add_microsoft365_connect_option(
@@ -1655,7 +1724,6 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     fn render_microsoft365_connect_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         Button::new("connect-account")
             .debug_selector(|| "connect-account".to_owned())
-            .primary()
             .label("Connect Microsoft 365 account")
             .on_click(cx.listener(|view, _, _, cx| view.connect(cx)))
     }
@@ -1949,7 +2017,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn render_header(&self, colors: ColorTokens) -> gpui_kit::Div {
-        let mut header = div()
+        let description = self.account_header_description();
+        div()
             .w_full()
             .max_w_48()
             .flex()
@@ -1958,20 +2027,55 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .child(div().text_lg().font_bold().child("Accounts"))
             .child(
                 div()
+                    .id("account-header-description")
                     .text_sm()
                     .text_color(colors.muted_foreground)
-                    .child("Connect a Microsoft 365 or Exchange Server account to Einfach Mail."),
-            );
-        let can_review_mail_permissions = self
-            .status
-            .connected_profile()
-            .is_none_or(|profile| profile.capabilities().can_review_mail_write_permission());
-        if can_review_mail_permissions
-            && matches!(&self.services, Ok(services) if services.microsoft365_setup_issue.is_none())
-        {
-            header = header.child(self.render_permissions(colors));
+                    .child(description),
+            )
+    }
+
+    fn account_header_description(&self) -> &'static str {
+        if self.exchange_ews_form.is_some() {
+            return "Complete or cancel the Exchange Server connection below.";
         }
-        header
+
+        match &self.status {
+            AccountStatus::Restoring => "Checking for a saved account.",
+            AccountStatus::Disconnected
+            | AccountStatus::Failed {
+                saved_credential_may_exist: false,
+                ..
+            } => "Choose Microsoft 365 or Exchange Server to connect an account.",
+            AccountStatus::Connecting { .. } => {
+                "Connection is in progress. Cancel it below if needed."
+            }
+            AccountStatus::CancellingConnect { .. } => {
+                "Connection cancellation is finishing. Wait before starting another sign-in."
+            }
+            AccountStatus::SigningOut { account: Some(_) } => {
+                "Sign-out is in progress. Account details remain visible until it finishes."
+            }
+            AccountStatus::SigningOut { account: None } => {
+                "Saved sign-in removal is in progress. Wait before connecting another account."
+            }
+            AccountStatus::SignOutFailed { .. } => "Sign-out needs attention. Retry it below.",
+            AccountStatus::Connected(_)
+            | AccountStatus::Reauthorizing { .. }
+            | AccountStatus::CancellingReauthorization { .. }
+            | AccountStatus::ReauthorizationFailed { .. } => {
+                "Manage the active account, review permissions, or sign out."
+            }
+            AccountStatus::Failed {
+                saved_credential_may_exist: true,
+                error:
+                    AccountOperationError::SavedAccountIdentityUnavailable
+                    | AccountOperationError::AccountMismatch,
+            } => "Retry account restore before removing or replacing the saved sign-in.",
+            AccountStatus::Failed {
+                saved_credential_may_exist: true,
+                ..
+            } => "Restore or remove the saved sign-in before connecting another account.",
+        }
     }
 
     fn render_setup_status(&self, issue: SetupIssue) -> impl IntoElement {
@@ -2046,7 +2150,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 ..
             }
         ) {
-            return content.child(self.render_primary_action(cx));
+            return content.child(self.render_primary_action(colors, cx));
         }
         if matches!(
             &self.status,
@@ -2057,7 +2161,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         ) {
             content = content.child(self.render_saved_sign_out(cx, "Remove saved sign-in"));
         }
-        content.child(self.render_primary_action(cx))
+        content.child(self.render_primary_action(colors, cx))
     }
 
     fn render_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
