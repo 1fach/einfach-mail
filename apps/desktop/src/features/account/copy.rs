@@ -4,7 +4,7 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{MailAction, MailCapabilities};
 
-use super::account_state::{AccountStatus, EwsDiscoveryState, SetupIssue};
+use super::state::{AccountStatus, EwsDiscoveryState, SetupIssue};
 
 impl SetupIssue {
     pub(super) fn message(self) -> &'static str {

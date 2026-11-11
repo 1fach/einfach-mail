@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-11-11
+Last updated: 2026-11-12
 
 ## Current milestone
 
@@ -42,6 +42,8 @@ Issue #288 aligns the EWS provider with ADR 0061. Account, mail, calendar, sessi
 
 Issue [#336](https://github.com/1fach/einfach-mail/issues/336) tracks the follow-up that aligns Rust module declarations with the feature-first directory tree. [ADR 0061](../decisions/0061-feature-first-module-layout-and-test-placement.md) now requires `foo.rs` and `foo/`, forbids `mod.rs` and `#[path]`, and keeps account-router in one `lib.rs`.
 
+PRs #352–#355 completed the domain, application, and persistence splits. The desktop account move tracked by #342 passes the Rust 1.95 Linux local gate, and all 511 test function names match the baseline. Headless GPUI tests pass. No GitHub Actions or native window ran. Issues #343 and #344 are closed. Continue with #345–#347, then finish the module-tree work with #348.
+
 Issue #289 moved desktop startup, workspace, mail and calendar features, Linux process locking, shared helpers, and GPUI test support under their agreed ownership paths in [PR #320](https://github.com/1fach/einfach-mail/pull/320), targeting `feat/mail-list-resizing`. All 494 test function identifiers match the baseline. The full Linux local gate passes with localhost socket access for synthetic HTTP tests. Existing headless account and workspace tests passed. No real window was launched because Xvfb and Weston are unavailable. The #290 plan has children #321 through #324.
 
 The #321 Calendar composer split passes the full Linux local gate and preserves all 494 workspace test identifiers. Issue #279's compact Calendar agenda implementation passes the Linux local gate and 492 workspace tests (3 ignored); its headless coverage checks 340px and 520px layouts, navigation bounds, accessible event labels, and keyboard focus behavior. [PR #326](https://github.com/1fach/einfach-mail/pull/326) merged it into `feat/mail-list-resizing` at `84a42ee`, unblocking #322.
@@ -73,7 +75,7 @@ Issue #324's Account split merged in [PR #331](https://github.com/1fach/einfach-
 ## Next actions
 
 1. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux; keep #273's theme review and #274's named-compositor check open.
-2. Complete the behavior-preserving module-tree work tracked in issue [#336](https://github.com/1fach/einfach-mail/issues/336).
+2. Complete the remaining behavior-preserving module-tree work tracked in issue [#336](https://github.com/1fach/einfach-mail/issues/336), then close it after #348 lands.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.

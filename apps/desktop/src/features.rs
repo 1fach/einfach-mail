@@ -1,7 +1,13 @@
+mod account;
 mod calendar;
 mod mail;
 mod settings;
 
+pub(super) use account::{AccountServices, AccountView, NavigationSurfaceAppearance, SetupIssue};
+#[cfg(test)]
+pub(crate) use account::{
+    AccountViewTestContent, AccountViewTestSection, test_account_cache_open_error_message,
+};
 pub(super) use calendar::{
     CalendarView, CalendarViewEvent, bind_calendar_event_navigation_keys, bind_event_composer_keys,
 };
