@@ -509,7 +509,7 @@ where
     fn remove_account_cache(
         &self,
     ) -> AccountSessionFuture<'_, Result<(), AccountCacheRemovalError>> {
-        Box::pin(crate::account_cache::remove_reserved_account_cache(
+        Box::pin(super::cache::remove_reserved_account_cache(
             &self.cache,
             &self.reservations,
             &self.account_id,
@@ -707,5 +707,4 @@ where
 }
 
 #[cfg(test)]
-#[path = "session/tests.rs"]
 mod tests;

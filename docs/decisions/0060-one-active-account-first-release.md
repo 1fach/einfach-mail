@@ -63,5 +63,5 @@ Use `ConnectedAccount`. The application workflow owns provider selection, and th
 - `crates/providers/account-router/src/lib.rs`: one selected provider
 - `apps/desktop/src/app/workspace.rs`: account view, shared session, and lifecycle owner
 - `apps/desktop/src/features/account/state.rs`: one account status and provider metadata
-- `crates/application/src/account_session.rs`: account-bound shared Mail and Calendar session
+- `crates/application/src/account/session.rs`: account-bound shared Mail and Calendar session
 - `crates/providers/microsoft-graph/src/credential.rs` and `crates/persistence/src/exchange_ews_settings.rs`: provider-specific saved credentials and settings

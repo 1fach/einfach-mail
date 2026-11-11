@@ -8,7 +8,7 @@ use std::{
 
 use einfach_mail_domain::{AccountId, AccountProfile};
 
-use super::{
+use crate::account::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError, AccountProvider,
     AccountProviderKind, AccountWorkflow, ConnectedAccount, ExchangeEwsConnectionInput,
 };

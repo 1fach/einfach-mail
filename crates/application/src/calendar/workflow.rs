@@ -12,13 +12,15 @@ use einfach_mail_domain::{
 };
 use thiserror::Error;
 
-use crate::shared::recovery::{AccountWorkflowRecovery, CalendarWriteReadiness};
-use crate::{
-    calendar_cache::{CalendarCache, CalendarCacheError, CalendarSyncState},
-    calendar_provider::{
+use super::{
+    cache::{CalendarCache, CalendarCacheError, CalendarSyncState},
+    provider::{
         CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
         CalendarSyncStrategy,
     },
+};
+use crate::shared::recovery::{AccountWorkflowRecovery, CalendarWriteReadiness};
+use crate::{
     shared::reservations::{
         AccountReservationError, ActiveOperations, reserve_account, reserve_calendar_view,
     },
@@ -727,5 +729,4 @@ fn request_cursor(request: &CalendarDeltaRequest) -> Option<CalendarDeltaLink> {
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
 mod tests;

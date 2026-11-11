@@ -3,67 +3,35 @@
 //! This crate coordinates domain behavior without depending on a UI framework, Microsoft Graph, or a database.
 
 mod account;
-#[path = "account/cache.rs"]
-mod account_cache;
-#[path = "account/session.rs"]
-mod account_session;
-#[path = "calendar/workflow.rs"]
 mod calendar;
-#[path = "calendar/cache.rs"]
-mod calendar_cache;
-#[path = "calendar/provider.rs"]
-mod calendar_provider;
-#[path = "mail/email_html.rs"]
-mod email_html;
-#[path = "account/ews_settings.rs"]
-mod exchange_ews_settings;
-#[path = "mail/provider.rs"]
 mod mail;
-#[path = "mail/cache.rs"]
-mod mail_cache;
-#[path = "mail/workflow/mod.rs"]
-mod mail_workflow;
 mod shared;
 #[cfg(test)]
 mod test_support;
 
-use shared::recovery as account_recovery;
-
 pub use account::{
+    AccountCache, AccountCacheFactory, AccountCacheOpenError, AccountCacheRemovalError,
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
-    AccountPermissionRequest, AccountProvider, AccountProviderKind, AccountWorkflow,
-    ConnectedAccount, ExchangeEwsConnectionInput, ExchangeEwsDiscoveryConfirmation,
-    ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
-};
-pub use account_cache::{AccountCache, AccountCacheOpenError, AccountCacheRemovalError};
-pub use account_recovery::CalendarWriteReadiness;
-pub use account_session::{
-    AccountCacheFactory, AccountSession, AccountSessionFactory, AccountSessionFuture,
-    AccountSessionWorkflowFactory, CalendarSession, MailSession,
+    AccountPermissionRequest, AccountProvider, AccountProviderKind, AccountSession,
+    AccountSessionFactory, AccountSessionFuture, AccountSessionWorkflowFactory, AccountWorkflow,
+    CalendarSession, ConnectedAccount, ExchangeEwsAccountSettings, ExchangeEwsAccountSettingsStore,
+    ExchangeEwsConnectionInput, ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest,
+    ExchangeEwsDiscoveryResult, ExchangeEwsSettingsError, MailSession,
 };
 pub use calendar::{
-    CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
-    CalendarSnapshot, CalendarSyncReport, CalendarWorkflow, CalendarWorkflowError,
-};
-pub use calendar_cache::{CalendarCache, CalendarCacheError, CalendarSyncMode, CalendarSyncState};
-pub use calendar_provider::{
-    CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError,
-    CalendarProvider, CalendarSyncStrategy, CalendarViewSnapshotResponse,
-};
-pub use email_html::{
-    ExternalMessageLink, MessageBodyForDisplay, SanitizedEmailHtml, allowed_external_message_url,
-    prepare_message_body_for_display,
-};
-pub use exchange_ews_settings::{
-    ExchangeEwsAccountSettings, ExchangeEwsAccountSettingsStore, ExchangeEwsSettingsError,
+    CalendarCache, CalendarCacheError, CalendarDeltaPageResponse, CalendarDeltaRequest,
+    CalendarDeltaResponse, CalendarEventCreationOutcome, CalendarEventDeletionOutcome,
+    CalendarEventUpdateOutcome, CalendarOperationError, CalendarProvider, CalendarSnapshot,
+    CalendarSyncMode, CalendarSyncReport, CalendarSyncState, CalendarSyncStrategy,
+    CalendarViewSnapshotResponse, CalendarWorkflow, CalendarWorkflowError,
 };
 pub use mail::{
-    MailOperationError, MailProvider, MailSendProviderError, MessageDeltaPageResponse,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    ExternalMessageLink, FollowUpFlagUpdateOutcome, MailCache, MailCacheError, MailOperationError,
+    MailProvider, MailSendOutcome, MailSendProviderError, MailSendResolutionError,
+    MailSendWorkflowError, MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflow,
+    MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
+    MessageDeltaResponse, MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
+    SanitizedEmailHtml, WellKnownFolderMoveOutcome, WellKnownMailFolder,
+    allowed_external_message_url, prepare_message_body_for_display,
 };
-pub use mail_cache::{MailCache, MailCacheError, MailSyncState};
-pub use mail_workflow::{
-    FollowUpFlagUpdateOutcome, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError,
-    MailSyncProgress, MailSyncReport, MailWorkflow, MailWorkflowError, MessageMoveOutcome,
-    OpenedMessage, ReadStateUpdateOutcome, WellKnownFolderMoveOutcome,
-};
+pub use shared::recovery::CalendarWriteReadiness;

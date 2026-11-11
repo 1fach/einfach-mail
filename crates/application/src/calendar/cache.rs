@@ -8,7 +8,7 @@ use einfach_mail_domain::{
 };
 use thiserror::Error;
 
-use crate::calendar_provider::CalendarDeltaRequest;
+use super::provider::CalendarDeltaRequest;
 
 /// A user-safe category for a local calendar cache failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
