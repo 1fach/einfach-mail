@@ -11,6 +11,7 @@ use einfach_mail_domain::AccountId;
 use thiserror::Error;
 
 use crate::platform::linux::security;
+use crate::shared::CacheLifecycleError;
 
 #[cfg(test)]
 mod test_hooks;
@@ -43,6 +44,13 @@ impl From<async_sqlite::rusqlite::Error> for CacheFailure {
 }
 
 impl CacheFailure {
+    pub(crate) fn into_lifecycle_error(self) -> CacheLifecycleError {
+        match self {
+            Self::Unavailable => CacheLifecycleError::Unavailable,
+            Self::InvalidData => CacheLifecycleError::InvalidData,
+        }
+    }
+
     pub(crate) fn mail_public(self) -> MailCacheError {
         match self {
             Self::Unavailable => MailCacheError::Unavailable,
@@ -62,6 +70,30 @@ impl CacheFailure {
             Self::Unavailable => AccountCacheRemovalError::Unavailable,
             Self::InvalidData => AccountCacheRemovalError::InvalidData,
         }
+    }
+}
+
+impl CacheLifecycleError {
+    pub(crate) fn into_mail_cache_error(self) -> MailCacheError {
+        match self {
+            Self::Unavailable => MailCacheError::Unavailable,
+            Self::InUse => MailCacheError::InUse,
+            Self::MissingEncryptionKey => MailCacheError::MissingEncryptionKey,
+            Self::InvalidData => MailCacheError::InvalidData,
+        }
+    }
+
+    fn into_account_open_error(self) -> AccountCacheOpenError {
+        match self {
+            Self::Unavailable => AccountCacheOpenError::Unavailable,
+            Self::InUse => AccountCacheOpenError::InUse,
+            Self::MissingEncryptionKey => AccountCacheOpenError::MissingEncryptionKey,
+            Self::InvalidData => AccountCacheOpenError::InvalidData,
+        }
+    }
+
+    fn into_account_removal_error(self) -> AccountCacheRemovalError {
+        self.into_account_open_error().into()
     }
 }
 
@@ -117,7 +149,7 @@ impl SqliteAccountCache {
     pub async fn open_for_account(account_id: AccountId) -> Result<Self, AccountCacheOpenError> {
         let opened = security::open_database(&account_id)
             .await
-            .map_err(AccountCacheOpenError::from)?;
+            .map_err(CacheLifecycleError::into_account_open_error)?;
         Ok(Self {
             account_id,
             client: opened.client,
@@ -139,12 +171,14 @@ impl SqliteAccountCache {
     pub async fn remove_for_account(
         account_id: &AccountId,
     ) -> Result<(), AccountCacheRemovalError> {
-        if security::account_database_exists(account_id)? {
+        if security::account_database_exists(account_id)
+            .map_err(CacheLifecycleError::into_account_removal_error)?
+        {
             let cache = Self::open_for_account(account_id.clone()).await?;
             <Self as AccountCache>::remove_account(&cache, account_id).await
         } else {
             security::remove_account_without_open_client(account_id)
-                .map_err(AccountCacheRemovalError::from)
+                .map_err(CacheLifecycleError::into_account_removal_error)
         }
     }
 
@@ -257,7 +291,9 @@ impl SqliteAccountCache {
                 Ok(())
             }
             Err(error) => {
-                removal_lock.restore_shared()?;
+                removal_lock
+                    .restore_shared()
+                    .map_err(CacheLifecycleError::into_account_removal_error)?;
                 Err(error)
             }
         }
@@ -267,7 +303,11 @@ impl SqliteAccountCache {
         &self,
         account_id: &AccountId,
     ) -> Result<(), AccountCacheRemovalError> {
-        if !self.database_identity.matches_path(&self.database_path)? {
+        if !self
+            .database_identity
+            .matches_path(&self.database_path)
+            .map_err(CacheLifecycleError::into_account_removal_error)?
+        {
             return Err(AccountCacheRemovalError::Unavailable);
         }
         if self.load_pending_send(account_id).await?.is_some() {
@@ -278,9 +318,11 @@ impl SqliteAccountCache {
         }
         #[cfg(test)]
         self.test_hooks.wait_at(Gate::RemovalAfterMarkerCheck).await;
-        security::delete_database_files(&self.client, &self.database_path).await?;
+        security::delete_database_files(&self.client, &self.database_path)
+            .await
+            .map_err(CacheLifecycleError::into_account_removal_error)?;
         security::remove_credential(&self.credential_account)
-            .map_err(AccountCacheRemovalError::from)
+            .map_err(CacheLifecycleError::into_account_removal_error)
     }
 }
 
@@ -297,7 +339,7 @@ impl AccountCache for SqliteAccountCache {
             validation.map_err(AccountCacheRemovalError::from)?;
             let removal_lock =
                 security::AccountRemovalLock::acquire(&lifecycle_lock_path, account_lock)
-                    .map_err(AccountCacheRemovalError::from)?;
+                    .map_err(CacheLifecycleError::into_account_removal_error)?;
             self.remove_account_under_lock(&account_id, removal_lock)
                 .await
         }

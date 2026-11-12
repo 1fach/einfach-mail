@@ -9,14 +9,13 @@ use std::{
 };
 
 use async_sqlite::{Client, ClientBuilder};
-use einfach_mail_application::MailCacheError;
 use einfach_mail_domain::AccountId;
 use keyring::{Entry, Error as KeyringError};
 use sha2::{Digest, Sha256};
 use xdg::BaseDirectories;
 use zeroize::Zeroizing;
 
-use crate::shared::{schema, store::CacheFailure};
+use crate::shared::{CacheLifecycleError, schema, store::CacheFailure};
 
 const KEY_BYTES: usize = 32;
 const CREDENTIAL_SERVICE: &str = "com.1fach.einfach-mail";
@@ -54,13 +53,13 @@ impl AccountRemovalLock {
     ///
     /// # Errors
     ///
-    /// Returns [`MailCacheError::InUse`] when another cache handle or lifecycle operation
+    /// Returns [`CacheLifecycleError::InUse`] when another cache handle or lifecycle operation
     /// prevents removal.
-    /// Returns [`MailCacheError::Unavailable`] when lock state cannot be restored.
+    /// Returns [`CacheLifecycleError::Unavailable`] when lock state cannot be restored.
     pub(crate) fn acquire(
         lifecycle_lock_path: &Path,
         account_lock: Arc<File>,
-    ) -> Result<Self, MailCacheError> {
+    ) -> Result<Self, CacheLifecycleError> {
         let lifecycle_lock = lock_account_directory_exclusive(lifecycle_lock_path)?;
         let mut removal_lock = Self {
             account_lock,
@@ -79,9 +78,9 @@ impl AccountRemovalLock {
     ///
     /// # Errors
     ///
-    /// Returns [`MailCacheError::InUse`] when the account lock cannot be reacquired.
-    /// Returns [`MailCacheError::Unavailable`] when shared ownership cannot be restored.
-    pub(crate) fn restore_shared(mut self) -> Result<(), MailCacheError> {
+    /// Returns [`CacheLifecycleError::InUse`] when the account lock cannot be reacquired.
+    /// Returns [`CacheLifecycleError::Unavailable`] when shared ownership cannot be restored.
+    pub(crate) fn restore_shared(mut self) -> Result<(), CacheLifecycleError> {
         restore_shared_account_lock(&self.account_lock)?;
         self.restore_shared_on_drop = false;
         Ok(())
@@ -108,7 +107,7 @@ impl Drop for AccountRemovalLock {
 }
 
 fn take_lifecycle_lock_if_restore_failed(
-    restore_result: Result<(), MailCacheError>,
+    restore_result: Result<(), CacheLifecycleError>,
     lifecycle_lock: &mut Option<File>,
 ) -> Option<File> {
     restore_result.err()?;
@@ -122,19 +121,19 @@ pub(crate) struct DatabaseIdentity {
 }
 
 impl DatabaseIdentity {
-    pub(crate) fn read(path: &Path) -> Result<Self, MailCacheError> {
-        let metadata = fs::metadata(path).map_err(|_| MailCacheError::Unavailable)?;
+    pub(crate) fn read(path: &Path) -> Result<Self, CacheLifecycleError> {
+        let metadata = fs::metadata(path).map_err(|_| CacheLifecycleError::Unavailable)?;
         Ok(Self {
             device: metadata.dev(),
             inode: metadata.ino(),
         })
     }
 
-    pub(crate) fn matches_path(self, path: &Path) -> Result<bool, MailCacheError> {
+    pub(crate) fn matches_path(self, path: &Path) -> Result<bool, CacheLifecycleError> {
         let metadata = match fs::metadata(path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(_) => return Err(MailCacheError::Unavailable),
+            Err(_) => return Err(CacheLifecycleError::Unavailable),
         };
         Ok(self.device == metadata.dev() && self.inode == metadata.ino())
     }
@@ -149,16 +148,16 @@ enum KeyLookup {
 }
 
 impl DatabaseKey {
-    fn generate() -> Result<Self, MailCacheError> {
+    fn generate() -> Result<Self, CacheLifecycleError> {
         let mut bytes = Zeroizing::new([0_u8; KEY_BYTES]);
-        getrandom::fill(bytes.as_mut()).map_err(|_| MailCacheError::Unavailable)?;
+        getrandom::fill(bytes.as_mut()).map_err(|_| CacheLifecycleError::Unavailable)?;
         Ok(Self(bytes))
     }
 
-    fn from_secret(secret: Vec<u8>) -> Result<Self, MailCacheError> {
+    fn from_secret(secret: Vec<u8>) -> Result<Self, CacheLifecycleError> {
         let secret = Zeroizing::new(secret);
         if secret.len() != KEY_BYTES {
-            return Err(MailCacheError::MissingEncryptionKey);
+            return Err(CacheLifecycleError::MissingEncryptionKey);
         }
         let mut bytes = Zeroizing::new([0_u8; KEY_BYTES]);
         bytes.as_mut().copy_from_slice(secret.as_slice());
@@ -175,7 +174,9 @@ impl DatabaseKey {
     }
 }
 
-pub(crate) async fn open_database(account_id: &AccountId) -> Result<OpenDatabase, MailCacheError> {
+pub(crate) async fn open_database(
+    account_id: &AccountId,
+) -> Result<OpenDatabase, CacheLifecycleError> {
     let paths = cache_paths(account_id)?;
     let CacheOpenLocks {
         account_lock,
@@ -184,7 +185,7 @@ pub(crate) async fn open_database(account_id: &AccountId) -> Result<OpenDatabase
     open_locked_database(paths, account_lock).await
 }
 
-fn acquire_cache_open_locks(paths: &CachePaths) -> Result<CacheOpenLocks, MailCacheError> {
+fn acquire_cache_open_locks(paths: &CachePaths) -> Result<CacheOpenLocks, CacheLifecycleError> {
     let lifecycle_lock = lock_account_directory_shared(&paths.lifecycle_lock)?;
     let account_lock = Arc::new(lock_account_directory_shared(&paths.account_lock)?);
     drop(lifecycle_lock);
@@ -199,7 +200,7 @@ fn acquire_cache_open_locks(paths: &CachePaths) -> Result<CacheOpenLocks, MailCa
 async fn open_locked_database(
     paths: CachePaths,
     account_lock: Arc<File>,
-) -> Result<OpenDatabase, MailCacheError> {
+) -> Result<OpenDatabase, CacheLifecycleError> {
     let credential = credential_entry(&paths.credential_account)?;
     let key = load_or_create_key(&credential, encrypted_data_exists(&paths.database)?)?;
     open_database_with_key(paths, key, account_lock).await
@@ -209,12 +210,12 @@ async fn open_database_with_key(
     paths: CachePaths,
     key: DatabaseKey,
     account_lock: Arc<File>,
-) -> Result<OpenDatabase, MailCacheError> {
+) -> Result<OpenDatabase, CacheLifecycleError> {
     secure_database_file(&paths.database)?;
     let client = open_encrypted_client(&paths.database, &key).await?;
     schema::apply(&client)
         .await
-        .map_err(CacheFailure::mail_public)?;
+        .map_err(CacheFailure::into_lifecycle_error)?;
     let database_identity = DatabaseIdentity::read(&paths.database)?;
     Ok(OpenDatabase {
         client,
@@ -229,52 +230,52 @@ async fn open_database_with_key(
 fn load_or_create_key(
     credential: &Entry,
     database_exists: bool,
-) -> Result<DatabaseKey, MailCacheError> {
+) -> Result<DatabaseKey, CacheLifecycleError> {
     match classify_key_lookup(credential.get_secret(), database_exists)? {
         KeyLookup::Existing(key) => Ok(key),
         KeyLookup::Create => create_and_store_key(credential),
-        KeyLookup::Missing => Err(MailCacheError::MissingEncryptionKey),
+        KeyLookup::Missing => Err(CacheLifecycleError::MissingEncryptionKey),
     }
 }
 
 fn classify_key_lookup(
     secret_result: keyring::Result<Vec<u8>>,
     database_exists: bool,
-) -> Result<KeyLookup, MailCacheError> {
+) -> Result<KeyLookup, CacheLifecycleError> {
     match secret_result {
         Ok(secret) => DatabaseKey::from_secret(secret).map(KeyLookup::Existing),
         Err(KeyringError::NoEntry) if database_exists => Ok(KeyLookup::Missing),
         Err(KeyringError::NoEntry) => Ok(KeyLookup::Create),
-        Err(_) => Err(MailCacheError::Unavailable),
+        Err(_) => Err(CacheLifecycleError::Unavailable),
     }
 }
 
-fn create_and_store_key(credential: &Entry) -> Result<DatabaseKey, MailCacheError> {
+fn create_and_store_key(credential: &Entry) -> Result<DatabaseKey, CacheLifecycleError> {
     let key = DatabaseKey::generate()?;
     credential
         .set_secret(key.0.as_slice())
-        .map_err(|_| MailCacheError::Unavailable)?;
+        .map_err(|_| CacheLifecycleError::Unavailable)?;
     Ok(key)
 }
 
 async fn open_encrypted_client(
     database_path: &Path,
     key: &DatabaseKey,
-) -> Result<Client, MailCacheError> {
+) -> Result<Client, CacheLifecycleError> {
     let client = ClientBuilder::new()
         .path(database_path)
         .open()
         .await
-        .map_err(|_| MailCacheError::Unavailable)?;
+        .map_err(|_| CacheLifecycleError::Unavailable)?;
     let key_statement = key.raw_key_statement();
     client
         .conn_mut(move |connection| connection.execute_batch(&key_statement))
         .await
-        .map_err(|_| MailCacheError::Unavailable)?;
+        .map_err(|_| CacheLifecycleError::Unavailable)?;
     client
         .conn_mut(|connection| connection.execute_batch("PRAGMA foreign_keys = ON"))
         .await
-        .map_err(|_| MailCacheError::Unavailable)?;
+        .map_err(|_| CacheLifecycleError::Unavailable)?;
     Ok(client)
 }
 
@@ -282,8 +283,10 @@ async fn open_encrypted_client(
 pub(crate) async fn open_test_database(
     database_path: &Path,
     key_byte: u8,
-) -> Result<OpenDatabase, MailCacheError> {
-    let account_directory = database_path.parent().ok_or(MailCacheError::Unavailable)?;
+) -> Result<OpenDatabase, CacheLifecycleError> {
+    let account_directory = database_path
+        .parent()
+        .ok_or(CacheLifecycleError::Unavailable)?;
     let paths = CachePaths {
         database: database_path.to_owned(),
         account_lock: account_directory.join("mail-cache.lock"),
@@ -298,12 +301,12 @@ pub(crate) async fn open_test_database(
     open_database_with_key(paths, key, account_lock).await
 }
 
-fn cache_paths(account_id: &AccountId) -> Result<CachePaths, MailCacheError> {
+fn cache_paths(account_id: &AccountId) -> Result<CachePaths, CacheLifecycleError> {
     let project = BaseDirectories::with_prefix("einfach-mail");
     let account_hash = hex::encode(Sha256::digest(account_id.as_str().as_bytes()));
     let account_directory = project
         .get_data_file(PathBuf::from("mail-cache").join(&account_hash))
-        .ok_or(MailCacheError::Unavailable)?;
+        .ok_or(CacheLifecycleError::Unavailable)?;
     Ok(CachePaths {
         database: account_directory.join("mail.sqlite3"),
         account_lock: account_directory.join("mail-cache.lock"),
@@ -312,13 +315,13 @@ fn cache_paths(account_id: &AccountId) -> Result<CachePaths, MailCacheError> {
     })
 }
 
-fn create_private_directory(path: &Path) -> Result<(), MailCacheError> {
-    fs::create_dir_all(path).map_err(|_| MailCacheError::Unavailable)?;
+fn create_private_directory(path: &Path) -> Result<(), CacheLifecycleError> {
+    fs::create_dir_all(path).map_err(|_| CacheLifecycleError::Unavailable)?;
     fs::set_permissions(path, Permissions::from_mode(0o700))
-        .map_err(|_| MailCacheError::Unavailable)
+        .map_err(|_| CacheLifecycleError::Unavailable)
 }
 
-fn open_lock_file(path: &Path) -> Result<File, MailCacheError> {
+fn open_lock_file(path: &Path) -> Result<File, CacheLifecycleError> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -326,13 +329,13 @@ fn open_lock_file(path: &Path) -> Result<File, MailCacheError> {
         .truncate(false)
         .mode(0o600)
         .open(path)
-        .map_err(|_| MailCacheError::Unavailable)?;
+        .map_err(|_| CacheLifecycleError::Unavailable)?;
     file.set_permissions(Permissions::from_mode(0o600))
-        .map_err(|_| MailCacheError::Unavailable)?;
+        .map_err(|_| CacheLifecycleError::Unavailable)?;
     Ok(file)
 }
 
-fn secure_database_file(path: &Path) -> Result<(), MailCacheError> {
+fn secure_database_file(path: &Path) -> Result<(), CacheLifecycleError> {
     OpenOptions::new()
         .read(true)
         .write(true)
@@ -340,12 +343,12 @@ fn secure_database_file(path: &Path) -> Result<(), MailCacheError> {
         .truncate(false)
         .mode(0o600)
         .open(path)
-        .map_err(|_| MailCacheError::Unavailable)?
+        .map_err(|_| CacheLifecycleError::Unavailable)?
         .set_permissions(Permissions::from_mode(0o600))
-        .map_err(|_| MailCacheError::Unavailable)
+        .map_err(|_| CacheLifecycleError::Unavailable)
 }
 
-fn encrypted_data_exists(database_path: &Path) -> Result<bool, MailCacheError> {
+fn encrypted_data_exists(database_path: &Path) -> Result<bool, CacheLifecycleError> {
     if path_exists(database_path)? {
         return Ok(true);
     }
@@ -355,39 +358,40 @@ fn encrypted_data_exists(database_path: &Path) -> Result<bool, MailCacheError> {
     path_exists(&with_suffix(database_path, "-shm"))
 }
 
-fn path_exists(path: &Path) -> Result<bool, MailCacheError> {
-    path.try_exists().map_err(|_| MailCacheError::Unavailable)
+fn path_exists(path: &Path) -> Result<bool, CacheLifecycleError> {
+    path.try_exists()
+        .map_err(|_| CacheLifecycleError::Unavailable)
 }
 
-pub(crate) fn account_database_exists(account_id: &AccountId) -> Result<bool, MailCacheError> {
+pub(crate) fn account_database_exists(account_id: &AccountId) -> Result<bool, CacheLifecycleError> {
     encrypted_data_exists(&cache_paths(account_id)?.database)
 }
 
-fn credential_entry(account: &str) -> Result<Entry, MailCacheError> {
-    Entry::new(CREDENTIAL_SERVICE, account).map_err(|_| MailCacheError::Unavailable)
+fn credential_entry(account: &str) -> Result<Entry, CacheLifecycleError> {
+    Entry::new(CREDENTIAL_SERVICE, account).map_err(|_| CacheLifecycleError::Unavailable)
 }
 
-pub(crate) fn remove_credential(account: &str) -> Result<(), MailCacheError> {
+pub(crate) fn remove_credential(account: &str) -> Result<(), CacheLifecycleError> {
     match credential_entry(account)?.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(_) => Err(MailCacheError::Unavailable),
+        Err(_) => Err(CacheLifecycleError::Unavailable),
     }
 }
 
 pub(crate) async fn delete_database_files(
     client: &Client,
     database_path: &Path,
-) -> Result<(), MailCacheError> {
+) -> Result<(), CacheLifecycleError> {
     client
         .close()
         .await
-        .map_err(|_| MailCacheError::Unavailable)?;
+        .map_err(|_| CacheLifecycleError::Unavailable)?;
     remove_database_files(database_path)
 }
 
 pub(crate) fn remove_account_without_open_client(
     account_id: &AccountId,
-) -> Result<(), MailCacheError> {
+) -> Result<(), CacheLifecycleError> {
     let paths = cache_paths(account_id)?;
     remove_unopened_account_cache(
         &paths.database,
@@ -401,8 +405,8 @@ fn remove_unopened_account_cache(
     database_path: &Path,
     account_lock_path: &Path,
     lifecycle_lock_path: &Path,
-    remove_credential: impl FnOnce() -> Result<(), MailCacheError>,
-) -> Result<(), MailCacheError> {
+    remove_credential: impl FnOnce() -> Result<(), CacheLifecycleError>,
+) -> Result<(), CacheLifecycleError> {
     let _lifecycle_lock = lock_account_directory_exclusive(lifecycle_lock_path)?;
     let _account_lock = lock_account_directory_exclusive(account_lock_path)?;
     if encrypted_data_exists(database_path)? {
@@ -411,8 +415,9 @@ fn remove_unopened_account_cache(
     remove_credential()
 }
 
-fn restore_shared_account_lock(file: &File) -> Result<(), MailCacheError> {
-    file.unlock().map_err(|_| MailCacheError::Unavailable)?;
+fn restore_shared_account_lock(file: &File) -> Result<(), CacheLifecycleError> {
+    file.unlock()
+        .map_err(|_| CacheLifecycleError::Unavailable)?;
     file.try_lock_shared().map_err(lock_error)
 }
 
@@ -420,45 +425,45 @@ fn restore_shared_account_lock(file: &File) -> Result<(), MailCacheError> {
 ///
 /// # Errors
 ///
-/// Returns [`MailCacheError::InUse`] when an account removal owns the lock.
-/// Returns [`MailCacheError::Unavailable`] when the lock file cannot be opened or locked.
-fn lock_account_directory_shared(path: &Path) -> Result<File, MailCacheError> {
+/// Returns [`CacheLifecycleError::InUse`] when an account removal owns the lock.
+/// Returns [`CacheLifecycleError::Unavailable`] when the lock file cannot be opened or locked.
+fn lock_account_directory_shared(path: &Path) -> Result<File, CacheLifecycleError> {
     let file = open_account_lock_file(path)?;
     file.try_lock_shared().map_err(lock_error)?;
     Ok(file)
 }
 
-fn lock_account_directory_exclusive(path: &Path) -> Result<File, MailCacheError> {
+fn lock_account_directory_exclusive(path: &Path) -> Result<File, CacheLifecycleError> {
     let file = open_account_lock_file(path)?;
     file.try_lock().map_err(lock_error)?;
     Ok(file)
 }
 
-fn open_account_lock_file(path: &Path) -> Result<File, MailCacheError> {
-    let account_directory = path.parent().ok_or(MailCacheError::Unavailable)?;
+fn open_account_lock_file(path: &Path) -> Result<File, CacheLifecycleError> {
+    let account_directory = path.parent().ok_or(CacheLifecycleError::Unavailable)?;
     create_private_directory(account_directory)?;
     open_lock_file(path)
 }
 
-fn lock_error(error: std::fs::TryLockError) -> MailCacheError {
+fn lock_error(error: std::fs::TryLockError) -> CacheLifecycleError {
     match error {
-        std::fs::TryLockError::WouldBlock => MailCacheError::InUse,
-        std::fs::TryLockError::Error(_) => MailCacheError::Unavailable,
+        std::fs::TryLockError::WouldBlock => CacheLifecycleError::InUse,
+        std::fs::TryLockError::Error(_) => CacheLifecycleError::Unavailable,
     }
 }
 
-fn remove_database_files(database_path: &Path) -> Result<(), MailCacheError> {
+fn remove_database_files(database_path: &Path) -> Result<(), CacheLifecycleError> {
     // Remove sidecars first so a failure leaves the database available for retry.
     remove_file_if_present(&with_suffix(database_path, "-wal"))?;
     remove_file_if_present(&with_suffix(database_path, "-shm"))?;
     remove_file_if_present(database_path)
 }
 
-fn remove_file_if_present(path: &Path) -> Result<(), MailCacheError> {
+fn remove_file_if_present(path: &Path) -> Result<(), CacheLifecycleError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(MailCacheError::Unavailable),
+        Err(_) => Err(CacheLifecycleError::Unavailable),
     }
 }
 

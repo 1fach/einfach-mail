@@ -2,8 +2,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::test_support::calendar_view;
 use einfach_mail_application::{
-    AccountCache, AccountCacheRemovalError, CalendarCache, CalendarCacheError,
-    CalendarEventCreationStage, MailCache, MailCacheError,
+    AccountCache, AccountCacheOpenError, AccountCacheRemovalError, CalendarCache,
+    CalendarCacheError, CalendarEventCreationStage, MailCache, MailCacheError,
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrencePatch,
@@ -16,11 +16,105 @@ use tempfile::TempDir;
 use time::{Date, Month, PrimitiveDateTime, Time};
 
 use super::{
-    SqliteAccountCache,
+    CacheFailure, SqliteAccountCache,
     time::{system_time_from_parts, system_time_parts},
 };
+use crate::shared::CacheLifecycleError;
 const DATABASE_KEY_BYTE: u8 = 0x51;
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+#[test]
+fn lifecycle_failures_map_to_account_open_errors() {
+    let cases = [
+        (
+            CacheLifecycleError::Unavailable,
+            AccountCacheOpenError::Unavailable,
+        ),
+        (CacheLifecycleError::InUse, AccountCacheOpenError::InUse),
+        (
+            CacheLifecycleError::MissingEncryptionKey,
+            AccountCacheOpenError::MissingEncryptionKey,
+        ),
+        (
+            CacheLifecycleError::InvalidData,
+            AccountCacheOpenError::InvalidData,
+        ),
+    ];
+
+    for (lifecycle_error, expected) in cases {
+        assert_eq!(lifecycle_error.into_account_open_error(), expected);
+    }
+}
+
+#[test]
+fn lifecycle_failures_map_to_account_removal_errors() {
+    let cases = [
+        (
+            CacheLifecycleError::Unavailable,
+            AccountCacheRemovalError::Unavailable,
+        ),
+        (CacheLifecycleError::InUse, AccountCacheRemovalError::InUse),
+        (
+            CacheLifecycleError::MissingEncryptionKey,
+            AccountCacheRemovalError::MissingEncryptionKey,
+        ),
+        (
+            CacheLifecycleError::InvalidData,
+            AccountCacheRemovalError::InvalidData,
+        ),
+    ];
+
+    for (lifecycle_error, expected) in cases {
+        assert_eq!(lifecycle_error.into_account_removal_error(), expected);
+    }
+}
+
+#[test]
+fn lifecycle_failures_map_to_mail_cache_errors() {
+    let cases = [
+        (
+            CacheLifecycleError::Unavailable,
+            MailCacheError::Unavailable,
+        ),
+        (CacheLifecycleError::InUse, MailCacheError::InUse),
+        (
+            CacheLifecycleError::MissingEncryptionKey,
+            MailCacheError::MissingEncryptionKey,
+        ),
+        (
+            CacheLifecycleError::InvalidData,
+            MailCacheError::InvalidData,
+        ),
+    ];
+
+    for (lifecycle_error, expected) in cases {
+        assert_eq!(lifecycle_error.into_mail_cache_error(), expected);
+    }
+}
+
+#[test]
+fn database_failures_keep_mail_operation_error_mapping() {
+    assert_eq!(
+        CacheFailure::Unavailable.mail_public(),
+        MailCacheError::Unavailable
+    );
+    assert_eq!(
+        CacheFailure::InvalidData.mail_public(),
+        MailCacheError::InvalidData
+    );
+}
+
+#[test]
+fn initialization_failures_use_feature_neutral_lifecycle_errors() {
+    assert_eq!(
+        CacheFailure::Unavailable.into_lifecycle_error(),
+        CacheLifecycleError::Unavailable
+    );
+    assert_eq!(
+        CacheFailure::InvalidData.into_lifecycle_error(),
+        CacheLifecycleError::InvalidData
+    );
+}
 
 fn account_id(value: &str) -> AccountId {
     AccountId::try_from(value.to_owned()).expect("synthetic account ID is non-empty")

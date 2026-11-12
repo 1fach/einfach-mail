@@ -9,7 +9,7 @@ use std::{
 };
 
 use super::{
-    KeyLookup, MailCacheError, classify_key_lookup, lock_account_directory_exclusive,
+    CacheLifecycleError, KeyLookup, classify_key_lookup, lock_account_directory_exclusive,
     lock_account_directory_shared, open_test_database, remove_database_files,
     take_lifecycle_lock_if_restore_failed, with_suffix,
 };
@@ -31,7 +31,7 @@ fn keyring_lookup_distinguishes_new_existing_and_unavailable_states() {
     ));
     assert_eq!(
         classify_key_lookup(Ok(vec![0x31; super::KEY_BYTES - 1]), true).err(),
-        Some(MailCacheError::MissingEncryptionKey)
+        Some(CacheLifecycleError::MissingEncryptionKey)
     );
 
     let locked_store_error = KeyringError::NoStorageAccess(Box::new(std::io::Error::other(
@@ -39,7 +39,7 @@ fn keyring_lookup_distinguishes_new_existing_and_unavailable_states() {
     )));
     assert_eq!(
         classify_key_lookup(Err(locked_store_error), true).err(),
-        Some(MailCacheError::Unavailable)
+        Some(CacheLifecycleError::Unavailable)
     );
 }
 
@@ -118,7 +118,7 @@ fn unopened_cache_removal_keeps_files_and_key_while_cache_is_open() {
                     Ok(())
                 },
             ),
-            Err(MailCacheError::InUse)
+            Err(CacheLifecycleError::InUse)
         );
         assert!(database_path.exists());
         assert!(!credential_removed.load(Ordering::Relaxed));
@@ -136,7 +136,7 @@ fn unopened_cache_removal_keeps_files_and_key_while_cache_is_open() {
                 &lifecycle_lock_path,
                 || Ok(()),
             ),
-            Err(MailCacheError::InUse)
+            Err(CacheLifecycleError::InUse)
         );
 
         opened
@@ -182,7 +182,7 @@ fn failed_cache_lock_upgrade_restores_the_open_handle_lock() {
                 Arc::clone(&first.account_lock),
             )
             .map(|_| ()),
-            Err(MailCacheError::InUse)
+            Err(CacheLifecycleError::InUse)
         );
         assert_eq!(
             super::remove_unopened_account_cache(
@@ -191,7 +191,7 @@ fn failed_cache_lock_upgrade_restores_the_open_handle_lock() {
                 &lifecycle_lock_path,
                 || Ok(()),
             ),
-            Err(MailCacheError::InUse)
+            Err(CacheLifecycleError::InUse)
         );
         second
             .client
@@ -206,7 +206,7 @@ fn failed_cache_lock_upgrade_restores_the_open_handle_lock() {
                 &lifecycle_lock_path,
                 || Ok(()),
             ),
-            Err(MailCacheError::InUse)
+            Err(CacheLifecycleError::InUse)
         );
         let removal_lock = super::AccountRemovalLock::acquire(
             &lifecycle_lock_path,
@@ -215,7 +215,7 @@ fn failed_cache_lock_upgrade_restores_the_open_handle_lock() {
         .expect("cache lock upgrades after the other handle closes");
         assert!(matches!(
             open_test_database(&database_path, 7).await,
-            Err(MailCacheError::InUse)
+            Err(CacheLifecycleError::InUse)
         ));
         removal_lock
             .restore_shared()
@@ -248,7 +248,7 @@ fn failed_shared_lock_restore_keeps_lifecycle_gate_held() {
     );
 
     let retained_lifecycle_lock = take_lifecycle_lock_if_restore_failed(
-        Err(MailCacheError::Unavailable),
+        Err(CacheLifecycleError::Unavailable),
         &mut lifecycle_lock,
     )
     .expect("failed restoration retains the lifecycle lock");
@@ -256,7 +256,7 @@ fn failed_shared_lock_restore_keeps_lifecycle_gate_held() {
     assert!(lifecycle_lock.is_none());
     assert_eq!(
         lock_account_directory_shared(&lifecycle_lock_path).err(),
-        Some(MailCacheError::InUse)
+        Some(CacheLifecycleError::InUse)
     );
 
     drop(retained_lifecycle_lock);
@@ -279,7 +279,7 @@ fn cache_initialization_requires_its_exclusive_lock() {
 
         assert!(matches!(
             open_test_database(&database_path, 7).await,
-            Err(MailCacheError::InUse)
+            Err(CacheLifecycleError::InUse)
         ));
         assert!(!database_path.exists());
 
@@ -305,7 +305,7 @@ fn cache_presence_check_fails_closed_when_a_parent_is_not_a_directory() {
 
     assert!(matches!(
         super::encrypted_data_exists(&database),
-        Err(MailCacheError::Unavailable)
+        Err(CacheLifecycleError::Unavailable)
     ));
 }
 
@@ -335,7 +335,7 @@ fn failed_sidecar_removal_keeps_the_encrypted_database_reopenable_for_retry() {
 
             assert!(matches!(
                 remove_database_files(&database),
-                Err(MailCacheError::Unavailable)
+                Err(CacheLifecycleError::Unavailable)
             ));
             assert!(database.exists(), "main database remains after failure");
 
