@@ -1,5 +1,5 @@
 use std::{
-    sync::mpsc as sync_mpsc,
+    sync::{Mutex as SyncMutex, OnceLock, mpsc as sync_mpsc},
     thread::{self, JoinHandle},
 };
 
@@ -34,8 +34,32 @@ use self::tls::{DigestAlgorithm, digest_for_hash_oid, digest_for_signature_oid, 
 pub(crate) struct EwsTransport {
     commands: mpsc::Sender<EwsCommand>,
     request_sequence: Mutex<()>,
+    reaper: sync_mpsc::Sender<JoinHandle<()>>,
     shutdown: Option<oneshot::Sender<()>>,
     worker: Option<JoinHandle<()>>,
+}
+
+struct WorkerReaper {
+    sender: sync_mpsc::Sender<JoinHandle<()>>,
+    _thread: JoinHandle<()>,
+}
+
+impl WorkerReaper {
+    fn start() -> Result<Self, EwsError> {
+        let (sender, receiver) = sync_mpsc::channel::<JoinHandle<()>>();
+        let worker = thread::Builder::new()
+            .name("einfach-mail-ews-reaper".to_owned())
+            .spawn(move || {
+                while let Ok(worker) = receiver.recv() {
+                    let _ = worker.join();
+                }
+            })
+            .map_err(|_| EwsError::ServiceUnavailable)?;
+        Ok(Self {
+            sender,
+            _thread: worker,
+        })
+    }
 }
 
 struct EwsCommand {
@@ -48,6 +72,12 @@ struct EwsCommand {
 enum EwsRequestMode {
     Read,
     Update,
+}
+
+#[derive(Clone, Copy)]
+enum EwsRequestPhase {
+    Queued,
+    Executing,
 }
 
 enum EwsRequestError {
@@ -93,6 +123,7 @@ impl EwsTransport {
             .filter(|host| !host.is_empty())
             .ok_or(EwsError::InvalidConnectionDetails)?
             .to_owned();
+        let reaper = worker_reaper_sender()?;
 
         let (commands, command_receiver) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
         let (shutdown, shutdown_receiver) = oneshot::channel();
@@ -133,6 +164,7 @@ impl EwsTransport {
             Ok(Ok(())) => Ok(Self {
                 commands,
                 request_sequence: Mutex::new(()),
+                reaper,
                 shutdown: Some(shutdown),
                 worker: Some(worker),
             }),
@@ -307,9 +339,39 @@ impl Drop for EwsTransport {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        if let Some(worker) = self.worker.take()
+            && let Err(error) = self.reaper.send(worker)
+        {
+            let _ = error.0.join();
         }
+    }
+}
+
+/// Returns the process-wide reaper sender, starting its thread on first use.
+fn worker_reaper_sender() -> Result<sync_mpsc::Sender<JoinHandle<()>>, EwsError> {
+    static WORKER_REAPER: OnceLock<SyncMutex<Option<WorkerReaper>>> = OnceLock::new();
+
+    let mut reaper = WORKER_REAPER
+        .get_or_init(|| SyncMutex::new(None))
+        .lock()
+        .map_err(|_| EwsError::ServiceUnavailable)?;
+    if let Some(reaper) = reaper.as_ref() {
+        return Ok(reaper.sender.clone());
+    }
+
+    let reaper_worker = WorkerReaper::start()?;
+    let sender = reaper_worker.sender.clone();
+    *reaper = Some(reaper_worker);
+    Ok(sender)
+}
+
+fn shutdown_error(mode: EwsRequestMode, phase: EwsRequestPhase) -> EwsRequestError {
+    match mode {
+        EwsRequestMode::Read => EwsRequestError::Read(EwsError::ServiceUnavailable),
+        EwsRequestMode::Update if matches!(phase, EwsRequestPhase::Executing) => {
+            EwsRequestError::OutcomeUnknown
+        }
+        EwsRequestMode::Update => EwsRequestError::NotDispatched(EwsError::ServiceUnavailable),
     }
 }
 

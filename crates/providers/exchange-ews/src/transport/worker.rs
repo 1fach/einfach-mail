@@ -9,8 +9,8 @@ use secrecy::SecretString;
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
-use super::{EwsCommand, EwsRequestError, EwsRequestMode};
 use super::{
+    EwsCommand, EwsRequestError, EwsRequestMode, EwsRequestPhase, shutdown_error,
     soap::{ReceivedResponse, receive_response},
     tls::{ConnectionIdentity, map_status, ntlm_challenge, ntlm_header, tls_server_end_point},
 };
@@ -131,19 +131,36 @@ pub(super) async fn run_worker(
     loop {
         tokio::select! {
             biased;
-            _ = &mut shutdown => break,
+            _ = &mut shutdown => {
+                fail_queued_commands(&mut commands);
+                break;
+            }
             command = commands.recv() => {
                 let Some(command) = command else {
                     break;
                 };
                 let response = tokio::select! {
                     biased;
-                    _ = &mut shutdown => break,
+                    _ = &mut shutdown => {
+                        let _ = command.response.send(Err(shutdown_error(
+                            command.mode,
+                            EwsRequestPhase::Executing,
+                        )));
+                        fail_queued_commands(&mut commands);
+                        break;
+                    }
                     response = state.post_soap(&command.document, command.mode) => response,
                 };
                 let _ = command.response.send(response);
             }
         }
+    }
+}
+
+fn fail_queued_commands(commands: &mut mpsc::Receiver<EwsCommand>) {
+    while let Ok(command) = commands.try_recv() {
+        let response = Err(shutdown_error(command.mode, EwsRequestPhase::Queued));
+        let _ = command.response.send(response);
     }
 }
 
