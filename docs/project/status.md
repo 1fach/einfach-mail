@@ -93,7 +93,7 @@ Issue [#361](https://github.com/1fach/einfach-mail/issues/361) adds a named shar
 ## Next actions
 
 1. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux; keep #273's theme review and #274's named-compositor check open.
-2. Continue the clean-code pass tracked in issue [#356](https://github.com/1fach/einfach-mail/issues/356), starting with [#362](https://github.com/1fach/einfach-mail/issues/362) after the #361 spike.
+2. Continue the clean-code pass tracked in issue [#356](https://github.com/1fach/einfach-mail/issues/356): [#362](https://github.com/1fach/einfach-mail/issues/362) covers domain and application; the remaining independent reviews are #363 (persistence), #364 (providers), and #365 (desktop).
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
