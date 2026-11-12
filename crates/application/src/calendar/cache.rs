@@ -26,9 +26,20 @@ pub enum CalendarCacheError {
     /// The requested view belongs to another cache account.
     #[error("the local calendar cache belongs to another account")]
     AccountMismatch,
-    /// Another uncertain event creation must be resolved for this account first.
+    /// A previous event creation remains pending for this account.
     #[error("another calendar event creation is already pending")]
     CreationAlreadyPending,
+}
+
+/// Describes whether the cache inserted or found the unresolved creation.
+#[non_exhaustive]
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CalendarEventCreationStage {
+    /// The cache inserted this creation as the account's unresolved operation.
+    NewlyStaged,
+    /// The cache already held this exact creation as the account's unresolved operation.
+    ExistingUnresolved,
 }
 
 /// Sync completion and cursor state for one account and fixed calendar view.
@@ -299,21 +310,25 @@ pub trait CalendarCache: Send + Sync {
         view: &CalendarViewReference,
     ) -> impl Future<Output = Result<Vec<CalendarOccurrence>, CalendarCacheError>> + Send + '_;
 
-    /// Saves or confirms the account's unresolved event-creation operation.
+    /// Saves a new event-creation operation or identifies the same unresolved operation.
     ///
-    /// Repeating the same unresolved operation is idempotent. A rejected
-    /// operation remains blocked until its marker is removed.
+    /// The cache compares and writes the account's pending operation atomically.
+    /// A rejected operation remains blocked until its marker is removed.
+    ///
+    /// Returns [`CalendarEventCreationStage::NewlyStaged`] when this call inserts
+    /// the creation, or [`CalendarEventCreationStage::ExistingUnresolved`] when
+    /// the cache already stores the exact creation as unresolved.
     ///
     /// # Errors
     ///
-    /// Returns [`CalendarCacheError::CreationAlreadyPending`] while an
-    /// unresolved operation or a different operation is stored, an account or
-    /// data error for invalid values, or [`CalendarCacheError::Unavailable`]
-    /// when the encrypted store cannot be changed.
+    /// Returns [`CalendarCacheError::CreationAlreadyPending`] when the cache
+    /// stores a rejected operation or a different unresolved operation. Returns
+    /// an account or data error for invalid values, or
+    /// [`CalendarCacheError::Unavailable`] when the encrypted store cannot be changed.
     fn stage_event_creation(
         &self,
         creation: &CalendarEventCreation,
-    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
+    ) -> impl Future<Output = Result<CalendarEventCreationStage, CalendarCacheError>> + Send + '_;
 
     /// Returns the account's pending event-creation operation, if present.
     ///
@@ -327,7 +342,7 @@ pub trait CalendarCache: Send + Sync {
         account_id: &AccountId,
     ) -> impl Future<Output = Result<Option<PendingCalendarEventCreation>, CalendarCacheError>> + Send + '_;
 
-    /// Records that Graph definitively rejected the matching operation.
+    /// Records that the provider definitively rejected the matching operation.
     ///
     /// Repeating this update is safe. An absent matching marker is already
     /// resolved, while another operation remains untouched.
@@ -359,7 +374,7 @@ pub trait CalendarCache: Send + Sync {
         creation: &CalendarEventCreation,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
 
-    /// Stores a Graph-confirmed event and removes its matching pending operation atomically.
+    /// Stores a provider-confirmed event and removes its matching pending operation atomically.
     ///
     /// # Errors
     ///
@@ -372,7 +387,7 @@ pub trait CalendarCache: Send + Sync {
         event: &CalendarOccurrence,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
 
-    /// Replaces every cached copy of a Graph-confirmed event in one transaction.
+    /// Replaces every cached copy of a provider-confirmed event in one transaction.
     ///
     /// The cache removes the old event from all ranges for its account, then
     /// writes it to every existing range that the updated occurrence overlaps.

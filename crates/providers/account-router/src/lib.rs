@@ -447,6 +447,22 @@ where
         }
     }
 
+    fn recover_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_ {
+        let creation = creation.clone();
+        async move {
+            match require_selected_provider(
+                self.selected_provider().await,
+                CalendarOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => self.graph.recover_event_creation(&creation).await,
+                ProviderKind::ExchangeEws => self.ews.recover_event_creation(&creation).await,
+            }
+        }
+    }
+
     fn load_versioned_event(
         &self,
         event: &CalendarOccurrence,

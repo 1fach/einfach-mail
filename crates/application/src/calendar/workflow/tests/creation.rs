@@ -68,11 +68,23 @@ fn event_creation_waits_for_a_successful_view_sync() {
             workflow.create_event(&creation).await,
             Ok(CalendarEventCreationOutcome::Cached(_))
         ));
+        assert_eq!(
+            *provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned"),
+            vec![creation.id()]
+        );
+        assert!(provider
+            .recoveries
+            .lock()
+            .expect("synthetic recovery log mutex is not poisoned")
+            .is_empty());
     });
 }
 
 #[test]
-fn event_creation_reuses_its_pending_id_after_an_uncertain_provider_failure() {
+fn event_creation_recovers_its_pending_id_after_an_uncertain_provider_failure() {
     smol::block_on(async {
         let view = view();
         let creation = creation(view.clone());
@@ -98,17 +110,37 @@ fn event_creation_reuses_its_pending_id_after_an_uncertain_provider_failure() {
         );
         assert!(pending.events().is_empty());
 
+        assert_eq!(
+            *provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned"),
+            vec![creation.id()]
+        );
+        assert!(provider
+            .recoveries
+            .lock()
+            .expect("synthetic recovery log mutex is not poisoned")
+            .is_empty());
+
         let outcome = workflow
             .create_event(&creation)
             .await
-            .expect("same operation confirms on retry");
+            .expect("same operation confirms through recovery");
         assert!(matches!(outcome, CalendarEventCreationOutcome::Cached(_)));
         assert_eq!(
             *provider
                 .creations
                 .lock()
                 .expect("synthetic creation log mutex is not poisoned"),
-            vec![creation.id(), creation.id()]
+            vec![creation.id()]
+        );
+        assert_eq!(
+            *provider
+                .recoveries
+                .lock()
+                .expect("synthetic recovery log mutex is not poisoned"),
+            vec![creation.id()]
         );
         let saved = workflow
             .load_cached_view(&view)
@@ -124,7 +156,115 @@ fn event_creation_reuses_its_pending_id_after_an_uncertain_provider_failure() {
 }
 
 #[test]
-fn event_creation_recovers_when_cache_commit_fails_after_graph_confirmation() {
+fn unresolved_creation_uses_recovery_after_workflow_restart() {
+    smol::block_on(async {
+        let view = view();
+        let creation = creation(view.clone());
+        let provider = FixtureProvider::default();
+        provider.fail_next_creation(CalendarOperationError::ServiceUnavailable);
+        provider.fail_next_recovery(CalendarOperationError::ServiceUnavailable);
+        let cache = FixtureCache::default();
+        let workflow = CalendarWorkflow::new(
+            workflow_account_id(),
+            provider.clone(),
+            cache.clone(),
+        );
+        synchronize_empty_view(&workflow, &provider, &view, "create-restart-first-sync").await;
+
+        assert_eq!(
+            workflow.create_event(&creation).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::ServiceUnavailable
+            ))
+        );
+        drop(workflow);
+
+        let restarted = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
+        synchronize_empty_view(
+            &restarted,
+            &provider,
+            &view,
+            "create-restart-recovery-sync",
+        )
+        .await;
+        assert_eq!(
+            restarted.create_event(&creation).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::ServiceUnavailable
+            ))
+        );
+        assert_eq!(
+            *provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned"),
+            vec![creation.id()]
+        );
+        assert_eq!(
+            *provider
+                .recoveries
+                .lock()
+                .expect("synthetic recovery log mutex is not poisoned"),
+            vec![creation.id()]
+        );
+
+        assert!(matches!(
+            restarted.create_event(&creation).await,
+            Ok(CalendarEventCreationOutcome::Cached(_))
+        ));
+        assert_eq!(
+            *provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned"),
+            vec![creation.id()]
+        );
+        assert_eq!(
+            *provider
+                .recoveries
+                .lock()
+                .expect("synthetic recovery log mutex is not poisoned"),
+            vec![creation.id(), creation.id()]
+        );
+    });
+}
+
+#[test]
+fn creation_stage_cache_failure_does_not_call_the_provider() {
+    smol::block_on(async {
+        let view = view();
+        let creation = creation(view.clone());
+        let provider = FixtureProvider::default();
+        let cache = FixtureCache::default();
+        cache.fail_creation_stage(CalendarCacheError::Unavailable);
+        let workflow =
+            CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache.clone());
+        synchronize_empty_view(&workflow, &provider, &view, "create-stage-failure-sync").await;
+
+        assert_eq!(
+            workflow.create_event(&creation).await,
+            Err(CalendarWorkflowError::Cache(CalendarCacheError::Unavailable))
+        );
+        assert!(provider
+            .creations
+            .lock()
+            .expect("synthetic creation log mutex is not poisoned")
+            .is_empty());
+        assert!(provider
+            .recoveries
+            .lock()
+            .expect("synthetic recovery log mutex is not poisoned")
+            .is_empty());
+        assert!(cache
+            .pending_event_creation(creation.view().account_id())
+            .await
+            .expect("synthetic pending state is readable")
+            .is_none());
+    });
+}
+
+#[test]
+fn event_creation_recovers_when_cache_commit_fails_after_provider_confirmation() {
     smol::block_on(async {
         let view = view();
         let creation = creation(view.clone());
@@ -138,7 +278,7 @@ fn event_creation_recovers_when_cache_commit_fails_after_graph_confirmation() {
         let first_outcome = workflow
             .create_event(&creation)
             .await
-            .expect("Graph confirmation is reported even when local commit fails");
+            .expect("provider confirmation is reported even when local commit fails");
         assert!(matches!(
             first_outcome,
             CalendarEventCreationOutcome::ConfirmedButNotCached {
@@ -158,12 +298,12 @@ fn event_creation_recovers_when_cache_commit_fails_after_graph_confirmation() {
         );
         assert!(pending.events().is_empty());
 
-        let retry_outcome = workflow
+        let recovery_outcome = workflow
             .create_event(&creation)
             .await
-            .expect("retry confirms and saves the same operation");
+            .expect("recovery confirms and saves the same operation");
         assert!(matches!(
-            retry_outcome,
+            recovery_outcome,
             CalendarEventCreationOutcome::Cached(_)
         ));
         assert_eq!(
@@ -171,7 +311,14 @@ fn event_creation_recovers_when_cache_commit_fails_after_graph_confirmation() {
                 .creations
                 .lock()
                 .expect("synthetic creation log mutex is not poisoned"),
-            vec![creation.id(), creation.id()]
+            vec![creation.id()]
+        );
+        assert_eq!(
+            *provider
+                .recoveries
+                .lock()
+                .expect("synthetic recovery log mutex is not poisoned"),
+            vec![creation.id()]
         );
         let saved = workflow
             .load_cached_view(&view)
@@ -199,10 +346,10 @@ fn event_creation_rejects_an_unrelated_pending_operation_for_the_account() {
             "create-pending-initial-sync",
         )
         .await;
-        cache
-            .stage_event_creation(&pending_creation)
-            .await
-            .expect("the synthetic pending operation is staged");
+        assert_eq!(
+            cache.stage_event_creation(&pending_creation).await,
+            Ok(CalendarEventCreationStage::NewlyStaged)
+        );
 
         assert_eq!(
             workflow.create_event(&new_creation).await,

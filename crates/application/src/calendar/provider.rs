@@ -205,19 +205,40 @@ pub trait CalendarProvider: Send + Sync {
         std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
     }
 
-    /// Creates one event for the operation's account and exact primary-calendar view.
+    /// Sends a newly staged event creation to the provider.
     ///
-    /// The provider uses the operation's stable identifier as the Graph retry
-    /// key and never sends attendees or recurrence data.
+    /// The workflow calls this method only when the cache reports
+    /// [`crate::CalendarEventCreationStage::NewlyStaged`]. If the operation
+    /// remains unresolved, the workflow calls
+    /// [`Self::recover_event_creation`] with the same operation.
     ///
     /// # Errors
     ///
     /// Returns [`CalendarOperationError::EventCreationRejected`] only when a
-    /// provider response proves Graph did not create the event. Returns
+    /// provider response proves it did not create the event. Returns
     /// [`CalendarOperationError::CreationOutcomeUnknown`] when the request may
-    /// have reached Graph without confirmation. Other errors describe sign-in,
+    /// have reached the provider without confirmation. Other errors describe sign-in,
     /// access, transport, or response validation failures.
     fn create_event(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_;
+
+    /// Resolves the outcome of an event creation already stored by the cache.
+    ///
+    /// Implementations must use their provider's recovery policy for the exact
+    /// operation and must not change its identifier or draft. A provider that
+    /// cannot recover an existing creation returns
+    /// [`CalendarOperationError::UnsupportedOperation`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarOperationError::EventCreationRejected`] only when the
+    /// provider proves that the original creation was rejected. Returns
+    /// [`CalendarOperationError::CreationOutcomeUnknown`] when the event may
+    /// exist without confirmation. Other errors describe sign-in, access,
+    /// transport, or response-validation failures.
+    fn recover_event_creation(
         &self,
         creation: &CalendarEventCreation,
     ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_;

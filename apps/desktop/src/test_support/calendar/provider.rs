@@ -162,6 +162,13 @@ impl CalendarProvider for TestProvider {
         }
     }
 
+    fn recover_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_ {
+        self.create_event(creation)
+    }
+
     fn load_versioned_event(
         &self,
         event: &CalendarOccurrence,

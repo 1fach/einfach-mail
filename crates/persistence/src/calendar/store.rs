@@ -4,7 +4,8 @@ use async_sqlite::rusqlite::{
     Connection, OptionalExtension, Transaction, params, params_from_iter,
 };
 use einfach_mail_application::{
-    CalendarCache, CalendarCacheError, CalendarSyncMode, CalendarSyncState,
+    CalendarCache, CalendarCacheError, CalendarEventCreationStage, CalendarSyncMode,
+    CalendarSyncState,
 };
 use einfach_mail_domain::{
     AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
@@ -445,7 +446,8 @@ impl CalendarCache for SqliteAccountCache {
     fn stage_event_creation(
         &self,
         creation: &CalendarEventCreation,
-    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+    ) -> impl Future<Output = Result<CalendarEventCreationStage, CalendarCacheError>> + Send + '_
+    {
         let validation = self.check_calendar_view(creation.view());
         let creation = creation.clone();
         let account_id = creation.view().account_id().as_str().to_owned();
@@ -456,14 +458,20 @@ impl CalendarCache for SqliteAccountCache {
                 .conn_mut_and_then(move |connection| {
                     let transaction = connection.transaction()?;
                     insert_calendar_view_state(&transaction, &account_id, scope)?;
-                    match read_pending_event_creation(&transaction, &account_id)? {
+                    let stage = match read_pending_event_creation(&transaction, &account_id)? {
                         Some(PendingCalendarEventCreation::Unresolved(existing))
-                            if existing == creation => {}
+                            if existing == creation =>
+                        {
+                            CalendarEventCreationStage::ExistingUnresolved
+                        }
                         Some(_) => return Err(CalendarCacheFailure::CreationAlreadyPending),
-                        None => write_pending_event_creation(&transaction, &creation)?,
-                    }
+                        None => {
+                            write_pending_event_creation(&transaction, &creation)?;
+                            CalendarEventCreationStage::NewlyStaged
+                        }
+                    };
                     transaction.commit()?;
-                    Ok(())
+                    Ok(stage)
                 })
                 .await
                 .map_err(CalendarCacheFailure::public)

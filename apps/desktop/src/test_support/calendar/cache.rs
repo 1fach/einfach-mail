@@ -9,7 +9,8 @@ use std::{
 
 use super::fixtures::timed_event;
 use einfach_mail_application::{
-    CalendarCache, CalendarCacheError, CalendarSyncMode, CalendarSyncState,
+    CalendarCache, CalendarCacheError, CalendarEventCreationStage, CalendarSyncMode,
+    CalendarSyncState,
 };
 use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation,
@@ -272,7 +273,8 @@ impl CalendarCache for TestCache {
     fn stage_event_creation(
         &self,
         creation: &CalendarEventCreation,
-    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+    ) -> impl Future<Output = Result<CalendarEventCreationStage, CalendarCacheError>> + Send + '_
+    {
         let pending_creation = Arc::clone(&self.pending_creation);
         let creation = creation.clone();
         async move {
@@ -283,11 +285,11 @@ impl CalendarCache for TestCache {
                 Some(PendingCalendarEventCreation::Unresolved(existing))
                     if existing == &creation =>
                 {
-                    Ok(())
+                    Ok(CalendarEventCreationStage::ExistingUnresolved)
                 }
                 None => {
                     *pending = Some(PendingCalendarEventCreation::Unresolved(creation));
-                    Ok(())
+                    Ok(CalendarEventCreationStage::NewlyStaged)
                 }
                 Some(_) => Err(CalendarCacheError::CreationAlreadyPending),
             }

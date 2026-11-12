@@ -2,6 +2,7 @@
 pub(super) struct FixtureCache {
     views: Arc<Mutex<HashMap<CalendarViewReference, CachedView>>>,
     pending: Arc<Mutex<HashMap<AccountId, PendingCalendarEventCreation>>>,
+    creation_stage_error: Arc<Mutex<Option<CalendarCacheError>>>,
     creation_commit_error: Arc<Mutex<Option<CalendarCacheError>>>,
     rejection_mark_error: Arc<Mutex<Option<CalendarCacheError>>>,
     rejection_cleanup_error: Arc<Mutex<Option<CalendarCacheError>>>,
@@ -12,6 +13,13 @@ pub(super) struct FixtureCache {
 }
 
 impl FixtureCache {
+    pub(super) fn fail_creation_stage(&self, error: CalendarCacheError) {
+        *self
+            .creation_stage_error
+            .lock()
+            .expect("synthetic creation-stage error mutex is not poisoned") = Some(error);
+    }
+
     pub(super) fn fail_creation_commit(&self, error: CalendarCacheError) {
         *self
             .creation_commit_error
@@ -337,10 +345,18 @@ impl CalendarCache for FixtureCache {
     fn stage_event_creation(
         &self,
         creation: &CalendarEventCreation,
-    ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
+    ) -> impl Future<Output = Result<CalendarEventCreationStage, CalendarCacheError>> + Send + '_ {
         let pending = Arc::clone(&self.pending);
+        let creation_stage_error = Arc::clone(&self.creation_stage_error);
         let creation = creation.clone();
         async move {
+            if let Some(error) = creation_stage_error
+                .lock()
+                .expect("synthetic creation-stage error mutex is not poisoned")
+                .take()
+            {
+                return Err(error);
+            }
             let mut pending = pending
                 .lock()
                 .expect("synthetic cache mutex is not poisoned");
@@ -348,7 +364,7 @@ impl CalendarCache for FixtureCache {
                 Some(PendingCalendarEventCreation::Unresolved(existing))
                     if existing == &creation =>
                 {
-                    Ok(())
+                    Ok(CalendarEventCreationStage::ExistingUnresolved)
                 }
                 Some(_) => Err(CalendarCacheError::CreationAlreadyPending),
                 None => {
@@ -356,7 +372,7 @@ impl CalendarCache for FixtureCache {
                         creation.view().account_id().clone(),
                         PendingCalendarEventCreation::Unresolved(creation),
                     );
-                    Ok(())
+                    Ok(CalendarEventCreationStage::NewlyStaged)
                 }
             }
         }
