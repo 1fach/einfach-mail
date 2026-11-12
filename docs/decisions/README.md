@@ -67,3 +67,5 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0060](0060-one-active-account-first-release.md) | Support one active account in the first release | Accepted; Accounts UI tracked in #272 |
 | [0061](0061-feature-first-module-layout-and-test-placement.md) | Use a feature-first module layout and colocated tests | Accepted; refactor tracked in issue #282 |
 | [0062](0062-target-borrowed-mail-provider-future.md) | Tie the message-body future to its borrowed inputs | Accepted |
+| [0063](0063-reap-ews-transport-workers.md) | Reap EWS transport workers without blocking Drop | Accepted; implementation tracked in issue #383 |
+| [0064](0064-calendar-capabilities-by-operation.md) | Model calendar capabilities by operation | Accepted; migration tracked in issue #390 |
