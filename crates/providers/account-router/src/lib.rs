@@ -12,8 +12,8 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
-    MailFolder, MailReplyDraft, MessageBody, MessageId, ReadState,
+    CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
+    MailReplyDraft, MessageBody, MessageId, ReadState, VersionedCalendarEvent,
 };
 use einfach_mail_exchange_ews::ExchangeEwsProvider;
 use einfach_mail_microsoft_graph::MicrosoftGraphProvider;
@@ -447,10 +447,10 @@ where
         }
     }
 
-    fn editable_event(
+    fn load_versioned_event(
         &self,
         event: &CalendarOccurrence,
-    ) -> impl Future<Output = Result<EditableCalendarEvent, CalendarOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<VersionedCalendarEvent, CalendarOperationError>> + Send + '_
     {
         let event = event.clone();
         async move {
@@ -458,8 +458,8 @@ where
                 self.selected_provider().await,
                 CalendarOperationError::SignInRequired,
             )? {
-                ProviderKind::MicrosoftGraph => self.graph.editable_event(&event).await,
-                ProviderKind::ExchangeEws => self.ews.editable_event(&event).await,
+                ProviderKind::MicrosoftGraph => self.graph.load_versioned_event(&event).await,
+                ProviderKind::ExchangeEws => self.ews.load_versioned_event(&event).await,
             }
         }
     }
@@ -482,7 +482,7 @@ where
 
     fn delete_event(
         &self,
-        event: &EditableCalendarEvent,
+        event: &VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
         let event = event.clone();
         async move {

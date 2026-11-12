@@ -11,7 +11,7 @@ use einfach_mail_domain::{
     CalendarEventCreation, CalendarEventCreationId, CalendarEventDraft, CalendarEventUpdate,
     CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
     CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange, CalendarViewReference,
-    EditableCalendarEvent, PendingCalendarEventCreation,
+    PendingCalendarEventCreation, VersionedCalendarEvent,
 };
 use thiserror::Error;
 use time::{Date, OffsetDateTime, PrimitiveDateTime};
@@ -636,7 +636,7 @@ impl CalendarCache for SqliteAccountCache {
 
     fn commit_event_deletion(
         &self,
-        event: &EditableCalendarEvent,
+        event: &VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
         let validation = self.check_calendar_view(event.occurrence().reference());
         let event = event.clone();

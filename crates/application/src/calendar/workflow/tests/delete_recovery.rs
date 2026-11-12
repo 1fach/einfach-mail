@@ -16,14 +16,14 @@ fn confirmed_event_deletion_removes_the_cached_event() {
         else {
             panic!("synthetic event is cached");
         };
-        let editable = workflow
-            .editable_event(&event)
+        let versioned_event = workflow
+            .load_versioned_event(&event)
             .await
-            .expect("synthetic event is editable");
+            .expect("synthetic event has a provider version");
 
         assert_eq!(
             workflow
-                .delete_event(&editable)
+                .delete_event(&versioned_event)
                 .await
                 .expect("provider deletion is confirmed"),
             CalendarEventDeletionOutcome::Deleted
@@ -34,6 +34,14 @@ fn confirmed_event_deletion_removes_the_cached_event() {
             .expect("deleted view remains readable");
         assert!(snapshot.events().is_empty());
         assert_eq!(snapshot.write_readiness(), CalendarWriteReadiness::Ready);
+        let deleted_events = provider
+            .deletion_events
+            .lock()
+            .expect("synthetic deletion event mutex is not poisoned")
+            .clone();
+        assert_eq!(deleted_events.len(), 1);
+        assert_eq!(deleted_events[0].occurrence().id(), event.id());
+        assert_eq!(deleted_events[0].version().as_str(), "synthetic-version-1");
         assert_eq!(
             *provider
                 .deletion_calls
@@ -63,7 +71,7 @@ fn uncertain_event_deletion_requires_sync_and_is_not_replayed() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
         provider.fail_next_deletion(CalendarOperationError::DeleteOutcomeUnknown);
@@ -156,11 +164,11 @@ fn uncertain_event_deletion_requires_sync_for_each_previously_synced_account_vie
             .events()[0]
             .clone();
         let source_editable = workflow
-            .editable_event(&source_event)
+            .load_versioned_event(&source_event)
             .await
             .expect("synchronized event can be opened for deletion");
         let overlapping_editable = workflow
-            .editable_event(&overlapping_event)
+            .load_versioned_event(&overlapping_event)
             .await
             .expect("overlapping event can be opened for deletion");
         provider.fail_next_deletion(CalendarOperationError::DeleteOutcomeUnknown);
@@ -269,7 +277,7 @@ fn changed_event_deletion_requires_sync_before_another_write() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
         provider.fail_next_deletion(CalendarOperationError::EventChanged);
@@ -320,7 +328,7 @@ fn confirmed_event_deletion_with_a_cache_failure_requires_sync() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
 
@@ -394,7 +402,7 @@ fn event_deletion_reserves_the_account_until_the_provider_returns() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
         let second_editable = editable.clone();
@@ -447,7 +455,7 @@ fn canceled_event_deletion_requires_sync_before_another_write() {
         };
         let editable = workflows
             .first
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
         let retry = editable.clone();
@@ -485,7 +493,7 @@ fn reopened_workflow_requires_sync_for_every_previously_synced_view() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
         provider.fail_next_deletion(CalendarOperationError::DeleteOutcomeUnknown);

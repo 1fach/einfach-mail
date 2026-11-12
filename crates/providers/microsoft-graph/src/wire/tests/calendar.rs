@@ -43,7 +43,7 @@ async fn create_event_requires_a_matching_transaction_id_in_the_response() {
 #[test]
 fn event_update_body_contains_only_changed_fields() {
     let subject_update = CalendarEventUpdate::new(
-        editable_event("synthetic-version-1"),
+        versioned_event("synthetic-version-1"),
         CalendarEventUpdateDraft::timed(
             "Updated planning".to_owned(),
             utc_time(8, 9),
@@ -59,7 +59,7 @@ fn event_update_body_contains_only_changed_fields() {
     assert_eq!(subject_body, json!({"subject": "Updated planning"}));
 
     let time_update = CalendarEventUpdate::new(
-        editable_event("synthetic-version-1"),
+        versioned_event("synthetic-version-1"),
         CalendarEventUpdateDraft::timed("Planning".to_owned(), utc_time(8, 11), utc_time(8, 12))
             .expect("synthetic time update is valid"),
     )
@@ -79,7 +79,7 @@ fn event_update_body_contains_only_changed_fields() {
 
 #[test]
 fn event_edit_boundary_rejects_meetings_recurring_events_and_unknown_metadata() {
-    let valid_event_json = editable_event_json(
+    let valid_event_json = versioned_event_json(
         "synthetic-version-1",
         "Planning",
         "2030-01-08T09:00:00.0000000",
@@ -138,7 +138,7 @@ fn event_edit_boundary_rejects_meetings_recurring_events_and_unknown_metadata() 
         let wire = serde_json::from_value::<WireCalendarEvent>(event_json)
             .expect("synthetic event metadata deserializes");
         assert_eq!(
-            wire.into_editable(synthetic_view()),
+            wire.into_versioned(synthetic_view()),
             Err(GraphError::CalendarEventNotEditable)
         );
     }
@@ -148,7 +148,7 @@ fn event_edit_boundary_rejects_meetings_recurring_events_and_unknown_metadata() 
 async fn event_update_rechecks_version_and_patches_only_requested_fields() {
     let server = MockServer::start_async().await;
     let view = synthetic_view();
-    let source = serde_json::from_value::<WireCalendarEvent>(editable_event_json(
+    let source = serde_json::from_value::<WireCalendarEvent>(versioned_event_json(
         "synthetic-version-1",
         "Planning",
         "2030-01-08T09:00:00.0000000",
@@ -157,7 +157,7 @@ async fn event_update_rechecks_version_and_patches_only_requested_fields() {
     .expect("synthetic event deserializes")
     .into_new(view)
     .expect("synthetic cached event is complete");
-    let updated = editable_event_json(
+    let updated = versioned_event_json(
         "synthetic-version-2",
         "Updated planning",
         "2030-01-08T11:00:00.0000000",
@@ -172,7 +172,7 @@ async fn event_update_rechecks_version_and_patches_only_requested_fields() {
             then.status(200)
                 .header("content-type", "application/json")
                 .body(
-                    editable_event_json(
+                    versioned_event_json(
                         "synthetic-version-1",
                         "Planning",
                         "2030-01-08T09:00:00.0000000",
@@ -197,7 +197,7 @@ async fn event_update_rechecks_version_and_patches_only_requested_fields() {
         .await;
     let (api, _transport) = synthetic_graph_api(&server);
     let editable = api
-        .editable_calendar_event(&source, synthetic_access_token())
+        .load_versioned_calendar_event(&source, synthetic_access_token())
         .await
         .expect("synthetic supported event passes the edit check");
     let update = CalendarEventUpdate::new(
@@ -226,7 +226,7 @@ async fn event_update_rechecks_version_and_patches_only_requested_fields() {
 #[tokio::test]
 async fn event_update_refuses_a_changed_version_without_patching() {
     let server = MockServer::start_async().await;
-    let source = editable_event("synthetic-version-1");
+    let source = versioned_event("synthetic-version-1");
     let update = CalendarEventUpdate::new(
         source,
         CalendarEventUpdateDraft::timed(
@@ -243,7 +243,7 @@ async fn event_update_refuses_a_changed_version_without_patching() {
             then.status(200)
                 .header("content-type", "application/json")
                 .body(
-                    editable_event_json(
+                    versioned_event_json(
                         "synthetic-version-2",
                         "Concurrent change",
                         "2030-01-08T09:00:00.0000000",
@@ -274,7 +274,7 @@ async fn event_update_refuses_a_changed_version_without_patching() {
 async fn event_update_refuses_a_missing_event_without_patching() {
     let server = MockServer::start_async().await;
     let update = CalendarEventUpdate::new(
-        editable_event("synthetic-version-1"),
+        versioned_event("synthetic-version-1"),
         CalendarEventUpdateDraft::timed(
             "Updated planning".to_owned(),
             utc_time(8, 11),
@@ -309,7 +309,7 @@ async fn event_update_refuses_a_missing_event_without_patching() {
 #[tokio::test]
 async fn event_delete_rechecks_version_and_sends_the_current_etag() {
     let server = MockServer::start_async().await;
-    let event = editable_event("synthetic-version-1");
+    let event = versioned_event("synthetic-version-1");
     let read = server
         .mock_async(|when, then| {
             when.method(GET)
@@ -319,7 +319,7 @@ async fn event_delete_rechecks_version_and_sends_the_current_etag() {
             then.status(200)
                 .header("content-type", "application/json")
                 .body(
-                    editable_event_json(
+                    versioned_event_json(
                         "synthetic-version-1",
                         "Planning",
                         "2030-01-08T09:00:00.0000000",
@@ -351,14 +351,14 @@ async fn event_delete_rechecks_version_and_sends_the_current_etag() {
 #[tokio::test]
 async fn event_delete_refuses_a_changed_version_without_deleting() {
     let server = MockServer::start_async().await;
-    let event = editable_event("synthetic-version-1");
+    let event = versioned_event("synthetic-version-1");
     let read = server
         .mock_async(|when, then| {
             when.method(GET).path("/v1.0/me/events/synthetic-event");
             then.status(200)
                 .header("content-type", "application/json")
                 .body(
-                    editable_event_json(
+                    versioned_event_json(
                         "synthetic-version-2",
                         "Changed planning",
                         "2030-01-08T09:00:00.0000000",
@@ -388,8 +388,8 @@ async fn event_delete_refuses_a_changed_version_without_deleting() {
 #[tokio::test]
 async fn event_delete_requires_an_etag_before_sending() {
     let server = MockServer::start_async().await;
-    let event = editable_event("synthetic-version-1");
-    let mut current = editable_event_json(
+    let event = versioned_event("synthetic-version-1");
+    let mut current = versioned_event_json(
         "synthetic-version-1",
         "Planning",
         "2030-01-08T09:00:00.0000000",

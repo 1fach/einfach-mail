@@ -9,8 +9,8 @@ use einfach_mail_domain::{
     AccountCapabilities, AccountId, CalendarCapabilities, CalendarEventCreation,
     CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion,
     CalendarOccurrencePatch, CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange,
-    CalendarViewReference, EditableCalendarEvent, EventId, FolderId, FolderReference, MailAction,
-    MailCapabilities, MessageDeltaChange, MessageDeltaProgress, MessageId, ReadState,
+    CalendarViewReference, EventId, FolderId, FolderReference, MailAction, MailCapabilities,
+    MessageDeltaChange, MessageDeltaProgress, MessageId, ReadState, VersionedCalendarEvent,
 };
 use ews::server_version::ServerVersionInfo;
 use ews::sync_folder_items::{Change, SyncFolderItems};
@@ -98,7 +98,7 @@ fn synthetic_event_creation(view: &CalendarViewReference) -> CalendarEventCreati
         .expect("synthetic event fits the calendar view")
 }
 
-fn synthetic_editable_event(view: &CalendarViewReference) -> EditableCalendarEvent {
+fn synthetic_versioned_event(view: &CalendarViewReference) -> VersionedCalendarEvent {
     let start = view.range().start() + time::Duration::hours(1);
     let end = start + time::Duration::hours(1);
     let mut time = CalendarOccurrenceTimePatch::new();
@@ -114,7 +114,7 @@ fn synthetic_editable_event(view: &CalendarViewReference) -> EditableCalendarEve
             EventId::try_from("synthetic-event".to_owned()).expect("synthetic event ID is valid"),
         )
         .expect("synthetic timed event is valid");
-    EditableCalendarEvent::new(
+    VersionedCalendarEvent::new(
         occurrence,
         CalendarEventVersion::try_from("synthetic-version".to_owned())
             .expect("synthetic event version is valid"),

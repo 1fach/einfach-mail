@@ -10,9 +10,9 @@ use std::{
 
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, EditableCalendarEvent, FolderReference, FollowUpFlagStatus, MailDraft,
-    MailFolder, MailMessage, MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend,
-    ReadState,
+    CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
+    MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend, ReadState,
+    VersionedCalendarEvent,
 };
 
 use crate::shared::recovery::AccountWorkflowRecovery;
@@ -227,19 +227,19 @@ pub trait CalendarSession: Send + Sync {
         view: &'a CalendarViewReference,
     ) -> AccountSessionFuture<'a, Result<CalendarSyncReport, CalendarWorkflowError>>;
 
-    /// Loads and validates the current Graph version of a cached event for editing.
+    /// Loads the provider version for a cached event before an update or deletion.
     ///
     /// The account reservation ends when this method returns so the user can
-    /// edit the form without blocking synchronization.
+    /// review the event without blocking synchronization.
     ///
     /// # Errors
     ///
     /// Returns a workflow error when the event cannot be loaded, does not meet
-    /// the supported edit rules, or another account operation is active.
-    fn editable_event<'a>(
+    /// the provider's supported write rules, or another account operation is active.
+    fn load_versioned_event<'a>(
         &'a self,
         event: &'a CalendarOccurrence,
-    ) -> AccountSessionFuture<'a, Result<EditableCalendarEvent, CalendarWorkflowError>>;
+    ) -> AccountSessionFuture<'a, Result<VersionedCalendarEvent, CalendarWorkflowError>>;
 
     /// Creates a staged event and caches it after Graph confirms the result.
     ///
@@ -289,7 +289,7 @@ pub trait CalendarSession: Send + Sync {
     /// [`CalendarEventDeletionOutcome::DeletedButNotCached`].
     fn delete_event<'a>(
         &'a self,
-        event: &'a EditableCalendarEvent,
+        event: &'a VersionedCalendarEvent,
     ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>>;
 }
 
@@ -670,11 +670,11 @@ where
         Box::pin(CalendarWorkflow::sync_view(self, view))
     }
 
-    fn editable_event<'a>(
+    fn load_versioned_event<'a>(
         &'a self,
         event: &'a CalendarOccurrence,
-    ) -> AccountSessionFuture<'a, Result<EditableCalendarEvent, CalendarWorkflowError>> {
-        Box::pin(CalendarWorkflow::editable_event(self, event))
+    ) -> AccountSessionFuture<'a, Result<VersionedCalendarEvent, CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::load_versioned_event(self, event))
     }
 
     fn create_event<'a>(
@@ -702,7 +702,7 @@ where
 
     fn delete_event<'a>(
         &'a self,
-        event: &'a EditableCalendarEvent,
+        event: &'a VersionedCalendarEvent,
     ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>> {
         Box::pin(CalendarWorkflow::delete_event(self, event))
     }

@@ -107,7 +107,7 @@ pub(super) fn deletion_error_text(error: CalendarWorkflowError) -> &'static str 
             "This appointment changed while the editor was open. Sync every calendar week already synced for this account, then review it again."
         }
         CalendarWorkflowError::Provider(CalendarOperationError::EventNotEditable)
-        | CalendarWorkflowError::InvalidEditableEvent => {
+        | CalendarWorkflowError::InvalidVersionedEvent => {
             "Microsoft did not confirm that this appointment can be deleted here."
         }
         CalendarWorkflowError::CalendarWriteSyncRequired => {
@@ -188,7 +188,7 @@ pub(super) fn update_error_text(error: CalendarWorkflowError) -> &'static str {
         CalendarWorkflowError::OperationInProgress => {
             "The calendar is syncing. Save these changes after sync finishes."
         }
-        CalendarWorkflowError::InvalidEditableEvent => {
+        CalendarWorkflowError::InvalidVersionedEvent => {
             "The calendar service returned event details that cannot be edited safely."
         }
         CalendarWorkflowError::InvalidUpdateConfirmation => {

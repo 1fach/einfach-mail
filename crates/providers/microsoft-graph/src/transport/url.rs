@@ -152,7 +152,7 @@ impl GraphAuthority {
         self.validated_url(self.calendar_event_url(event_id)?)
     }
 
-    pub fn editable_calendar_event_path(&self, event_id: &str) -> Result<GraphUrl, GraphError> {
+    pub fn versioned_calendar_event_path(&self, event_id: &str) -> Result<GraphUrl, GraphError> {
         let mut url = self.calendar_event_url(event_id)?;
         url.query_pairs_mut()
             .append_pair("$select", CALENDAR_EVENT_EDIT_SELECT);

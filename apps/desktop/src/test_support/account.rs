@@ -26,10 +26,10 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, CalendarCapabilities, CalendarEventCreation,
-    CalendarEventUpdate, CalendarOccurrence, CalendarViewReference, EditableCalendarEvent,
-    FolderReference, FollowUpFlagStatus, MailAction, MailCapabilities, MailDraft, MailFolder,
-    MailMessage, MailReplyDraft, MailSendOperationId, MessageId, MissingAccountLabel,
-    PendingMailSend, ReadState,
+    CalendarEventUpdate, CalendarOccurrence, CalendarViewReference, FolderReference,
+    FollowUpFlagStatus, MailAction, MailCapabilities, MailDraft, MailFolder, MailMessage,
+    MailReplyDraft, MailSendOperationId, MessageId, MissingAccountLabel, PendingMailSend,
+    ReadState, VersionedCalendarEvent,
 };
 
 pub(crate) fn mail_only_profile() -> AccountProfile {
@@ -241,10 +241,10 @@ impl CalendarSession for TestCalendarSession {
         ))))
     }
 
-    fn editable_event<'a>(
+    fn load_versioned_event<'a>(
         &'a self,
         _: &'a CalendarOccurrence,
-    ) -> AccountSessionFuture<'a, Result<EditableCalendarEvent, CalendarWorkflowError>> {
+    ) -> AccountSessionFuture<'a, Result<VersionedCalendarEvent, CalendarWorkflowError>> {
         Box::pin(ready(Err(CalendarWorkflowError::Cache(
             CalendarCacheError::Unavailable,
         ))))
@@ -279,7 +279,7 @@ impl CalendarSession for TestCalendarSession {
 
     fn delete_event<'a>(
         &'a self,
-        _: &'a EditableCalendarEvent,
+        _: &'a VersionedCalendarEvent,
     ) -> AccountSessionFuture<'a, Result<CalendarEventDeletionOutcome, CalendarWorkflowError>> {
         Box::pin(ready(Err(CalendarWorkflowError::Cache(
             CalendarCacheError::Unavailable,

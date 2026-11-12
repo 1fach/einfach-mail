@@ -3,7 +3,7 @@ async fn ews_provider_rejects_calendar_event_writes() {
     let provider = ExchangeEwsProvider::new(EmptySettingsStore);
     let view = synthetic_calendar_view();
     let creation = synthetic_event_creation(&view);
-    let editable = synthetic_editable_event(&view);
+    let editable = synthetic_versioned_event(&view);
     let update_draft = CalendarEventUpdateDraft::timed(
         "Changed event".to_owned(),
         view.range().start() + time::Duration::hours(2),
@@ -18,7 +18,7 @@ async fn ews_provider_rejects_calendar_event_writes() {
         Err(CalendarOperationError::UnsupportedOperation)
     ));
     assert!(matches!(
-        provider.editable_event(editable.occurrence()).await,
+        provider.load_versioned_event(editable.occurrence()).await,
         Err(CalendarOperationError::UnsupportedOperation)
     ));
     assert!(matches!(

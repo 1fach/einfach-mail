@@ -13,7 +13,7 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, EditableCalendarEvent,
+    CalendarViewReference, VersionedCalendarEvent,
 };
 use einfach_mail_provider_runtime as worker;
 
@@ -82,10 +82,10 @@ impl CalendarProvider for MicrosoftGraphProvider {
         })
     }
 
-    fn editable_event(
+    fn load_versioned_event(
         &self,
         event: &CalendarOccurrence,
-    ) -> impl Future<Output = Result<EditableCalendarEvent, CalendarOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<VersionedCalendarEvent, CalendarOperationError>> + Send + '_
     {
         let config = Arc::clone(&self.config);
         let event = event.clone();
@@ -94,7 +94,7 @@ impl CalendarProvider for MicrosoftGraphProvider {
             let token = ensure_access_token(&config, &account_id).await?;
             let graph_api = config.graph_api().map_err(map_calendar_graph_error)?;
             let editable = graph_api
-                .editable_calendar_event(&event, Arc::clone(&token))
+                .load_versioned_calendar_event(&event, Arc::clone(&token))
                 .await;
             map_calendar_result(&config, &account_id, &token, editable).await
         })
@@ -124,7 +124,7 @@ impl CalendarProvider for MicrosoftGraphProvider {
 
     fn delete_event(
         &self,
-        event: &EditableCalendarEvent,
+        event: &VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let event = event.clone();

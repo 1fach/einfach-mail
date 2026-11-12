@@ -9,7 +9,7 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     CalendarEventCreation, CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft,
     CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId, CalendarViewRange,
-    EditableCalendarEvent, PendingCalendarEventCreation,
+    PendingCalendarEventCreation, VersionedCalendarEvent,
 };
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::{

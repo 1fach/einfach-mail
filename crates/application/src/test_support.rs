@@ -9,8 +9,8 @@ use einfach_mail_domain::{
     AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
     CalendarEventCreation, CalendarEventCreationId, CalendarEventUpdate, CalendarEventUpdateDraft,
     CalendarEventVersion, CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTime,
-    CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference, EditableCalendarEvent,
-    EventId, PendingCalendarEventCreation,
+    CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference, EventId,
+    PendingCalendarEventCreation, VersionedCalendarEvent,
 };
 use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 

@@ -55,6 +55,7 @@ run() {
 
 run python3 -B -m unittest discover -s scripts/tests
 run python3 -B scripts/check-rust-module-layout.py
+run python3 -B scripts/check-calendar-versioned-api.py
 run cargo depgraph-check check
 run cargo deny check bans
 run cargo +1.95.0 check --workspace --all-targets --locked

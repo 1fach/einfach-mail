@@ -28,9 +28,9 @@ pub use calendar_creation::{
     InvalidCalendarEventTimeZone, PendingCalendarEventCreation,
 };
 pub use calendar_edit::{
-    CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion, EditableCalendarEvent,
-    InvalidCalendarEventUpdateDraft, InvalidCalendarEventVersion, InvalidEditableCalendarEvent,
-    NoCalendarEventChanges,
+    CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion,
+    InvalidCalendarEventUpdateDraft, InvalidCalendarEventVersion, InvalidVersionedCalendarEvent,
+    NoCalendarEventChanges, VersionedCalendarEvent,
 };
 pub use identifiers::{AccountId, EmptyIdentifier, EventId, FolderId, MessageId};
 pub use mail::{

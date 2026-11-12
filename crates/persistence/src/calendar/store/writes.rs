@@ -364,7 +364,7 @@ pub(super) fn commit_calendar_event_deletion(
     transaction: &Transaction<'_>,
     account_id: &str,
     source_range: CalendarScope,
-    event: &EditableCalendarEvent,
+    event: &VersionedCalendarEvent,
 ) -> CacheResult<()> {
     require_cached_source_view(transaction, account_id, source_range)?;
     transaction.execute(

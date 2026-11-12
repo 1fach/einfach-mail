@@ -14,8 +14,8 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, EditableCalendarEvent, FolderId, FolderReference, FollowUpFlagStatus,
-    MailDraft, MailFolder, MessageBody, MessageId, ReadState,
+    CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
+    MessageBody, MessageId, ReadState, VersionedCalendarEvent,
 };
 
 pub(crate) type PageQueue = VecDeque<Result<MessageDeltaResponse, MailOperationError>>;
@@ -544,10 +544,10 @@ impl CalendarProvider for FixtureProvider {
         ready(Ok(CalendarSyncStrategy::Delta))
     }
 
-    fn editable_event(
+    fn load_versioned_event(
         &self,
         _: &CalendarOccurrence,
-    ) -> impl Future<Output = Result<EditableCalendarEvent, CalendarOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<VersionedCalendarEvent, CalendarOperationError>> + Send + '_
     {
         ready(Err(CalendarOperationError::ServiceUnavailable))
     }
@@ -568,7 +568,7 @@ impl CalendarProvider for FixtureProvider {
 
     fn delete_event(
         &self,
-        _: &EditableCalendarEvent,
+        _: &VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
         let result = self.calendar_delete_result;
         let calls = Arc::clone(&self.calendar_delete_calls);

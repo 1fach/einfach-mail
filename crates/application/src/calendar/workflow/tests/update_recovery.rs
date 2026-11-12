@@ -14,23 +14,37 @@ fn event_update_confirms_and_replaces_the_cached_occurrence() {
         else {
             panic!("synthetic event is cached");
         };
-        let editable = workflow
-            .editable_event(&event)
+        let versioned_event = workflow
+            .load_versioned_event(&event)
             .await
-            .expect("synthetic timed event can be opened for editing");
+            .expect("synthetic timed event has a provider version");
         let draft = CalendarEventUpdateDraft::timed(
             "Updated planning".to_owned(),
             utc(2030, Month::January, 8) + time::Duration::hours(11),
             utc(2030, Month::January, 8) + time::Duration::hours(12),
         )
         .expect("synthetic edit draft is valid");
-        let update = CalendarEventUpdate::new(editable, draft).expect("event values changed");
+        let update = CalendarEventUpdate::new(versioned_event, draft).expect("event values changed");
 
         let outcome = workflow
             .update_event(&update)
             .await
             .expect("synthetic Graph update is confirmed");
         assert!(matches!(outcome, CalendarEventUpdateOutcome::Cached(_)));
+        let captured_updates = provider
+            .update_calls
+            .lock()
+            .expect("synthetic update log mutex is not poisoned")
+            .clone();
+        assert_eq!(captured_updates.len(), 1);
+        assert_eq!(
+            captured_updates[0].source().occurrence().id(),
+            event.id()
+        );
+        assert_eq!(
+            captured_updates[0].source().version().as_str(),
+            "synthetic-version-1"
+        );
         let snapshot = workflow
             .load_cached_view(&view)
             .await
@@ -65,7 +79,7 @@ fn event_update_reports_remote_confirmation_when_cache_commit_fails() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic timed event can be opened for editing");
         let draft = CalendarEventUpdateDraft::timed(
@@ -96,7 +110,7 @@ fn event_update_reports_remote_confirmation_when_cache_commit_fails() {
                 == CalendarWriteReadiness::AccountSyncRequired
         );
         assert_eq!(
-            workflow.editable_event(&event).await,
+            workflow.load_versioned_event(&event).await,
             Err(CalendarWorkflowError::CalendarWriteSyncRequired)
         );
         assert_eq!(
@@ -120,7 +134,7 @@ fn event_update_reports_remote_confirmation_when_cache_commit_fails() {
             .sync_view(&view)
             .await
             .expect("a completed sync clears the update recovery gate");
-        assert!(workflow.editable_event(&event).await.is_ok());
+        assert!(workflow.load_versioned_event(&event).await.is_ok());
     });
 }
 
@@ -149,7 +163,7 @@ fn unknown_event_update_requires_successful_sync_before_another_write() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic timed event can be opened for editing");
         let draft = CalendarEventUpdateDraft::timed(
@@ -177,7 +191,7 @@ fn unknown_event_update_requires_successful_sync_before_another_write() {
                 == CalendarWriteReadiness::AccountSyncRequired
         );
         assert_eq!(
-            workflow.editable_event(&event).await,
+            workflow.load_versioned_event(&event).await,
             Err(CalendarWorkflowError::CalendarWriteSyncRequired)
         );
         assert_eq!(
@@ -223,7 +237,7 @@ fn unknown_event_update_requires_successful_sync_before_another_write() {
             .sync_view(&view)
             .await
             .expect("a complete sync clears the recovery gate");
-        assert!(workflow.editable_event(&event).await.is_ok());
+        assert!(workflow.load_versioned_event(&event).await.is_ok());
         assert!(matches!(
             workflow.create_event(&followup_creation).await,
             Ok(CalendarEventCreationOutcome::Cached(_))
@@ -264,7 +278,7 @@ fn uncertain_update_and_delete_recovery_blocks_sibling_workflows() {
         };
         let editable = workflows
             .first
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
         let update = update_request(editable.clone());
@@ -291,7 +305,7 @@ fn uncertain_update_and_delete_recovery_blocks_sibling_workflows() {
         .await;
         let editable = workflows
             .sibling
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("successful sync restores calendar writes");
         let sibling_editable = editable.clone();
@@ -333,7 +347,7 @@ fn definitive_event_write_rejections_clear_persisted_recovery_markers() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
         let update = update_request(editable);
@@ -361,7 +375,7 @@ fn definitive_event_write_rejections_clear_persisted_recovery_markers() {
         );
 
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("definitive rejection keeps the event editable");
         provider.fail_next_deletion(CalendarOperationError::EventDeletionRejected);
@@ -405,7 +419,7 @@ fn failed_recovery_marker_cleanup_keeps_calendar_writes_blocked() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
         cache.fail_write_recovery_cleanup(CalendarCacheError::Unavailable);
@@ -466,7 +480,7 @@ fn changed_event_update_requires_sync_before_another_write() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
         let draft = CalendarEventUpdateDraft::timed(
@@ -550,7 +564,7 @@ fn uncertain_update_requires_sync_for_each_previously_synced_account_view() {
             .events()[0]
             .clone();
         let editable = workflow
-            .editable_event(&source_event)
+            .load_versioned_event(&source_event)
             .await
             .expect("synchronized event can be opened for editing");
         let draft = CalendarEventUpdateDraft::timed(
@@ -579,7 +593,7 @@ fn uncertain_update_requires_sync_for_each_previously_synced_account_view() {
             );
         }
         assert_eq!(
-            workflow.editable_event(&overlapping_event).await,
+            workflow.load_versioned_event(&overlapping_event).await,
             Err(CalendarWorkflowError::CalendarWriteSyncRequired)
         );
 
@@ -631,7 +645,7 @@ fn uncertain_update_requires_sync_for_each_previously_synced_account_view() {
             .events()[0]
             .clone();
         assert_eq!(reconciled.subject(), Some("Updated cross-week appointment"));
-        assert!(workflow.editable_event(&reconciled).await.is_ok());
+        assert!(workflow.load_versioned_event(&reconciled).await.is_ok());
     });
 }
 
@@ -662,7 +676,7 @@ fn event_update_reserves_the_whole_account_until_the_cache_commit_finishes() {
             panic!("synthetic event is cached");
         };
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic timed event can be opened for editing");
         let draft = CalendarEventUpdateDraft::timed(
@@ -718,7 +732,7 @@ fn canceled_event_update_requires_sync_before_another_write() {
         };
         let editable = workflows
             .first
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("synthetic event is editable");
         let update = update_request(editable.clone());

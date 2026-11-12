@@ -266,7 +266,7 @@ fn factory_sessions_share_uncertain_calendar_delete_recovery() {
             .synchronize_view(&view)
             .await
             .expect("second calendar view syncs");
-        let event = editable_calendar_event(view);
+        let event = versioned_calendar_event(view);
 
         assert_eq!(
             first_calendar.delete_event(&event).await,

@@ -13,8 +13,8 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation,
     CalendarEventUpdate, CalendarEventVersion, CalendarOccurrence, CalendarOccurrencePatch,
-    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarViewReference,
-    EditableCalendarEvent, EventId,
+    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarViewReference, EventId,
+    VersionedCalendarEvent,
 };
 use tokio::sync::oneshot;
 
@@ -162,14 +162,14 @@ impl CalendarProvider for TestProvider {
         }
     }
 
-    fn editable_event(
+    fn load_versioned_event(
         &self,
         event: &CalendarOccurrence,
-    ) -> impl Future<Output = Result<EditableCalendarEvent, CalendarOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<VersionedCalendarEvent, CalendarOperationError>> + Send + '_
     {
         let event = event.clone();
         async move {
-            EditableCalendarEvent::new(
+            VersionedCalendarEvent::new(
                 event,
                 CalendarEventVersion::try_from("synthetic-version-1".to_owned())
                     .map_err(|_| CalendarOperationError::InvalidResponse)?,
@@ -223,7 +223,7 @@ impl CalendarProvider for TestProvider {
 
     fn delete_event(
         &self,
-        _: &EditableCalendarEvent,
+        _: &VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
         let gate = self
             .event_deletion_gate

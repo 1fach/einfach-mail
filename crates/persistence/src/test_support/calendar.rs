@@ -2,7 +2,7 @@ use einfach_mail_application::{CalendarDeltaPageResponse, CalendarDeltaResponse}
 use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress, CalendarEventVersion,
     CalendarOccurrencePatch, CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference,
-    EditableCalendarEvent, EventId,
+    EventId, VersionedCalendarEvent,
 };
 use time::{Date, Month};
 
@@ -34,7 +34,7 @@ pub(crate) fn completed_calendar_page(cursor: &str) -> CalendarDeltaResponse {
     ))
 }
 
-pub(crate) fn editable_calendar_event(view: CalendarViewReference) -> EditableCalendarEvent {
+pub(crate) fn versioned_calendar_event(view: CalendarViewReference) -> VersionedCalendarEvent {
     let mut patch = CalendarOccurrencePatch::new();
     patch.set_subject(Some("Synthetic event".to_owned()));
     let start = view.range().start() + time::Duration::hours(1);
@@ -51,6 +51,6 @@ pub(crate) fn editable_calendar_event(view: CalendarViewReference) -> EditableCa
         .expect("synthetic calendar event is complete");
     let version = CalendarEventVersion::try_from("synthetic-version".to_owned())
         .expect("synthetic calendar version is valid");
-    EditableCalendarEvent::new(occurrence, version)
+    VersionedCalendarEvent::new(occurrence, version)
         .expect("synthetic timed calendar event is editable")
 }
