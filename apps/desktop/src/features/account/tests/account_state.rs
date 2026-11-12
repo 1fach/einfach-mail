@@ -16,8 +16,11 @@ fn connects_and_signs_out_through_the_account_view(cx: &mut TestAppContext) {
         sign_out_events: Arc::clone(&sign_out_events),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (workspace, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let view = context
+        .cx
+        .update(|cx| workspace.read(cx).test_account_view());
 
     context.run_until_parked();
     context.cx.update(|cx| {
@@ -242,8 +245,11 @@ fn failed_restore_removes_cache_before_the_verified_saved_credential(cx: &mut Te
         sign_out_events: Arc::clone(&event_log),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (workspace, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let view = context
+        .cx
+        .update(|cx| workspace.read(cx).test_account_view());
 
     context.run_until_parked();
     draw_account_view(context);
@@ -289,8 +295,11 @@ fn failed_restore_without_verified_identity_preserves_credential(cx: &mut TestAp
         sign_out_events: Arc::clone(&event_log),
         removal_account_ids: Arc::clone(&removal_account_ids),
     });
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (workspace, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let view = context
+        .cx
+        .update(|cx| workspace.read(cx).test_account_view());
 
     context.run_until_parked();
     click(context, "sign-out");
@@ -341,8 +350,8 @@ fn connect_mismatch_keeps_saved_sign_in_and_requires_restore(cx: &mut TestAppCon
         .expect("synthetic connection error mutex is healthy") =
         Some(AccountOperationError::AccountMismatch);
     let workflow = Arc::new(AccountWorkflow::new(provider));
-    let (view, context) = cx.add_window_view(|_, cx| {
-        AccountView::new(
+    let (workspace, context) = cx.add_window_view(|_, cx| {
+        Workspace::new(
             Ok(AccountServices::new(
                 workflow,
                 unused_account_session_factory(),
@@ -350,6 +359,9 @@ fn connect_mismatch_keeps_saved_sign_in_and_requires_restore(cx: &mut TestAppCon
             cx,
         )
     });
+    let view = context
+        .cx
+        .update(|cx| workspace.read(cx).test_account_view());
 
     context.run_until_parked();
     draw_account_view(context);

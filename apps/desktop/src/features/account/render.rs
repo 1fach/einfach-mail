@@ -1,12 +1,11 @@
 use super::copy::{
-    account_cache_open_error_message, account_cache_removal_error_message,
-    calendar_actions_summary, mail_access_summary, permission_review_disclosure,
+    account_cache_removal_error_message, calendar_actions_summary, mail_access_summary,
+    permission_review_disclosure,
 };
 use super::state::{
-    AccountStatus, AccountViewCacheError, EwsDiscoveryState, ExchangeEwsConnectionForm,
-    SavedCredentialState,
+    AccountStatus, EwsDiscoveryState, ExchangeEwsConnectionForm, SavedCredentialState,
 };
-use super::{AccountView, OpeningContent, SetupIssue};
+use super::{AccountView, SetupIssue};
 use einfach_mail_application::{
     AccountOperationError, AccountPermissionRequest, AccountProvider, AccountProviderKind,
     ExchangeEwsDiscoveryConfirmation,
@@ -17,7 +16,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     form::{Field, Form},
     input::Input,
-    scroll::ScrollableElement,
 };
 use gpui_kit::{Context, Div, IntoElement, Role, Stateful, div, prelude::*};
 
@@ -207,8 +205,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 Button::new("sign-out")
                     .danger()
                     .label(label)
-                    .disabled(self.content.opening_kind().is_some())
-                    .on_click(cx.listener(|view, _, _, cx| view.sign_out(cx))),
+                    .disabled(self.workspace_is_opening)
+                    .on_click(cx.listener(|view, _, _, cx| view.request_sign_out(cx))),
             )
     }
 
@@ -232,9 +230,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                                 .debug_selector(|| "continue-permission-review".to_owned())
                                 .primary()
                                 .label("Continue to Microsoft")
-                                .disabled(
-                                    self.task.is_some() || self.content.opening_kind().is_some(),
-                                )
+                                .disabled(self.task.is_some() || self.workspace_is_opening)
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.continue_permission_review(cx);
                                 })),
@@ -259,7 +255,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     Button::new("review-app-permissions")
                         .debug_selector(|| "review-app-permissions".to_owned())
                         .label("Review sign-in permissions")
-                        .disabled(self.content.opening_kind().is_some() || self.task.is_some())
+                        .disabled(self.workspace_is_opening || self.task.is_some())
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.prepare_permission_review(AccountPermissionRequest::Current, cx);
                         })),
@@ -311,15 +307,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                         .label("Cancel sign-in")
                         .on_click(cx.listener(|view, _, _, cx| view.cancel_connect(cx))),
                 ),
-            AccountStatus::Connected(_) if self.services.is_ok() => {
-                match self.content.opening_kind() {
-                    Some(OpeningContent::Mail) => Self::render_progress_action("Opening mail…"),
-                    Some(OpeningContent::Calendar) => {
-                        Self::render_progress_action("Opening calendar…")
-                    }
-                    None => div(),
-                }
-            }
+            AccountStatus::Connected(_) if self.services.is_ok() => div(),
             AccountStatus::Failed {
                 saved_credential_state: SavedCredentialState::MayExist,
                 ..
@@ -840,11 +828,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return content.child(self.render_setup_status(*issue));
         }
         let mut content = content.child(self.render_status());
-        if let Some(error) = self.session_open_error {
-            let message = match error {
-                AccountViewCacheError::Open(error) => account_cache_open_error_message(error),
-                AccountViewCacheError::Removal(error) => account_cache_removal_error_message(error),
-            };
+        if let Some(error) = self.cache_removal_error {
+            let message = account_cache_removal_error_message(error);
             content = content.child(
                 div()
                     .id("account-cache-error")
@@ -910,25 +895,11 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         content.child(self.render_primary_action(colors, cx))
     }
 
-    pub(super) fn render_account_workspace_content(
+    pub(super) fn render_account_feature_content(
         &self,
         colors: ColorTokens,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        div()
-            .size_full()
-            .overflow_y_scrollbar()
-            .id("account-scroll-viewport")
-            .bg(colors.background)
-            .child(
-                div()
-                    .min_h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .p_8()
-                    .child(self.render_account_content(colors, cx)),
-            )
-            .into_any_element()
+        self.render_account_content(colors, cx).into_any_element()
     }
 }

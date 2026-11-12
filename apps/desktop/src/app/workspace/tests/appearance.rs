@@ -17,7 +17,7 @@ fn settings_navigation_applies_and_persists_appearance_preferences(cx: &mut Test
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
     let (view, context) = cx.add_window_view(move |window, cx| {
-        AccountView::new_with_appearance_store_for_test(
+        Workspace::new_with_appearance_store_for_test(
             Ok(AccountServices::new(workflow, factory)),
             Ok(store),
             window,
@@ -28,9 +28,11 @@ fn settings_navigation_applies_and_persists_appearance_preferences(cx: &mut Test
     draw_account_view(context);
     click(context, "nav-settings");
 
-    assert!(context.cx.update(|cx| {
-        view.read(cx).test_selected_section() == AccountViewTestSection::Settings
-    }));
+    assert!(
+        context.cx.update(|cx| {
+            view.read(cx).test_selected_section() == WorkspaceTestSection::Settings
+        })
+    );
     assert_appearance_radio_is_selected(context, "System");
     assert!(!settings_path.exists());
 
@@ -80,7 +82,7 @@ fn saved_appearance_is_applied_when_the_window_opens(cx: &mut TestAppContext) {
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
     let (view, context) = cx.add_window_view(move |window, cx| {
-        AccountView::new_with_appearance_store_for_test(
+        Workspace::new_with_appearance_store_for_test(
             Ok(AccountServices::new(workflow, factory)),
             Ok(AppearanceSettingsStore::at_path(settings_path)),
             window,
@@ -114,7 +116,7 @@ fn invalid_appearance_file_is_preserved_and_falls_back_to_system(cx: &mut TestAp
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
     let (view, context) = cx.add_window_view(move |window, cx| {
-        AccountView::new_with_appearance_store_for_test(
+        Workspace::new_with_appearance_store_for_test(
             Ok(AccountServices::new(workflow, factory)),
             Ok(AppearanceSettingsStore::at_path(store_path)),
             window,
@@ -156,7 +158,7 @@ fn appearance_save_failure_keeps_the_session_theme_and_reports_the_failure(
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
     let (view, context) = cx.add_window_view(move |window, cx| {
-        AccountView::new_with_appearance_store_for_test(
+        Workspace::new_with_appearance_store_for_test(
             Ok(AccountServices::new(workflow, factory)),
             Ok(AppearanceSettingsStore::at_path(settings_path)),
             window,
@@ -219,11 +221,11 @@ struct SettingsLayout {
 fn settings_view(
     cx: &mut TestAppContext,
     store: AppearanceSettingsStore,
-) -> (Entity<AccountView<TestProvider>>, &mut VisualTestContext) {
+) -> (Entity<Workspace<TestProvider>>, &mut VisualTestContext) {
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
     cx.add_window_view(move |window, cx| {
-        AccountView::new_with_appearance_store_for_test(
+        Workspace::new_with_appearance_store_for_test(
             Ok(AccountServices::new(workflow, factory)),
             Ok(store),
             window,
@@ -232,10 +234,10 @@ fn settings_view(
     })
 }
 
-fn focus_settings_radio(view: &Entity<AccountView<TestProvider>>, context: &mut VisualTestContext) {
+fn focus_settings_radio(view: &Entity<Workspace<TestProvider>>, context: &mut VisualTestContext) {
     let settings_focus = context.cx.update(|cx| {
         view.read(cx)
-            .test_navigation_focus(AccountViewTestSection::Settings)
+            .test_navigation_focus(WorkspaceTestSection::Settings)
     });
     context.update(|window, cx| {
         settings_focus.focus(window, cx);

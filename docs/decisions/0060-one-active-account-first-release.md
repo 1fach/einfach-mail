@@ -8,7 +8,7 @@
 
 The first-release scope already describes one signed-in account, but the product brief still lists multiple-account support as an open question. M10 adds persistent navigation and an Accounts destination, so the interface needs a clear account model before it displays account-selection controls.
 
-The current application workflow stores one optional active `AccountProfile` and rejects a second connection while that profile is active. The account router selects either Microsoft Graph or EWS for the connected account. The desktop account view owns one `AccountSession`; Mail and Calendar receive focused session ports. Each session binds one `AccountId` and shares one per-account encrypted cache between the two workflows. Account sign-out stops child work, removes that cache, and only then removes the provider credential. Existing identity verification, cancellation, and retry rules protect this sequence.
+The current application workflow stores one optional active `AccountProfile` and rejects a second connection while that profile is active. The account router selects either Microsoft Graph or EWS for the connected account. The desktop workspace owns one `AccountSession`, its session-open errors, navigation, and child-view lifecycle. The account feature owns account operations, and Mail and Calendar receive focused session ports. Each session binds one `AccountId` and shares one per-account encrypted cache between the two workflows. Workspace sign-out stops child work, removes that cache, and only then removes the provider credential. Existing identity verification, cancellation, and retry rules protect this sequence.
 
 This implementation does not provide an account collection or account switcher. Supporting simultaneous accounts would require coordinated changes to provider credential identity and enumeration, active-provider routing, desktop session ownership, synchronization lifecycle, and account removal.
 
@@ -61,7 +61,8 @@ Use `ConnectedAccount`. The application workflow owns provider selection, and th
 - [ADR 0059: Use a shared, adaptive mail and calendar workspace](0059-native-mail-and-calendar-workspace.md)
 - `crates/application/src/account.rs`: one active profile and connection reservation
 - `crates/providers/account-router/src/lib.rs`: one selected provider
-- `apps/desktop/src/app/workspace.rs`: account view, shared session, and lifecycle owner
+- `apps/desktop/src/app/workspace.rs`: shared session, navigation, and child-view lifecycle owner
+- `apps/desktop/src/features/account.rs`: account status, connection, permission review, and sign-out workflow
 - `apps/desktop/src/features/account/state.rs`: one account status and provider metadata
 - `crates/application/src/account/session.rs`: account-bound shared Mail and Calendar session
 - `crates/providers/microsoft-graph/src/credential.rs` and `crates/persistence/src/exchange_ews_settings.rs`: provider-specific saved credentials and settings

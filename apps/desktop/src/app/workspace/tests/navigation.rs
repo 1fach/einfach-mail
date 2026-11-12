@@ -5,8 +5,8 @@ fn workspace_navigation_stays_visible_and_supports_keyboard_switching(cx: &mut T
     cx.update(gpui_kit::init);
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (view, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
     assert_disconnected_workspace_routes(&view, context);
     connect_synthetic_workspace_account(&view, context);
     assert_keyboard_navigation_selects_calendar(&view, context);
@@ -17,11 +17,11 @@ fn mail_workspace_places_folders_before_the_message_list_and_reader(cx: &mut Tes
     cx.update(gpui_kit::init);
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (view, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.test_set_connected_account(connected_account(mail_only_profile()));
+            view.test_set_connected_account(connected_account(mail_only_profile()), cx);
             cx.notify();
         });
     });
@@ -31,7 +31,7 @@ fn mail_workspace_places_folders_before_the_message_list_and_reader(cx: &mut Tes
     assert!(
         context
             .cx
-            .update(|cx| view.read(cx).test_content() == AccountViewTestContent::Mail)
+            .update(|cx| view.read(cx).test_content() == WorkspaceTestContent::Mail)
     );
     assert_workspace_navigation_is_visible(context);
     let (navigation, folders, reader) = context.update(|window, _| {
@@ -61,12 +61,12 @@ fn unavailable_calendar_navigation_explains_why_it_is_disabled(cx: &mut TestAppC
     cx.update(gpui_kit::init);
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (view, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
     let profile = mail_only_profile();
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.test_set_connected_account(connected_account(profile));
+            view.test_set_connected_account(connected_account(profile), cx);
             cx.notify();
         });
     });
@@ -76,17 +76,19 @@ fn unavailable_calendar_navigation_explains_why_it_is_disabled(cx: &mut TestAppC
     assert_eq!(
         context.cx.update(|cx| {
             view.read(cx)
-                .test_navigation_disabled_reason(AccountViewTestSection::Calendar, cx)
+                .test_navigation_disabled_reason(WorkspaceTestSection::Calendar, cx)
         }),
         Some("Calendar is unavailable for this account.")
     );
     click(context, "nav-calendar");
-    assert!(context.cx.update(|cx| {
-        view.read(cx).test_selected_section() == AccountViewTestSection::Accounts
-    }));
+    assert!(
+        context.cx.update(|cx| {
+            view.read(cx).test_selected_section() == WorkspaceTestSection::Accounts
+        })
+    );
 }
 
-type WorkspaceTestView = gpui_kit::Entity<AccountView<TestProvider>>;
+type WorkspaceTestView = gpui_kit::Entity<Workspace<TestProvider>>;
 fn assert_workspace_navigation_is_visible(context: &mut VisualTestContext) {
     for selector in ["nav-mail", "nav-calendar", "nav-accounts", "nav-settings"] {
         assert!(context.debug_bounds(selector).is_some());
@@ -100,8 +102,8 @@ fn assert_disconnected_navigation_explains_disabled_destinations(
     let reasons = context.cx.update(|cx| {
         let view = view.read(cx);
         [
-            view.test_navigation_disabled_reason(AccountViewTestSection::Mail, cx),
-            view.test_navigation_disabled_reason(AccountViewTestSection::Calendar, cx),
+            view.test_navigation_disabled_reason(WorkspaceTestSection::Mail, cx),
+            view.test_navigation_disabled_reason(WorkspaceTestSection::Calendar, cx),
         ]
     });
     assert_eq!(
@@ -120,8 +122,8 @@ fn assert_disconnected_workspace_routes(view: &WorkspaceTestView, context: &mut 
     assert_disconnected_navigation_explains_disabled_destinations(view, context);
     click(context, "nav-mail");
     assert!(context.cx.update(|cx| {
-        view.read(cx).test_content() == AccountViewTestContent::Account
-            && view.read(cx).test_status_is_disconnected()
+        view.read(cx).test_content() == WorkspaceTestContent::Accounts
+            && view.read(cx).test_status_is_disconnected(cx)
     }));
 }
 
@@ -133,9 +135,11 @@ fn assert_keyboard_navigation_selects_calendar(
     focus_calendar_after_mail(view, context);
     press_enter(context);
     draw_account_view(context);
-    assert!(context.cx.update(|cx| {
-        view.read(cx).test_selected_section() == AccountViewTestSection::Calendar
-    }));
+    assert!(
+        context.cx.update(|cx| {
+            view.read(cx).test_selected_section() == WorkspaceTestSection::Calendar
+        })
+    );
 }
 
 fn connect_synthetic_workspace_account(view: &WorkspaceTestView, context: &mut VisualTestContext) {
@@ -149,7 +153,7 @@ fn connect_synthetic_workspace_account(view: &WorkspaceTestView, context: &mut V
     .expect("synthetic account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.test_set_connected_account(connected_account(profile));
+            view.test_set_connected_account(connected_account(profile), cx);
             cx.notify();
         });
     });
@@ -158,7 +162,7 @@ fn connect_synthetic_workspace_account(view: &WorkspaceTestView, context: &mut V
 fn focus_calendar_after_mail(view: &WorkspaceTestView, context: &mut VisualTestContext) {
     let mail_focus = context.cx.update(|cx| {
         view.read(cx)
-            .test_navigation_focus(AccountViewTestSection::Mail)
+            .test_navigation_focus(WorkspaceTestSection::Mail)
     });
     context.update(|window, cx| {
         mail_focus.focus(window, cx);
@@ -166,7 +170,7 @@ fn focus_calendar_after_mail(view: &WorkspaceTestView, context: &mut VisualTestC
     });
     let calendar_focus = context.cx.update(|cx| {
         view.read(cx)
-            .test_navigation_focus(AccountViewTestSection::Calendar)
+            .test_navigation_focus(WorkspaceTestSection::Calendar)
     });
     assert!(
         context.update(|window, _| calendar_focus.is_focused(window)),

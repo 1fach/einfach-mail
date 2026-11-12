@@ -52,8 +52,8 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
         session_open_attempts: Arc::clone(&session_open_attempts),
         opened_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (view, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
     let profile = AccountProfile::try_new(
         AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
@@ -65,7 +65,7 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
     .expect("synthetic account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.status = AccountStatus::Connected(connected_account(profile));
+            view.test_set_connected_account(connected_account(profile), cx);
             cx.notify();
         });
     });
@@ -75,13 +75,12 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
     assert!(
         context
             .cx
-            .update(|cx| matches!(&view.read(cx).content, AccountContent::Mail { .. }))
+            .update(|cx| view.read(cx).test_mail_view().is_some())
     );
 
-    let mail_view = context.cx.update(|cx| match &view.read(cx).content {
-        AccountContent::Mail { view, .. } => view.clone(),
-        _ => panic!("mail view is open"),
-    });
+    let mail_view = context
+        .cx
+        .update(|cx| view.read(cx).test_mail_view().expect("mail view is open"));
     context.cx.update(|cx| {
         mail_view.update(cx, |_, cx| {
             cx.emit(crate::features::MailViewEvent::ReviewMailWritePermission);
@@ -90,61 +89,61 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
     context.run_until_parked();
     draw_account_view(context);
     assert!(context.cx.update(|cx| {
-        let account_view = view.read(cx);
-        matches!(&account_view.content, AccountContent::Account)
-            && matches!(
-                account_view.pending_permission_review,
-                Some(AccountPermissionRequest::MailReadWrite)
+        let workspace = view.read(cx);
+        workspace.test_mail_view().is_none()
+            && workspace.test_pending_permission_review_is(
+                Some(AccountPermissionRequest::MailReadWrite),
+                cx,
             )
     }));
     click(context, "cancel-permission-review");
     assert!(
         context
             .cx
-            .update(|cx| { view.read(cx).pending_permission_review.is_none() })
+            .update(|cx| view.read(cx).test_pending_permission_review_is(None, cx))
     );
 
     click(context, "nav-mail");
     assert!(
         context
             .cx
-            .update(|cx| matches!(&view.read(cx).content, AccountContent::Mail { .. }))
+            .update(|cx| view.read(cx).test_mail_view().is_some())
     );
     click(context, "nav-calendar");
     assert!(
         context
             .cx
-            .update(|cx| { matches!(&view.read(cx).content, AccountContent::Calendar { .. }) })
+            .update(|cx| view.read(cx).test_calendar_view().is_some())
     );
     click(context, "nav-mail");
     assert!(
         context
             .cx
-            .update(|cx| { matches!(&view.read(cx).content, AccountContent::Mail { .. }) })
+            .update(|cx| view.read(cx).test_mail_view().is_some())
     );
     assert_eq!(session_open_attempts.load(Ordering::SeqCst), 1);
     click(context, "nav-accounts");
     assert!(
         context
             .cx
-            .update(|cx| matches!(&view.read(cx).content, AccountContent::Account))
+            .update(|cx| view.read(cx).test_mail_view().is_none())
     );
-    assert!(context.cx.update(|cx| {
-        view.read(cx)
-            .account_session
-            .as_ref()
-            .is_some_and(|retained| Arc::ptr_eq(retained, &session))
-    }));
+    assert!(
+        context
+            .cx
+            .update(|cx| { view.read(cx).test_session_matches(&session) })
+    );
 
     click(context, "nav-calendar");
     assert!(
         context
             .cx
-            .update(|cx| matches!(&view.read(cx).content, AccountContent::Calendar { .. }))
+            .update(|cx| view.read(cx).test_calendar_view().is_some())
     );
-    let calendar_view = context.cx.update(|cx| match &view.read(cx).content {
-        AccountContent::Calendar { view, .. } => view.clone(),
-        _ => panic!("calendar view is open"),
+    let calendar_view = context.cx.update(|cx| {
+        view.read(cx)
+            .test_calendar_view()
+            .expect("calendar view is open")
     });
     context.cx.update(|cx| {
         calendar_view.update(cx, |_, cx| {
@@ -154,18 +153,18 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
     context.run_until_parked();
     draw_account_view(context);
     assert!(context.cx.update(|cx| {
-        let account_view = view.read(cx);
-        matches!(&account_view.content, AccountContent::Account)
-            && matches!(
-                account_view.pending_permission_review,
-                Some(AccountPermissionRequest::CalendarReadWrite)
+        let workspace = view.read(cx);
+        workspace.test_calendar_view().is_none()
+            && workspace.test_pending_permission_review_is(
+                Some(AccountPermissionRequest::CalendarReadWrite),
+                cx,
             )
     }));
     click(context, "cancel-permission-review");
     assert!(
         context
             .cx
-            .update(|cx| { view.read(cx).pending_permission_review.is_none() })
+            .update(|cx| view.read(cx).test_pending_permission_review_is(None, cx))
     );
     assert_eq!(session_open_attempts.load(Ordering::SeqCst), 1);
 }
@@ -178,8 +177,8 @@ fn connection_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
     let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
     let mut account_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| {
-            AccountView::new(
+        let workspace = cx.new(|cx| {
+            Workspace::new(
                 Ok(AccountServices::new(
                     workflow,
                     unused_account_session_factory(),
@@ -187,8 +186,8 @@ fn connection_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
                 cx,
             )
         });
-        account_view = Some(view.clone());
-        gpui_kit::base::Root::new(view, window, cx)
+        account_view = Some(workspace.read(cx).test_account_view());
+        gpui_kit::base::Root::new(workspace, window, cx)
     });
     let view = account_view.expect("account view is created in its window");
 
@@ -251,8 +250,8 @@ fn permission_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
     let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
     let mut account_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| {
-            AccountView::new(
+        let workspace = cx.new(|cx| {
+            Workspace::new(
                 Ok(AccountServices::new(
                     workflow,
                     unused_account_session_factory(),
@@ -260,8 +259,8 @@ fn permission_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
                 cx,
             )
         });
-        account_view = Some(view.clone());
-        gpui_kit::base::Root::new(view, window, cx)
+        account_view = Some(workspace.read(cx).test_account_view());
+        gpui_kit::base::Root::new(workspace, window, cx)
     });
     let view = account_view.expect("account view is created in its window");
 
@@ -333,8 +332,8 @@ fn mail_write_scope_requires_review_before_the_browser_flow(cx: &mut TestAppCont
     let provider = TestProvider::default();
     let permission_request = Arc::clone(&provider.last_permission_request);
     let workflow = Arc::new(AccountWorkflow::new(provider));
-    let (view, context) = cx.add_window_view(|_, cx| {
-        AccountView::new(
+    let (workspace, context) = cx.add_window_view(|_, cx| {
+        Workspace::new(
             Ok(AccountServices::new(
                 workflow,
                 unused_account_session_factory(),
@@ -342,6 +341,9 @@ fn mail_write_scope_requires_review_before_the_browser_flow(cx: &mut TestAppCont
             cx,
         )
     });
+    let view = context
+        .cx
+        .update(|cx| workspace.read(cx).test_account_view());
 
     context.run_until_parked();
     draw_account_view(context);
@@ -369,7 +371,7 @@ fn mail_write_scope_requires_review_before_the_browser_flow(cx: &mut TestAppCont
     );
     let can_continue = context.cx.update(|cx| {
         let view = view.read(cx);
-        view.task.is_none() && view.content.opening_kind().is_none()
+        view.task.is_none() && !view.workspace_is_opening
     });
     assert!(can_continue);
     let disclosure =
