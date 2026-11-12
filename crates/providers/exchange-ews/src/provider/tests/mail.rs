@@ -145,3 +145,28 @@ fn maps_a_synthetic_expired_cursor_response_to_a_reset() {
     assert_eq!(cursor.folder_id, "synthetic-folder");
     assert_eq!(cursor.sync_state, None);
 }
+
+#[test]
+fn maps_access_denied_codes_and_preserves_other_mail_response_errors() {
+    for (response_code, expected_error) in [
+        ("ErrorAccessDenied", MailOperationError::AccessDenied),
+        (
+            "ErrorImpersonateUserDenied",
+            MailOperationError::AccessDenied,
+        ),
+        (
+            "ErrorInternalServerError",
+            MailOperationError::InvalidResponse,
+        ),
+    ] {
+        let document = String::from_utf8_lossy(SYNC_STATE_EXPIRED)
+            .replace("ErrorInvalidSyncStateData", response_code);
+        let response = parse_soap_response::<SyncFolderItems>(document.as_bytes())
+            .expect("synthetic EWS error response parses");
+
+        assert_eq!(
+            map_sync_responses(response.messages, "synthetic-folder", document.len()),
+            Err(expected_error)
+        );
+    }
+}

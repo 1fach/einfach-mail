@@ -180,10 +180,41 @@ fn rejects_snapshots_above_the_calendar_view_limit() {
     );
 }
 
+#[test]
+fn maps_access_denied_codes_and_preserves_other_calendar_response_errors() {
+    for (response_code, expected_error) in [
+        ("ErrorAccessDenied", EwsError::AccessDenied),
+        ("ErrorImpersonateUserDenied", EwsError::AccessDenied),
+        (
+            "ErrorCalendarViewRangeTooBig",
+            EwsError::ResourceLimitExceeded,
+        ),
+        ("ErrorInternalServerError", EwsError::InvalidResponse),
+        ("ErrorSyntheticUnknown", EwsError::InvalidResponse),
+    ] {
+        let document = calendar_error_response(response_code);
+
+        assert_eq!(
+            parse_calendar_view_snapshot(&document, document.len(), &calendar_view()),
+            Err(expected_error)
+        );
+    }
+}
+
 fn replace_fixture_value(original: &str, replacement: &str) -> Vec<u8> {
     String::from_utf8_lossy(CALENDAR_VIEW_RESPONSE)
         .replace(original, replacement)
         .into_bytes()
+}
+
+fn calendar_error_response(response_code: &str) -> Vec<u8> {
+    let document = String::from_utf8_lossy(CALENDAR_VIEW_RESPONSE)
+        .replace("ResponseClass=\"Success\"", "ResponseClass=\"Error\"")
+        .replace(
+            "<m:ResponseCode>NoError</m:ResponseCode>",
+            &format!("<m:ResponseCode>{response_code}</m:ResponseCode>"),
+        );
+    document.into_bytes()
 }
 
 fn calendar_view() -> CalendarViewReference {

@@ -7,6 +7,7 @@ use einfach_mail_domain::{
 use ews::{
     BaseFolderId, BaseShape, ItemShape, PathToElement, View,
     find_item::{FindItem, Traversal},
+    response::ResponseCode,
 };
 use jiff::{Timestamp, tz::TimeZone};
 use quick_xml::de::from_reader;
@@ -28,7 +29,7 @@ use einfach_mail_application::{
 use einfach_mail_provider_runtime as worker;
 use tokio_util::sync::CancellationToken;
 
-use super::{ExchangeEwsProvider, session::session_for_calendar};
+use super::{ExchangeEwsProvider, map_access_denied_response_code, session::session_for_calendar};
 
 const MAX_CALENDAR_OCCURRENCES: usize = 512;
 const EWS_MESSAGES_NAMESPACE: &[u8] =
@@ -145,17 +146,20 @@ fn only_response_message(
     }
     let response = responses.pop().ok_or(EwsError::InvalidResponse)?;
     if response.response_class.as_deref() != Some("Success")
-        || response.response_code.as_deref() != Some("NoError")
+        || response.response_code != Some(ResponseCode::NoError)
     {
-        return Err(map_response_error(response.response_code.as_deref()));
+        return Err(map_response_error(response.response_code));
     }
     Ok(response)
 }
 
-fn map_response_error(response_code: Option<&str>) -> EwsError {
+fn map_response_error(response_code: Option<ResponseCode>) -> EwsError {
+    if let Some(error) = response_code.and_then(map_access_denied_response_code) {
+        return error;
+    }
+
     match response_code {
-        Some("ErrorAccessDenied" | "ErrorImpersonateUserDenied") => EwsError::AccessDenied,
-        Some("ErrorCalendarViewRangeTooBig") => EwsError::ResourceLimitExceeded,
+        Some(ResponseCode::ErrorCalendarViewRangeTooBig) => EwsError::ResourceLimitExceeded,
         _ => EwsError::InvalidResponse,
     }
 }
@@ -364,7 +368,7 @@ struct CalendarResponseMessage {
     #[serde(rename = "@ResponseClass")]
     response_class: Option<String>,
     root_folder: Option<CalendarRootFolder>,
-    response_code: Option<String>,
+    response_code: Option<ResponseCode>,
 }
 
 #[derive(Deserialize)]

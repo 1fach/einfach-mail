@@ -1,9 +1,20 @@
 use std::sync::Arc;
 
 use einfach_mail_application::ExchangeEwsAccountSettingsStore;
+use ews::response::ResponseCode;
 use tokio::sync::RwLock;
 
 use self::{account::EwsAutodiscover, session::EwsSession};
+use crate::error::EwsError;
+
+pub(in crate::provider) fn map_access_denied_response_code(code: ResponseCode) -> Option<EwsError> {
+    match code {
+        ResponseCode::ErrorAccessDenied | ResponseCode::ErrorImpersonateUserDenied => {
+            Some(EwsError::AccessDenied)
+        }
+        _ => None,
+    }
+}
 
 mod account;
 mod calendar;
