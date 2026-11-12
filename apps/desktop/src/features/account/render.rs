@@ -624,52 +624,44 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     fn render_ews_identity_fields(&self, form: &ExchangeEwsConnectionForm) -> [Field; 3] {
         let inputs_disabled = self.ews_inputs_disabled(form);
         [
-            self.render_ews_mailbox_field(form, inputs_disabled),
-            self.render_ews_username_field(form, inputs_disabled),
-            self.render_ews_password_field(form, inputs_disabled),
+            Self::render_ews_identity_field(
+                "ews-mailbox-address-input",
+                "Mailbox address",
+                Input::new(&form.mailbox_address)
+                    .aria_label("Mailbox address")
+                    .disabled(inputs_disabled)
+                    .w_full(),
+            ),
+            Self::render_ews_identity_field(
+                "ews-username-input",
+                "NTLM username",
+                Input::new(&form.username)
+                    .aria_label("NTLM username")
+                    .disabled(inputs_disabled)
+                    .w_full(),
+            ),
+            Self::render_ews_identity_field(
+                "ews-password-input",
+                "Password",
+                Input::new(&form.password)
+                    .aria_label("Password")
+                    .mask_toggle()
+                    .disabled(inputs_disabled)
+                    .w_full(),
+            ),
         ]
     }
 
-    fn render_ews_mailbox_field(&self, form: &ExchangeEwsConnectionForm, disabled: bool) -> Field {
-        Field::new().label("Mailbox address").required(true).child(
+    fn render_ews_identity_field(
+        id: &'static str,
+        label: &'static str,
+        input: impl IntoElement,
+    ) -> Field {
+        Field::new().label(label).required(true).child(
             div()
-                .id("ews-mailbox-address-input")
-                .debug_selector(|| "ews-mailbox-address-input".to_owned())
-                .child(
-                    Input::new(&form.mailbox_address)
-                        .aria_label("Mailbox address")
-                        .disabled(disabled)
-                        .w_full(),
-                ),
-        )
-    }
-
-    fn render_ews_username_field(&self, form: &ExchangeEwsConnectionForm, disabled: bool) -> Field {
-        Field::new().label("NTLM username").required(true).child(
-            div()
-                .id("ews-username-input")
-                .debug_selector(|| "ews-username-input".to_owned())
-                .child(
-                    Input::new(&form.username)
-                        .aria_label("NTLM username")
-                        .disabled(disabled)
-                        .w_full(),
-                ),
-        )
-    }
-
-    fn render_ews_password_field(&self, form: &ExchangeEwsConnectionForm, disabled: bool) -> Field {
-        Field::new().label("Password").required(true).child(
-            div()
-                .id("ews-password-input")
-                .debug_selector(|| "ews-password-input".to_owned())
-                .child(
-                    Input::new(&form.password)
-                        .aria_label("Password")
-                        .mask_toggle()
-                        .disabled(disabled)
-                        .w_full(),
-                ),
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .child(input),
         )
     }
 
