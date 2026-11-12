@@ -5,7 +5,7 @@ mod read;
 mod send;
 mod sync;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use einfach_mail_domain::{
     AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailMessage, MailReplyDraft,
@@ -17,9 +17,7 @@ use crate::shared::recovery::AccountWorkflowRecovery;
 use crate::{
     MailCache, MailCacheError, MailOperationError, MailProvider, MailSendProviderError,
     MessageBodyForDisplay, WellKnownMailFolder,
-    shared::reservations::{
-        AccountReservationError, ActiveOperations, OperationReservation, reserve_folders,
-    },
+    shared::reservations::{AccountReservationError, OperationReservation, OperationReservations},
 };
 
 /// A user-safe category for a mail workflow failure.
@@ -295,7 +293,7 @@ pub struct MailWorkflow<P, C> {
     account_id: AccountId,
     provider: P,
     cache: C,
-    reservations: Arc<Mutex<ActiveOperations>>,
+    reservations: OperationReservations,
     recovery: Arc<AccountWorkflowRecovery>,
 }
 
@@ -311,7 +309,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             account_id,
             provider,
             cache,
-            Arc::new(Mutex::new(ActiveOperations::default())),
+            OperationReservations::default(),
             Arc::new(AccountWorkflowRecovery::default()),
         )
     }
@@ -320,7 +318,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         account_id: AccountId,
         provider: P,
         cache: C,
-        reservations: Arc<Mutex<ActiveOperations>>,
+        reservations: OperationReservations,
         recovery: Arc<AccountWorkflowRecovery>,
     ) -> Self {
         Self {
@@ -345,6 +343,8 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         &self,
         folders: &[FolderReference],
     ) -> Result<OperationReservation, MailWorkflowError> {
-        reserve_folders(&self.reservations, folders).map_err(MailWorkflowError::from)
+        self.reservations
+            .reserve_folders(folders)
+            .map_err(MailWorkflowError::from)
     }
 }

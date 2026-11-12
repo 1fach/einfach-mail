@@ -64,6 +64,8 @@ Issue [#347](https://github.com/1fach/einfach-mail/issues/347) confirms ADR 0061
 
 Issue [#348](https://github.com/1fach/einfach-mail/issues/348) moved the 11 remaining desktop module files to the `foo.rs` and `foo/` convention. The module-layout checker rejects `#[path]` and `mod.rs` under `apps/` and `crates/`; the local gate and GitHub workflow run it. The 511 test names match the pre-move inventory. The full Rust 1.95 Linux local gate passed. This completes #336; start [#356](https://github.com/1fach/einfach-mail/issues/356).
 
+Issue [#358](https://github.com/1fach/einfach-mail/issues/358) replaces the shared reservation registry's raw `Arc<Mutex<...>>` parameters and fields with a cloneable application-owned handle. The six focused reservation-sharing tests passed, all 511 workspace test names match the baseline, and the full Rust 1.95 Linux local gate passed. Continue #356 with issue #359.
+
 ## Active risks
 
 - GitHub Actions are disabled because the repository has no compute quota. PRs #275, #276, #277, #301, #320, #328, and #331 have no Actions runs; their Linux-local checks are recorded in their PRs. The application source, manifests, lockfile, and local-check scripts at PR #275 head `16c9ce9` match the locally checked code tree `d98fc69`. PR #331 merged after its local gate passed.
@@ -85,7 +87,7 @@ Issue [#348](https://github.com/1fach/einfach-mail/issues/348) moved the 11 rema
 ## Next actions
 
 1. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux; keep #273's theme review and #274's named-compositor check open.
-2. Start the clean-code pass tracked in issue [#356](https://github.com/1fach/einfach-mail/issues/356).
+2. Continue the clean-code pass tracked in issue [#356](https://github.com/1fach/einfach-mail/issues/356), starting with #359 after #358 merges.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
