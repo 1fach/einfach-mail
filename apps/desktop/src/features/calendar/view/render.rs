@@ -1,5 +1,5 @@
 use einfach_mail_application::{CalendarSession, CalendarWorkflowError, CalendarWriteReadiness};
-use einfach_mail_domain::CalendarOccurrenceTime;
+use einfach_mail_domain::{CalendarAction, CalendarOccurrenceTime};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
@@ -62,10 +62,10 @@ where
             let read_only_status = read_only_status.test_support();
             title_bar = title_bar.child(read_only_status);
         }
-        if let Some(edit_action) = self.render_selected_event_edit_action(cx) {
-            title_bar = title_bar.child(edit_action);
+        if let Some(selected_event_action) = self.render_selected_event_action(cx) {
+            title_bar = title_bar.child(selected_event_action);
         }
-        if self.can_write_events() {
+        if self.supports_calendar_action(CalendarAction::CreateEvent) {
             title_bar = title_bar.child(self.render_event_button(cx));
         }
         title_bar.child(self.render_sync_button(cx))
@@ -264,32 +264,25 @@ where
             .into_any_element()
     }
 
-    fn render_selected_event_edit_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.can_write_events() {
-            return None;
-        }
-        let selected = self.selected_agenda_event.as_ref()?;
-        let cached_event = self
-            .events
-            .iter()
-            .find(|event| event.id() == &selected.event_id)?;
+    fn render_selected_event_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let action = self.selected_event_action()?;
+        let cached_event = self.selected_calendar_event()?;
         if !matches!(cached_event.time(), CalendarOccurrenceTime::Timed { .. }) {
             return None;
         }
 
-        let cached_event = cached_event.clone();
         Some(
-            Button::new("calendar-event-edit")
-                .debug_selector(|| "calendar-event-edit".to_owned())
+            Button::new("calendar-event-open")
+                .debug_selector(|| "calendar-event-open".to_owned())
                 .ghost()
                 .flex_shrink_0()
-                .label("Edit")
+                .label(action.label())
                 .disabled(
                     self.status.is_sync_active()
                         || self.write_readiness != CalendarWriteReadiness::Ready,
                 )
                 .on_click(cx.listener(move |view, _, window, cx| {
-                    view.open_event_editor(cached_event.clone(), window, cx);
+                    view.open_selected_event(cached_event.clone(), window, cx);
                 }))
                 .into_any_element(),
         )

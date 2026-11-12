@@ -67,6 +67,39 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .child(format!("Times use {0}.", self.week.time_zone_label()))
     }
 
+    fn render_event_details(&self, colors: ColorTokens) -> Option<AnyElement> {
+        let event = self.read_only_versioned_event()?;
+        let fields = event_detail_fields(event.occurrence(), &self.week)?;
+        let details = fields
+            .into_iter()
+            .fold(
+                div()
+                    .id("event-composer-details")
+                    .debug_selector(|| "event-composer-details".to_owned())
+                    .flex()
+                    .flex_col()
+                    .gap_4(),
+                |details, (label, value)| details.child(render_event_detail(label, value)),
+            )
+            .child(self.render_time_zone(colors));
+        #[cfg(test)]
+        let details = details.test_support();
+        Some(details.into_any_element())
+    }
+
+    fn read_only_versioned_event(&self) -> Option<&VersionedCalendarEvent> {
+        if self.capabilities.supports(CalendarAction::UpdateEvent) {
+            return None;
+        }
+        match &self.state {
+            ComposerState::Edit(EditState::Ready {
+                versioned_event, ..
+            }) => Some(versioned_event),
+            ComposerState::Create(_)
+            | ComposerState::Edit(EditState::Loading | EditState::LoadFailed(_)) => None,
+        }
+    }
+
     fn render_draft_validation(&self, colors: ColorTokens) -> Option<AnyElement> {
         let draft_error = self.state.validation_error()?;
         Some(render_draft_error(draft_error, colors).into_any_element())
@@ -141,29 +174,54 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         if self.state.action_is_terminal() {
             return render_close_action();
         }
-        if matches!(&self.state, ComposerState::Edit(_)) {
-            let actions = div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(
-                    Button::new("event-composer-delete")
-                        .debug_selector(|| "event-composer-delete".to_owned())
-                        .danger()
-                        .label("Delete…")
-                        .disabled(!self.state.can_delete())
-                        .on_click(cx.listener(|composer, _, window, cx| {
-                            composer.confirm_deletion(window, cx);
-                        })),
-                )
-                .child(self.render_submit_action(cx));
-            #[cfg(test)]
-            let actions = actions.id("event-composer-actions").test_support();
-            actions.into_any_element()
-        } else {
-            self.render_submit_action(cx)
+        match &self.state {
+            ComposerState::Create(_) => {
+                if self.capabilities.supports(CalendarAction::CreateEvent) {
+                    self.render_submit_action(cx)
+                } else {
+                    div().into_any_element()
+                }
+            }
+            ComposerState::Edit(_) => self.render_existing_event_actions(cx),
         }
+    }
+
+    fn render_existing_event_actions(&self, cx: &mut Context<Self>) -> AnyElement {
+        let can_update = self.capabilities.supports(CalendarAction::UpdateEvent);
+        let can_delete = self.capabilities.supports(CalendarAction::DeleteEvent);
+        if !can_update && !can_delete {
+            return div().into_any_element();
+        }
+
+        let mut actions = div()
+            .flex()
+            .items_center()
+            .when(can_update && can_delete, |element| {
+                element.justify_between()
+            })
+            .when(can_update != can_delete, |element| element.justify_end())
+            .gap_3();
+        if can_delete {
+            actions = actions.child(self.render_delete_action(cx));
+        }
+        if can_update {
+            actions = actions.child(self.render_submit_action(cx));
+        }
+        #[cfg(test)]
+        let actions = actions.id("event-composer-actions").test_support();
+        actions.into_any_element()
+    }
+
+    fn render_delete_action(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("event-composer-delete")
+            .debug_selector(|| "event-composer-delete".to_owned())
+            .danger()
+            .label("Delete…")
+            .disabled(!self.can_delete())
+            .on_click(cx.listener(|composer, _, window, cx| {
+                composer.confirm_deletion(window, cx);
+            }))
+            .into_any_element()
     }
 
     fn render_submit_action(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -175,10 +233,30 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .primary()
             .label(label)
             .loading(self.state.submit_is_loading())
-            .disabled(!self.state.can_submit())
+            .disabled(!self.can_submit())
             .on_click(cx.listener(|composer, _, _, cx| composer.submit(cx)))
             .into_any_element()
     }
+}
+
+fn event_detail_fields(
+    event: &CalendarOccurrence,
+    week: &CalendarWeek,
+) -> Option<Vec<(&'static str, String)>> {
+    let CalendarOccurrenceTime::Timed { start, end } = event.time() else {
+        return None;
+    };
+    let time_zone = week.time_zone();
+    let mut fields = vec![(
+        "Title",
+        event.subject().unwrap_or("Untitled event").to_owned(),
+    )];
+    if let Some(location) = event.location() {
+        fields.push(("Location", location.to_owned()));
+    }
+    fields.push(("Starts", format_event_time(*start, &time_zone)));
+    fields.push(("Ends", format_event_time(*end, &time_zone)));
+    Some(fields)
 }
 
 impl<S: CalendarSession + ?Sized + 'static> Render for EventComposer<S> {
@@ -199,9 +277,13 @@ impl<S: CalendarSession + ?Sized + 'static> Render for EventComposer<S> {
                 element.child(self.render_pending(creation, status, colors))
             })
             .when(pending_creation.is_none(), |element| {
-                element.when(self.state.show_fields(), |element| {
-                    element.child(self.render_fields(colors))
-                })
+                element
+                    .when(self.should_render_fields(), |element| {
+                        element.child(self.render_fields(colors))
+                    })
+                    .when_some(self.render_event_details(colors), |element, details| {
+                        element.child(details)
+                    })
             })
             .when(
                 matches!(&self.state, ComposerState::Edit(EditState::Loading)),
@@ -212,6 +294,27 @@ impl<S: CalendarSession + ?Sized + 'static> Render for EventComposer<S> {
             })
             .child(self.render_actions(cx))
     }
+}
+
+fn render_event_detail(label: &'static str, value: String) -> impl IntoElement {
+    let detail = div()
+        .id(format!("event-composer-detail-{label}"))
+        .role(Role::Group)
+        .aria_label(format!("{label}: {value}"))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_sm().font_bold().child(label))
+        .child(div().text_base().child(value));
+    #[cfg(test)]
+    let detail = detail.test_support();
+    detail
+}
+
+fn format_event_time(value: ::time::OffsetDateTime, time_zone: &jiff::tz::TimeZone) -> String {
+    picker_value_for_offset(value, time_zone)
+        .map(|value| value.format("%A, %B %-d, %Y · %H:%M").to_string())
+        .unwrap_or_else(|| value.to_string())
 }
 
 pub(super) fn render_pending_subject(creation: &CalendarEventCreation) -> impl IntoElement {
