@@ -1,51 +1,16 @@
 use std::sync::Arc;
 
 use einfach_mail_application::{FollowUpFlagUpdateOutcome, MailOperationError, MailWorkflowError};
-use einfach_mail_domain::{
-    FolderReference, FollowUpFlagStatus, MailAction, MessageId, MessageMetadataPatch,
-};
+use einfach_mail_domain::{FollowUpFlagStatus, MailAction, MessageId, MessageMetadataPatch};
 use gpui_kit::{AsyncApp, Context};
 
 use super::MailView;
+use super::message_write::{MessageWriteFeedbackText, MessageWriteRequest, MessageWriteStatus};
 
-pub(super) enum FollowUpFlagUpdateStatus {
-    Idle,
-    Pending {
-        message_id: MessageId,
-        requested: FollowUpFlagStatus,
-    },
-    Confirmed {
-        message_id: MessageId,
-        status: FollowUpFlagStatus,
-    },
-    ConfirmedNeedsSync {
-        message_id: MessageId,
-        status: FollowUpFlagStatus,
-    },
-    Failed {
-        message_id: MessageId,
-        requested: FollowUpFlagStatus,
-        error: MailWorkflowError,
-    },
-}
+pub(super) type FollowUpFlagUpdateStatus = MessageWriteStatus<FollowUpFlagStatus>;
+pub(super) type FollowUpFlagUpdateRequest = MessageWriteRequest<FollowUpFlagStatus>;
 
-pub(super) struct FollowUpFlagUpdateRequest {
-    folder: FolderReference,
-    message_id: MessageId,
-    requested: FollowUpFlagStatus,
-}
-
-impl FollowUpFlagUpdateStatus {
-    pub(super) fn is_pending_for(&self, message_id: &MessageId) -> bool {
-        matches!(
-            self,
-            Self::Pending {
-                message_id: pending_id,
-                ..
-            } if pending_id == message_id
-        )
-    }
-
+impl MessageWriteStatus<FollowUpFlagStatus> {
     pub(super) fn action_label(
         &self,
         message_id: &MessageId,
@@ -59,6 +24,24 @@ impl FollowUpFlagUpdateStatus {
             Some(FollowUpFlagStatus::Complete) => "Reopen flag",
             Some(FollowUpFlagStatus::NotFlagged) | None => "Flag",
         }
+    }
+}
+
+impl MessageWriteFeedbackText for FollowUpFlagStatus {
+    fn progress_message(self) -> String {
+        follow_up_flag_progress_message(self)
+    }
+
+    fn confirmed_message(self) -> &'static str {
+        follow_up_flag_confirmed_message(self)
+    }
+
+    fn cache_sync_message(self) -> &'static str {
+        follow_up_flag_cache_sync_message(self)
+    }
+
+    fn failure_message(self, error: MailWorkflowError) -> String {
+        follow_up_flag_failure_message(self, error)
     }
 }
 

@@ -1,112 +1,31 @@
 use std::sync::Arc;
 
 use einfach_mail_application::{MailOperationError, MailWorkflowError, ReadStateUpdateOutcome};
-use einfach_mail_domain::{
-    FolderReference, MailAction, MessageId, MessageMetadataPatch, ReadState,
-};
-use gpui_kit::{AsyncApp, Context, Role};
+use einfach_mail_domain::{MailAction, MessageId, MessageMetadataPatch, ReadState};
+use gpui_kit::{AsyncApp, Context};
 
 use super::MailView;
+use super::message_write::{MessageWriteFeedbackText, MessageWriteRequest, MessageWriteStatus};
 
-pub(super) enum ReadStateUpdateStatus {
-    Idle,
-    Pending {
-        message_id: MessageId,
-        requested: ReadState,
-    },
-    Confirmed {
-        message_id: MessageId,
-        state: ReadState,
-    },
-    ConfirmedNeedsSync {
-        message_id: MessageId,
-        state: ReadState,
-    },
-    Failed {
-        message_id: MessageId,
-        requested: ReadState,
-        error: MailWorkflowError,
-    },
-}
+pub(super) type ReadStateUpdateStatus = MessageWriteStatus<ReadState>;
+pub(super) type ReadStateUpdateRequest = MessageWriteRequest<ReadState>;
 
-pub(super) enum ReadStateFeedback {
-    Status(String),
-    Failure {
-        message: String,
-        error: MailWorkflowError,
-    },
-}
-
-impl ReadStateFeedback {
-    pub(super) fn into_parts(self) -> (String, Role, bool) {
-        match self {
-            Self::Status(message) => (message, Role::Status, false),
-            Self::Failure { message, error } => (
-                message,
-                Role::Alert,
-                matches!(
-                    error,
-                    MailWorkflowError::Provider(MailOperationError::AccessDenied)
-                ),
-            ),
-        }
-    }
-}
-
-impl ReadStateUpdateStatus {
-    pub(super) fn is_pending_for(&self, message_id: &MessageId) -> bool {
-        matches!(
-            self,
-            Self::Pending {
-                message_id: pending_id,
-                ..
-            } if pending_id == message_id
-        )
+impl MessageWriteFeedbackText for ReadState {
+    fn progress_message(self) -> String {
+        read_state_progress_message(self)
     }
 
-    pub(super) fn feedback_for(&self, message_id: &MessageId) -> Option<ReadStateFeedback> {
-        if self.message_id()? != message_id {
-            return None;
-        }
-        self.feedback()
+    fn confirmed_message(self) -> &'static str {
+        read_state_confirmed_message(self)
     }
 
-    fn message_id(&self) -> Option<&MessageId> {
-        match self {
-            Self::Idle => None,
-            Self::Pending { message_id, .. }
-            | Self::Confirmed { message_id, .. }
-            | Self::ConfirmedNeedsSync { message_id, .. }
-            | Self::Failed { message_id, .. } => Some(message_id),
-        }
+    fn cache_sync_message(self) -> &'static str {
+        read_state_cache_sync_message(self)
     }
 
-    fn feedback(&self) -> Option<ReadStateFeedback> {
-        match self {
-            Self::Idle => None,
-            Self::Pending { requested, .. } => Some(ReadStateFeedback::Status(
-                read_state_progress_message(*requested),
-            )),
-            Self::Confirmed { state, .. } => Some(ReadStateFeedback::Status(
-                read_state_confirmed_message(*state).to_owned(),
-            )),
-            Self::ConfirmedNeedsSync { state, .. } => Some(ReadStateFeedback::Status(
-                read_state_cache_sync_message(*state).to_owned(),
-            )),
-            Self::Failed {
-                requested, error, ..
-            } => Some(ReadStateFeedback::Failure {
-                message: read_state_failure_message(*requested, *error),
-                error: *error,
-            }),
-        }
+    fn failure_message(self, error: MailWorkflowError) -> String {
+        read_state_failure_message(self, error)
     }
-}
-
-pub(super) struct ReadStateUpdateRequest {
-    folder: FolderReference,
-    message_id: MessageId,
-    requested: ReadState,
 }
 
 impl MailView {
@@ -187,14 +106,14 @@ impl MailView {
                 self.apply_read_state_to_message(&request.message_id, state);
                 ReadStateUpdateStatus::Confirmed {
                     message_id: request.message_id,
-                    state,
+                    status: state,
                 }
             }
             Ok(ReadStateUpdateOutcome::ConfirmedNeedsSync { state, .. }) => {
                 self.apply_read_state_to_message(&request.message_id, state);
                 ReadStateUpdateStatus::ConfirmedNeedsSync {
                     message_id: request.message_id,
-                    state,
+                    status: state,
                 }
             }
             Err(error) => ReadStateUpdateStatus::Failed {
