@@ -513,10 +513,9 @@ where
     ) -> Result<CalendarEventUpdateOutcome, CalendarWorkflowError> {
         let view = update.source().occurrence().reference();
         self.ensure_account(view.account_id())?;
-        let account_id = view.account_id().clone();
         let _reservation = self
             .reservations
-            .reserve_account(&account_id)
+            .reserve_account(view.account_id())
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
         self.cache.mark_calendar_write_sync_required(view).await?;
@@ -529,7 +528,7 @@ where
                         | CalendarOperationError::UpdateOutcomeUnknown
                 ) {
                     self.cache
-                        .clear_calendar_write_sync_required(&account_id)
+                        .clear_calendar_write_sync_required(view.account_id())
                         .await?;
                 }
                 return Err(error.into());
@@ -572,10 +571,9 @@ where
     ) -> Result<CalendarEventDeletionOutcome, CalendarWorkflowError> {
         let view = event.occurrence().reference();
         self.ensure_account(view.account_id())?;
-        let account_id = view.account_id().clone();
         let _reservation = self
             .reservations
-            .reserve_account(&account_id)
+            .reserve_account(view.account_id())
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
         self.cache.mark_calendar_write_sync_required(view).await?;
@@ -585,7 +583,7 @@ where
                 CalendarOperationError::EventChanged | CalendarOperationError::DeleteOutcomeUnknown
             ) {
                 self.cache
-                    .clear_calendar_write_sync_required(&account_id)
+                    .clear_calendar_write_sync_required(view.account_id())
                     .await?;
             }
             return Err(error.into());
@@ -687,11 +685,8 @@ where
         round: &mut CalendarSyncRound,
     ) -> Result<bool, CalendarWorkflowError> {
         let request = round.next_request()?;
-        match self
-            .provider
-            .calendar_delta_page(view, request.clone())
-            .await?
-        {
+        let is_initial_request = matches!(&request, CalendarDeltaRequest::Initial);
+        match self.provider.calendar_delta_page(view, request).await? {
             CalendarDeltaResponse::Page(response) => {
                 let (page, page_bytes) = response.into_parts();
                 round.validate_response(&page, page_bytes)?;
@@ -706,7 +701,7 @@ where
                 reset_link,
                 response_bytes,
             } => {
-                if request == CalendarDeltaRequest::Initial {
+                if is_initial_request {
                     return Err(CalendarOperationError::InvalidResponse.into());
                 }
                 round.add_response_bytes(response_bytes)?;
