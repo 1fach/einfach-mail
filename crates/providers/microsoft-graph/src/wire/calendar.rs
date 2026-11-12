@@ -304,16 +304,16 @@ impl WireCalendarEvent {
     }
 
     fn into_checked_editable(
-        self,
+        mut self,
         view: CalendarViewReference,
     ) -> Result<CheckedEditableCalendarEvent, GraphError> {
-        let etag = self.odata_etag.clone();
+        let etag = self.odata_etag.take();
         let editable = self.into_editable(view)?;
         Ok(CheckedEditableCalendarEvent { editable, etag })
     }
 
     pub(super) fn into_editable(
-        self,
+        mut self,
         view: CalendarViewReference,
     ) -> Result<EditableCalendarEvent, GraphError> {
         if !self.has_supported_editable_shape() {
@@ -321,7 +321,7 @@ impl WireCalendarEvent {
         }
         let version = self
             .change_key
-            .clone()
+            .take()
             .ok_or(GraphError::CalendarEventNotEditable)?;
         let version =
             CalendarEventVersion::try_from(version).map_err(|_| GraphError::InvalidRecord)?;
