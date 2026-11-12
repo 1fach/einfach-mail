@@ -6,7 +6,7 @@
 
 ## Context
 
-The Linux desktop currently opens Accounts first. It replaces that view with either Mail or Calendar, and each child view adds its own header and return button. `AccountView` owns the shared `AccountSession`; the mail and calendar views receive workflow-specific session ports. The accepted session boundary must remain intact when navigation changes. See [ADR 0043](0043-per-account-mail-and-calendar-session.md).
+The Linux desktop currently opens Accounts first. It replaces that view with either Mail or Calendar, and each child view adds its own header and return button. The root `Workspace` owns the shared `AccountSession`; the mail and calendar views receive workflow-specific session ports. The accepted session boundary must remain intact when navigation changes. See [ADR 0043](0043-per-account-mail-and-calendar-session.md).
 
 The supplied Wino Mail screenshots show persistent navigation, a dense message list beside a reading pane, and separate account and preference sections. Use them as references for hierarchy and density, not as pixel specifications. The screenshots use a dark theme and a custom Windows title bar; the Linux app follows GPUI Kit themes and system window decorations. The project already has native mail reading, a weekly calendar, account connection, and account details. The first release supports one active account at a time; see [ADR 0060](0060-one-active-account-first-release.md). Global mail search, People, and To Do remain out of scope.
 
@@ -36,7 +36,7 @@ Choose the first layout for a comfortable desktop window. Use the third layout a
 
 ## Consequences
 
-- The app shell owns destination selection. `AccountView` or its replacement keeps ownership of account operations and the shared session. Mail and Calendar remain application workflow clients.
+- The app shell owns destination selection, session-open errors, and the shared account session. The account feature owns account operations and requests sign-out through the workspace. Mail and Calendar remain application workflow clients.
 - Mail and Calendar share navigation and window chrome. Their feature state stays in their existing views until implementation shows a clear owner for a shared state value.
 - Mail pane splits need user-resizable limits and a sensible compact-width transition. Persist split sizes only after the layout proves they represent a useful user preference.
 - Account navigation shows the one active identity and cannot imply that multiple accounts can be connected or switched. Issue #272 owns the account-detail UI.

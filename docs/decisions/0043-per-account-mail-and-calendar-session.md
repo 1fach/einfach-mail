@@ -12,7 +12,7 @@ The application still needs concrete, testable mail and calendar workflows. Only
 
 ## Decision
 
-Replace the mail-only session boundary with an application-owned `AccountSession` and `AccountSessionFactory`. One account session returns a focused mail session and calendar session, and owns removal of the shared account cache. The factory opens the cache once, then composes both workflows over handles to that same account cache and provider. The account view owns the account session lifecycle; each child view receives only its workflow-specific application port. Calendar creation and its local rejection recovery use the `CalendarSession` port so the native view does not retain a concrete provider/cache workflow.
+Replace the mail-only session boundary with an application-owned `AccountSession` and `AccountSessionFactory`. One account session returns a focused mail session and calendar session, and owns removal of the shared account cache. The factory opens the cache once, then composes both workflows over handles to that same account cache and provider. The desktop `Workspace` owns the account session, session-open errors, and child-view lifecycle. The account feature owns account operations and emits a sign-out request to the workspace; each mail or calendar child receives only its workflow-specific application port. Calendar creation and its local rejection recovery use the `CalendarSession` port so the native view does not retain a concrete provider/cache workflow.
 
 Each opened session binds its account ID for its lifetime. Account-scoped session methods use that bound identity; methods that accept account-scoped references validate them before cache, provider, or persistence work. Session cache removal uses the bound identity. The factory retains explicit account IDs for cache removal when no session is open.
 
@@ -34,7 +34,7 @@ The interface continues to return boxed `Send` futures from the standard library
 - Mail and calendar views receive workflow-specific session interfaces and do not name Graph or SQLite types.
 - An open session cannot be redirected to another account by passing a second account ID; foreign mail and calendar references fail before cache or provider access.
 - The calendar session exposes cached reads, synchronization, staged creation, and cleanup after a definitive provider rejection.
-- The account view retains the composite session while either child view is active and stops the child view before removing the shared cache.
+- The workspace retains the composite session while either child view is active and stops the child view before removing the shared cache.
 - The shared-cache registry from ADR 0038 is superseded by account-scoped lock leases: one account session shares a cache client across its workflows, and removal waits until every open cache handle releases its shared lease.
 - Cache creation and removal remain application and persistence responsibilities.
 - The session composes separate workflows, so mail and calendar domain logic remain independently testable.

@@ -27,7 +27,10 @@ fn exchange_server_form_connects_without_microsoft_client_configuration(cx: &mut
     let workflow = Arc::new(AccountWorkflow::new(provider));
     let services = AccountServices::new(workflow, unused_account_session_factory())
         .with_microsoft365_setup_issue(SetupIssue::MissingClientId);
-    let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(services), cx));
+    let (workspace, context) = cx.add_window_view(|_, cx| Workspace::new(Ok(services), cx));
+    let view = context
+        .cx
+        .update(|cx| workspace.read(cx).test_account_view());
 
     context.run_until_parked();
     draw_account_view(context);
@@ -106,7 +109,10 @@ fn exchange_autodiscover_shows_external_destination_before_continuing(cx: &mut T
     let discovery_input_valid = Arc::clone(&provider.ews_discovery_input_valid);
     let workflow = Arc::new(AccountWorkflow::new(provider));
     let services = AccountServices::new(workflow, unused_account_session_factory());
-    let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(services), cx));
+    let (workspace, context) = cx.add_window_view(|_, cx| Workspace::new(Ok(services), cx));
+    let view = context
+        .cx
+        .update(|cx| workspace.read(cx).test_account_view());
 
     context.run_until_parked();
     draw_account_view(context);
@@ -144,7 +150,10 @@ fn exchange_form_cancel_drops_the_active_discovery_task(cx: &mut TestAppContext)
     cx.update(gpui_kit::init);
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let services = AccountServices::new(workflow, unused_account_session_factory());
-    let (view, context) = cx.add_window_view(|_, cx| AccountView::new(Ok(services), cx));
+    let (workspace, context) = cx.add_window_view(|_, cx| Workspace::new(Ok(services), cx));
+    let view = context
+        .cx
+        .update(|cx| workspace.read(cx).test_account_view());
 
     context.run_until_parked();
     draw_account_view(context);

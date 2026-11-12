@@ -11,8 +11,8 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
         removal_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
     let workflow = Arc::new(AccountWorkflow::new(provider));
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (view, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
 
     let profile = synthetic_account_profile(
@@ -23,7 +23,7 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
     .expect("synthetic account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.test_set_connected_account(connected_account(profile));
+            view.test_set_connected_account(connected_account(profile), cx);
             cx.notify();
         });
     });
@@ -45,13 +45,13 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
     assert!(
         context
             .cx
-            .update(|cx| view.read(cx).test_has_pending_permission_review())
+            .update(|cx| view.read(cx).test_has_pending_permission_review(cx))
     );
     click(context, "cancel-permission-review");
     assert!(
         context
             .cx
-            .update(|cx| view.read(cx).test_pending_permission_review_is(None))
+            .update(|cx| view.read(cx).test_pending_permission_review_is(None, cx))
     );
 }
 
@@ -71,8 +71,8 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
         sign_out_events: Arc::new(Mutex::new(Vec::new())),
         removal_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (view, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
     let profile = synthetic_account_profile(
         synthetic_account_id(),
@@ -92,7 +92,7 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
     .expect("replacement account profile is valid");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.test_set_connected_account(connected_account(profile));
+            view.test_set_connected_account(connected_account(profile), cx);
             cx.notify();
         });
     });
@@ -104,8 +104,8 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
         .expect("the account session open starts");
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.test_set_opening_mail_content();
-            view.test_set_connected_account(connected_account(replacement_profile));
+            view.test_set_opening_mail_content(cx);
+            view.test_set_connected_account(connected_account(replacement_profile), cx);
             cx.notify();
         });
     });
@@ -116,8 +116,8 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
 
     let stale_error_ignored = context.cx.update(|cx| {
         let view = view.read(cx);
-        view.test_status_is_connected_to(&replacement_account_id)
-            && view.test_content() == AccountViewTestContent::OpeningMail
+        view.test_status_is_connected_to(&replacement_account_id, cx)
+            && view.test_content() == WorkspaceTestContent::OpeningMail
             && view.test_session_open_error_is_none()
     });
     assert!(stale_error_ignored);
@@ -165,12 +165,12 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
         opened_account_ids: Arc::clone(&opened_account_ids),
     });
     let workflow = Arc::new(AccountWorkflow::new(provider.clone()));
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (view, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.test_set_connected_account(connected_account(profile_a));
+            view.test_set_connected_account(connected_account(profile_a), cx);
             view.test_set_account_session(Some(Arc::clone(&session_a)));
             cx.notify();
         });
@@ -183,6 +183,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
         view.read(cx)
             .test_status_is_failed_with_possible_saved_credential(
                 AccountOperationError::SavedAccountIdentityUnavailable,
+                cx,
             )
     }));
     assert!(
@@ -204,7 +205,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
     assert!(
         context
             .cx
-            .update(|cx| view.read(cx).test_status_is_connected_to(&account_b_id))
+            .update(|cx| view.read(cx).test_status_is_connected_to(&account_b_id, cx))
     );
     assert!(
         context
@@ -231,7 +232,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
 
     let retry_state_is_bound_to_account_b = context.cx.update(|cx| {
         let view = view.read(cx);
-        view.test_status_is_connected_to(&account_b_id) && view.test_session_matches(&session_b)
+        view.test_status_is_connected_to(&account_b_id, cx) && view.test_session_matches(&session_b)
     });
     assert!(retry_state_is_bound_to_account_b);
     assert!(
@@ -252,7 +253,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
     assert!(
         context
             .cx
-            .update(|cx| view.read(cx).test_status_is_disconnected())
+            .update(|cx| view.read(cx).test_status_is_disconnected(cx))
     );
     assert!(signed_out.load(Ordering::SeqCst));
     assert_eq!(
@@ -268,6 +269,7 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
     cx.update(gpui_kit::init);
     let provider = TestProvider::default();
     let signed_out = Arc::clone(&provider.signed_out);
+    provider.fail_next_sign_out.store(true, Ordering::SeqCst);
     *provider
         .saved_account_id
         .lock()
@@ -285,8 +287,8 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
         session_open_attempts: Arc::new(AtomicUsize::new(0)),
         opened_account_ids: Arc::new(Mutex::new(Vec::new())),
     });
-    let (view, context) = cx
-        .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
+    let (view, context) =
+        cx.add_window_view(|_, cx| Workspace::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
     let profile = synthetic_account_profile(
         synthetic_account_id(),
@@ -297,7 +299,7 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
     let account_id = profile.id().clone();
     context.cx.update(|cx| {
         view.update(cx, |view, cx| {
-            view.test_set_connected_account(connected_account(profile));
+            view.test_set_connected_account(connected_account(profile), cx);
             cx.notify();
         });
     });
@@ -306,13 +308,13 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
     click(context, "nav-calendar");
     let calendar_open = context
         .cx
-        .update(|cx| view.read(cx).test_content() == AccountViewTestContent::Calendar);
+        .update(|cx| view.read(cx).test_content() == WorkspaceTestContent::Calendar);
     assert!(calendar_open);
 
     click(context, "nav-accounts");
     let returned_to_account = context
         .cx
-        .update(|cx| view.read(cx).test_content() == AccountViewTestContent::Account);
+        .update(|cx| view.read(cx).test_content() == WorkspaceTestContent::Accounts);
     assert!(returned_to_account);
 
     let session_retained_after_return = context
@@ -324,7 +326,7 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
 
     let retry_state_kept = context.cx.update(|cx| {
         let account_view = view.read(cx);
-        account_view.test_status_is_connected_to(&account_id)
+        account_view.test_status_is_connected_to(&account_id, cx)
             && account_view.test_session_matches(&session)
     });
     assert!(retry_state_kept);
@@ -335,12 +337,21 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
         vec![account_id.clone()]
     );
     assert!(!fallback_removals.load(Ordering::SeqCst));
+    assert!(!signed_out.load(Ordering::SeqCst));
+
+    click(context, "sign-out");
+
+    let session_retained_after_credential_failure = context
+        .cx
+        .update(|cx| view.read(cx).test_session_matches(&session));
+    assert!(session_retained_after_credential_failure);
+    assert!(!signed_out.load(Ordering::SeqCst));
 
     click(context, "sign-out");
 
     let state_cleared = context.cx.update(|cx| {
         let account_view = view.read(cx);
-        account_view.test_status_is_disconnected() && !account_view.test_has_account_session()
+        account_view.test_status_is_disconnected(cx) && !account_view.test_has_account_session()
     });
     assert!(state_cleared);
     assert!(signed_out.load(Ordering::SeqCst));
@@ -348,7 +359,7 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
         *removal_attempts
             .lock()
             .expect("synthetic session removal log mutex is healthy"),
-        vec![account_id.clone(), account_id]
+        vec![account_id.clone(), account_id.clone(), account_id]
     );
     assert!(!fallback_removals.load(Ordering::SeqCst));
 }

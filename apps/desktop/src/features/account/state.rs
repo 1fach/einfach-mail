@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use einfach_mail_application::{
-    AccountCacheOpenError, AccountCacheRemovalError, AccountConnectionRequest,
-    AccountOperationCancellation, AccountOperationError, AccountProvider, AccountSessionFactory,
-    AccountWorkflow, ConnectedAccount, ExchangeEwsConnectionInput,
-    ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryResult,
+    AccountCacheRemovalError, AccountConnectionRequest, AccountOperationCancellation,
+    AccountOperationError, AccountProvider, AccountSessionFactory, AccountWorkflow,
+    ConnectedAccount, ExchangeEwsConnectionInput, ExchangeEwsDiscoveryConfirmation,
+    ExchangeEwsDiscoveryResult,
 };
 use einfach_mail_domain::AccountProfile;
 use gpui_kit::component::input::InputState;
@@ -213,10 +213,4 @@ pub(super) enum AccountSignOutError {
     Identity(AccountOperationError),
     CacheRemoval(AccountCacheRemovalError),
     CredentialRemoval(AccountOperationError),
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum AccountViewCacheError {
-    Open(AccountCacheOpenError),
-    Removal(AccountCacheRemovalError),
 }

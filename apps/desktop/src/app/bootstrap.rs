@@ -14,10 +14,10 @@ use einfach_mail_persistence::{SqliteAccountCacheFactory, XdgExchangeEwsAccountS
 use gpui_kit::*;
 use uuid::Uuid;
 
-use super::workspace::{AccountServices, AccountView, NavigationSurfaceAppearance, SetupIssue};
+use super::{NavigationSurfaceAppearance, Workspace};
 use crate::features::{
-    bind_calendar_event_navigation_keys, bind_event_composer_keys, bind_mail_composer_keys,
-    bind_message_navigation_keys,
+    AccountServices, SetupIssue, bind_calendar_event_navigation_keys, bind_event_composer_keys,
+    bind_mail_composer_keys, bind_message_navigation_keys,
 };
 
 const CLIENT_ID_ENV: &str = "EINFACH_MAIL_ENTRA_CLIENT_ID";
@@ -148,7 +148,7 @@ pub(crate) fn run_application() -> Result<(), std::io::Error> {
             cx,
             |window, cx| {
                 cx.new(|cx| {
-                    AccountView::new_for_window(account_services, window, cx)
+                    Workspace::new_for_window(account_services, window, cx)
                         .with_navigation_surface_appearance(navigation_surface_appearance)
                 })
             },

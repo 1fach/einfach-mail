@@ -4,9 +4,10 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use gpui_kit::{Modifiers, TestAppContext, px, size};
+use gpui_kit::{AppContext, Modifiers, TestAppContext, px, size};
 
 use super::*;
+use crate::app::Workspace;
 use crate::test_support::account::*;
 use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountOperationError,

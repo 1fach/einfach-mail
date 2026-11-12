@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
-use super::AccountView;
 use super::state::{
-    AccountStatus, EwsDiscoveryState, ExchangeEwsConnectionForm, SavedCredentialState,
+    AccountSignOutError, AccountStatus, EwsDiscoveryState, ExchangeEwsConnectionForm,
+    SavedCredentialState,
 };
+use super::{AccountView, AccountViewEvent, SignOutSessionDisposition};
 use einfach_mail_application::{
-    AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
-    AccountPermissionRequest, AccountProvider, AccountWorkflow, ConnectedAccount,
-    ExchangeEwsDiscoveryConfirmation, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
+    AccountCacheRemovalError, AccountConnectionRequest, AccountOperationCancellation,
+    AccountOperationError, AccountPermissionRequest, AccountProvider, AccountSession,
+    AccountSessionFactory, AccountWorkflow, ConnectedAccount, ExchangeEwsDiscoveryConfirmation,
+    ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult,
 };
 use gpui_kit::{AsyncApp, Context, Task, Window};
 
@@ -17,9 +19,9 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         };
         let workflow = Arc::clone(&services.workflow);
-        self.account_session = None;
         self.status = AccountStatus::Restoring;
-        self.session_open_error = None;
+        self.cache_removal_error = None;
+        cx.emit(AccountViewEvent::RestoreStarted);
         self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let restore_result = workflow.restore_account().await;
             let _ = this.update(cx, |view, cx| {
@@ -320,12 +322,12 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         cx.notify();
     }
 
-    pub(super) fn prepare_permission_review(
+    pub(crate) fn prepare_permission_review(
         &mut self,
         request: AccountPermissionRequest,
         cx: &mut Context<Self>,
     ) {
-        if self.content.opening_kind().is_some() || self.status.connected_profile().is_none() {
+        if self.workspace_is_opening || self.status.connected_profile().is_none() {
             return;
         }
         if request == AccountPermissionRequest::MailReadWrite
@@ -427,4 +429,147 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         };
         cx.notify();
     }
+
+    pub(crate) fn request_sign_out(&mut self, cx: &mut Context<Self>) {
+        cx.emit(AccountViewEvent::SignOutRequested);
+    }
+
+    pub(crate) fn sign_out(
+        &mut self,
+        account_session: Option<Arc<dyn AccountSession>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(services) = &self.services else {
+            return;
+        };
+        if !self.can_sign_out() {
+            return;
+        }
+
+        let workflow = Arc::clone(&services.workflow);
+        let account_session_factory = Arc::clone(&services.account_session_factory);
+        let previous_status = self.status.clone();
+        let account = previous_status.connected_account().cloned();
+        self.cache_removal_error = None;
+        self.status = AccountStatus::SigningOut { account };
+        self.task = Some(Self::sign_out_task(
+            workflow,
+            previous_status,
+            account_session,
+            account_session_factory,
+            cx,
+        ));
+        cx.notify();
+    }
+
+    fn can_sign_out(&self) -> bool {
+        self.status.saved_credential_state() != SavedCredentialState::Absent
+            && !self.workspace_is_opening
+            && !matches!(
+                &self.status,
+                AccountStatus::Connecting { .. }
+                    | AccountStatus::CancellingConnect
+                    | AccountStatus::Reauthorizing { .. }
+                    | AccountStatus::CancellingReauthorization { .. }
+                    | AccountStatus::SigningOut { .. }
+            )
+    }
+
+    fn sign_out_task(
+        workflow: Arc<AccountWorkflow<P>>,
+        previous_status: AccountStatus,
+        account_session: Option<Arc<dyn AccountSession>>,
+        account_session_factory: Arc<dyn AccountSessionFactory>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let result = cx
+                .background_executor()
+                .spawn(remove_verified_account_cache_and_sign_out(
+                    workflow,
+                    account_session,
+                    account_session_factory,
+                ))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.finish_sign_out(previous_status, result, cx);
+            });
+        })
+    }
+
+    fn finish_sign_out(
+        &mut self,
+        previous_status: AccountStatus,
+        result: Result<(), AccountSignOutError>,
+        cx: &mut Context<Self>,
+    ) {
+        let session_disposition = sign_out_session_disposition(&result);
+        match result {
+            Ok(()) => self.status = AccountStatus::Disconnected,
+            Err(AccountSignOutError::Identity(error)) => {
+                self.status = AccountStatus::Failed {
+                    error,
+                    saved_credential_state: SavedCredentialState::MayExist,
+                };
+            }
+            Err(AccountSignOutError::CacheRemoval(error)) => {
+                self.status = previous_status;
+                self.cache_removal_error = Some(error);
+            }
+            Err(AccountSignOutError::CredentialRemoval(error)) => {
+                self.status = AccountStatus::SignOutFailed {
+                    account: previous_status.connected_account().cloned(),
+                    error,
+                };
+            }
+        }
+        self.task = None;
+        cx.emit(AccountViewEvent::SignOutFinished(session_disposition));
+        cx.notify();
+    }
+}
+
+fn sign_out_session_disposition(
+    result: &Result<(), AccountSignOutError>,
+) -> SignOutSessionDisposition {
+    match result {
+        Ok(()) => SignOutSessionDisposition::Release,
+        Err(_) => SignOutSessionDisposition::Retain,
+    }
+}
+
+async fn remove_account_cache(
+    account_session: Option<Arc<dyn AccountSession>>,
+    account_session_factory: Arc<dyn AccountSessionFactory>,
+    account_id: einfach_mail_domain::AccountId,
+) -> Result<(), AccountCacheRemovalError> {
+    match account_session {
+        Some(account_session) => account_session.remove_account_cache().await,
+        None => {
+            account_session_factory
+                .remove_account_cache(&account_id)
+                .await
+        }
+    }
+}
+
+async fn remove_verified_account_cache_and_sign_out<P: AccountProvider>(
+    workflow: Arc<AccountWorkflow<P>>,
+    account_session: Option<Arc<dyn AccountSession>>,
+    account_session_factory: Arc<dyn AccountSessionFactory>,
+) -> Result<(), AccountSignOutError> {
+    let account_id = workflow
+        .saved_credential_account_id()
+        .await
+        .map_err(AccountSignOutError::Identity)?
+        .ok_or(AccountSignOutError::Identity(
+            AccountOperationError::SavedAccountIdentityUnavailable,
+        ))?;
+    remove_account_cache(account_session, account_session_factory, account_id)
+        .await
+        .map_err(AccountSignOutError::CacheRemoval)?;
+    workflow
+        .sign_out()
+        .await
+        .map_err(AccountSignOutError::CredentialRemoval)
 }
