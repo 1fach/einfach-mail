@@ -364,10 +364,8 @@ impl MailView {
             action,
         } = feedback;
         let feedback_view = Self::message_write_feedback_view(message, role, feedback_id, cx);
-        let permission_review_id = match action {
-            Some(MessageWriteFeedbackAction::ReviewPermission) => Some(permission_review_id),
-            None => None,
-        };
+        let permission_review_id =
+            action.map(|MessageWriteFeedbackAction::ReviewPermission| permission_review_id);
         self.with_permission_review(feedback_view, permission_review_id, cx)
     }
 
