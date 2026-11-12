@@ -42,6 +42,9 @@ pub enum CalendarWorkflowError {
     /// The provider returned an event that does not match the staged creation.
     #[error("the calendar service returned an unexpected created event")]
     InvalidConfirmation,
+    /// No matching unresolved creation is available for provider recovery.
+    #[error("the unresolved calendar event creation is no longer available")]
+    PendingCreationNotFound,
     /// The provider did not return the event and values submitted for update.
     #[error("the calendar service returned an unexpected updated event")]
     InvalidUpdateConfirmation,
@@ -401,30 +404,47 @@ where
                 self.provider.recover_event_creation(creation).await
             }
         };
-        let event = match creation_result {
-            Ok(event) => event,
-            Err(CalendarOperationError::EventCreationRejected) => {
-                if let Err(cache_error) = self.cache.mark_event_creation_rejected(creation).await {
-                    return Ok(CalendarEventCreationOutcome::RejectedButPending { cache_error });
-                }
-                return match self.cache.discard_event_creation(creation).await {
-                    Ok(()) => Ok(CalendarEventCreationOutcome::Rejected),
-                    Err(cache_error) => {
-                        Ok(CalendarEventCreationOutcome::RejectedButPending { cache_error })
-                    }
-                };
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if !confirms_creation(creation, &event) {
-            return Err(CalendarWorkflowError::InvalidConfirmation);
+        self.finish_event_creation(creation, creation_result).await
+    }
+
+    /// Checks the provider for an event matching an existing unresolved creation.
+    ///
+    /// The cache must still contain the exact draft as unresolved. This method
+    /// never stages a creation or calls the provider's create operation. An
+    /// inconclusive provider result leaves the saved draft unresolved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarWorkflowError::AccountMismatch`] for a creation from another account,
+    /// [`CalendarWorkflowError::PendingCreationNotFound`] when the cache does
+    /// not contain that exact unresolved creation, a provider or cache error
+    /// when recovery cannot be completed, [`CalendarWorkflowError::OperationInProgress`]
+    /// when another account operation owns the calendar,
+    /// [`CalendarWorkflowError::CalendarWriteSyncRequired`] until the calendar
+    /// is ready, or [`CalendarWorkflowError::StateUnavailable`] when shared
+    /// workflow state cannot be accessed.
+    pub async fn recover_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> Result<CalendarEventCreationOutcome, CalendarWorkflowError> {
+        self.ensure_account(creation.view().account_id())?;
+        let _reservation = self
+            .reservations
+            .reserve_account(creation.view().account_id())
+            .map_err(CalendarWorkflowError::from)?;
+        self.ensure_calendar_write_ready(creation.view()).await?;
+        let pending_creation = self
+            .cache
+            .pending_event_creation(creation.view().account_id())
+            .await?;
+        if !matches!(
+            pending_creation,
+            Some(PendingCalendarEventCreation::Unresolved(pending)) if &pending == creation
+        ) {
+            return Err(CalendarWorkflowError::PendingCreationNotFound);
         }
-        match self.cache.commit_event_creation(creation, &event).await {
-            Ok(()) => Ok(CalendarEventCreationOutcome::Cached(event)),
-            Err(cache_error) => {
-                Ok(CalendarEventCreationOutcome::ConfirmedButNotCached { event, cache_error })
-            }
-        }
+        let creation_result = self.provider.recover_event_creation(creation).await;
+        self.finish_event_creation(creation, creation_result).await
     }
 
     /// Removes a pending draft after the provider definitively rejects it.
@@ -453,6 +473,51 @@ where
         self.cache.mark_event_creation_rejected(creation).await?;
         self.cache.discard_event_creation(creation).await?;
         Ok(())
+    }
+
+    async fn finish_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+        result: Result<CalendarOccurrence, CalendarOperationError>,
+    ) -> Result<CalendarEventCreationOutcome, CalendarWorkflowError> {
+        match result {
+            Ok(event) => self.cache_confirmed_event_creation(creation, event).await,
+            Err(CalendarOperationError::EventCreationRejected) => {
+                self.clear_rejected_event_creation(creation).await
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn cache_confirmed_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+        event: CalendarOccurrence,
+    ) -> Result<CalendarEventCreationOutcome, CalendarWorkflowError> {
+        if !confirms_creation(creation, &event) {
+            return Err(CalendarWorkflowError::InvalidConfirmation);
+        }
+        match self.cache.commit_event_creation(creation, &event).await {
+            Ok(()) => Ok(CalendarEventCreationOutcome::Cached(event)),
+            Err(cache_error) => {
+                Ok(CalendarEventCreationOutcome::ConfirmedButNotCached { event, cache_error })
+            }
+        }
+    }
+
+    async fn clear_rejected_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> Result<CalendarEventCreationOutcome, CalendarWorkflowError> {
+        if let Err(cache_error) = self.cache.mark_event_creation_rejected(creation).await {
+            return Ok(CalendarEventCreationOutcome::RejectedButPending { cache_error });
+        }
+        match self.cache.discard_event_creation(creation).await {
+            Ok(()) => Ok(CalendarEventCreationOutcome::Rejected),
+            Err(cache_error) => {
+                Ok(CalendarEventCreationOutcome::RejectedButPending { cache_error })
+            }
+        }
     }
 
     /// Loads a provider-versioned event after reserving its account against calendar writes.

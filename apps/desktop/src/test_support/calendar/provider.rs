@@ -26,6 +26,9 @@ pub(crate) struct TestProvider {
     event_creation_gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     event_creation_failure: Arc<Mutex<Option<CalendarOperationError>>>,
     pub(crate) event_creation_count: Arc<AtomicUsize>,
+    event_creation_recovery_gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+    event_creation_recovery_failure: Arc<Mutex<Option<CalendarOperationError>>>,
+    pub(crate) event_creation_recovery_count: Arc<AtomicUsize>,
     pub(crate) event_update_calls: Arc<AtomicUsize>,
     event_update_gate: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     event_update_failure: Arc<Mutex<Option<CalendarOperationError>>>,
@@ -88,6 +91,20 @@ impl TestProvider {
             .expect("synthetic creation failure mutex is not poisoned") = Some(failure);
     }
 
+    pub(crate) fn hold_event_creation_recovery_until(&self, gate: oneshot::Receiver<()>) {
+        *self
+            .event_creation_recovery_gate
+            .lock()
+            .expect("synthetic recovery gate mutex is not poisoned") = Some(gate);
+    }
+
+    pub(crate) fn fail_next_event_creation_recovery(&self, failure: CalendarOperationError) {
+        *self
+            .event_creation_recovery_failure
+            .lock()
+            .expect("synthetic recovery failure mutex is not poisoned") = Some(failure);
+    }
+
     fn take_event_creation_gate(&self) -> Option<oneshot::Receiver<()>> {
         self.event_creation_gate
             .lock()
@@ -99,6 +116,20 @@ impl TestProvider {
         self.event_creation_failure
             .lock()
             .expect("synthetic creation failure mutex is not poisoned")
+            .take()
+    }
+
+    fn take_event_creation_recovery_gate(&self) -> Option<oneshot::Receiver<()>> {
+        self.event_creation_recovery_gate
+            .lock()
+            .expect("synthetic recovery gate mutex is not poisoned")
+            .take()
+    }
+
+    fn take_event_creation_recovery_failure(&self) -> Option<CalendarOperationError> {
+        self.event_creation_recovery_failure
+            .lock()
+            .expect("synthetic recovery failure mutex is not poisoned")
             .take()
     }
 }
@@ -158,7 +189,7 @@ impl CalendarProvider for TestProvider {
         let event_creation_count = Arc::clone(&self.event_creation_count);
         async move {
             event_creation_count.fetch_add(1, Ordering::SeqCst);
-            create_event_after_wait(creation, gate, failure).await
+            event_creation_after_wait(creation, gate, failure).await
         }
     }
 
@@ -166,7 +197,14 @@ impl CalendarProvider for TestProvider {
         &self,
         creation: &CalendarEventCreation,
     ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_ {
-        self.create_event(creation)
+        let gate = self.take_event_creation_recovery_gate();
+        let failure = self.take_event_creation_recovery_failure();
+        let creation = creation.clone();
+        let recovery_count = Arc::clone(&self.event_creation_recovery_count);
+        async move {
+            recovery_count.fetch_add(1, Ordering::SeqCst);
+            event_creation_after_wait(creation, gate, failure).await
+        }
     }
 
     fn load_versioned_event(
@@ -254,7 +292,7 @@ impl CalendarProvider for TestProvider {
     }
 }
 
-async fn create_event_after_wait(
+async fn event_creation_after_wait(
     creation: CalendarEventCreation,
     gate: Option<oneshot::Receiver<()>>,
     failure: Option<CalendarOperationError>,

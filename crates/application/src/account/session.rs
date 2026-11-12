@@ -241,7 +241,7 @@ pub trait CalendarSession: Send + Sync {
         event: &'a CalendarOccurrence,
     ) -> AccountSessionFuture<'a, Result<VersionedCalendarEvent, CalendarWorkflowError>>;
 
-    /// Creates a staged event and caches it after Graph confirms the result.
+    /// Creates a staged event and caches it after the provider confirms the result.
     ///
     /// # Errors
     ///
@@ -255,7 +255,28 @@ pub trait CalendarSession: Send + Sync {
         creation: &'a CalendarEventCreation,
     ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>>;
 
-    /// Clears a creation after Graph definitively rejected it.
+    /// Checks the provider for an event matching the exact unresolved creation in the cache.
+    ///
+    /// This operation does not stage a creation or call the provider's create
+    /// operation. An inconclusive result leaves the saved creation unresolved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalendarWorkflowError::AccountMismatch`] when the creation
+    /// belongs to another account, [`CalendarWorkflowError::PendingCreationNotFound`]
+    /// when the cache does not contain the exact unresolved creation, a
+    /// provider or cache error when recovery cannot be completed,
+    /// [`CalendarWorkflowError::OperationInProgress`] when another account
+    /// operation is active, [`CalendarWorkflowError::CalendarWriteSyncRequired`]
+    /// until the calendar is ready, or
+    /// [`CalendarWorkflowError::StateUnavailable`] when shared workflow state
+    /// cannot be accessed.
+    fn recover_event_creation<'a>(
+        &'a self,
+        creation: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>>;
+
+    /// Clears a creation after the provider definitively rejected it.
     ///
     /// # Errors
     ///
@@ -682,6 +703,13 @@ where
         creation: &'a CalendarEventCreation,
     ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>> {
         Box::pin(CalendarWorkflow::create_event(self, creation))
+    }
+
+    fn recover_event_creation<'a>(
+        &'a self,
+        creation: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>> {
+        Box::pin(CalendarWorkflow::recover_event_creation(self, creation))
     }
 
     fn discard_rejected_event_creation<'a>(

@@ -5,7 +5,7 @@ use jiff::tz::TimeZone;
 use time::{Date, Month, PrimitiveDateTime, Time};
 
 use super::copy::creation_error_text;
-use super::state::{ComposerState, CreateState, DraftError, EditState};
+use super::state::{ComposerState, CreateState, DraftError, EditState, PendingCreationStatus};
 use super::time::{
     event_endpoints_within_view_week, picker_value_for_offset, resolve_local_datetime,
     selected_event_time,
@@ -40,6 +40,42 @@ fn composer_state_keeps_draft_and_recovery_actions_distinct() {
     assert!(!unresolved.can_submit());
     assert!(unresolved.action_is_terminal());
     assert_eq!(unresolved.submit_label(), None);
+}
+
+#[test]
+fn pending_creation_actions_check_status_without_offering_a_create_retry() {
+    assert_eq!(
+        PendingCreationStatus::Unresolved.submit_label(),
+        "Check event status"
+    );
+    assert_eq!(
+        PendingCreationStatus::StillUnresolved.submit_label(),
+        "Check event status"
+    );
+    assert_eq!(
+        PendingCreationStatus::Failed(CalendarWorkflowError::Provider(
+            CalendarOperationError::ServiceUnavailable
+        ))
+        .submit_label(),
+        "Check event status"
+    );
+    assert_eq!(
+        PendingCreationStatus::Checking.submit_label(),
+        "Checking event status…"
+    );
+
+    let unstaged = ComposerState::Create(CreateState::DraftFailed(CalendarWorkflowError::Cache(
+        CalendarCacheError::Unavailable,
+    )));
+    assert!(unstaged.show_fields());
+    assert!(unstaged.can_submit());
+    assert_eq!(unstaged.submit_label(), Some("Create event"));
+    assert_eq!(
+        unstaged.status_text(),
+        Some(
+            "The encrypted calendar cache is unavailable. This event was not sent to Microsoft. Restore cache access, then retry."
+        )
+    );
 }
 
 #[test]

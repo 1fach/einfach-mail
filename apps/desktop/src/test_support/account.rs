@@ -259,6 +259,15 @@ impl CalendarSession for TestCalendarSession {
         ))))
     }
 
+    fn recover_event_creation<'a>(
+        &'a self,
+        _: &'a CalendarEventCreation,
+    ) -> AccountSessionFuture<'a, Result<CalendarEventCreationOutcome, CalendarWorkflowError>> {
+        Box::pin(ready(Err(CalendarWorkflowError::Cache(
+            CalendarCacheError::Unavailable,
+        ))))
+    }
+
     fn discard_rejected_event_creation<'a>(
         &'a self,
         _: &'a CalendarEventCreation,

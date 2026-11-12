@@ -7,6 +7,7 @@ pub(super) enum ComposerState {
 
 pub(super) enum CreateState {
     Draft,
+    DraftFailed(CalendarWorkflowError),
     InvalidDraft(DraftError),
     Pending {
         creation: CalendarEventCreation,
@@ -19,8 +20,10 @@ pub(super) enum CreateState {
 
 #[derive(Clone, Copy)]
 pub(super) enum PendingCreationStatus {
-    Ready,
-    Submitting,
+    Unresolved,
+    Creating,
+    Checking,
+    StillUnresolved,
     Failed(CalendarWorkflowError),
     ConfirmedButNotCached,
     RejectedPendingCleanup,
@@ -89,7 +92,7 @@ impl CreateState {
         match pending_creation {
             Some(PendingCalendarEventCreation::Unresolved(creation)) => Self::Pending {
                 creation,
-                status: PendingCreationStatus::Ready,
+                status: PendingCreationStatus::Unresolved,
             },
             Some(PendingCalendarEventCreation::Rejected(creation)) => Self::Pending {
                 creation,
@@ -101,7 +104,7 @@ impl CreateState {
 
     pub(super) fn submit_label(&self) -> Option<&'static str> {
         match self {
-            Self::Draft | Self::InvalidDraft(_) => Some("Create event"),
+            Self::Draft | Self::DraftFailed(_) | Self::InvalidDraft(_) => Some("Create event"),
             Self::Pending { status, .. } => Some(status.submit_label()),
             Self::PendingResolutionRequired
             | Self::PendingResolutionFailed(_)
@@ -115,7 +118,8 @@ impl CreateState {
             Self::Pending {
                 status: PendingCreationStatus::Failed(error),
                 ..
-            } if is_access_denied(*error)
+            }
+                | Self::DraftFailed(error) if is_access_denied(*error)
         )
     }
 }
@@ -125,8 +129,12 @@ impl PendingCreationStatus {
         match self {
             Self::DiscardingRejected => "Clearing draft…",
             Self::RejectedPendingCleanup | Self::RejectedCleanupFailed(_) => "Clear rejected draft",
-            Self::Submitting => "Creating event…",
-            Self::Ready | Self::Failed(_) | Self::ConfirmedButNotCached => "Retry event creation",
+            Self::Creating => "Creating event…",
+            Self::Checking => "Checking event status…",
+            Self::Unresolved
+            | Self::StillUnresolved
+            | Self::Failed(_)
+            | Self::ConfirmedButNotCached => "Check event status",
         }
     }
 }
@@ -169,6 +177,7 @@ impl ComposerState {
             Self::Create(CreateState::Pending { creation, status }) => Some((creation, *status)),
             Self::Create(
                 CreateState::Draft
+                | CreateState::DraftFailed(_)
                 | CreateState::InvalidDraft(_)
                 | CreateState::PendingResolutionRequired
                 | CreateState::PendingResolutionFailed(_)
@@ -180,10 +189,14 @@ impl ComposerState {
 
     pub(super) fn can_submit(&self) -> bool {
         match self {
-            Self::Create(CreateState::Draft | CreateState::InvalidDraft(_)) => true,
+            Self::Create(
+                CreateState::Draft | CreateState::DraftFailed(_) | CreateState::InvalidDraft(_),
+            ) => true,
             Self::Create(CreateState::Pending { status, .. }) => !matches!(
                 status,
-                PendingCreationStatus::Submitting | PendingCreationStatus::DiscardingRejected
+                PendingCreationStatus::Creating
+                    | PendingCreationStatus::Checking
+                    | PendingCreationStatus::DiscardingRejected
             ),
             Self::Create(
                 CreateState::PendingResolutionRequired
@@ -224,7 +237,10 @@ impl ComposerState {
             )
             | Self::Edit(EditState::Loading | EditState::LoadFailed(_)) => true,
             Self::Create(
-                CreateState::Draft | CreateState::InvalidDraft(_) | CreateState::Pending { .. },
+                CreateState::Draft
+                | CreateState::DraftFailed(_)
+                | CreateState::InvalidDraft(_)
+                | CreateState::Pending { .. },
             ) => false,
             Self::Edit(EditState::Ready { status, .. }) => is_terminal_edit_status(*status),
         }
@@ -235,6 +251,7 @@ impl ComposerState {
             Self::Create(CreateState::Pending { .. }) => false,
             Self::Create(
                 CreateState::Draft
+                | CreateState::DraftFailed(_)
                 | CreateState::InvalidDraft(_)
                 | CreateState::PendingResolutionRequired
                 | CreateState::PendingResolutionFailed(_)
@@ -249,7 +266,8 @@ impl ComposerState {
         matches!(
             self,
             Self::Create(CreateState::Pending {
-                status: PendingCreationStatus::Submitting
+                status: PendingCreationStatus::Creating
+                    | PendingCreationStatus::Checking
                     | PendingCreationStatus::DiscardingRejected,
                 ..
             }) | Self::Edit(EditState::Ready {
@@ -274,6 +292,7 @@ impl ComposerState {
                 ..
             }) => Some(*error),
             Self::Create(CreateState::Draft)
+            | Self::Create(CreateState::DraftFailed(_))
             | Self::Create(
                 CreateState::Pending { .. }
                 | CreateState::PendingResolutionRequired

@@ -70,23 +70,28 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         });
     }
 
-    pub(super) fn submit(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn activate_primary_action(&mut self, cx: &mut Context<Self>) {
         if !self.can_submit() {
             return;
         }
-        if matches!(
-            &self.state,
+        match &self.state {
             ComposerState::Create(CreateState::Pending {
-                status: PendingCreationStatus::RejectedPendingCleanup
+                status:
+                    PendingCreationStatus::RejectedPendingCleanup
                     | PendingCreationStatus::RejectedCleanupFailed(_),
                 ..
-            })
-        ) {
-            self.discard_rejected_creation(cx);
-            return;
-        }
-        match &self.state {
-            ComposerState::Create(_) => self.submit_create(cx),
+            }) => self.discard_rejected_creation(cx),
+            ComposerState::Create(CreateState::Pending { .. }) => {
+                self.check_pending_creation_status(cx);
+            }
+            ComposerState::Create(
+                CreateState::Draft | CreateState::DraftFailed(_) | CreateState::InvalidDraft(_),
+            ) => self.submit_create(cx),
+            ComposerState::Create(
+                CreateState::PendingResolutionRequired
+                | CreateState::PendingResolutionFailed(_)
+                | CreateState::Completed(_),
+            ) => {}
             ComposerState::Edit(EditState::Ready { .. }) => self.submit_edit(cx),
             ComposerState::Edit(EditState::Loading | EditState::LoadFailed(_)) => {}
         }
@@ -122,9 +127,27 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     fn submit_creation(&mut self, creation: CalendarEventCreation, cx: &mut Context<Self>) {
         self.state = ComposerState::Create(CreateState::Pending {
             creation: creation.clone(),
-            status: PendingCreationStatus::Submitting,
+            status: PendingCreationStatus::Creating,
         });
         self.start_submission(creation, cx);
+        cx.notify();
+    }
+
+    fn check_pending_creation_status(&mut self, cx: &mut Context<Self>) {
+        let Some((creation, _)) = self.state.pending_creation() else {
+            return;
+        };
+        let creation = creation.clone();
+        if let ComposerState::Create(CreateState::Pending { status, .. }) = &mut self.state {
+            *status = PendingCreationStatus::Checking;
+        }
+        let session = Arc::clone(&self.session);
+        self.task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let recovery_outcome = session.recover_event_creation(&creation).await;
+            let _ = this.update(cx, |composer, cx| {
+                composer.apply_recovery(recovery_outcome, cx);
+            });
+        }));
         cx.notify();
     }
 
@@ -370,7 +393,28 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         cx: &mut Context<Self>,
     ) {
         self.task = None;
-        self.apply_creation_outcome(creation_outcome, conflict_recovery);
+        match creation_outcome {
+            Err(CalendarWorkflowError::Cache(CalendarCacheError::CreationAlreadyPending)) => {
+                self.state =
+                    ComposerState::Create(Self::resolve_pending_conflict(conflict_recovery));
+            }
+            Err(error) if creation_was_not_dispatched(error) => {
+                self.state = ComposerState::Create(CreateState::DraftFailed(error));
+            }
+            creation_outcome => self.apply_creation_outcome(creation_outcome, None),
+        }
+        cx.emit(EventComposerEvent::PendingOperationUpdated);
+        cx.emit(EventComposerEvent::CalendarChanged);
+        cx.notify();
+    }
+
+    fn apply_recovery(
+        &mut self,
+        recovery_outcome: Result<CalendarEventCreationOutcome, CalendarWorkflowError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.task = None;
+        self.apply_creation_outcome(recovery_outcome, None);
         cx.emit(EventComposerEvent::PendingOperationUpdated);
         cx.emit(EventComposerEvent::CalendarChanged);
         cx.notify();
@@ -411,6 +455,12 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
                     ),
                 }
             }
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::CreationOutcomeUnknown,
+            )) => CreateState::Pending {
+                creation,
+                status: PendingCreationStatus::StillUnresolved,
+            },
             Err(CalendarWorkflowError::Cache(CalendarCacheError::CreationAlreadyPending)) => {
                 Self::resolve_pending_conflict(conflict_recovery)
             }
@@ -430,7 +480,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             Some(Ok(Some(PendingCalendarEventCreation::Unresolved(creation)))) => {
                 CreateState::Pending {
                     creation,
-                    status: PendingCreationStatus::Ready,
+                    status: PendingCreationStatus::Unresolved,
                 }
             }
             Some(Ok(Some(PendingCalendarEventCreation::Rejected(creation)))) => {
@@ -455,14 +505,12 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         cx: &App,
     ) -> Option<Result<CalendarEventCreation, DraftError>> {
         match &self.state {
-            ComposerState::Create(CreateState::Draft | CreateState::InvalidDraft(_)) => {
-                Some(self.build_creation(cx))
-            }
-            ComposerState::Create(CreateState::Pending { creation, .. }) => {
-                Some(Ok(creation.clone()))
-            }
             ComposerState::Create(
-                CreateState::PendingResolutionRequired
+                CreateState::Draft | CreateState::DraftFailed(_) | CreateState::InvalidDraft(_),
+            ) => Some(self.build_creation(cx)),
+            ComposerState::Create(
+                CreateState::Pending { .. }
+                | CreateState::PendingResolutionRequired
                 | CreateState::PendingResolutionFailed(_)
                 | CreateState::Completed(_),
             )
@@ -530,5 +578,16 @@ async fn recover_pending_conflict<S: CalendarSession + ?Sized>(
             .load_cached_view(creation.view())
             .await
             .map(|snapshot| snapshot.pending_creation().cloned()),
+    )
+}
+
+fn creation_was_not_dispatched(error: CalendarWorkflowError) -> bool {
+    matches!(
+        error,
+        CalendarWorkflowError::Cache(_)
+            | CalendarWorkflowError::AccountMismatch
+            | CalendarWorkflowError::OperationInProgress
+            | CalendarWorkflowError::CalendarWriteSyncRequired
+            | CalendarWorkflowError::StateUnavailable
     )
 }
