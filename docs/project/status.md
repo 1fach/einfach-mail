@@ -78,10 +78,11 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 
 [PR #384](https://github.com/1fach/einfach-mail/pull/384) merged at `ec689c2f1fded0b95eb6f89abee347375955f1ea` on 2026-11-12 and closed issue #382. It shares the two EWS access-denied response mappings through the installed `ews::ResponseCode` type. Mail keeps its expired-cursor reset. Calendar keeps its range-limit error. Unknown response codes remain invalid. The Rust 1.95 Linux gate passed: 511 tests passed, 0 failed, and 3 existing live Secret Service tests were ignored. The EWS provider suite passed all 55 tests.
 
+[PR #385](https://github.com/1fach/einfach-mail/pull/385) implements issue #383's EWS worker shutdown lifecycle. [ADR 0063](../decisions/0063-reap-ews-transport-workers.md) records the process-wide standard-library reaper, credential ownership, and request-outcome contract. Synthetic tests cover idle transport drop, queued reads and updates, and in-flight reads and updates. The Rust 1.95 Linux local gate passed; all 60 EWS provider tests and 123 headless desktop tests passed, with 3 existing live Secret Service tests ignored. No live Exchange verification was available.
+
 ## Active risks
 
 - GitHub Actions are disabled because the repository has no compute quota. PRs #275, #276, #277, #301, #320, #328, and #331 have no Actions runs; their Linux-local checks are recorded in their PRs. The application source, manifests, lockfile, and local-check scripts at PR #275 head `16c9ce9` match the locally checked code tree `d98fc69`. PR #331 merged after its local gate passed.
-- Issue [#383](https://github.com/1fach/einfach-mail/issues/383) tracks the EWS worker shutdown lifecycle. It covers synchronous thread joining and credential release.
 - No dedicated Microsoft 365 test tenant or public app registration is available. Keep live sign-in, initial mail sync, read-state, flag, send, reply, move, and calendar verification open under their existing issues.
 - No Exchange Server test host or sanitized EWS response recording is available. Synthetic EWS tests verify the request path and response mapping, but cannot prove server compatibility. Keep issue #257 open for live verification; PR #275 carries issue #267's implementation into `main`.
 - No Exchange Server test host is available to verify Autodiscover's published candidate sequence, SRV behavior, redirects, and server response variants end to end. Keep issue #258 open for that live verification.
@@ -99,15 +100,14 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 
 ## Next actions
 
-1. Define and verify EWS worker shutdown behavior under [issue #383](https://github.com/1fach/einfach-mail/issues/383) before changing lifecycle guarantees.
-2. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux. Keep #273's theme review and #274's named-compositor check open.
-3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
-4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
-5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
-6. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
-7. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
-8. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
-9. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
+1. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux. Keep #273's theme review and #274's named-compositor check open.
+2. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
+3. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
+4. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
+5. Resume the tenant-backed checks in issues #3, #6, #8, #24, #26, #28, #30, #32, #34, #36, #38, #40, #42, and #49 when the required Microsoft 365 test tenant and public app registration are available.
+6. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
+7. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
+8. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
 
 ## Update rule
 

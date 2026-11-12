@@ -1,8 +1,9 @@
 use super::{
-    DigestAlgorithm, EwsTransport, EwsWriteError, MAX_SOAP_DEPTH, build_client_builder,
-    digest_for_hash_oid, digest_for_signature_oid, map_status, parse_endpoint, parse_soap_response,
-    serialize_soap_request, validate_soap_header,
+    DigestAlgorithm, EwsCommand, EwsRequestError, EwsRequestMode, EwsTransport, EwsWriteError,
+    MAX_SOAP_DEPTH, build_client_builder, digest_for_hash_oid, digest_for_signature_oid,
+    map_status, parse_endpoint, parse_soap_response, serialize_soap_request, validate_soap_header,
 };
+use super::{tls::ConnectionIdentity, worker::EwsTransportState};
 use crate::auth::synthetic_type_two_challenge;
 use crate::error::EwsError;
 use crate::provider::read_state::{
@@ -16,9 +17,11 @@ use ews::{
     BaseFolderId, BaseShape, ItemShape, PathToElement, ResponseClass,
     sync_folder_items::{SyncFolderItems, SyncScope},
 };
-use httpmock::MockServer;
+use httpmock::{Mock, MockServer};
 use reqwest::{Certificate, StatusCode, header::AUTHORIZATION};
 use secrecy::SecretString;
+use tokio::sync::{mpsc, oneshot};
+use url::Url;
 
 const SYNC_FOLDER_ITEMS_PAGE: &[u8] = include_bytes!("..//fixtures/sync-folder-items-page.xml");
 const GET_ITEM_VERSIONED: &[u8] = include_bytes!("..//fixtures/get-item-versioned.xml");
@@ -321,4 +324,241 @@ async fn https_client_does_not_follow_redirects_with_an_authorization_header() {
     assert_eq!(response.status(), StatusCode::FOUND);
     redirect.assert_async().await;
     destination_request.assert_calls(0);
+}
+
+#[tokio::test]
+async fn dropping_an_idle_transport_does_not_send_a_request() {
+    let server = MockServer::start_async().await;
+    let unexpected_request = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/EWS/Exchange.asmx");
+            then.status(StatusCode::OK);
+        })
+        .await;
+    let transport = EwsTransport::new_with_client_builder(
+        &server.url("/EWS/Exchange.asmx"),
+        "EXAMPLE\\ada".to_owned(),
+        SecretString::from("synthetic-only"),
+        synthetic_client_builder(),
+    )
+    .expect("idle EWS transport starts with the synthetic test CA");
+
+    drop(transport);
+    unexpected_request.assert_calls(0);
+}
+
+#[tokio::test]
+async fn queued_requests_are_classified_before_shutdown_dispatch() {
+    let (commands, command_receiver) = mpsc::channel(2);
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+    let (read_response_sender, read_response_receiver) = oneshot::channel();
+    commands
+        .send(EwsCommand {
+            document: b"synthetic read request".to_vec(),
+            mode: EwsRequestMode::Read,
+            response: read_response_sender,
+        })
+        .await
+        .expect("queued command is accepted");
+    let (update_response_sender, update_response_receiver) = oneshot::channel();
+    commands
+        .send(EwsCommand {
+            document: b"synthetic UpdateItem".to_vec(),
+            mode: EwsRequestMode::Update,
+            response: update_response_sender,
+        })
+        .await
+        .expect("queued update is accepted");
+    shutdown_sender
+        .send(())
+        .expect("worker shutdown is signaled");
+
+    super::worker::run_worker(
+        command_receiver,
+        shutdown_receiver,
+        synthetic_worker_state("https://exchange.example.test/EWS/Exchange.asmx", None),
+    )
+    .await;
+
+    let read_response = read_response_receiver
+        .await
+        .expect("worker answers queued read request");
+    assert!(matches!(
+        read_response,
+        Err(EwsRequestError::Read(EwsError::ServiceUnavailable))
+    ));
+    let update_response = update_response_receiver
+        .await
+        .expect("worker answers queued update");
+    assert!(matches!(
+        update_response,
+        Err(EwsRequestError::NotDispatched(EwsError::ServiceUnavailable))
+    ));
+}
+
+#[tokio::test]
+async fn shutdown_interrupts_in_flight_read_without_waiting_for_http_timeout() {
+    let error = shutdown_in_flight_request(EwsRequestMode::Read, None).await;
+
+    assert!(matches!(
+        error,
+        EwsRequestError::Read(EwsError::ServiceUnavailable)
+    ));
+}
+
+#[tokio::test]
+async fn shutdown_marks_in_flight_update_outcome_unknown() {
+    let error = shutdown_in_flight_request(
+        EwsRequestMode::Update,
+        Some(synthetic_connection_identity()),
+    )
+    .await;
+
+    assert!(matches!(error, EwsRequestError::OutcomeUnknown));
+}
+
+#[tokio::test]
+async fn dropping_a_transport_during_a_read_does_not_wait_for_the_response() {
+    let server = MockServer::start_async().await;
+    let pending_request = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/EWS/Exchange.asmx");
+            then.status(StatusCode::OK)
+                .delay(std::time::Duration::from_secs(5));
+        })
+        .await;
+    let transport = EwsTransport::new_with_client_builder(
+        &server.url("/EWS/Exchange.asmx"),
+        "EXAMPLE\\ada".to_owned(),
+        SecretString::from("synthetic-only"),
+        synthetic_client_builder(),
+    )
+    .expect("EWS transport starts with the synthetic test CA");
+    let (response_sender, response_receiver) = oneshot::channel();
+    transport
+        .commands
+        .send(EwsCommand {
+            document: b"synthetic SOAP request".to_vec(),
+            mode: EwsRequestMode::Read,
+            response: response_sender,
+        })
+        .await
+        .expect("worker accepts request");
+    wait_for_mock_call(&pending_request).await;
+
+    let start = std::time::Instant::now();
+    drop(transport);
+
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(3),
+        "transport drop waits for the delayed HTTP response"
+    );
+    let response = response_receiver
+        .await
+        .expect("worker returns the shutdown result");
+    assert!(matches!(
+        response,
+        Err(EwsRequestError::Read(EwsError::ServiceUnavailable))
+    ));
+}
+
+async fn shutdown_in_flight_request(
+    mode: EwsRequestMode,
+    authenticated_connection: Option<ConnectionIdentity>,
+) -> EwsRequestError {
+    let server = MockServer::start_async().await;
+    let pending_request = server
+        .mock_async(|when, then| {
+            when.method("POST").path("/EWS/Exchange.asmx");
+            then.status(StatusCode::OK)
+                .delay(std::time::Duration::from_secs(5));
+        })
+        .await;
+    let endpoint = server.url("/EWS/Exchange.asmx");
+    let state = synthetic_worker_state(&endpoint, authenticated_connection);
+    let (commands, command_receiver) = mpsc::channel(1);
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+    let (response_sender, response_receiver) = oneshot::channel();
+    let worker = tokio::spawn(super::worker::run_worker(
+        command_receiver,
+        shutdown_receiver,
+        state,
+    ));
+    commands
+        .send(EwsCommand {
+            document: b"synthetic SOAP request".to_vec(),
+            mode,
+            response: response_sender,
+        })
+        .await
+        .expect("worker accepts request");
+    wait_for_mock_call(&pending_request).await;
+    shutdown_sender
+        .send(())
+        .expect("worker shutdown is signaled");
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), worker)
+        .await
+        .expect("worker cancels the pending request")
+        .expect("worker exits without panicking");
+    let response = response_receiver
+        .await
+        .expect("worker returns the shutdown result");
+    match response {
+        Err(error) => error,
+        Ok(_) => panic!("pending HTTP response should be interrupted"),
+    }
+}
+
+async fn wait_for_mock_call(mock: &Mock<'_>) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while mock.calls_async().await == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("HTTP mock receives the pending request");
+}
+
+fn synthetic_worker_state(
+    endpoint: &str,
+    authenticated_connection: Option<ConnectionIdentity>,
+) -> EwsTransportState {
+    let endpoint = Url::parse(endpoint).expect("synthetic HTTPS endpoint parses");
+    let target_name = endpoint
+        .host_str()
+        .expect("synthetic HTTPS endpoint has a host")
+        .to_owned();
+    let client = synthetic_client_builder()
+        .build()
+        .expect("synthetic HTTPS client builds");
+
+    EwsTransportState {
+        endpoint,
+        target_name,
+        username: "EXAMPLE\\ada".to_owned(),
+        password: SecretString::from("synthetic-only"),
+        client,
+        authenticated_connection,
+    }
+}
+
+fn synthetic_client_builder() -> reqwest::ClientBuilder {
+    let certificate = Certificate::from_pem(httpmock::server::DEFAULT_CA_CERTIFICATE.as_bytes())
+        .expect("synthetic HTTPS test CA parses");
+    build_client_builder()
+        .no_proxy()
+        .add_root_certificate(certificate)
+}
+
+fn synthetic_connection_identity() -> ConnectionIdentity {
+    ConnectionIdentity {
+        local: "127.0.0.1:1234"
+            .parse()
+            .expect("synthetic local socket address parses"),
+        remote: "127.0.0.1:5678"
+            .parse()
+            .expect("synthetic remote socket address parses"),
+        certificate_hash: [0; 32],
+    }
 }
