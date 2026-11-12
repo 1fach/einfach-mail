@@ -13,7 +13,7 @@ use crate::features::{
 #[cfg(test)]
 use copy::{
     account_cache_open_error_message, account_cache_removal_error_message,
-    permission_review_disclosure,
+    calendar_actions_summary, permission_review_disclosure,
 };
 #[cfg(test)]
 use einfach_mail_application::AccountCacheOpenError;
@@ -21,7 +21,7 @@ use einfach_mail_application::{
     AccountCacheRemovalError, AccountOperationError, AccountPermissionRequest, AccountProvider,
     AccountSession, AccountSessionFactory, AccountWorkflow,
 };
-use einfach_mail_domain::{AccountProfile, CalendarAccess};
+use einfach_mail_domain::{AccountProfile, CalendarAction};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Icon, IconName, Selectable, StyledExt,
     button::{Button, ButtonVariants},
@@ -455,9 +455,12 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn calendar_is_available(&self) -> bool {
-        self.status
-            .connected_profile()
-            .is_some_and(|profile| profile.capabilities().calendar() != CalendarAccess::Unavailable)
+        self.status.connected_profile().is_some_and(|profile| {
+            profile
+                .capabilities()
+                .calendar()
+                .supports(CalendarAction::ViewEvents)
+        })
     }
 
     fn navigation_focus(&self, section: WorkspaceSection) -> &FocusHandle {

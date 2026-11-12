@@ -1,5 +1,5 @@
 #[test]
-fn ews_account_profile_exposes_read_only_calendar_access() {
+fn ews_account_profile_advertises_view_only_calendar_capabilities() {
     let settings = ExchangeEwsAccountSettings::new(
         "https://exchange.example.test/EWS/Exchange.asmx".to_owned(),
         "ada@example.test".to_owned(),
@@ -10,7 +10,10 @@ fn ews_account_profile_exposes_read_only_calendar_access() {
 
     assert_eq!(
         profile.capabilities(),
-        AccountCapabilities::new(MailCapabilities::read_only(), CalendarAccess::ReadOnly)
+        AccountCapabilities::new(
+            MailCapabilities::read_only(),
+            CalendarCapabilities::view_only(),
+        )
     );
 }
 
@@ -39,7 +42,7 @@ fn ews_profile_advertises_only_read_state_after_receipt_safe_version_evidence() 
     assert!(!capabilities.mail().supports(MailAction::Send));
     assert!(!capabilities.mail().supports(MailAction::Move));
     assert!(!capabilities.can_review_mail_write_permission());
-    assert_eq!(capabilities.calendar(), CalendarAccess::ReadOnly);
+    assert_eq!(capabilities.calendar(), CalendarCapabilities::view_only());
 }
 
 #[test]

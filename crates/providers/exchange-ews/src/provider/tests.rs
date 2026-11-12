@@ -6,11 +6,11 @@ use einfach_mail_application::{
     MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, CalendarAccess, CalendarEventCreation, CalendarEventDraft,
-    CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion, CalendarOccurrencePatch,
-    CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange, CalendarViewReference,
-    EditableCalendarEvent, EventId, FolderId, FolderReference, MailAction, MailCapabilities,
-    MessageDeltaChange, MessageDeltaProgress, MessageId, ReadState,
+    AccountCapabilities, AccountId, CalendarCapabilities, CalendarEventCreation,
+    CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion,
+    CalendarOccurrencePatch, CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange,
+    CalendarViewReference, EditableCalendarEvent, EventId, FolderId, FolderReference, MailAction,
+    MailCapabilities, MessageDeltaChange, MessageDeltaProgress, MessageId, ReadState,
 };
 use ews::server_version::ServerVersionInfo;
 use ews::sync_folder_items::{Change, SyncFolderItems};

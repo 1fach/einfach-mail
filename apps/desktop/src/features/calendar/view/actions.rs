@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use einfach_mail_application::{CalendarSession, CalendarWriteReadiness};
-use einfach_mail_domain::{CalendarAccess, CalendarOccurrence, CalendarOccurrenceTime};
+use einfach_mail_domain::{CalendarAction, CalendarOccurrence, CalendarOccurrenceTime};
 use gpui_kit::component::{StyledExt, WindowExt};
 use gpui_kit::{App, Context, Entity, KeyBinding, Window, div, prelude::*};
 use jiff::Span;
@@ -252,6 +252,13 @@ where
     }
 
     pub(super) fn can_write_events(&self) -> bool {
-        self.profile.capabilities().calendar() == CalendarAccess::ReadWrite
+        let calendar = self.profile.capabilities().calendar();
+        [
+            CalendarAction::CreateEvent,
+            CalendarAction::UpdateEvent,
+            CalendarAction::DeleteEvent,
+        ]
+        .into_iter()
+        .all(|action| calendar.supports(action))
     }
 }

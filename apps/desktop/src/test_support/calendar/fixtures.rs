@@ -1,5 +1,5 @@
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, CalendarAccess, CalendarOccurrence,
+    AccountCapabilities, AccountId, AccountProfile, CalendarCapabilities, CalendarOccurrence,
     CalendarOccurrencePatch, CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference,
     EventId, MailCapabilities,
 };
@@ -18,12 +18,16 @@ pub(crate) fn profile() -> AccountProfile {
 }
 
 pub(crate) fn read_only_calendar_profile() -> AccountProfile {
+    profile_with_calendar_capabilities(CalendarCapabilities::view_only())
+}
+
+pub(crate) fn profile_with_calendar_capabilities(calendar: CalendarCapabilities) -> AccountProfile {
     synthetic_account_profile(
         synthetic_account_id(),
         None,
-        AccountCapabilities::new(MailCapabilities::read_only(), CalendarAccess::ReadOnly),
+        AccountCapabilities::new(MailCapabilities::read_only(), calendar),
     )
-    .expect("synthetic read-only calendar profile is valid")
+    .expect("synthetic calendar profile is valid")
 }
 
 pub(crate) fn workflow_account_id() -> AccountId {

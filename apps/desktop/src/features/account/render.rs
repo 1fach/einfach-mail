@@ -1,6 +1,6 @@
 use super::copy::{
-    account_cache_open_error_message, account_cache_removal_error_message, mail_access_summary,
-    permission_review_disclosure,
+    account_cache_open_error_message, account_cache_removal_error_message,
+    calendar_actions_summary, mail_access_summary, permission_review_disclosure,
 };
 use super::state::{
     AccountStatus, AccountViewCacheError, EwsDiscoveryState, ExchangeEwsConnectionForm,
@@ -11,7 +11,7 @@ use einfach_mail_application::{
     AccountOperationError, AccountPermissionRequest, AccountProvider, AccountProviderKind,
     ExchangeEwsDiscoveryConfirmation,
 };
-use einfach_mail_domain::{AccountProfile, CalendarAccess};
+use einfach_mail_domain::AccountProfile;
 use gpui_kit::component::{
     ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
@@ -178,13 +178,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     .text_sm()
                     .child(mail_access_summary(profile.capabilities().mail())),
             );
-        let calendar_summary = match profile.capabilities().calendar() {
-            CalendarAccess::Unavailable => "Calendar actions: unavailable.",
-            CalendarAccess::ReadOnly => "Calendar actions: view events.",
-            CalendarAccess::ReadWrite => {
-                "Calendar actions: view events and make supported changes."
-            }
-        };
+        let calendar_summary = calendar_actions_summary(profile.capabilities().calendar());
         details = details.child(
             div()
                 .id("account-calendar-capabilities")

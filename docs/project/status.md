@@ -108,7 +108,7 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 6. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
 7. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
 8. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
-9. Resolve EWS calendar-write request and recovery rules under [issue #389](https://github.com/1fach/einfach-mail/issues/389). [ADR 0064](../decisions/0064-calendar-capabilities-by-operation.md) selects per-operation capabilities; issue [#390](https://github.com/1fach/einfach-mail/issues/390) tracks the domain and desktop migration. Keep EWS read-only until #389 accepts the operation-specific safety rules.
+9. Complete the calendar-capability migration under [issue #390](https://github.com/1fach/einfach-mail/issues/390): implement the capability API in [#392](https://github.com/1fach/einfach-mail/issues/392) and the independent versioned-event refactor in [#393](https://github.com/1fach/einfach-mail/issues/393), then add per-action UI in [#394](https://github.com/1fach/einfach-mail/issues/394). Keep EWS read-only until [#389](https://github.com/1fach/einfach-mail/issues/389) accepts the operation-specific request and recovery rules.
 
 ## Update rule
 

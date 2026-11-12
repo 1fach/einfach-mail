@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn calendar_summary_lists_the_provider_supported_actions() {
+    assert_eq!(
+        calendar_actions_summary(CalendarCapabilities::unavailable()),
+        "Calendar actions: unavailable."
+    );
+    assert_eq!(
+        calendar_actions_summary(CalendarCapabilities::view_only()),
+        "Calendar actions: view events."
+    );
+    assert_eq!(
+        calendar_actions_summary(CalendarCapabilities::from_actions([
+            CalendarAction::DeleteEvent,
+        ])),
+        "Calendar actions: view events, delete events."
+    );
+    assert_eq!(
+        calendar_actions_summary(CalendarCapabilities::full_access()),
+        "Calendar actions: view events, create events, update events, delete events."
+    );
+}
+
+#[test]
 fn cancelled_permission_review_has_permission_specific_copy() {
     assert_eq!(
         AccountStatus::reauthorization_error_message(AccountOperationError::SignInCancelled),

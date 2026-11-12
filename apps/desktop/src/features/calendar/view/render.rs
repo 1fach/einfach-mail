@@ -1,5 +1,5 @@
 use einfach_mail_application::{CalendarSession, CalendarWorkflowError, CalendarWriteReadiness};
-use einfach_mail_domain::{CalendarAccess, CalendarOccurrenceTime};
+use einfach_mail_domain::CalendarOccurrenceTime;
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
@@ -48,7 +48,7 @@ where
             .justify_between()
             .gap_3()
             .child(self.render_calendar_title());
-        if self.profile.capabilities().calendar() == CalendarAccess::ReadOnly {
+        if self.profile.capabilities().calendar().is_read_only() {
             let read_only_status = div()
                 .id("calendar-read-only-status")
                 .debug_selector(|| "calendar-read-only-status".to_owned())

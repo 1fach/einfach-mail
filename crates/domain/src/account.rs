@@ -16,14 +16,14 @@ pub struct MissingAccountLabel;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AccountCapabilities {
     mail: MailCapabilities,
-    calendar: CalendarAccess,
+    calendar: CalendarCapabilities,
     mail_write_permission_review: bool,
 }
 
 impl AccountCapabilities {
     /// Creates capabilities for the supported mail and calendar actions.
     #[must_use]
-    pub const fn new(mail: MailCapabilities, calendar: CalendarAccess) -> Self {
+    pub const fn new(mail: MailCapabilities, calendar: CalendarCapabilities) -> Self {
         Self {
             mail,
             calendar,
@@ -34,14 +34,20 @@ impl AccountCapabilities {
     /// Returns read-only mail capabilities with no calendar access.
     #[must_use]
     pub fn read_only_mail() -> Self {
-        Self::new(MailCapabilities::read_only(), CalendarAccess::Unavailable)
+        Self::new(
+            MailCapabilities::read_only(),
+            CalendarCapabilities::unavailable(),
+        )
     }
 
-    /// Returns all current mail actions and read/write calendar access.
+    /// Returns all current mail and calendar actions.
     #[must_use]
     pub fn full_access() -> Self {
-        Self::new(MailCapabilities::full_access(), CalendarAccess::ReadWrite)
-            .with_mail_write_permission_review()
+        Self::new(
+            MailCapabilities::full_access(),
+            CalendarCapabilities::full_access(),
+        )
+        .with_mail_write_permission_review()
     }
 
     /// Enables the Microsoft Graph mail permission review flow for this account.
@@ -63,9 +69,9 @@ impl AccountCapabilities {
         self.mail
     }
 
-    /// Returns the account's calendar access level.
+    /// Returns the account's supported calendar actions.
     #[must_use]
-    pub const fn calendar(self) -> CalendarAccess {
+    pub const fn calendar(self) -> CalendarCapabilities {
         self.calendar
     }
 }
@@ -131,15 +137,89 @@ impl MailCapabilities {
     }
 }
 
-/// The calendar access available for an account.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CalendarAccess {
-    /// The account does not expose calendar data.
-    Unavailable,
-    /// The account can read calendar data.
-    ReadOnly,
-    /// The account can read and change calendar data.
-    ReadWrite,
+/// A calendar operation supported by an account's provider.
+#[non_exhaustive]
+#[derive(Debug, Hash, Ord, PartialOrd, EnumSetType)]
+pub enum CalendarAction {
+    /// View calendar events.
+    ViewEvents,
+    /// Create calendar events.
+    CreateEvent,
+    /// Update calendar events.
+    UpdateEvent,
+    /// Delete calendar events.
+    DeleteEvent,
+}
+
+/// The calendar operations supported by an account's provider.
+///
+/// An empty set means calendar data is unavailable. Any write action also
+/// includes [`CalendarAction::ViewEvents`].
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CalendarCapabilities(EnumSet<CalendarAction>);
+
+impl CalendarCapabilities {
+    /// Returns a capability set with no calendar actions.
+    #[must_use]
+    pub fn unavailable() -> Self {
+        Self::default()
+    }
+
+    /// Returns a capability set that can view events without changing them.
+    #[must_use]
+    pub fn view_only() -> Self {
+        Self::from_actions([CalendarAction::ViewEvents])
+    }
+
+    /// Creates a capability set from the actions supported by a provider.
+    ///
+    /// If the set includes a write action, this constructor also adds
+    /// [`CalendarAction::ViewEvents`].
+    #[must_use]
+    pub fn from_actions(actions: impl IntoIterator<Item = CalendarAction>) -> Self {
+        let mut actions: EnumSet<CalendarAction> = actions.into_iter().collect();
+        if [
+            CalendarAction::CreateEvent,
+            CalendarAction::UpdateEvent,
+            CalendarAction::DeleteEvent,
+        ]
+        .into_iter()
+        .any(|action| actions.contains(action))
+        {
+            actions.insert(CalendarAction::ViewEvents);
+        }
+        Self(actions)
+    }
+
+    /// Returns all currently supported calendar actions.
+    #[must_use]
+    pub fn full_access() -> Self {
+        Self::from_actions([
+            CalendarAction::ViewEvents,
+            CalendarAction::CreateEvent,
+            CalendarAction::UpdateEvent,
+            CalendarAction::DeleteEvent,
+        ])
+    }
+
+    /// Returns whether the provider supports the specified action.
+    #[must_use]
+    pub fn supports(self, action: CalendarAction) -> bool {
+        self.0.contains(action)
+    }
+
+    /// Returns whether the provider supports viewing events without any writes.
+    #[must_use]
+    pub fn is_read_only(self) -> bool {
+        self.supports(CalendarAction::ViewEvents)
+            && ![
+                CalendarAction::CreateEvent,
+                CalendarAction::UpdateEvent,
+                CalendarAction::DeleteEvent,
+            ]
+            .into_iter()
+            .any(|action| self.supports(action))
+    }
 }
 
 /// Provider-independent identity details for one connected account.
