@@ -194,9 +194,7 @@ impl GraphApi {
                 GraphPostJsonOperation::MessageMove,
                 url,
                 token,
-                message_move_body(destination_folder.folder_id().as_str())?
-                    .as_ref()
-                    .to_vec(),
+                message_move_body(destination_folder.folder_id().as_str())?,
             )
             .await?;
         confirmed_message_move(
