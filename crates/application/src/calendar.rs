@@ -2,7 +2,10 @@ mod cache;
 mod provider;
 mod workflow;
 
-pub use cache::{CalendarCache, CalendarCacheError, CalendarSyncMode, CalendarSyncState};
+pub use cache::{
+    CalendarCache, CalendarCacheError, CalendarEventCreationStage, CalendarSyncMode,
+    CalendarSyncState,
+};
 pub use provider::{
     CalendarDeltaPageResponse, CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError,
     CalendarProvider, CalendarSyncStrategy, CalendarViewSnapshotResponse,

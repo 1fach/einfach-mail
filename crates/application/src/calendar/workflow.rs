@@ -10,7 +10,7 @@ use einfach_mail_domain::{
 use thiserror::Error;
 
 use super::{
-    cache::{CalendarCache, CalendarCacheError, CalendarSyncState},
+    cache::{CalendarCache, CalendarCacheError, CalendarEventCreationStage, CalendarSyncState},
     provider::{
         CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
         CalendarSyncStrategy,
@@ -39,7 +39,7 @@ pub enum CalendarWorkflowError {
     /// Another mail or calendar operation already owns this account.
     #[error("another mail or calendar operation is active for this account")]
     OperationInProgress,
-    /// Graph did not return the event that was staged for creation.
+    /// The provider returned an event that does not match the staged creation.
     #[error("the calendar service returned an unexpected created event")]
     InvalidConfirmation,
     /// Graph did not return the event and values submitted for update.
@@ -126,21 +126,21 @@ impl CalendarSnapshot {
     }
 }
 
-/// The result of a Graph event creation and its pending cache state.
+/// The result of a provider event creation and its pending cache state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CalendarEventCreationOutcome {
-    /// Graph confirmed the event and the encrypted cache committed it.
+    /// The provider confirmed the event and the encrypted cache committed it.
     Cached(CalendarOccurrence),
-    /// Graph confirmed the event, but the encrypted cache still needs recovery.
+    /// The provider confirmed the event, but the encrypted cache still needs recovery.
     ConfirmedButNotCached {
-        /// The event returned by Graph.
+        /// The event returned by the provider.
         event: CalendarOccurrence,
         /// The user-safe category returned by the cache boundary.
         cache_error: CalendarCacheError,
     },
-    /// Graph rejected the request and the cache removed its pending operation.
+    /// The provider rejected the request and the cache removed its pending operation.
     Rejected,
-    /// Graph rejected the request, but the cache still has the pending operation.
+    /// The provider rejected the request, but the cache still has the pending operation.
     RejectedButPending {
         /// The user-safe category returned by the cache boundary.
         cache_error: CalendarCacheError,
@@ -358,14 +358,16 @@ where
         Ok(report)
     }
 
-    /// Creates one staged event and caches it only after Graph confirms it.
+    /// Creates a new staged event or recovers an existing unresolved creation.
     ///
-    /// The exact draft and retry identifier are stored before the network
-    /// request. Unknown outcomes keep that operation available for replay.
+    /// The cache stores the exact draft and operation identifier before the
+    /// provider call. A new operation uses [`CalendarProvider::create_event`].
+    /// The same unresolved operation uses
+    /// [`CalendarProvider::recover_event_creation`].
     ///
-    /// A cache failure after Graph confirmation is returned as
+    /// A cache failure after provider confirmation is returned as
     /// [`CalendarEventCreationOutcome::ConfirmedButNotCached`] so callers can
-    /// report the remote result accurately. A definitive Graph rejection is
+    /// report the remote result accurately. A definitive provider rejection is
     /// returned as [`CalendarEventCreationOutcome::Rejected`] when cleanup
     /// succeeds, or [`CalendarEventCreationOutcome::RejectedButPending`] when
     /// local cleanup fails.
@@ -373,12 +375,12 @@ where
     /// # Errors
     ///
     /// Returns [`CalendarWorkflowError::AccountMismatch`] for a creation from another account,
-    /// a provider or cache error when staging fails or Graph cannot
+    /// a provider or cache error when staging fails or the provider cannot
     /// confirm the request, [`CalendarWorkflowError::OperationInProgress`]
     /// when another account operation owns the calendar,
     /// [`CalendarWorkflowError::CalendarWriteSyncRequired`] until this view and
     /// all recovery-required account views have completed successful syncs,
-    /// [`CalendarWorkflowError::InvalidConfirmation`] when Graph returns an
+    /// [`CalendarWorkflowError::InvalidConfirmation`] when the provider returns an
     /// event that does not match the staged draft, or
     /// [`CalendarWorkflowError::StateUnavailable`] when the account reservation
     /// or shared recovery state cannot be accessed.
@@ -392,8 +394,14 @@ where
             .reserve_account(creation.view().account_id())
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(creation.view()).await?;
-        self.cache.stage_event_creation(creation).await?;
-        let event = match self.provider.create_event(creation).await {
+        let stage = self.cache.stage_event_creation(creation).await?;
+        let creation_result = match stage {
+            CalendarEventCreationStage::NewlyStaged => self.provider.create_event(creation).await,
+            CalendarEventCreationStage::ExistingUnresolved => {
+                self.provider.recover_event_creation(creation).await
+            }
+        };
+        let event = match creation_result {
             Ok(event) => event,
             Err(CalendarOperationError::EventCreationRejected) => {
                 if let Err(cache_error) = self.cache.mark_event_creation_rejected(creation).await {
@@ -423,7 +431,7 @@ where
     ///
     /// Call this with the same operation passed to `create_event` when it
     /// returned [`CalendarEventCreationOutcome::RejectedButPending`]. This
-    /// retries local cleanup without another Graph request.
+    /// repeats local cleanup without another provider request.
     ///
     /// # Errors
     ///

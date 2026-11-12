@@ -13,7 +13,9 @@ pub(super) struct FixtureProvider {
     snapshot_gate: Arc<Mutex<Option<CalendarWriteGate>>>,
     pub(super) requests: Arc<Mutex<Vec<CalendarDeltaRequest>>>,
     pub(super) creations: Arc<Mutex<Vec<CalendarEventCreationId>>>,
+    pub(super) recoveries: Arc<Mutex<Vec<CalendarEventCreationId>>>,
     creation_error: Arc<Mutex<Option<CalendarOperationError>>>,
+    recovery_error: Arc<Mutex<Option<CalendarOperationError>>>,
     creation_override: Arc<Mutex<Option<CalendarOccurrence>>>,
     pub(super) update_calls: Arc<Mutex<Vec<CalendarEventUpdate>>>,
     update_gate: Arc<Mutex<Option<CalendarWriteGate>>>,
@@ -36,7 +38,9 @@ impl FixtureProvider {
             snapshot_gate: Arc::new(Mutex::new(None)),
             requests: Arc::new(Mutex::new(Vec::new())),
             creations: Arc::new(Mutex::new(Vec::new())),
+            recoveries: Arc::new(Mutex::new(Vec::new())),
             creation_error: Arc::new(Mutex::new(None)),
+            recovery_error: Arc::new(Mutex::new(None)),
             creation_override: Arc::new(Mutex::new(None)),
             update_calls: Arc::new(Mutex::new(Vec::new())),
             update_gate: Arc::new(Mutex::new(None)),
@@ -115,6 +119,13 @@ impl FixtureProvider {
             .creation_error
             .lock()
             .expect("synthetic creation error mutex is not poisoned") = Some(error);
+    }
+
+    pub(super) fn fail_next_recovery(&self, error: CalendarOperationError) {
+        *self
+            .recovery_error
+            .lock()
+            .expect("synthetic recovery error mutex is not poisoned") = Some(error);
     }
 
     pub(super) fn return_creation(&self, event: CalendarOccurrence) {
@@ -262,35 +273,24 @@ impl CalendarProvider for FixtureProvider {
                 .lock()
                 .expect("synthetic creation log mutex is not poisoned")
                 .push(creation.id());
-            if let Some(error) = creation_error
+            synthetic_creation_result(&creation, &creation_error, &creation_override)
+        }
+    }
+
+    fn recover_event_creation(
+        &self,
+        creation: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_ {
+        let creation = creation.clone();
+        let recoveries = Arc::clone(&self.recoveries);
+        let recovery_error = Arc::clone(&self.recovery_error);
+        let creation_override = Arc::clone(&self.creation_override);
+        async move {
+            recoveries
                 .lock()
-                .expect("synthetic creation error mutex is not poisoned")
-                .take()
-            {
-                return Err(error);
-            }
-            if let Some(event) = creation_override
-                .lock()
-                .expect("synthetic creation result mutex is not poisoned")
-                .take()
-            {
-                return Ok(event);
-            }
-            let CalendarOccurrenceTime::Timed { start, end } = creation.draft().time() else {
-                return Err(CalendarOperationError::InvalidResponse);
-            };
-            let mut patch = CalendarOccurrencePatch::new();
-            patch.set_subject(Some(creation.draft().subject().to_owned()));
-            let mut time = CalendarOccurrenceTimePatch::new();
-            time.set_start(*start);
-            time.set_end(*end);
-            time.set_is_all_day(false);
-            patch.set_time(time);
-            let id = EventId::try_from(format!("synthetic-created-{}", creation.id().as_uuid()))
-                .expect("synthetic created event identifier is valid");
-            patch
-                .into_new(creation.view().clone(), id)
-                .map_err(|_| CalendarOperationError::InvalidResponse)
+                .expect("synthetic recovery log mutex is not poisoned")
+                .push(creation.id());
+            synthetic_creation_result(&creation, &recovery_error, &creation_override)
         }
     }
 
@@ -381,4 +381,40 @@ impl CalendarProvider for FixtureProvider {
             error.map_or(Ok(()), Err)
         }
     }
+}
+
+fn synthetic_creation_result(
+    creation: &CalendarEventCreation,
+    error: &Mutex<Option<CalendarOperationError>>,
+    override_event: &Mutex<Option<CalendarOccurrence>>,
+) -> Result<CalendarOccurrence, CalendarOperationError> {
+    if let Some(error) = error
+        .lock()
+        .expect("synthetic provider failure mutex is not poisoned")
+        .take()
+    {
+        return Err(error);
+    }
+    if let Some(event) = override_event
+        .lock()
+        .expect("synthetic creation result mutex is not poisoned")
+        .take()
+    {
+        return Ok(event);
+    }
+    let CalendarOccurrenceTime::Timed { start, end } = creation.draft().time() else {
+        return Err(CalendarOperationError::InvalidResponse);
+    };
+    let mut patch = CalendarOccurrencePatch::new();
+    patch.set_subject(Some(creation.draft().subject().to_owned()));
+    let mut time = CalendarOccurrenceTimePatch::new();
+    time.set_start(*start);
+    time.set_end(*end);
+    time.set_is_all_day(false);
+    patch.set_time(time);
+    let id = EventId::try_from(format!("synthetic-created-{}", creation.id().as_uuid()))
+        .expect("synthetic created event identifier is valid");
+    patch
+        .into_new(creation.view().clone(), id)
+        .map_err(|_| CalendarOperationError::InvalidResponse)
 }

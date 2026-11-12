@@ -1,7 +1,7 @@
 
 
 #[tokio::test]
-async fn create_event_renews_delegated_access_and_posts_one_timed_primary_calendar_event() {
+async fn create_and_recover_reuse_the_same_timed_primary_calendar_creation() {
     let server = MockServer::start_async().await;
     let token_refresh = server
         .mock_async(|when, then| {
@@ -106,13 +106,18 @@ async fn create_event_renews_delegated_access_and_posts_one_timed_primary_calend
         .create_event(&creation)
         .await
         .expect("delegated Graph event creation succeeds");
+    let recovered_event = provider
+        .recover_event_creation(&creation)
+        .await
+        .expect("Graph recovery replays the operation with its transaction ID");
+    assert_eq!(recovered_event, event);
     assert_eq!(event.reference(), &view);
     assert_eq!(event.subject(), Some("Synthetic planning meeting"));
     assert_eq!(event.time(), creation.draft().time());
     assert!(matches!(event.time(), CalendarOccurrenceTime::Timed { .. }));
     token_refresh.assert_async().await;
     profile_request.assert_async().await;
-    event_request.assert_async().await;
+    event_request.assert_calls_async(2).await;
 }
 
 #[tokio::test]

@@ -559,6 +559,13 @@ impl CalendarProvider for FixtureProvider {
         ready(Err(CalendarOperationError::ServiceUnavailable))
     }
 
+    fn recover_event_creation(
+        &self,
+        _: &CalendarEventCreation,
+    ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_ {
+        ready(Err(CalendarOperationError::ServiceUnavailable))
+    }
+
     fn update_event(
         &self,
         _: &CalendarEventUpdate,

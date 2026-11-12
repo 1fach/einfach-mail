@@ -18,6 +18,10 @@ async fn ews_provider_rejects_calendar_event_writes() {
         Err(CalendarOperationError::UnsupportedOperation)
     ));
     assert!(matches!(
+        provider.recover_event_creation(&creation).await,
+        Err(CalendarOperationError::UnsupportedOperation)
+    ));
+    assert!(matches!(
         provider.load_versioned_event(editable.occurrence()).await,
         Err(CalendarOperationError::UnsupportedOperation)
     ));

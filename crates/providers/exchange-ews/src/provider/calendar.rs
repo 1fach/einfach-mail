@@ -464,6 +464,16 @@ where
         std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
     }
 
+    fn recover_event_creation(
+        &self,
+        _creation: &einfach_mail_domain::CalendarEventCreation,
+    ) -> impl Future<
+        Output = Result<einfach_mail_domain::CalendarOccurrence, CalendarOperationError>,
+    > + Send
+    + '_ {
+        std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
+    }
+
     fn load_versioned_event(
         &self,
         _event: &einfach_mail_domain::CalendarOccurrence,

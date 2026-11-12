@@ -11,8 +11,9 @@ use crate::{CalendarViewSnapshotResponse, shared::sync_budget::MAX_SYNC_RESPONSE
 
 use crate::{
     CalendarCache, CalendarCacheError, CalendarDeltaRequest, CalendarDeltaResponse,
-    CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
-    CalendarOperationError, CalendarWorkflow, CalendarWorkflowError, CalendarWriteReadiness,
+    CalendarEventCreationOutcome, CalendarEventCreationStage, CalendarEventDeletionOutcome,
+    CalendarEventUpdateOutcome, CalendarOperationError, CalendarWorkflow, CalendarWorkflowError,
+    CalendarWriteReadiness,
 };
 
 use crate::test_support::{

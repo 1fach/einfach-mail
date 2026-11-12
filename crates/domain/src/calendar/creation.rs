@@ -9,10 +9,10 @@ use uuid::Uuid;
 use super::subject::normalized_event_subject;
 use crate::{CalendarOccurrenceTime, CalendarViewReference};
 
-/// A stable identifier for one calendar event creation attempt.
+/// A stable identifier for one calendar event creation operation.
 ///
-/// The value is sent as Microsoft Graph's `transactionId` and remains the same
-/// when the application retries an unresolved creation.
+/// The value remains unchanged while the application recovers the same
+/// unresolved creation. Providers use it in their recovery mechanisms.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CalendarEventCreationId(Uuid);
 
@@ -23,7 +23,7 @@ impl CalendarEventCreationId {
         Self(Uuid::new_v4())
     }
 
-    /// Parses a persisted transaction identifier.
+    /// Parses a persisted operation identifier.
     ///
     /// # Errors
     ///
@@ -34,7 +34,7 @@ impl CalendarEventCreationId {
             .map_err(|_| InvalidCalendarEventCreationId)
     }
 
-    /// Returns the UUID value used in the Graph request and encrypted cache.
+    /// Returns the UUID value used by the provider and encrypted cache.
     #[must_use]
     pub fn as_uuid(self) -> Uuid {
         self.0
@@ -94,7 +94,7 @@ pub struct InvalidCalendarEventTimeZone;
 /// A single timed event's source local schedule and resolved UTC range.
 ///
 /// The source values preserve what the user entered. The UTC range is the
-/// unambiguous instant range sent to Graph and used by the calendar cache.
+/// unambiguous instant range sent to the provider and used by the calendar cache.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CalendarEventDraft {
     subject: Box<str>,
@@ -209,7 +209,7 @@ impl CalendarEventCreation {
 
     /// Restores a pending operation after validating its endpoints against the view.
     ///
-    /// Retains `id` so the operation keeps its retry identifier.
+    /// Retains `id` so the provider can identify the same operation during recovery.
     ///
     /// # Errors
     ///
@@ -257,7 +257,7 @@ impl CalendarEventCreation {
         })
     }
 
-    /// Returns the stable identifier reused for every retry of this operation.
+    /// Returns the stable identifier used to recover this operation.
     #[must_use]
     pub fn id(&self) -> CalendarEventCreationId {
         self.id
@@ -285,9 +285,9 @@ impl CalendarEventCreation {
 /// An event creation retained because its result or local cleanup still needs resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PendingCalendarEventCreation {
-    /// The request may have reached Graph, or its accepted event is not yet cached.
+    /// The request may have reached the provider, or its accepted event is not yet cached.
     Unresolved(CalendarEventCreation),
-    /// Graph rejected the request and only local marker cleanup remains.
+    /// The provider rejected the request and only local marker cleanup remains.
     Rejected(CalendarEventCreation),
 }
 

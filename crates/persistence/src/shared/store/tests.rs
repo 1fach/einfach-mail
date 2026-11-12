@@ -2,8 +2,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::test_support::calendar_view;
 use einfach_mail_application::{
-    AccountCache, AccountCacheRemovalError, CalendarCache, CalendarCacheError, MailCache,
-    MailCacheError,
+    AccountCache, AccountCacheRemovalError, CalendarCache, CalendarCacheError,
+    CalendarEventCreationStage, MailCache, MailCacheError,
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrencePatch,
@@ -471,14 +471,14 @@ fn pending_calendar_event_survives_restart_blocks_removal_and_confirms_atomicall
         let creation = calendar_creation(view.clone());
         let cache = open_test_cache(&directory, account.clone()).await;
 
-        cache
-            .stage_event_creation(&creation)
-            .await
-            .expect("synthetic event operation is staged");
-        cache
-            .stage_event_creation(&creation)
-            .await
-            .expect("repeating the same staging operation is idempotent");
+        assert_eq!(
+            cache.stage_event_creation(&creation).await,
+            Ok(CalendarEventCreationStage::NewlyStaged)
+        );
+        assert_eq!(
+            cache.stage_event_creation(&creation).await,
+            Ok(CalendarEventCreationStage::ExistingUnresolved)
+        );
         let other_creation = calendar_creation(view.clone());
         assert_eq!(
             cache.stage_event_creation(&other_creation).await,
@@ -499,6 +499,10 @@ fn pending_calendar_event_survives_restart_blocks_removal_and_confirms_atomicall
             Ok(Some(PendingCalendarEventCreation::Unresolved(
                 creation.clone()
             )))
+        );
+        assert_eq!(
+            reopened.stage_event_creation(&creation).await,
+            Ok(CalendarEventCreationStage::ExistingUnresolved)
         );
         assert_eq!(
             AccountCache::remove_account(&reopened, &account).await,
@@ -577,10 +581,10 @@ fn rejected_calendar_event_survives_restart_and_can_be_discarded_locally() {
         let account = account_id("synthetic-account");
         let creation = calendar_creation(calendar_view(&account));
         let cache = open_test_cache(&directory, account.clone()).await;
-        cache
-            .stage_event_creation(&creation)
-            .await
-            .expect("synthetic event operation is staged");
+        assert_eq!(
+            cache.stage_event_creation(&creation).await,
+            Ok(CalendarEventCreationStage::NewlyStaged)
+        );
 
         assert_eq!(
             cache.discard_event_creation(&creation).await,
@@ -605,6 +609,10 @@ fn rejected_calendar_event_survives_restart_and_can_be_discarded_locally() {
             Ok(Some(PendingCalendarEventCreation::Rejected(
                 creation.clone()
             )))
+        );
+        assert_eq!(
+            reopened.stage_event_creation(&creation).await,
+            Err(CalendarCacheError::CreationAlreadyPending)
         );
         assert!(
             !reopened
