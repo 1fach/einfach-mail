@@ -46,7 +46,7 @@ serde_json = "1.0"
 secrecy = "0.10.3"
 sspi = { version = "0.23.1", default-features = false }
 smol = "2.0.2"
-rusqlite_migration = "2.6.0"
+rusqlite_migration = "2.7.0"
 sha2 = "0.11.1"
 time = { version = "0.3.55", default-features = false, features = ["formatting", "parsing", "std"] }
 tempfile = "3.27.0"
@@ -68,4 +68,3 @@ all = "warn"
 
 [patch.crates-io]
 libsqlite3-sys = { git = "https://github.com/LucaCappelletti94/rusqlite.git", rev = "0f1ab7393ae5d62d44a94a5a5107c00b23d4ed58" }
-rusqlite_migration = { git = "https://github.com/DannyStoll1/rusqlite_migration.git", rev = "30b941a0850df790091dc58c3ec44f18dbb5e3ba" }
