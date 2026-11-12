@@ -162,24 +162,12 @@ fn updated_occurrence(
 }
 
 pub(super) fn view() -> CalendarViewReference {
-    let account = AccountId::try_from("synthetic-account".to_owned())
-        .expect("synthetic account identifier is valid");
-    let start_date = Date::from_calendar_date(2030, Month::January, 7)
-        .expect("synthetic view start date is valid");
-    let end_date = Date::from_calendar_date(2030, Month::January, 14)
-        .expect("synthetic view end date is valid");
-    let range = CalendarViewRange::new(
-        start_date.midnight().assume_utc(),
-        end_date.midnight().assume_utc(),
-        start_date,
-        end_date,
-    )
-    .expect("synthetic week range is valid");
-    CalendarViewReference::new(account, range)
+    view_for_week(7)
 }
 
 pub(super) fn workflow_account_id() -> AccountId {
-    view().account_id().clone()
+    AccountId::try_from("synthetic-account".to_owned())
+        .expect("synthetic account identifier is valid")
 }
 
 pub(super) fn event_id() -> EventId {
@@ -257,8 +245,7 @@ pub(super) fn cross_week_timed_event_patch() -> CalendarOccurrencePatch {
 }
 
 pub(super) fn view_for_week(start_day: u8) -> CalendarViewReference {
-    let account = AccountId::try_from("synthetic-account".to_owned())
-        .expect("synthetic account identifier is valid");
+    let account = workflow_account_id();
     let start_date = Date::from_calendar_date(2030, Month::January, start_day)
         .expect("synthetic view start date is valid");
     let end_date = start_date
