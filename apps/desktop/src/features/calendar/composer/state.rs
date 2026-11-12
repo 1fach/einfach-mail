@@ -45,7 +45,7 @@ pub(super) enum EditState {
     Loading,
     LoadFailed(CalendarWorkflowError),
     Ready {
-        editable_event: Box<EditableCalendarEvent>,
+        versioned_event: Box<VersionedCalendarEvent>,
         status: EditStatus,
     },
 }
@@ -343,7 +343,7 @@ fn is_terminal_edit_status(status: EditStatus) -> bool {
             | EditStatus::DeletedButNotCached
             | EditStatus::DeleteOutcomeUnknown
             | EditStatus::DeletionFailed(
-                CalendarWorkflowError::InvalidEditableEvent
+                CalendarWorkflowError::InvalidVersionedEvent
                     | CalendarWorkflowError::CalendarWriteSyncRequired
                     | CalendarWorkflowError::Provider(
                         CalendarOperationError::EventChanged
@@ -352,7 +352,7 @@ fn is_terminal_edit_status(status: EditStatus) -> bool {
                     )
             )
             | EditStatus::Failed(
-                CalendarWorkflowError::InvalidEditableEvent
+                CalendarWorkflowError::InvalidVersionedEvent
                     | CalendarWorkflowError::InvalidUpdateConfirmation
                     | CalendarWorkflowError::CalendarWriteSyncRequired
                     | CalendarWorkflowError::Provider(

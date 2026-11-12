@@ -4,7 +4,7 @@ use std::future::Future;
 
 use einfach_mail_domain::{
     CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation, CalendarEventUpdate,
-    CalendarOccurrence, CalendarViewReference, EditableCalendarEvent,
+    CalendarOccurrence, CalendarViewReference, VersionedCalendarEvent,
 };
 use thiserror::Error;
 
@@ -222,20 +222,20 @@ pub trait CalendarProvider: Send + Sync {
         creation: &CalendarEventCreation,
     ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_;
 
-    /// Loads and validates an event for the supported edit flow.
+    /// Loads the provider version for an event used by calendar write operations.
     ///
-    /// The provider must reject events outside the accepted editable shape and
-    /// return the event version with its complete current occurrence values.
+    /// The provider must reject events outside its supported write shape and
+    /// return its version with the complete current occurrence values.
     ///
     /// # Errors
     ///
-    /// Returns [`CalendarOperationError::EventNotEditable`] for an unsupported
-    /// event, or a user-safe provider error when the event cannot be read or
-    /// its response cannot be validated.
-    fn editable_event(
+    /// Returns [`CalendarOperationError::EventNotEditable`] when the event is
+    /// outside the provider's supported write shape, or a user-safe provider
+    /// error when the event cannot be read or its response cannot be validated.
+    fn load_versioned_event(
         &self,
         event: &CalendarOccurrence,
-    ) -> impl Future<Output = Result<EditableCalendarEvent, CalendarOperationError>> + Send + '_;
+    ) -> impl Future<Output = Result<VersionedCalendarEvent, CalendarOperationError>> + Send + '_;
 
     /// Rechecks the captured event version and updates its requested fields.
     ///
@@ -262,6 +262,6 @@ pub trait CalendarProvider: Send + Sync {
     /// user-safe provider error when Graph rejects the request.
     fn delete_event(
         &self,
-        event: &EditableCalendarEvent,
+        event: &VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_;
 }

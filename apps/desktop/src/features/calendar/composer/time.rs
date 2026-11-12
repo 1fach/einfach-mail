@@ -53,7 +53,7 @@ pub(super) fn selected_picker_time(
 }
 
 pub(super) fn editable_event_picker_values(
-    event: &EditableCalendarEvent,
+    event: &VersionedCalendarEvent,
     time_zone: &TimeZone,
 ) -> Option<EditableEventFormValues> {
     let CalendarOccurrenceTime::Timed { start, end } = event.occurrence().time() else {

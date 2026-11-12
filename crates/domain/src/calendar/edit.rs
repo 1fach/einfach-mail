@@ -1,4 +1,4 @@
-//! Provider-independent values for editing a standalone timed calendar event.
+//! Provider-independent values for versioned calendar event operations.
 
 use std::fmt;
 
@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use super::subject::normalized_event_subject;
 use crate::{CalendarOccurrence, CalendarOccurrenceTime};
 
-/// The provider version captured when an event is opened for editing.
+/// The provider version captured when the provider loads a calendar event.
 ///
 /// Values are limited to 4,096 UTF-8 bytes and cannot contain control characters.
 #[derive(Clone, Eq, PartialEq)]
@@ -44,31 +44,31 @@ impl CalendarEventVersion {
 #[error("calendar event version must be bounded and control-free")]
 pub struct InvalidCalendarEventVersion;
 
-/// A timed event that the provider confirmed is safe to edit.
+/// A timed occurrence paired with the provider version captured when it was loaded.
 #[derive(Clone, Eq, PartialEq)]
-pub struct EditableCalendarEvent {
+pub struct VersionedCalendarEvent {
     occurrence: CalendarOccurrence,
     version: CalendarEventVersion,
 }
 
-impl fmt::Debug for EditableCalendarEvent {
+impl fmt::Debug for VersionedCalendarEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("EditableCalendarEvent(<redacted>)")
+        formatter.write_str("VersionedCalendarEvent(<redacted>)")
     }
 }
 
-impl EditableCalendarEvent {
-    /// Creates an edit snapshot for a provider-validated timed event.
+impl VersionedCalendarEvent {
+    /// Creates a versioned value for a timed occurrence and provider version.
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidEditableCalendarEvent`] when the occurrence is all-day.
+    /// Returns [`InvalidVersionedCalendarEvent`] when the occurrence is all-day.
     pub fn new(
         occurrence: CalendarOccurrence,
         version: CalendarEventVersion,
-    ) -> Result<Self, InvalidEditableCalendarEvent> {
+    ) -> Result<Self, InvalidVersionedCalendarEvent> {
         if !matches!(occurrence.time(), CalendarOccurrenceTime::Timed { .. }) {
-            return Err(InvalidEditableCalendarEvent);
+            return Err(InvalidVersionedCalendarEvent);
         }
         Ok(Self {
             occurrence,
@@ -76,7 +76,7 @@ impl EditableCalendarEvent {
         })
     }
 
-    /// Returns the provider-validated event values captured for editing.
+    /// Returns the timed occurrence paired with the provider version.
     #[must_use]
     pub fn occurrence(&self) -> &CalendarOccurrence {
         &self.occurrence
@@ -89,10 +89,10 @@ impl EditableCalendarEvent {
     }
 }
 
-/// An edit snapshot contains an all-day event.
+/// A versioned calendar event contains an all-day occurrence.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-#[error("editable calendar event must use timed values")]
-pub struct InvalidEditableCalendarEvent;
+#[error("versioned calendar event must use timed values")]
+pub struct InvalidVersionedCalendarEvent;
 
 /// The changed subject and timed range submitted for an event update.
 #[derive(Clone, Eq, PartialEq)]
@@ -146,10 +146,10 @@ impl CalendarEventUpdateDraft {
 #[error("calendar event update must contain a title and ordered UTC times")]
 pub struct InvalidCalendarEventUpdateDraft;
 
-/// A requested event update bound to the provider version used by the editor.
+/// A requested event update based on a provider-versioned event.
 #[derive(Clone, Eq, PartialEq)]
 pub struct CalendarEventUpdate {
-    source: EditableCalendarEvent,
+    source: VersionedCalendarEvent,
     draft: CalendarEventUpdateDraft,
 }
 
@@ -167,7 +167,7 @@ impl CalendarEventUpdate {
     /// Returns [`NoCalendarEventChanges`] when the requested values equal the
     /// captured event.
     pub fn new(
-        source: EditableCalendarEvent,
+        source: VersionedCalendarEvent,
         draft: CalendarEventUpdateDraft,
     ) -> Result<Self, NoCalendarEventChanges> {
         let occurrence = source.occurrence();
@@ -177,9 +177,9 @@ impl CalendarEventUpdate {
         Ok(Self { source, draft })
     }
 
-    /// Returns the provider-validated event and version being changed.
+    /// Returns the versioned event being changed.
     #[must_use]
-    pub fn source(&self) -> &EditableCalendarEvent {
+    pub fn source(&self) -> &VersionedCalendarEvent {
         &self.source
     }
 

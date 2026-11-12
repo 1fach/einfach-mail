@@ -521,7 +521,7 @@ impl CalendarCache for FixtureCache {
 
     fn commit_event_deletion(
         &self,
-        event: &EditableCalendarEvent,
+        event: &VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
         let views = Arc::clone(&self.views);
         let source_view = event.occurrence().reference().clone();

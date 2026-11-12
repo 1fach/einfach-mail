@@ -4,7 +4,8 @@ use std::{future::Future, time::SystemTime};
 
 use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation, CalendarEventUpdate,
-    CalendarOccurrence, CalendarViewReference, EditableCalendarEvent, PendingCalendarEventCreation,
+    CalendarOccurrence, CalendarViewReference, PendingCalendarEventCreation,
+    VersionedCalendarEvent,
 };
 use thiserror::Error;
 
@@ -400,6 +401,6 @@ pub trait CalendarCache: Send + Sync {
     /// [`CalendarCacheError::Unavailable`] when the transaction cannot commit.
     fn commit_event_deletion(
         &self,
-        event: &EditableCalendarEvent,
+        event: &VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_;
 }

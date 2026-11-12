@@ -129,7 +129,7 @@ fn confirmed_event_update_moves_the_cached_copy_between_overlapping_week_views()
             .into_iter()
             .next()
             .expect("source event exists");
-        let editable = EditableCalendarEvent::new(
+        let editable = VersionedCalendarEvent::new(
             event,
             CalendarEventVersion::try_from("synthetic-version-1".to_owned())
                 .expect("synthetic provider version is valid"),
@@ -231,7 +231,7 @@ fn confirmed_event_deletion_removes_every_cached_copy_and_preserves_view_cursors
             .into_iter()
             .next()
             .expect("source event exists");
-        let editable = EditableCalendarEvent::new(
+        let editable = VersionedCalendarEvent::new(
             event,
             CalendarEventVersion::try_from("synthetic-version-1".to_owned())
                 .expect("synthetic event version is valid"),
@@ -309,7 +309,7 @@ fn event_deletion_without_a_cached_source_view_leaves_other_rows_unchanged() {
         let source_event = timed_event_patch(start, end)
             .into_new(source_view.clone(), event_id())
             .expect("synthetic source event is complete");
-        let editable = EditableCalendarEvent::new(
+        let editable = VersionedCalendarEvent::new(
             source_event,
             CalendarEventVersion::try_from("synthetic-version-1".to_owned())
                 .expect("synthetic event version is valid"),
@@ -358,7 +358,7 @@ fn invalid_event_update_leaves_all_cached_copies_unchanged() {
             .await
             .expect("source range is readable")[0]
             .clone();
-        let editable = EditableCalendarEvent::new(
+        let editable = VersionedCalendarEvent::new(
             original_start,
             CalendarEventVersion::try_from("synthetic-version-1".to_owned())
                 .expect("synthetic provider version is valid"),

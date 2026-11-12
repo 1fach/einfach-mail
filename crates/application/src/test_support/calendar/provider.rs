@@ -19,6 +19,7 @@ pub(super) struct FixtureProvider {
     update_gate: Arc<Mutex<Option<CalendarWriteGate>>>,
     update_error: Arc<Mutex<Option<CalendarOperationError>>>,
     pub(super) deletion_calls: Arc<Mutex<usize>>,
+    pub(super) deletion_events: Arc<Mutex<Vec<VersionedCalendarEvent>>>,
     deletion_gate: Arc<Mutex<Option<CalendarWriteGate>>>,
     deletion_error: Arc<Mutex<Option<CalendarOperationError>>>,
 }
@@ -41,6 +42,7 @@ impl FixtureProvider {
             update_gate: Arc::new(Mutex::new(None)),
             update_error: Arc::new(Mutex::new(None)),
             deletion_calls: Arc::new(Mutex::new(0)),
+            deletion_events: Arc::new(Mutex::new(Vec::new())),
             deletion_gate: Arc::new(Mutex::new(None)),
             deletion_error: Arc::new(Mutex::new(None)),
         }
@@ -292,14 +294,14 @@ impl CalendarProvider for FixtureProvider {
         }
     }
 
-    fn editable_event(
+    fn load_versioned_event(
         &self,
         event: &CalendarOccurrence,
-    ) -> impl Future<Output = Result<EditableCalendarEvent, CalendarOperationError>> + Send + '_
+    ) -> impl Future<Output = Result<VersionedCalendarEvent, CalendarOperationError>> + Send + '_
     {
         let event = event.clone();
         async move {
-            EditableCalendarEvent::new(
+            VersionedCalendarEvent::new(
                 event,
                 CalendarEventVersion::try_from("synthetic-version-1".to_owned())
                     .map_err(|_| CalendarOperationError::InvalidResponse)?,
@@ -345,9 +347,11 @@ impl CalendarProvider for FixtureProvider {
 
     fn delete_event(
         &self,
-        _event: &EditableCalendarEvent,
+        event: &VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
         let deletion_calls = Arc::clone(&self.deletion_calls);
+        let deletion_events = Arc::clone(&self.deletion_events);
+        let event = event.clone();
         let gate = self
             .deletion_gate
             .lock()
@@ -359,6 +363,10 @@ impl CalendarProvider for FixtureProvider {
             .expect("synthetic deletion error mutex is not poisoned")
             .take();
         async move {
+            deletion_events
+                .lock()
+                .expect("synthetic deletion event mutex is not poisoned")
+                .push(event);
             *deletion_calls
                 .lock()
                 .expect("synthetic deletion counter mutex is not poisoned") += 1;

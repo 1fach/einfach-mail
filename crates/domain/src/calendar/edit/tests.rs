@@ -5,8 +5,8 @@ use crate::{
 };
 
 use super::{
-    CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion, EditableCalendarEvent,
-    InvalidCalendarEventVersion, NoCalendarEventChanges,
+    CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion,
+    InvalidCalendarEventVersion, NoCalendarEventChanges, VersionedCalendarEvent,
 };
 
 #[test]
@@ -45,7 +45,7 @@ fn update_draft_rejects_control_characters_in_the_subject() {
 #[test]
 fn update_requires_a_changed_subject_or_timed_range() {
     let event = occurrence("Planning", primary_calendar_view());
-    let editable = EditableCalendarEvent::new(
+    let versioned_event = VersionedCalendarEvent::new(
         event,
         CalendarEventVersion::try_from("version-1".to_owned()).expect("synthetic version is valid"),
     )
@@ -54,9 +54,30 @@ fn update_requires_a_changed_subject_or_timed_range() {
         .expect("synthetic update draft is valid");
 
     assert_eq!(
-        CalendarEventUpdate::new(editable, draft),
+        CalendarEventUpdate::new(versioned_event, draft),
         Err(NoCalendarEventChanges)
     );
+}
+
+#[test]
+fn versioned_event_preserves_identity_and_version_in_an_update() {
+    let event = occurrence("Planning", primary_calendar_view());
+    let event_id = event.id().clone();
+    let versioned_event = VersionedCalendarEvent::new(
+        event,
+        CalendarEventVersion::try_from("version-1".to_owned()).expect("synthetic version is valid"),
+    )
+    .expect("synthetic timed event can be versioned");
+    let draft = CalendarEventUpdateDraft::timed(
+        "Updated planning".to_owned(),
+        timestamp(11),
+        timestamp(12),
+    )
+    .expect("synthetic update draft is valid");
+    let update = CalendarEventUpdate::new(versioned_event, draft).expect("event values changed");
+
+    assert_eq!(update.source().occurrence().id(), &event_id);
+    assert_eq!(update.source().version().as_str(), "version-1");
 }
 
 #[test]
@@ -139,7 +160,7 @@ fn confirmation_accepts_the_same_event_and_requested_values() {
 
 fn event_update() -> CalendarEventUpdate {
     let view = primary_calendar_view();
-    let source = EditableCalendarEvent::new(
+    let source = VersionedCalendarEvent::new(
         occurrence("Planning", view),
         CalendarEventVersion::try_from("version-1".to_owned()).expect("synthetic version is valid"),
     )

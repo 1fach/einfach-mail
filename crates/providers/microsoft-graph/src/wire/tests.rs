@@ -19,9 +19,9 @@ use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarCapabilities, CalendarDeltaChange, CalendarDeltaLink,
     CalendarDeltaProgress, CalendarEventCreation, CalendarEventDraft, CalendarEventUpdate,
     CalendarEventUpdateDraft, CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId,
-    CalendarViewRange, CalendarViewReference, EditableCalendarEvent, FolderId, FolderReference,
-    FollowUpFlagStatus, MailDraft, MailRecipient, MailReplyDraft, MailReplySource, MailSubject,
-    MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, ReadState,
+    CalendarViewRange, CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus,
+    MailDraft, MailRecipient, MailReplyDraft, MailReplySource, MailSubject, MessageDeltaChange,
+    MessageId, MessageMetadata, MessageOrigin, ReadState, VersionedCalendarEvent,
 };
 
 use super::{
@@ -138,7 +138,7 @@ fn occurrence_from_graph_change(
     }
 }
 
-fn editable_event_json(version: &str, subject: &str, start: &str, end: &str) -> serde_json::Value {
+fn versioned_event_json(version: &str, subject: &str, start: &str, end: &str) -> serde_json::Value {
     json!({
         "id": "synthetic-event",
         "subject": subject,
@@ -157,15 +157,15 @@ fn editable_event_json(version: &str, subject: &str, start: &str, end: &str) -> 
     })
 }
 
-fn editable_event(version: &str) -> EditableCalendarEvent {
-    serde_json::from_value::<WireCalendarEvent>(editable_event_json(
+fn versioned_event(version: &str) -> VersionedCalendarEvent {
+    serde_json::from_value::<WireCalendarEvent>(versioned_event_json(
         version,
         "Planning",
         "2030-01-08T09:00:00.0000000",
         "2030-01-08T10:00:00.0000000",
     ))
     .expect("synthetic event metadata deserializes")
-    .into_editable(synthetic_view())
+    .into_versioned(synthetic_view())
     .expect("synthetic single-instance appointment is editable")
 }
 

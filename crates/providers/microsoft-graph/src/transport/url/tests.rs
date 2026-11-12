@@ -81,9 +81,9 @@ fn calendar_event_path_escapes_opaque_ids_without_query_options() {
 }
 
 #[test]
-fn editable_calendar_event_path_selects_only_edit_data() {
+fn versioned_calendar_event_path_selects_only_edit_data() {
     let request = authority()
-        .editable_calendar_event_path("event/id+1")
+        .versioned_calendar_event_path("event/id+1")
         .expect("synthetic event ID is safely encoded");
     let url = Url::parse(request.as_str()).expect("synthetic Graph URL is valid");
 

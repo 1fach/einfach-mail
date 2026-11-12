@@ -6,8 +6,9 @@ use einfach_mail_domain::{
     EmptyIdentifier, EmptyMailboxAddress, FolderParentError, InvalidCalendarEventCreation,
     InvalidCalendarEventCreationId, InvalidCalendarEventDraft, InvalidCalendarEventTimeZone,
     InvalidCalendarEventUpdateDraft, InvalidCalendarEventVersion, InvalidCalendarOccurrenceTime,
-    InvalidCalendarViewRange, InvalidEditableCalendarEvent, InvalidMailRecipient,
-    InvalidMailSubject, MissingAccountLabel, NewCalendarOccurrenceError, NoCalendarEventChanges,
+    InvalidCalendarViewRange, InvalidMailRecipient, InvalidMailSubject,
+    InvalidVersionedCalendarEvent, MissingAccountLabel, NewCalendarOccurrenceError,
+    NoCalendarEventChanges,
 };
 
 #[test]
@@ -57,8 +58,8 @@ fn domain_validation_errors_keep_their_display_messages() {
             "calendar event version must be bounded and control-free",
         ),
         (
-            &InvalidEditableCalendarEvent,
-            "editable calendar event must use timed values",
+            &InvalidVersionedCalendarEvent,
+            "versioned calendar event must use timed values",
         ),
         (
             &InvalidCalendarEventUpdateDraft,

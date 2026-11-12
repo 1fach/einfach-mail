@@ -5,7 +5,7 @@ use einfach_mail_domain::{
     AccountId, CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
     CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion, CalendarOccurrencePatch,
     CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference,
-    EditableCalendarEvent, EventId,
+    EventId, VersionedCalendarEvent,
 };
 use tempfile::TempDir;
 use time::{Date, Month, OffsetDateTime, Time};

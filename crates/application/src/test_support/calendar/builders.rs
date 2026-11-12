@@ -44,7 +44,7 @@ fn updated_event(
     Ok(event)
 }
 
-pub(super) fn update_request(event: EditableCalendarEvent) -> CalendarEventUpdate {
+pub(super) fn update_request(event: VersionedCalendarEvent) -> CalendarEventUpdate {
     let draft = CalendarEventUpdateDraft::timed(
         "Updated planning".to_owned(),
         utc(2030, Month::January, 8) + time::Duration::hours(11),

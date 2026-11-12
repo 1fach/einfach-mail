@@ -4,7 +4,8 @@ use std::{collections::HashSet, sync::Arc, time::SystemTime};
 
 use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation, CalendarEventUpdate,
-    CalendarOccurrence, CalendarViewReference, EditableCalendarEvent, PendingCalendarEventCreation,
+    CalendarOccurrence, CalendarViewReference, PendingCalendarEventCreation,
+    VersionedCalendarEvent,
 };
 use thiserror::Error;
 
@@ -44,9 +45,9 @@ pub enum CalendarWorkflowError {
     /// Graph did not return the event and values submitted for update.
     #[error("the calendar service returned an unexpected updated event")]
     InvalidUpdateConfirmation,
-    /// The provider returned an edit snapshot for another event or account.
-    #[error("the calendar service returned an unexpected event for editing")]
-    InvalidEditableEvent,
+    /// The provider returned a versioned event for another event or account.
+    #[error("the calendar service returned a different event than requested")]
+    InvalidVersionedEvent,
     /// A view sync or account replacement scan must finish before a calendar write.
     #[error("sync the calendar before changing calendar events")]
     CalendarWriteSyncRequired,
@@ -446,28 +447,29 @@ where
         Ok(())
     }
 
-    /// Loads the current event after reserving its account against calendar writes.
+    /// Loads a provider-versioned event after reserving its account against calendar writes.
     ///
     /// The account reservation ends when this method returns so the user can
-    /// edit the form without blocking calendar synchronization.
+    /// review the event without blocking calendar synchronization.
     ///
     /// # Errors
     ///
     /// Returns [`CalendarWorkflowError::AccountMismatch`] for an event from another account,
-    /// a provider error when the event cannot be read or edited, a
+    /// a provider error when the event cannot be read or is outside the
+    /// provider's supported write shape, a
     /// [`CalendarWorkflowError::OperationInProgress`] when another calendar
     /// operation owns the account, or
     /// [`CalendarWorkflowError::CalendarWriteSyncRequired`] when this view has
     /// not completed a successful sync or another view for the account needs
     /// recovery after a calendar write. Returns
-    /// [`CalendarWorkflowError::InvalidEditableEvent`]
+    /// [`CalendarWorkflowError::InvalidVersionedEvent`]
     /// when the provider returns a snapshot for another event. Returns
     /// [`CalendarWorkflowError::StateUnavailable`] when the account reservation
     /// or shared recovery state cannot be accessed.
-    pub async fn editable_event(
+    pub async fn load_versioned_event(
         &self,
         event: &CalendarOccurrence,
-    ) -> Result<EditableCalendarEvent, CalendarWorkflowError> {
+    ) -> Result<VersionedCalendarEvent, CalendarWorkflowError> {
         let account_id = event.reference().account_id();
         self.ensure_account(account_id)?;
         let _reservation = self
@@ -475,13 +477,13 @@ where
             .reserve_account(account_id)
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(event.reference()).await?;
-        let editable = self.provider.editable_event(event).await?;
-        if editable.occurrence().reference() != event.reference()
-            || editable.occurrence().id() != event.id()
+        let versioned_event = self.provider.load_versioned_event(event).await?;
+        if versioned_event.occurrence().reference() != event.reference()
+            || versioned_event.occurrence().id() != event.id()
         {
-            return Err(CalendarWorkflowError::InvalidEditableEvent);
+            return Err(CalendarWorkflowError::InvalidVersionedEvent);
         }
-        Ok(editable)
+        Ok(versioned_event)
     }
 
     /// Updates one event and atomically reconciles every cached account view.
@@ -567,7 +569,7 @@ where
     /// [`CalendarEventDeletionOutcome::DeletedButNotCached`].
     pub async fn delete_event(
         &self,
-        event: &EditableCalendarEvent,
+        event: &VersionedCalendarEvent,
     ) -> Result<CalendarEventDeletionOutcome, CalendarWorkflowError> {
         let view = event.occurrence().reference();
         self.ensure_account(view.account_id())?;

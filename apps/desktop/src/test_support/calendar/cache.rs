@@ -14,7 +14,7 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation,
     CalendarEventUpdate, CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTimePatch,
-    CalendarViewReference, EditableCalendarEvent, EventId, PendingCalendarEventCreation,
+    CalendarViewReference, EventId, PendingCalendarEventCreation, VersionedCalendarEvent,
 };
 use time::{Date, Month};
 
@@ -433,7 +433,7 @@ impl CalendarCache for TestCache {
 
     fn commit_event_deletion(
         &self,
-        event: &EditableCalendarEvent,
+        event: &VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
         let deleted_event_ids = Arc::clone(&self.deleted_event_ids);
         let write_sync_required = Arc::clone(&self.write_sync_required);

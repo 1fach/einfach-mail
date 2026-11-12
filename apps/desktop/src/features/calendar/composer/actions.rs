@@ -10,22 +10,22 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     ) {
         let session = Arc::clone(&self.session);
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
-            let editable_event = session.editable_event(&cached_event).await;
+            let versioned_event = session.load_versioned_event(&cached_event).await;
             let _ = this.update_in(cx, |composer, window, cx| {
-                composer.apply_editable_event(editable_event, window, cx);
+                composer.apply_versioned_event(versioned_event, window, cx);
             });
         }));
     }
 
-    fn apply_editable_event(
+    fn apply_versioned_event(
         &mut self,
-        editable_result: Result<EditableCalendarEvent, CalendarWorkflowError>,
+        versioned_result: Result<VersionedCalendarEvent, CalendarWorkflowError>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.task = None;
-        match editable_result {
-            Ok(editable_event) => self.load_edit_fields(editable_event, window, cx),
+        match versioned_result {
+            Ok(versioned_event) => self.load_edit_fields(versioned_event, window, cx),
             Err(error) => self.state = ComposerState::Edit(EditState::LoadFailed(error)),
         }
         cx.notify();
@@ -33,22 +33,22 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
 
     fn load_edit_fields(
         &mut self,
-        editable_event: EditableCalendarEvent,
+        versioned_event: VersionedCalendarEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let time_zone = self.week.time_zone();
         let Some(form_values) =
-            super::time::editable_event_picker_values(&editable_event, &time_zone)
+            super::time::editable_event_picker_values(&versioned_event, &time_zone)
         else {
             self.state = ComposerState::Edit(EditState::LoadFailed(
-                CalendarWorkflowError::InvalidEditableEvent,
+                CalendarWorkflowError::InvalidVersionedEvent,
             ));
             return;
         };
         self.set_edit_form_values(form_values, window, cx);
         self.state = ComposerState::Edit(EditState::Ready {
-            editable_event: Box::new(editable_event),
+            versioned_event: Box::new(versioned_event),
             status: EditStatus::Editing,
         });
     }
@@ -106,8 +106,8 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     }
 
     fn submit_edit(&mut self, cx: &mut Context<Self>) {
-        let update = match self.editable_event() {
-            Some(editable_event) => self.update_for_submission(editable_event, cx),
+        let update = match self.versioned_event() {
+            Some(versioned_event) => self.update_for_submission(versioned_event, cx),
             None => return,
         };
         match update {
@@ -186,7 +186,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
 
     fn update_for_submission(
         &self,
-        editable_event: &EditableCalendarEvent,
+        versioned_event: &VersionedCalendarEvent,
         cx: &App,
     ) -> Result<CalendarEventUpdate, DraftError> {
         let subject = self.event_subject(cx)?;
@@ -194,7 +194,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         let CalendarOccurrenceTime::Timed {
             start: source_start,
             end: source_end,
-        } = editable_event.occurrence().time()
+        } = versioned_event.occurrence().time()
         else {
             return Err(DraftError::InvalidTime);
         };
@@ -203,16 +203,18 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         let end = super::time::selected_event_time(selected_end, *source_end, &time_zone)?;
         let draft = CalendarEventUpdateDraft::timed(subject, start, end)
             .map_err(|_| DraftError::InvalidTime)?;
-        CalendarEventUpdate::new(editable_event.clone(), draft).map_err(|_| DraftError::NoChanges)
+        CalendarEventUpdate::new(versioned_event.clone(), draft).map_err(|_| DraftError::NoChanges)
     }
 
     pub(crate) fn edit_write_in_progress(&self) -> bool {
         self.state.edit_write_in_progress()
     }
 
-    fn editable_event(&self) -> Option<&EditableCalendarEvent> {
+    fn versioned_event(&self) -> Option<&VersionedCalendarEvent> {
         match &self.state {
-            ComposerState::Edit(EditState::Ready { editable_event, .. }) => Some(editable_event),
+            ComposerState::Edit(EditState::Ready {
+                versioned_event, ..
+            }) => Some(versioned_event),
             ComposerState::Create(_)
             | ComposerState::Edit(EditState::Loading | EditState::LoadFailed(_)) => None,
         }
@@ -222,7 +224,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         if !self.state.can_delete() {
             return;
         }
-        let Some(event) = self.editable_event() else {
+        let Some(event) = self.versioned_event() else {
             return;
         };
         let subject = event
@@ -260,7 +262,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     }
 
     fn start_deletion(&mut self, cx: &mut Context<Self>) {
-        let Some(event) = self.editable_event().cloned() else {
+        let Some(event) = self.versioned_event().cloned() else {
             return;
         };
         if !self.state.can_delete() {

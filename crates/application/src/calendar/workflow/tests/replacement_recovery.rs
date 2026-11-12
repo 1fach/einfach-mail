@@ -206,7 +206,7 @@ fn event_writes_wait_for_an_interrupted_calendar_replacement_sync() {
             .events()[0]
             .clone();
         let editable = workflow
-            .editable_event(&event)
+            .load_versioned_event(&event)
             .await
             .expect("the synchronized event can be opened for editing");
         let draft = CalendarEventUpdateDraft::timed(
@@ -251,7 +251,7 @@ fn event_writes_wait_for_an_interrupted_calendar_replacement_sync() {
             Err(CalendarWorkflowError::CalendarWriteSyncRequired)
         );
         assert_eq!(
-            workflow.editable_event(&another_event).await,
+            workflow.load_versioned_event(&another_event).await,
             Err(CalendarWorkflowError::CalendarWriteSyncRequired)
         );
         assert_eq!(

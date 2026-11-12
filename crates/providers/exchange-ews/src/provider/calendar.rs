@@ -464,11 +464,11 @@ where
         std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
     }
 
-    fn editable_event(
+    fn load_versioned_event(
         &self,
         _event: &einfach_mail_domain::CalendarOccurrence,
     ) -> impl Future<
-        Output = Result<einfach_mail_domain::EditableCalendarEvent, CalendarOperationError>,
+        Output = Result<einfach_mail_domain::VersionedCalendarEvent, CalendarOperationError>,
     > + Send
     + '_ {
         std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
@@ -486,7 +486,7 @@ where
 
     fn delete_event(
         &self,
-        _event: &einfach_mail_domain::EditableCalendarEvent,
+        _event: &einfach_mail_domain::VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
         std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
     }

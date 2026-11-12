@@ -18,7 +18,7 @@ use einfach_mail_domain::{
     CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
     CalendarEventCreation, CalendarEventUpdate, CalendarEventVersion, CalendarOccurrence,
     CalendarOccurrencePatch, CalendarOccurrenceTime, CalendarOccurrenceTimePatch,
-    CalendarViewReference, EditableCalendarEvent, EventId,
+    CalendarViewReference, EventId, VersionedCalendarEvent,
 };
 
 use super::{
@@ -100,39 +100,39 @@ impl GraphApi {
             .map_err(|_| GraphError::CalendarEventCreationOutcomeUnknown)
     }
 
-    pub(crate) async fn editable_calendar_event(
+    pub(crate) async fn load_versioned_calendar_event(
         &self,
         event: &CalendarOccurrence,
         token: Arc<AccessToken>,
-    ) -> Result<EditableCalendarEvent, GraphError> {
-        let editable = self
-            .fetch_editable_calendar_event(event, token)
+    ) -> Result<VersionedCalendarEvent, GraphError> {
+        let versioned = self
+            .fetch_versioned_calendar_event(event, token)
             .await?
-            .editable;
-        if editable.occurrence().reference() != event.reference()
-            || editable.occurrence().id() != event.id()
+            .versioned;
+        if versioned.occurrence().reference() != event.reference()
+            || versioned.occurrence().id() != event.id()
         {
             return Err(GraphError::InvalidRecord);
         }
-        Ok(editable)
+        Ok(versioned)
     }
 
-    async fn fetch_editable_calendar_event(
+    async fn fetch_versioned_calendar_event(
         &self,
         event: &CalendarOccurrence,
         token: Arc<AccessToken>,
-    ) -> Result<CheckedEditableCalendarEvent, GraphError> {
+    ) -> Result<CheckedVersionedCalendarEvent, GraphError> {
         let view = event.reference().clone();
         let url = self
             .authority
-            .editable_calendar_event_path(event.id().as_str())?;
+            .versioned_calendar_event_path(event.id().as_str())?;
         let response = self
             .transport
             .get(GraphReadOperation::CalendarEventRead, url, token)
             .await?;
         let event = serde_json::from_slice::<WireCalendarEvent>(&response)
             .map_err(|_| GraphError::InvalidResponse)?;
-        event.into_checked_editable(view)
+        event.into_checked_versioned(view)
     }
 
     pub(crate) async fn update_calendar_event(
@@ -141,19 +141,19 @@ impl GraphApi {
         token: Arc<AccessToken>,
     ) -> Result<CalendarOccurrence, GraphError> {
         let current = self
-            .current_editable_calendar_event(update.source(), Arc::clone(&token))
+            .current_versioned_calendar_event(update.source(), Arc::clone(&token))
             .await?;
-        self.patch_calendar_event(update, &current.editable, token)
+        self.patch_calendar_event(update, &current.versioned, token)
             .await
     }
 
     pub(crate) async fn delete_calendar_event(
         &self,
-        event: &EditableCalendarEvent,
+        event: &VersionedCalendarEvent,
         token: Arc<AccessToken>,
     ) -> Result<(), GraphError> {
         let current = self
-            .current_editable_calendar_event(event, Arc::clone(&token))
+            .current_versioned_calendar_event(event, Arc::clone(&token))
             .await?;
         let etag = current.etag.as_deref().ok_or(GraphError::InvalidResponse)?;
         let url = self
@@ -162,22 +162,22 @@ impl GraphApi {
         self.transport.delete_calendar_event(url, token, etag).await
     }
 
-    async fn current_editable_calendar_event(
+    async fn current_versioned_calendar_event(
         &self,
-        source: &EditableCalendarEvent,
+        source: &VersionedCalendarEvent,
         token: Arc<AccessToken>,
-    ) -> Result<CheckedEditableCalendarEvent, GraphError> {
+    ) -> Result<CheckedVersionedCalendarEvent, GraphError> {
         let source_event = source.occurrence();
         let current = self
-            .fetch_editable_calendar_event(source_event, Arc::clone(&token))
+            .fetch_versioned_calendar_event(source_event, Arc::clone(&token))
             .await
             .map_err(|error| match error {
                 GraphError::CalendarEventNotEditable => GraphError::CalendarEventChanged,
                 other => other,
             })?;
-        if current.editable.occurrence().reference() != source_event.reference()
-            || current.editable.occurrence().id() != source_event.id()
-            || current.editable.version() != source.version()
+        if current.versioned.occurrence().reference() != source_event.reference()
+            || current.versioned.occurrence().id() != source_event.id()
+            || current.versioned.version() != source.version()
         {
             return Err(GraphError::CalendarEventChanged);
         }
@@ -187,7 +187,7 @@ impl GraphApi {
     async fn patch_calendar_event(
         &self,
         update: &CalendarEventUpdate,
-        current: &EditableCalendarEvent,
+        current: &VersionedCalendarEvent,
         token: Arc<AccessToken>,
     ) -> Result<CalendarOccurrence, GraphError> {
         let body = calendar_event_update_body(update)?;
@@ -273,8 +273,8 @@ pub(super) struct WireCalendarEvent {
     pub(super) removed: Option<WireRemoved>,
 }
 
-struct CheckedEditableCalendarEvent {
-    editable: EditableCalendarEvent,
+struct CheckedVersionedCalendarEvent {
+    versioned: VersionedCalendarEvent,
     etag: Option<String>,
 }
 
@@ -303,20 +303,20 @@ impl WireCalendarEvent {
         self.into_new(creation.view().clone())
     }
 
-    fn into_checked_editable(
+    fn into_checked_versioned(
         mut self,
         view: CalendarViewReference,
-    ) -> Result<CheckedEditableCalendarEvent, GraphError> {
+    ) -> Result<CheckedVersionedCalendarEvent, GraphError> {
         let etag = self.odata_etag.take();
-        let editable = self.into_editable(view)?;
-        Ok(CheckedEditableCalendarEvent { editable, etag })
+        let versioned = self.into_versioned(view)?;
+        Ok(CheckedVersionedCalendarEvent { versioned, etag })
     }
 
-    pub(super) fn into_editable(
+    pub(super) fn into_versioned(
         mut self,
         view: CalendarViewReference,
-    ) -> Result<EditableCalendarEvent, GraphError> {
-        if !self.has_supported_editable_shape() {
+    ) -> Result<VersionedCalendarEvent, GraphError> {
+        if !self.has_supported_write_shape() {
             return Err(GraphError::CalendarEventNotEditable);
         }
         let version = self
@@ -326,10 +326,10 @@ impl WireCalendarEvent {
         let version =
             CalendarEventVersion::try_from(version).map_err(|_| GraphError::InvalidRecord)?;
         let occurrence = self.into_new(view)?;
-        EditableCalendarEvent::new(occurrence, version).map_err(|_| GraphError::InvalidRecord)
+        VersionedCalendarEvent::new(occurrence, version).map_err(|_| GraphError::InvalidRecord)
     }
 
-    fn has_supported_editable_shape(&self) -> bool {
+    fn has_supported_write_shape(&self) -> bool {
         self.event_type.as_deref() == Some("singleInstance")
             && self.is_organizer == Some(true)
             && self.attendees.as_ref().is_some_and(Vec::is_empty)
@@ -458,7 +458,7 @@ fn calendar_event_update_times(
 
 fn confirm_calendar_event_update(
     update: &CalendarEventUpdate,
-    current: &EditableCalendarEvent,
+    current: &VersionedCalendarEvent,
     response: &[u8],
 ) -> Result<CalendarOccurrence, GraphError> {
     let event_id = update.source().occurrence().id();
