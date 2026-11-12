@@ -33,10 +33,8 @@ use einfach_mail_domain::{
 };
 
 pub(crate) fn mail_only_profile() -> AccountProfile {
-    AccountProfile::try_new_with_capabilities(
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
-        Some("Ada Example".to_owned()),
-        Some("ada@example.test".to_owned()),
+    synthetic_account_profile(
+        synthetic_account_id(),
         Some("ada@tenant.example.test".to_owned()),
         AccountCapabilities::read_only_mail(),
     )
@@ -333,8 +331,7 @@ impl AccountSessionFactory for TestAccountSessionFactory {
 pub(crate) fn unused_account_session_factory() -> Arc<dyn AccountSessionFactory> {
     Arc::new(TestAccountSessionFactory {
         session: Arc::new(TestAccountSession {
-            account_id: AccountId::try_from("synthetic-account".to_owned())
-                .expect("synthetic account ID is valid"),
+            account_id: synthetic_account_id(),
             removal_attempts: Arc::new(Mutex::new(Vec::new())),
         }),
         fallback_removals: Arc::new(AtomicBool::new(false)),
@@ -452,12 +449,10 @@ impl AccountProvider for TestProvider {
             .lock()
             .expect("synthetic commit gate mutex is not poisoned")
             .take();
-        let profile = AccountProfile::try_new(
-            AccountId::try_from("synthetic-account".to_owned())
-                .expect("synthetic account ID is non-empty"),
-            Some("Ada Example".to_owned()),
-            Some("ada@example.test".to_owned()),
+        let profile = synthetic_account_profile(
+            synthetic_account_id(),
             Some("ada@tenant.example.test".to_owned()),
+            AccountCapabilities::full_access(),
         )
         .expect("synthetic account profile has an identity");
         let account_id = profile.id().clone();
@@ -587,12 +582,10 @@ impl AccountProvider for TestProvider {
             .expect("synthetic commit gate mutex is not poisoned")
             .take();
         let expected_account_id = expected_account_id.clone();
-        let profile = AccountProfile::try_new(
-            AccountId::try_from("synthetic-account".to_owned())
-                .expect("synthetic account ID is non-empty"),
-            Some("Ada Example".to_owned()),
-            Some("ada@example.test".to_owned()),
+        let profile = synthetic_account_profile(
+            synthetic_account_id(),
             Some("ada@tenant.example.test".to_owned()),
+            AccountCapabilities::full_access(),
         )
         .expect("synthetic account profile has an identity");
         async move {

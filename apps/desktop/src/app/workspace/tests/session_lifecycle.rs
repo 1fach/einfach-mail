@@ -15,11 +15,10 @@ fn calendar_cache_open_failure_uses_account_scoped_error_copy(cx: &mut TestAppCo
         .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
 
-    let profile = AccountProfile::try_new(
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
-        Some("Ada Example".to_owned()),
-        Some("ada@example.test".to_owned()),
+    let profile = synthetic_account_profile(
+        synthetic_account_id(),
         Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic account profile is valid");
     context.cx.update(|cx| {
@@ -75,11 +74,10 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
     let (view, context) = cx
         .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
-    let profile = AccountProfile::try_new(
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
-        Some("Ada Example".to_owned()),
-        Some("ada@example.test".to_owned()),
+    let profile = synthetic_account_profile(
+        synthetic_account_id(),
         Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic account profile is valid");
     let replacement_account_id = AccountId::try_from("replacement-account".to_owned())
@@ -272,15 +270,12 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
     *provider
         .saved_account_id
         .lock()
-        .expect("synthetic saved account ID mutex is healthy") = Some(
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
-    );
+        .expect("synthetic saved account ID mutex is healthy") = Some(synthetic_account_id());
     let workflow = Arc::new(AccountWorkflow::new(provider));
     let removal_attempts = Arc::new(Mutex::new(Vec::new()));
     let fallback_removals = Arc::new(AtomicBool::new(false));
     let session: Arc<dyn AccountSession> = Arc::new(TestAccountSession {
-        account_id: AccountId::try_from("synthetic-account".to_owned())
-            .expect("synthetic account ID is valid"),
+        account_id: synthetic_account_id(),
         removal_attempts: Arc::clone(&removal_attempts),
     });
     let factory: Arc<dyn AccountSessionFactory> = Arc::new(TestAccountSessionFactory {
@@ -292,11 +287,10 @@ fn sign_out_after_calendar_return_reuses_the_retained_session(cx: &mut TestAppCo
     let (view, context) = cx
         .add_window_view(|_, cx| AccountView::new(Ok(AccountServices::new(workflow, factory)), cx));
     context.run_until_parked();
-    let profile = AccountProfile::try_new(
-        AccountId::try_from("synthetic-account".to_owned()).expect("synthetic account ID is valid"),
-        Some("Ada Example".to_owned()),
-        Some("ada@example.test".to_owned()),
+    let profile = synthetic_account_profile(
+        synthetic_account_id(),
         Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic account profile is valid");
     let account_id = profile.id().clone();
