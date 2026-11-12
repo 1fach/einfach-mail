@@ -44,17 +44,17 @@ pub(crate) enum EventComposerEvent {
     CalendarChanged,
     /// Blocks further event writes until a successful sync reconciles an uncertain outcome.
     CalendarWriteSyncRequired,
-    /// Reloads the saved creation operation after a create attempt or cleanup.
+    /// Reloads the saved creation operation after creation, status recovery, or cleanup.
     PendingOperationUpdated,
     /// Opens the account's calendar write permission review.
     ReviewCalendarWritePermission,
 }
 
-/// Selects a new event, a saved creation retry, or an existing event to load.
+/// Selects a new event, a saved creation to check, or an existing event to load.
 pub(super) enum EventComposerIntent {
-    /// Creates an event or resumes the account's saved creation.
+    /// Creates an event or opens the account's saved creation for status checks.
     Create {
-        /// A persisted operation to retry with its existing id, when present.
+        /// A persisted operation to check without creating it again, when present.
         pending_creation: Option<PendingCalendarEventCreation>,
     },
     /// Loads a fresh provider snapshot before showing or changing the event.
@@ -90,7 +90,12 @@ use state::{ComposerState, CreateState, EditState};
 
 impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     pub(super) fn can_submit(&self) -> bool {
-        self.capabilities.supports(self.required_write_action()) && self.state.can_submit()
+        self.state.can_submit()
+            && match &self.state {
+                ComposerState::Create(CreateState::Pending { .. }) => true,
+                ComposerState::Create(_) => self.capabilities.supports(CalendarAction::CreateEvent),
+                ComposerState::Edit(_) => self.capabilities.supports(CalendarAction::UpdateEvent),
+            }
     }
 
     pub(super) fn should_render_fields(&self) -> bool {

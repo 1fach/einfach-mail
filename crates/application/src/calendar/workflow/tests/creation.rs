@@ -124,7 +124,7 @@ fn event_creation_recovers_its_pending_id_after_an_uncertain_provider_failure() 
             .is_empty());
 
         let outcome = workflow
-            .create_event(&creation)
+            .recover_event_creation(&creation)
             .await
             .expect("same operation confirms through recovery");
         assert!(matches!(outcome, CalendarEventCreationOutcome::Cached(_)));
@@ -188,7 +188,7 @@ fn unresolved_creation_uses_recovery_after_workflow_restart() {
         )
         .await;
         assert_eq!(
-            restarted.create_event(&creation).await,
+            restarted.recover_event_creation(&creation).await,
             Err(CalendarWorkflowError::Provider(
                 CalendarOperationError::ServiceUnavailable
             ))
@@ -209,7 +209,7 @@ fn unresolved_creation_uses_recovery_after_workflow_restart() {
         );
 
         assert!(matches!(
-            restarted.create_event(&creation).await,
+            restarted.recover_event_creation(&creation).await,
             Ok(CalendarEventCreationOutcome::Cached(_))
         ));
         assert_eq!(
@@ -226,6 +226,49 @@ fn unresolved_creation_uses_recovery_after_workflow_restart() {
                 .expect("synthetic recovery log mutex is not poisoned"),
             vec![creation.id(), creation.id()]
         );
+    });
+}
+
+#[test]
+fn event_creation_recovery_requires_the_exact_unresolved_cache_entry() {
+    smol::block_on(async {
+        let view = view();
+        let (creation, other_creation) = (creation(view.clone()), creation(view.clone()));
+        let provider = FixtureProvider::default();
+        let cache = FixtureCache::default();
+        let workflow =
+            CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache.clone());
+        synchronize_empty_view(&workflow, &provider, &view, "recover-missing-creation-sync").await;
+
+        assert_eq!(
+            workflow.recover_event_creation(&creation).await,
+            Err(CalendarWorkflowError::PendingCreationNotFound)
+        );
+        assert_eq!(
+            cache.stage_event_creation(&other_creation).await,
+            Ok(CalendarEventCreationStage::NewlyStaged)
+        );
+        assert_eq!(
+            workflow.recover_event_creation(&creation).await,
+            Err(CalendarWorkflowError::PendingCreationNotFound)
+        );
+        assert!(provider
+            .creations
+            .lock()
+            .expect("synthetic creation log mutex is not poisoned")
+            .is_empty());
+        assert!(provider
+            .recoveries
+            .lock()
+            .expect("synthetic recovery log mutex is not poisoned")
+            .is_empty());
+        assert!(matches!(
+            cache
+                .pending_event_creation(creation.view().account_id())
+                .await
+                .expect("synthetic pending state is readable"),
+            Some(PendingCalendarEventCreation::Unresolved(pending)) if pending == other_creation
+        ));
     });
 }
 

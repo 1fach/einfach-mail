@@ -111,10 +111,28 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         status: PendingCreationStatus,
         colors: ColorTokens,
     ) -> impl IntoElement {
+        let progress = match status {
+            PendingCreationStatus::Creating => {
+                Some(("event-creation-submitting", "Creating event…"))
+            }
+            PendingCreationStatus::Checking => {
+                Some(("event-creation-checking", "Checking event status…"))
+            }
+            PendingCreationStatus::DiscardingRejected => Some((
+                "event-creation-submitting",
+                "Clearing rejected event draft…",
+            )),
+            _ => None,
+        };
         let pending = div()
             .id("event-creation-pending")
             .debug_selector(|| "event-creation-pending".to_owned())
             .role(Role::Status)
+            .aria_label(format!(
+                "Saved event draft: {}. {}",
+                creation.draft().subject(),
+                format_local_range(creation.draft())
+            ))
             .flex()
             .flex_col()
             .gap_2()
@@ -125,13 +143,9 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .rounded_lg()
             .child(render_pending_subject(creation))
             .child(render_pending_range(creation))
-            .when(
-                matches!(
-                    status,
-                    PendingCreationStatus::Submitting | PendingCreationStatus::DiscardingRejected
-                ),
-                |element| element.child(render_creation_submitting(status, colors)),
-            )
+            .when_some(progress, |element, (selector, message)| {
+                element.child(render_creation_submitting(selector, message, colors))
+            })
             .child(render_pending_explanation(status, colors));
         #[cfg(test)]
         let pending = pending.test_support();
@@ -175,6 +189,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             return render_close_action();
         }
         match &self.state {
+            ComposerState::Create(CreateState::Pending { .. }) => self.render_submit_action(cx),
             ComposerState::Create(_) => {
                 if self.capabilities.supports(CalendarAction::CreateEvent) {
                     self.render_submit_action(cx)
@@ -234,7 +249,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
             .label(label)
             .loading(self.state.submit_is_loading())
             .disabled(!self.can_submit())
-            .on_click(cx.listener(|composer, _, _, cx| composer.submit(cx)))
+            .on_click(cx.listener(|composer, _, _, cx| composer.activate_primary_action(cx)))
             .into_any_element()
     }
 }
@@ -340,7 +355,18 @@ pub(super) fn render_pending_explanation(
             "Microsoft rejected this event. Clear the saved draft locally before submitting a corrected event."
         }
         PendingCreationStatus::DiscardingRejected => "Clearing the rejected draft locally…",
-        _ => "This event may already exist in Microsoft. Retrying uses the same operation ID.",
+        PendingCreationStatus::Creating => {
+            "The event is being sent once. If the result is unclear, checking its status will not send it again."
+        }
+        PendingCreationStatus::Unresolved
+        | PendingCreationStatus::Checking
+        | PendingCreationStatus::StillUnresolved
+        | PendingCreationStatus::Failed(_) => {
+            "This event may already exist. Checking its status never creates it again. An inconclusive result keeps this draft saved and blocks another event and account removal."
+        }
+        PendingCreationStatus::ConfirmedButNotCached => {
+            "Microsoft confirmed this event, but the local calendar could not save it. Checking its status can recover it without creating another event."
+        }
     };
     div()
         .text_sm()
@@ -349,17 +375,13 @@ pub(super) fn render_pending_explanation(
 }
 
 pub(super) fn render_creation_submitting(
-    status: PendingCreationStatus,
+    selector: &'static str,
+    message: &'static str,
     colors: ColorTokens,
 ) -> impl IntoElement {
-    let message = if matches!(status, PendingCreationStatus::DiscardingRejected) {
-        "Clearing rejected event draft…"
-    } else {
-        "Creating event…"
-    };
     div()
-        .id("event-creation-submitting")
-        .debug_selector(|| "event-creation-submitting".to_owned())
+        .id(selector)
+        .debug_selector(move || selector.to_owned())
         .role(Role::Status)
         .text_sm()
         .text_color(colors.muted_foreground)
@@ -438,6 +460,7 @@ pub(super) fn render_status_message(
         .id("event-creation-status")
         .debug_selector(|| "event-creation-status".to_owned())
         .role(role)
+        .aria_label(message)
         .text_sm()
         .text_color(color)
         .child(message);

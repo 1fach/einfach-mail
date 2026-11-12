@@ -14,7 +14,7 @@ use super::CalendarView;
 use super::actions::CALENDAR_EVENT_LIST_CONTEXT;
 use super::copy::{
     UTC_FALLBACK_STATUS_LABEL, calendar_error_message, calendar_event_accessible_label, date_label,
-    elapsed_label, week_label, write_readiness_message,
+    elapsed_label, event_creation_action_copy, week_label, write_readiness_message,
 };
 use super::state::{
     AgendaEvent, AgendaEventKey, AgendaOptionPosition, AgendaRow, CalendarStatus, DisplayEvent,
@@ -65,7 +65,9 @@ where
         if let Some(selected_event_action) = self.render_selected_event_action(cx) {
             title_bar = title_bar.child(selected_event_action);
         }
-        if self.supports_calendar_action(CalendarAction::CreateEvent) {
+        if self.supports_calendar_action(CalendarAction::CreateEvent)
+            || self.pending_creation.is_some()
+        {
             title_bar = title_bar.child(self.render_event_button(cx));
         }
         title_bar.child(self.render_sync_button(cx))
@@ -96,17 +98,14 @@ where
     }
 
     fn render_event_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let action_copy = event_creation_action_copy(self.pending_creation.as_ref());
         div()
             .flex()
             .flex_shrink_0()
             .debug_selector(|| "calendar-new-event".to_owned())
             .child(
                 Button::new("calendar-new-event")
-                    .label(if self.pending_creation.is_some() {
-                        "Resolve pending event…"
-                    } else {
-                        "New event…"
-                    })
+                    .label(action_copy.button_label)
                     .disabled(
                         self.status.is_sync_active()
                             || self.write_readiness != CalendarWriteReadiness::Ready,

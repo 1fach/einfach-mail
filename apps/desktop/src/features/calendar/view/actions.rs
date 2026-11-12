@@ -11,6 +11,7 @@ use crate::components::ListNavigation;
 use super::super::composer::{
     EventComposer, EventComposerEvent, EventComposerIntent, EventComposerSetup,
 };
+use super::copy::event_creation_action_copy;
 use super::state::{AgendaEventKey, AgendaRow, CalendarStatus};
 use super::{CalendarView, CalendarViewEvent};
 
@@ -65,7 +66,8 @@ where
     S: CalendarSession + ?Sized + 'static,
 {
     pub(super) fn open_event_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.supports_calendar_action(CalendarAction::CreateEvent)
+        if (self.pending_creation.is_none()
+            && !self.supports_calendar_action(CalendarAction::CreateEvent))
             || self.write_readiness != CalendarWriteReadiness::Ready
         {
             return;
@@ -73,12 +75,8 @@ where
         let intent = EventComposerIntent::Create {
             pending_creation: self.pending_creation.clone(),
         };
-        let title = if self.pending_creation.is_some() {
-            "Resolve pending event"
-        } else {
-            "New calendar event"
-        };
-        self.open_composer(intent, title, window, cx);
+        let action_copy = event_creation_action_copy(self.pending_creation.as_ref());
+        self.open_composer(intent, action_copy.sheet_title, window, cx);
     }
 
     pub(super) fn open_selected_event(

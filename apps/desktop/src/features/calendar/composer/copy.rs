@@ -32,10 +32,17 @@ pub(super) fn pending_resolution_error_text(error: CalendarWorkflowError) -> &'s
 
 pub(super) fn creation_status_text(state: &CreateState) -> Option<&'static str> {
     match state {
+        CreateState::DraftFailed(error) => Some(creation_error_text(*error)),
         CreateState::Pending {
             status: PendingCreationStatus::Failed(error),
             ..
-        } => Some(creation_error_text(*error)),
+        } => Some(pending_recovery_error_text(*error)),
+        CreateState::Pending {
+            status: PendingCreationStatus::StillUnresolved,
+            ..
+        } => Some(
+            "Microsoft could not confirm whether this event exists. The saved draft remains unresolved.",
+        ),
         CreateState::Completed(CreationOutcome::Confirmed) => {
             Some("Event created and saved to the calendar.")
         }
@@ -43,7 +50,7 @@ pub(super) fn creation_status_text(state: &CreateState) -> Option<&'static str> 
             status: PendingCreationStatus::ConfirmedButNotCached,
             ..
         } => Some(
-            "Microsoft confirmed the event, but it could not be saved locally. Retry to recover it safely.",
+            "Microsoft confirmed the event, but it could not be saved locally. Check its status to recover it safely.",
         ),
         CreateState::Completed(CreationOutcome::Rejected) => {
             Some("Microsoft rejected this event. Correct the details and submit a new event.")
@@ -59,13 +66,51 @@ pub(super) fn creation_status_text(state: &CreateState) -> Option<&'static str> 
             ..
         } => Some("Clearing the rejected event draft…"),
         CreateState::Draft
-        | CreateState::InvalidDraft(_)
         | CreateState::Pending {
-            status: PendingCreationStatus::Ready | PendingCreationStatus::Submitting,
+            status:
+                PendingCreationStatus::Unresolved
+                | PendingCreationStatus::Creating
+                | PendingCreationStatus::Checking,
             ..
         }
+        | CreateState::InvalidDraft(_)
         | CreateState::PendingResolutionRequired
         | CreateState::PendingResolutionFailed(_) => None,
+    }
+}
+
+pub(super) fn pending_recovery_error_text(error: CalendarWorkflowError) -> &'static str {
+    match error {
+        CalendarWorkflowError::Provider(CalendarOperationError::AccessDenied) => {
+            "Microsoft denied access to check this event's status. Review the requested permission or your organization's consent policy."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::SignInRequired) => {
+            "Your Microsoft sign-in needs attention. Return to Accounts and connect again before checking this event."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::RateLimited { .. }) => {
+            "Microsoft is limiting calendar requests. Wait a moment, then check this event's status again."
+        }
+        CalendarWorkflowError::Provider(CalendarOperationError::ServiceUnavailable) => {
+            "The calendar service is unavailable. Check your connection, then check this event's status again."
+        }
+        CalendarWorkflowError::OperationInProgress => {
+            "The calendar is syncing. Check this event's status when sync finishes."
+        }
+        CalendarWorkflowError::CalendarWriteSyncRequired => {
+            "Sync the calendar before checking this event's status again."
+        }
+        CalendarWorkflowError::PendingCreationNotFound => {
+            "The saved event is no longer marked for recovery. Refresh the calendar before taking another action."
+        }
+        CalendarWorkflowError::Cache(_) => {
+            "The saved event status could not be checked. The draft remains saved; check again when the calendar cache is available."
+        }
+        CalendarWorkflowError::InvalidConfirmation => {
+            "Microsoft returned an event that did not match this saved draft. The draft remains pending; check its status again."
+        }
+        _ => {
+            "The event status could not be confirmed. The saved draft remains pending; check again later."
+        }
     }
 }
 
@@ -150,6 +195,15 @@ pub(super) fn creation_error_text(error: CalendarWorkflowError) -> &'static str 
         ) => "The calendar service is unavailable. Check your connection, then retry this event.",
         CalendarWorkflowError::OperationInProgress => {
             "The calendar is syncing. Retry this event when sync finishes."
+        }
+        CalendarWorkflowError::CalendarWriteSyncRequired => {
+            "Sync this calendar before creating the event. The draft has not been sent."
+        }
+        CalendarWorkflowError::AccountMismatch => {
+            "This draft belongs to another account. Return to the matching account before creating it."
+        }
+        CalendarWorkflowError::StateUnavailable => {
+            "The account state is unavailable. The draft has not been sent. Try again when the account is ready."
         }
         CalendarWorkflowError::InvalidConfirmation => {
             "Microsoft returned an event that did not match this draft. Retry the saved operation to check the same event."

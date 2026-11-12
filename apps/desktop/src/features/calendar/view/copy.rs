@@ -4,12 +4,37 @@ use crate::components::relative_age_label;
 use einfach_mail_application::{
     CalendarOperationError, CalendarWorkflowError, CalendarWriteReadiness,
 };
+use einfach_mail_domain::PendingCalendarEventCreation;
 use jiff::{Span, civil};
 
 use super::state::DisplayEvent;
 
 pub(super) const UTC_FALLBACK_STATUS_LABEL: &str =
     "The system time zone is unavailable. Timed events are shown in UTC.";
+
+pub(super) struct EventCreationActionCopy {
+    pub(super) button_label: &'static str,
+    pub(super) sheet_title: &'static str,
+}
+
+pub(super) fn event_creation_action_copy(
+    pending_creation: Option<&PendingCalendarEventCreation>,
+) -> EventCreationActionCopy {
+    match pending_creation {
+        Some(PendingCalendarEventCreation::Unresolved(_)) => EventCreationActionCopy {
+            button_label: "Check event status…",
+            sheet_title: "Check event status",
+        },
+        Some(PendingCalendarEventCreation::Rejected(_)) => EventCreationActionCopy {
+            button_label: "Clear rejected draft…",
+            sheet_title: "Clear rejected event draft",
+        },
+        None => EventCreationActionCopy {
+            button_label: "New event…",
+            sheet_title: "New calendar event",
+        },
+    }
+}
 
 pub(super) fn write_readiness_message(readiness: CalendarWriteReadiness) -> Option<&'static str> {
     match readiness {
