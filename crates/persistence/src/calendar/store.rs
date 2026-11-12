@@ -209,7 +209,6 @@ impl SqliteAccountCache {
     }
 
     fn validate_calendar_snapshot(
-        &self,
         view: &CalendarViewReference,
         events: &[CalendarOccurrence],
     ) -> Result<(), CalendarCacheError> {
@@ -235,7 +234,7 @@ impl SqliteAccountCache {
         completed_at: SystemTime,
     ) -> Result<CalendarSnapshotCommit, CalendarCacheError> {
         let scope = self.check_calendar_view(view)?;
-        self.validate_calendar_snapshot(view, &events)?;
+        Self::validate_calendar_snapshot(view, &events)?;
         let completed_at =
             system_time_parts(completed_at).map_err(CacheFailure::calendar_public)?;
         Ok(CalendarSnapshotCommit {
@@ -571,7 +570,11 @@ impl CalendarCache for SqliteAccountCache {
                 .conn_mut_and_then(move |connection| {
                     let transaction = connection.transaction()?;
                     let pending = read_pending_event_creation(&transaction, &account_id)?;
-                    if pending != Some(PendingCalendarEventCreation::Unresolved(creation.clone())) {
+                    if !matches!(
+                        pending.as_ref(),
+                        Some(PendingCalendarEventCreation::Unresolved(existing))
+                            if existing == &creation
+                    ) {
                         return Err(CacheFailure::InvalidData);
                     }
                     write_calendar_event(
