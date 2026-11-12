@@ -96,11 +96,11 @@ impl MailProvider for MicrosoftGraphProvider {
         })
     }
 
-    fn fetch_message_body(
-        &self,
-        folder: &FolderReference,
-        message_id: &MessageId,
-    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
+    fn fetch_message_body<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + 'a {
         let config = Arc::clone(&self.config);
         let account_id = folder.account_id().clone();
         let message_id = message_id.clone();

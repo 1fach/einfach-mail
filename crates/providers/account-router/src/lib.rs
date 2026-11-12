@@ -219,23 +219,19 @@ where
         }
     }
 
-    fn fetch_message_body(
-        &self,
-        folder: &FolderReference,
-        message_id: &MessageId,
-    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
-        let folder = folder.clone();
-        let message_id = message_id.clone();
-        async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => {
-                    self.graph.fetch_message_body(&folder, &message_id).await
-                }
-                Some(ProviderKind::ExchangeEws) => {
-                    self.ews.fetch_message_body(&folder, &message_id).await
-                }
-                None => Err(MailOperationError::SignInRequired),
+    async fn fetch_message_body<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+    ) -> Result<MessageBody, MailOperationError> {
+        match self.selected_provider().await {
+            Some(ProviderKind::MicrosoftGraph) => {
+                self.graph.fetch_message_body(folder, message_id).await
             }
+            Some(ProviderKind::ExchangeEws) => {
+                self.ews.fetch_message_body(folder, message_id).await
+            }
+            None => Err(MailOperationError::SignInRequired),
         }
     }
 

@@ -206,11 +206,11 @@ pub trait MailProvider: Send + Sync {
     ///
     /// Returns a user-safe provider error when the session, network, response,
     /// or resource limits prevent loading the body.
-    fn fetch_message_body(
-        &self,
-        folder: &FolderReference,
-        message_id: &MessageId,
-    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_;
+    fn fetch_message_body<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + 'a;
 
     /// Sets one message's read state and returns the state confirmed by the provider.
     ///

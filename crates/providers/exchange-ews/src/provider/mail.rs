@@ -111,63 +111,59 @@ where
         }
     }
 
-    fn fetch_message_body(
-        &self,
-        folder: &FolderReference,
-        message_id: &MessageId,
-    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
-        let folder = folder.clone();
+    async fn fetch_message_body<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+    ) -> Result<MessageBody, MailOperationError> {
+        let session = session_for_mail(&self.session, folder.account_id().clone()).await?;
         let message_id = message_id.clone();
-        let session_store = Arc::clone(&self.session);
-        async move {
-            let session = session_for_mail(&session_store, folder.account_id().clone()).await?;
-            worker::run(move |_cancellation: CancellationToken| async move {
-                let request = GetItem {
-                    item_shape: ItemShape {
-                        base_shape: BaseShape::Default,
-                        include_mime_content: Some(false),
-                        additional_properties: None,
-                    },
-                    item_ids: vec![BaseItemId::ItemId {
-                        id: message_id.as_str().to_owned(),
-                        change_key: None,
-                    }],
-                };
-                let response = session
-                    .transport
-                    .execute(request)
-                    .await
-                    .map_err(MailOperationError::from)?;
-                let mut responses = response.messages;
-                if responses.len() != 1 {
-                    return Err(MailOperationError::InvalidResponse);
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let request = GetItem {
+                item_shape: ItemShape {
+                    base_shape: BaseShape::Default,
+                    include_mime_content: Some(false),
+                    additional_properties: None,
+                },
+                item_ids: vec![BaseItemId::ItemId {
+                    id: message_id.as_str().to_owned(),
+                    change_key: None,
+                }],
+            };
+            let response = session
+                .transport
+                .execute(request)
+                .await
+                .map_err(MailOperationError::from)?;
+            let mut responses = response.messages;
+            if responses.len() != 1 {
+                return Err(MailOperationError::InvalidResponse);
+            }
+            let response = match responses.pop().ok_or(MailOperationError::InvalidResponse)? {
+                ResponseClass::Success(response) | ResponseClass::Warning(response) => response,
+                ResponseClass::Error(error) => {
+                    return Err(map_response_code(error.response_code).into());
                 }
-                let response = match responses.pop().ok_or(MailOperationError::InvalidResponse)? {
-                    ResponseClass::Success(response) | ResponseClass::Warning(response) => response,
-                    ResponseClass::Error(error) => {
-                        return Err(map_response_code(error.response_code).into());
-                    }
-                };
-                let item = response
-                    .items
-                    .inner
-                    .into_iter()
-                    .next()
-                    .ok_or(MailOperationError::InvalidResponse)?
-                    .into_inner_message();
-                let body = item.body.ok_or(MailOperationError::InvalidResponse)?;
-                let content = body.content.ok_or(MailOperationError::InvalidResponse)?;
-                if content.len() > MAX_MESSAGE_BODY_BYTES {
-                    return Err(MailOperationError::ResourceLimitExceeded);
-                }
-                let body_type = match body.body_type {
-                    ews::BodyType::HTML => MessageBodyType::Html,
-                    ews::BodyType::Text => MessageBodyType::Text,
-                };
-                Ok(MessageBody::new(body_type, content))
-            })
-            .await
-        }
+            };
+            let item = response
+                .items
+                .inner
+                .into_iter()
+                .next()
+                .ok_or(MailOperationError::InvalidResponse)?
+                .into_inner_message();
+            let body = item.body.ok_or(MailOperationError::InvalidResponse)?;
+            let content = body.content.ok_or(MailOperationError::InvalidResponse)?;
+            if content.len() > MAX_MESSAGE_BODY_BYTES {
+                return Err(MailOperationError::ResourceLimitExceeded);
+            }
+            let body_type = match body.body_type {
+                ews::BodyType::HTML => MessageBodyType::Html,
+                ews::BodyType::Text => MessageBodyType::Text,
+            };
+            Ok(MessageBody::new(body_type, content))
+        })
+        .await
     }
 
     fn set_message_read_state(
