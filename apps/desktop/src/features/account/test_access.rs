@@ -9,7 +9,7 @@ use gpui_kit::{App, Background, FocusHandle};
 
 use super::{
     AccountContent, AccountStatus, AccountView, AccountViewCacheError, NavigationSurfaceAppearance,
-    OpeningContent, WorkspaceSection,
+    OpeningContent, SavedCredentialState, WorkspaceSection,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,18 +76,16 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         matches!(self.status, AccountStatus::Disconnected)
     }
 
-    pub(crate) fn test_status_is_failed_with(
+    pub(crate) fn test_status_is_failed_with_possible_saved_credential(
         &self,
-        expected_error: &AccountOperationError,
-        saved_credential_may_exist: bool,
+        expected_error: AccountOperationError,
     ) -> bool {
         matches!(
             &self.status,
             AccountStatus::Failed {
                 error,
-                saved_credential_may_exist: actual_saved_credential_may_exist,
-            } if error == expected_error
-                && *actual_saved_credential_may_exist == saved_credential_may_exist
+                saved_credential_state: SavedCredentialState::MayExist,
+            } if error == &expected_error
         )
     }
 

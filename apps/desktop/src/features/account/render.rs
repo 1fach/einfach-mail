@@ -4,6 +4,7 @@ use super::copy::{
 };
 use super::state::{
     AccountStatus, AccountViewCacheError, EwsDiscoveryState, ExchangeEwsConnectionForm,
+    SavedCredentialState,
 };
 use super::{AccountView, OpeningContent, SetupIssue};
 use einfach_mail_application::{
@@ -98,7 +99,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 "Connecting to account…",
                 Role::Status,
             ),
-            AccountStatus::CancellingConnect { .. } => (
+            AccountStatus::CancellingConnect => (
                 "Finishing account connection",
                 "Finishing connection…",
                 Role::Status,
@@ -292,9 +293,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             AccountStatus::Restoring => Self::render_progress_action("Checking account…"),
             AccountStatus::SigningOut { .. } => Self::render_progress_action("Signing out…"),
             AccountStatus::SignOutFailed { .. } => div(),
-            AccountStatus::CancellingConnect { .. } => {
-                Self::render_progress_action("Finishing sign-in…")
-            }
+            AccountStatus::CancellingConnect => Self::render_progress_action("Finishing sign-in…"),
             AccountStatus::Reauthorizing { .. } => div()
                 .flex()
                 .justify_center()
@@ -328,7 +327,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 }
             }
             AccountStatus::Failed {
-                saved_credential_may_exist: true,
+                saved_credential_state: SavedCredentialState::MayExist,
                 ..
             } => div()
                 .flex()
@@ -342,7 +341,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 ),
             AccountStatus::Disconnected
             | AccountStatus::Failed {
-                saved_credential_may_exist: false,
+                saved_credential_state: SavedCredentialState::Absent,
                 ..
             } => self.render_connect_options(colors, cx),
             AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. } => div(),
@@ -679,7 +678,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
 
     fn render_cancel_ews_connection_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let connecting = self.ews_connection_busy();
-        let cancelling = matches!(&self.status, AccountStatus::CancellingConnect { .. });
+        let cancelling = matches!(&self.status, AccountStatus::CancellingConnect);
         let label = if cancelling {
             "Finishing connection…"
         } else if connecting {
@@ -714,7 +713,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     }
 
     fn ews_submit_label(&self) -> &'static str {
-        if matches!(&self.status, AccountStatus::CancellingConnect { .. }) {
+        if matches!(&self.status, AccountStatus::CancellingConnect) {
             "Finishing connection…"
         } else if matches!(&self.status, AccountStatus::Connecting { .. }) {
             "Connecting…"
@@ -732,7 +731,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     fn ews_connection_busy(&self) -> bool {
         matches!(
             &self.status,
-            AccountStatus::Connecting { .. } | AccountStatus::CancellingConnect { .. }
+            AccountStatus::Connecting { .. } | AccountStatus::CancellingConnect
         )
     }
 
@@ -771,14 +770,14 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     fn saved_sign_in_description(status: &AccountStatus) -> Option<&'static str> {
         match status {
             AccountStatus::Failed {
-                saved_credential_may_exist: true,
+                saved_credential_state: SavedCredentialState::MayExist,
                 error:
                     AccountOperationError::SavedAccountIdentityUnavailable
                     | AccountOperationError::AccountMismatch,
                 ..
             } => Some("Retry account restore before removing or replacing the saved sign-in."),
             AccountStatus::Failed {
-                saved_credential_may_exist: true,
+                saved_credential_state: SavedCredentialState::MayExist,
                 ..
             } => Some("Restore or remove the saved sign-in before connecting another account."),
             _ => None,
@@ -797,7 +796,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             AccountStatus::Connecting { .. } => {
                 Some("Connection is in progress. Cancel it below if needed.")
             }
-            AccountStatus::CancellingConnect { .. } => {
+            AccountStatus::CancellingConnect => {
                 Some("Connection cancellation is finishing. Wait before starting another sign-in.")
             }
             _ => None,
@@ -897,7 +896,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         if matches!(
             &self.status,
             AccountStatus::Failed {
-                saved_credential_may_exist: true,
+                saved_credential_state: SavedCredentialState::MayExist,
                 error: AccountOperationError::SavedAccountIdentityUnavailable
                     | AccountOperationError::AccountMismatch,
                 ..
@@ -908,7 +907,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         if matches!(
             &self.status,
             AccountStatus::Failed {
-                saved_credential_may_exist: true,
+                saved_credential_state: SavedCredentialState::MayExist,
                 ..
             }
         ) {

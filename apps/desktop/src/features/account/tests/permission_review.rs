@@ -201,7 +201,7 @@ fn connection_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
             &view.read(cx).status,
             super::AccountStatus::Failed {
                 error: AccountOperationError::SignInCancelled,
-                ..
+                saved_credential_state: super::SavedCredentialState::Absent,
             }
         )
     });
@@ -218,7 +218,7 @@ fn connection_cancel_resolves_before_and_during_credential_commit(cx: &mut TestA
     let cancelling = context.cx.update(|cx| {
         matches!(
             &view.read(cx).status,
-            super::AccountStatus::CancellingConnect { .. }
+            super::AccountStatus::CancellingConnect
         )
     });
     assert!(cancelling);

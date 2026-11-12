@@ -299,7 +299,7 @@ fn failed_restore_without_verified_identity_preserves_credential(cx: &mut TestAp
         &view.read(cx).status,
         AccountStatus::Failed {
             error: AccountOperationError::SavedAccountIdentityUnavailable,
-            saved_credential_may_exist: true,
+            saved_credential_state: SavedCredentialState::MayExist,
         }
     )));
     assert!(context.debug_bounds("connect-account").is_none());
@@ -359,7 +359,7 @@ fn connect_mismatch_keeps_saved_sign_in_and_requires_restore(cx: &mut TestAppCon
         &view.read(cx).status,
         AccountStatus::Failed {
             error: AccountOperationError::AccountMismatch,
-            saved_credential_may_exist: true,
+            saved_credential_state: SavedCredentialState::MayExist,
         }
     )));
     assert!(context.debug_bounds("connect-account").is_none());

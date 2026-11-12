@@ -35,7 +35,10 @@ use gpui_kit::{
 #[cfg(test)]
 use state::EwsDiscoveryState;
 pub(crate) use state::{AccountServices, SetupIssue};
-use state::{AccountSignOutError, AccountStatus, AccountViewCacheError, ExchangeEwsConnectionForm};
+use state::{
+    AccountSignOutError, AccountStatus, AccountViewCacheError, ExchangeEwsConnectionForm,
+    SavedCredentialState,
+};
 
 pub(crate) struct AccountView<P: AccountProvider + 'static> {
     services: Result<AccountServices<P>, SetupIssue>,
@@ -271,12 +274,12 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             return;
         };
         let workflow = Arc::clone(&services.workflow);
-        if !self.status.saved_credential_may_exist()
+        if self.status.saved_credential_state() == SavedCredentialState::Absent
             || self.content.opening_kind().is_some()
             || matches!(
                 &self.status,
                 AccountStatus::Connecting { .. }
-                    | AccountStatus::CancellingConnect { .. }
+                    | AccountStatus::CancellingConnect
                     | AccountStatus::Reauthorizing { .. }
                     | AccountStatus::CancellingReauthorization { .. }
                     | AccountStatus::SigningOut { .. }
@@ -575,7 +578,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             Err(AccountSignOutError::Identity(error)) => {
                 self.status = AccountStatus::Failed {
                     error,
-                    saved_credential_may_exist: true,
+                    saved_credential_state: SavedCredentialState::MayExist,
                 };
             }
             Err(AccountSignOutError::CacheRemoval(error)) => {
