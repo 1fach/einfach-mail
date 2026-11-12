@@ -46,7 +46,7 @@ Issue [#336](https://github.com/1fach/einfach-mail/issues/336) tracks the follow
 
 PRs #352–#355 completed the domain, application, and persistence splits. The desktop account move tracked by #342 passes the Rust 1.95 Linux local gate, and all 511 test function names match the baseline. Headless GPUI tests pass. No GitHub Actions or native window ran. Issues #343–#348 are closed. The #336 module-tree cleanup is complete; PR #379 completed #356 and all nine of its subissues.
 
-PR [#397](https://github.com/1fach/einfach-mail/pull/397) merged issue #394 into `main` at `d6db74d7ff5dbba7584913fb5a37221274e7b648` on 2026-11-12. The calendar UI gates create, update, and delete separately, and delete-only accounts get read-only event details with explicit confirmation. The headless GPUI suite covers all six capability profiles and successful supported writes. The full Rust 1.95 Linux local gate passed with localhost access for synthetic HTTP tests. No native window or live mailbox was used. This completes the #390 capability migration; keep EWS event writes disabled while issue #389 defines their request and recovery rules.
+PR [#397](https://github.com/1fach/einfach-mail/pull/397) merged issue #394 into `main` at `d6db74d7ff5dbba7584913fb5a37221274e7b648` on 2026-11-12. The calendar UI gates create, update, and delete separately, and delete-only accounts get read-only event details with explicit confirmation. The headless GPUI suite covers all six capability profiles and successful supported writes. The full Rust 1.95 Linux local gate passed with localhost access for synthetic HTTP tests. No native window or live mailbox was used. This completes the #390 capability migration; ADR 0065 accepts a future EWS calendar-write policy, but EWS remains view-only pending implementation and live Exchange verification.
 
 Issue #289 moved desktop startup, workspace, mail and calendar features, Linux process locking, shared helpers, and GPUI test support under their agreed ownership paths in [PR #320](https://github.com/1fach/einfach-mail/pull/320), targeting `feat/mail-list-resizing`. All 494 test function identifiers match the baseline. The full Linux local gate passes with localhost socket access for synthetic HTTP tests. Existing headless account and workspace tests passed. No real window was launched because Xvfb and Weston are unavailable. The #290 plan has children #321 through #324.
 
@@ -82,6 +82,8 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 
 [PR #385](https://github.com/1fach/einfach-mail/pull/385) implements issue #383's EWS worker shutdown lifecycle. [ADR 0063](../decisions/0063-reap-ews-transport-workers.md) records the process-wide standard-library reaper, credential ownership, and request-outcome contract. Synthetic tests cover idle transport drop, queued reads and updates, and in-flight reads and updates. The Rust 1.95 Linux local gate passed; all 60 EWS provider tests and 123 headless desktop tests passed, with 3 existing live Secret Service tests ignored. No live Exchange verification was available.
 
+[ADR 0065](../decisions/0065-safe-ews-calendar-event-writes.md) accepts a planned M11 scope for one-off timed standalone EWS appointments in the primary calendar. It keeps EWS capabilities view-only until implementation review and live Exchange verification. Issue [#389](https://github.com/1fach/einfach-mail/issues/389) remains open for small fixture-backed implementation issues and separate live verification.
+
 ## Active risks
 
 - GitHub Actions are disabled because the repository has no compute quota. PRs #275, #276, #277, #301, #320, #328, and #331 have no Actions runs; their Linux-local checks are recorded in their PRs. The application source, manifests, lockfile, and local-check scripts at PR #275 head `16c9ce9` match the locally checked code tree `d98fc69`. PR #331 merged after its local gate passed.
@@ -110,7 +112,7 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 6. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
 7. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
 8. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
-9. Continue [issue #389](https://github.com/1fach/einfach-mail/issues/389) by accepting the separate EWS calendar-write ADR and splitting implementation into fixture-backed issues. Keep live Exchange verification separate and all EWS writes disabled until implementation and review are complete.
+9. Continue [issue #389](https://github.com/1fach/einfach-mail/issues/389) by splitting the accepted ADR 0065 policy into fixture-backed implementation issues. Keep live Exchange verification separate and all EWS writes disabled until implementation review and live verification are complete.
 
 ## Update rule
 

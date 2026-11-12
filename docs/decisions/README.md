@@ -69,3 +69,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0062](0062-target-borrowed-mail-provider-future.md) | Tie the message-body future to its borrowed inputs | Accepted |
 | [0063](0063-reap-ews-transport-workers.md) | Reap EWS transport workers without blocking Drop | Accepted; implementation tracked in issue #383 |
 | [0064](0064-calendar-capabilities-by-operation.md) | Model calendar capabilities by operation | Accepted; migration tracked in issue #390 |
+| [0065](0065-safe-ews-calendar-event-writes.md) | Define safe EWS calendar event writes | Accepted; implementation decomposition tracked in issue #389 |

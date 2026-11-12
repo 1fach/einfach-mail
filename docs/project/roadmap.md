@@ -38,6 +38,10 @@ Allow an EWS account to mark a message read or unread only when the authenticate
 
 Bring account setup, Mail, the weekly Calendar agenda, and working preferences into one adaptive native GPUI workspace. Keep the mail list and reading pane together at desktop widths, preserve keyboard navigation and session ownership, and provide a useful narrow-window layout. The first release supports one active account at a time, with the active identity shown without a switcher. Use Linux system decorations and limit optional translucency to compact or transient surfaces with an opaque fallback. See [ADR 0059](../decisions/0059-native-mail-and-calendar-workspace.md), [ADR 0060](../decisions/0060-one-active-account-first-release.md), and the M10 work in [milestone 9](https://github.com/1fach/einfach-mail/milestone/9), including issues #268–#274 and #278–#280.
 
+## M11: Safe EWS calendar actions (planned)
+
+Add create, update, and delete actions for one-off timed standalone appointments in the primary calendar for on-premises Exchange accounts. Gate each action independently. Never resend an uncertain EWS create; reconcile it by a positive marker lookup and keep an inconclusive operation unresolved. Use `NeverOverwrite` and `SendToNone` for updates, and move confirmed deletions to Deleted Items. Reject meetings, attendees, recurring and all-day events, and other unsupported shapes. Add synthetic SOAP fixtures before enabling any action, then verify live behavior against supported on-premises Exchange versions. EWS stays view-only until implementation review and live verification pass. See [ADR 0065](../decisions/0065-safe-ews-calendar-event-writes.md) and [issue #389](https://github.com/1fach/einfach-mail/issues/389).
+
 ## M5: Windows support and daily-use integration
 
 Add and verify Windows shell launch, authentication and credential storage, accessibility, installation, account removal, and operating-system integrations for mail and calendar use.
