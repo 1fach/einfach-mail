@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    ExchangeEwsProvider,
+    ExchangeEwsProvider, map_access_denied_response_code,
     session::{EwsSession, session_for_mail},
 };
 use crate::{
@@ -593,10 +593,11 @@ pub(super) struct EwsSyncCursor {
 }
 
 fn map_response_code(code: ResponseCode) -> EwsError {
+    if let Some(error) = map_access_denied_response_code(code) {
+        return error;
+    }
+
     match code {
-        ResponseCode::ErrorAccessDenied | ResponseCode::ErrorImpersonateUserDenied => {
-            EwsError::AccessDenied
-        }
         ResponseCode::ErrorInvalidSyncStateData => EwsError::SyncStateExpired,
         _ => EwsError::InvalidResponse,
     }
