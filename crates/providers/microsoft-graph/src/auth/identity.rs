@@ -32,14 +32,14 @@ const CALENDAR_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
     "User.Read",
     "offline_access",
 ];
-pub const SEND_MAIL_AUTHORIZATION_SCOPES: [&str; 5] = [
+const SEND_MAIL_AUTHORIZATION_SCOPES: [&str; 5] = [
     "Calendars.Read",
     "Mail.Read",
     "Mail.Send",
     "User.Read",
     "offline_access",
 ];
-pub const MAIL_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
+const MAIL_READ_WRITE_AUTHORIZATION_SCOPES: [&str; 4] = [
     "Calendars.Read",
     "Mail.ReadWrite",
     "User.Read",
@@ -308,7 +308,7 @@ impl AuthorizationParameters {
     }
 }
 
-pub fn authorization_scopes(request: AccountPermissionRequest) -> &'static [&'static str] {
+fn authorization_scopes(request: AccountPermissionRequest) -> &'static [&'static str] {
     match request {
         AccountPermissionRequest::Current => &BASE_AUTHORIZATION_SCOPES,
         AccountPermissionRequest::MailReadWrite => &MAIL_READ_WRITE_AUTHORIZATION_SCOPES,
