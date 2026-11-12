@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn ews_provider_requires_a_session_for_calendar_create_recovery_read_and_update() {
+async fn ews_provider_requires_a_session_for_calendar_create_recovery_read_update_and_delete() {
     let provider = ExchangeEwsProvider::new(EmptySettingsStore);
     let view = synthetic_calendar_view();
     let creation = synthetic_event_creation(&view);
@@ -31,6 +31,6 @@ async fn ews_provider_requires_a_session_for_calendar_create_recovery_read_and_u
     ));
     assert!(matches!(
         provider.delete_event(&editable).await,
-        Err(CalendarOperationError::UnsupportedOperation)
+        Err(CalendarOperationError::SignInRequired)
     ));
 }

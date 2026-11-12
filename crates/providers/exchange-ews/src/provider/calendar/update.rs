@@ -1,21 +1,17 @@
 use einfach_mail_application::CalendarOperationError;
 use einfach_mail_domain::{
     CalendarEventUpdate, CalendarEventVersion, CalendarOccurrence, CalendarOccurrencePatch,
-    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, EventId, VersionedCalendarEvent,
+    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, VersionedCalendarEvent,
 };
-use ews::response::ResponseCode;
 
 use super::{
     item::{
-        CalendarItemSnapshot, CalendarItemSnapshotError, get_item_request,
+        CalendarItemSnapshot, CalendarItemSnapshotError, get_item_response,
         parse_calendar_item_snapshot,
     },
-    map_access_denied_response_code,
+    preflight::{map_item_read_rejection, map_write_preflight_error, validate_write_snapshot},
 };
-use crate::{
-    error::EwsError,
-    transport::{EwsRequestSequence, EwsWriteError},
-};
+use crate::transport::{EwsRequestSequence, EwsWriteError};
 
 mod request;
 mod response;
@@ -59,12 +55,8 @@ async fn load_update_source(
         .await
         .map_err(CalendarOperationError::from)?;
     let current =
-        parse_calendar_item_snapshot(&response, event.id()).map_err(map_update_preflight_error)?;
-    if current.change_key != source.version().as_str()
-        || !snapshot_matches_occurrence(&current, event)
-    {
-        return Err(CalendarOperationError::EventChanged);
-    }
+        parse_calendar_item_snapshot(&response, event.id()).map_err(map_write_preflight_error)?;
+    validate_write_snapshot(source, &current)?;
     Ok(current)
 }
 
@@ -97,16 +89,6 @@ async fn load_confirmed_snapshot(
         .map_err(|_| CalendarOperationError::UpdateOutcomeUnknown)
 }
 
-async fn get_item_response(
-    sequence: &EwsRequestSequence<'_>,
-    event_id: &EventId,
-) -> Result<Vec<u8>, EwsError> {
-    sequence
-        .execute_xml_with_size(get_item_request(event_id))
-        .await
-        .map(|(response, _)| response)
-}
-
 fn map_load_snapshot_error(error: CalendarItemSnapshotError) -> CalendarOperationError {
     match error {
         CalendarItemSnapshotError::Ineligible => CalendarOperationError::EventNotEditable,
@@ -114,29 +96,6 @@ fn map_load_snapshot_error(error: CalendarItemSnapshotError) -> CalendarOperatio
         CalendarItemSnapshotError::Rejected(code) => {
             map_item_read_rejection(code, CalendarOperationError::EventNotEditable)
         }
-    }
-}
-
-fn map_update_preflight_error(error: CalendarItemSnapshotError) -> CalendarOperationError {
-    match error {
-        CalendarItemSnapshotError::Ineligible => CalendarOperationError::EventChanged,
-        CalendarItemSnapshotError::InvalidResponse => CalendarOperationError::InvalidResponse,
-        CalendarItemSnapshotError::Rejected(code) => {
-            map_item_read_rejection(code, CalendarOperationError::EventChanged)
-        }
-    }
-}
-
-fn map_item_read_rejection(
-    code: ResponseCode,
-    missing_item: CalendarOperationError,
-) -> CalendarOperationError {
-    match code {
-        ResponseCode::ErrorItemNotFound
-        | ResponseCode::ErrorIrresolvableConflict
-        | ResponseCode::ErrorStaleObject => missing_item,
-        _ => map_access_denied_response_code(code)
-            .map_or(CalendarOperationError::InvalidResponse, Into::into),
     }
 }
 
@@ -167,19 +126,6 @@ fn occurrence_with_snapshot(
         .apply_to(&mut occurrence)
         .map_err(|_| CalendarOperationError::InvalidResponse)?;
     Ok(occurrence)
-}
-
-fn snapshot_matches_occurrence(
-    snapshot: &CalendarItemSnapshot,
-    occurrence: &CalendarOccurrence,
-) -> bool {
-    snapshot.id == *occurrence.id()
-        && occurrence.subject() == Some(snapshot.subject.as_str())
-        && matches!(
-            occurrence.time(),
-            CalendarOccurrenceTime::Timed { start, end }
-                if *start == snapshot.start && *end == snapshot.end
-        )
 }
 
 fn confirm_updated_snapshot(

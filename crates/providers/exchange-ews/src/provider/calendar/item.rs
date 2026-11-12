@@ -1,4 +1,6 @@
-use einfach_mail_domain::{CalendarEventCreationId, EventId};
+use einfach_mail_domain::{
+    CalendarEventCreationId, CalendarOccurrence, CalendarOccurrenceTime, EventId,
+};
 use ews::{
     BaseItemId, BaseShape, ItemShape, Message, PathToElement, PropertyType, RealItem,
     ResponseClass,
@@ -9,7 +11,8 @@ use quick_xml::{Reader, de::from_reader, events::Event};
 use serde::{Deserialize, de::IgnoredAny};
 use time::{OffsetDateTime, UtcOffset, format_description::well_known::Iso8601};
 
-use crate::transport::{EwsSoapResponse, parse_soap_response};
+use crate::error::EwsError;
+use crate::transport::{EwsRequestSequence, EwsSoapResponse, parse_soap_response};
 
 use super::validate_calendar_response_namespaces;
 
@@ -60,6 +63,29 @@ pub(super) fn get_item_request(event_id: &EventId) -> GetItem {
             change_key: None,
         }],
     }
+}
+
+pub(super) async fn get_item_response(
+    sequence: &EwsRequestSequence<'_>,
+    event_id: &EventId,
+) -> Result<Vec<u8>, EwsError> {
+    sequence
+        .execute_xml_with_size(get_item_request(event_id))
+        .await
+        .map(|(response, _)| response)
+}
+
+pub(super) fn snapshot_matches_occurrence(
+    snapshot: &CalendarItemSnapshot,
+    occurrence: &CalendarOccurrence,
+) -> bool {
+    snapshot.id == *occurrence.id()
+        && occurrence.subject() == Some(snapshot.subject.as_str())
+        && matches!(
+            occurrence.time(),
+            CalendarOccurrenceTime::Timed { start, end }
+                if *start == snapshot.start && *end == snapshot.end
+        )
 }
 
 fn requested_calendar_item_properties() -> Vec<PathToElement> {

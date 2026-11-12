@@ -38,10 +38,12 @@ const EWS_TYPES_NAMESPACE: &[u8] = b"http://schemas.microsoft.com/exchange/servi
 const SOAP_ELEMENT_NAMES: &[&[u8]] = &[b"Envelope", b"Header", b"Body"];
 const EWS_MESSAGES_ELEMENT_NAMES: &[&[u8]] = &[
     b"CreateItemResponse",
+    b"DeleteItemResponse",
     b"FindItemResponse",
     b"GetItemResponse",
     b"ResponseMessages",
     b"CreateItemResponseMessage",
+    b"DeleteItemResponseMessage",
     b"FindItemResponseMessage",
     b"GetItemResponseMessage",
     b"UpdateItemResponse",
@@ -49,6 +51,8 @@ const EWS_MESSAGES_ELEMENT_NAMES: &[&[u8]] = &[
     b"RootFolder",
     b"ResponseCode",
     b"MessageText",
+    b"DescriptiveLinkKey",
+    b"MessageXml",
 ];
 const EWS_TYPES_ELEMENT_NAMES: &[&[u8]] = &[
     b"ServerVersionInfo",
@@ -119,7 +123,9 @@ const CALENDAR_UNQUALIFIED_ATTRIBUTE_NAMES: &[&[u8]] = &[
 ];
 
 mod create;
+mod delete;
 mod item;
+mod preflight;
 mod recovery;
 mod update;
 
@@ -808,9 +814,20 @@ where
 
     fn delete_event(
         &self,
-        _event: &einfach_mail_domain::VersionedCalendarEvent,
+        event: &einfach_mail_domain::VersionedCalendarEvent,
     ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
-        std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
+        let event = event.clone();
+        let session_store = Arc::clone(&self.session);
+        async move {
+            let session =
+                session_for_calendar(&session_store, event.occurrence().reference().account_id())
+                    .await?;
+            worker::run(move |_cancellation: CancellationToken| async move {
+                let sequence = session.transport.sequence().await;
+                delete::delete_event(&sequence, &event).await
+            })
+            .await
+        }
     }
 }
 

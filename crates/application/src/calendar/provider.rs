@@ -56,13 +56,13 @@ pub enum CalendarOperationError {
     /// The event changed or became unsupported while the editor was open.
     #[error("this calendar event changed; refresh it before changing it again")]
     EventChanged,
-    /// Graph may have applied the update, but the client did not receive confirmation.
+    /// The provider may have applied the update, but the client did not receive confirmation.
     #[error("the calendar update outcome is unknown")]
     UpdateOutcomeUnknown,
-    /// Graph rejected the confirmed event deletion request.
+    /// The provider rejected the confirmed event deletion request.
     #[error("the calendar event deletion was rejected")]
     EventDeletionRejected,
-    /// Graph may have deleted the event, but the client did not receive confirmation.
+    /// The provider may have deleted the event, but the client did not receive confirmation.
     #[error("the calendar deletion outcome is unknown")]
     DeleteOutcomeUnknown,
 }
@@ -263,14 +263,14 @@ pub trait CalendarProvider: Send + Sync {
 
     /// Rechecks the captured event version and updates its requested fields.
     ///
-    /// Implementations must not automatically retry the Graph write.
+    /// Implementations must not automatically retry the provider write.
     ///
     /// # Errors
     ///
     /// Returns [`CalendarOperationError::EventChanged`] when the version is
     /// stale, [`CalendarOperationError::UpdateOutcomeUnknown`] when the write
-    /// may have reached Graph without a verifiable response, or another
-    /// user-safe provider error when Graph rejects the request.
+    /// may have reached the provider without a verifiable response, or another
+    /// user-safe provider error when the provider rejects the request.
     fn update_event(
         &self,
         update: &CalendarEventUpdate,
@@ -282,8 +282,8 @@ pub trait CalendarProvider: Send + Sync {
     ///
     /// Returns [`CalendarOperationError::EventChanged`] when the event version
     /// or supported shape changed, [`CalendarOperationError::DeleteOutcomeUnknown`]
-    /// when Graph may have deleted it without a verifiable response, or another
-    /// user-safe provider error when Graph rejects the request.
+    /// when the provider may have deleted it without a verifiable response, or
+    /// another user-safe provider error when the provider rejects the request.
     fn delete_event(
         &self,
         event: &VersionedCalendarEvent,
