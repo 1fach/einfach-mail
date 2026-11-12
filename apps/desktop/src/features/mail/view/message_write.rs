@@ -32,7 +32,11 @@ pub(super) struct MessageWriteRequest<T: Copy> {
 pub(super) struct MessageWriteFeedback {
     pub(super) message: String,
     pub(super) role: Role,
-    pub(super) show_permission_review: bool,
+    pub(super) action: Option<MessageWriteFeedbackAction>,
+}
+
+pub(super) enum MessageWriteFeedbackAction {
+    ReviewPermission,
 }
 
 impl MessageWriteFeedback {
@@ -40,7 +44,7 @@ impl MessageWriteFeedback {
         Self {
             message,
             role: Role::Status,
-            show_permission_review: false,
+            action: None,
         }
     }
 
@@ -48,10 +52,11 @@ impl MessageWriteFeedback {
         Self {
             message,
             role: Role::Alert,
-            show_permission_review: matches!(
+            action: matches!(
                 error,
                 MailWorkflowError::Provider(MailOperationError::AccessDenied)
-            ),
+            )
+            .then_some(MessageWriteFeedbackAction::ReviewPermission),
         }
     }
 }

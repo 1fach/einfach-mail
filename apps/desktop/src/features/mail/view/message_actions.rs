@@ -11,7 +11,7 @@ use gpui_kit::{
     AnyElement, Context, Div, IntoElement, Role, Stateful, WeakEntity, div, prelude::*,
 };
 
-use super::message_write::MessageWriteFeedback;
+use super::message_write::{MessageWriteFeedback, MessageWriteFeedbackAction};
 use super::{
     MailView, MailViewEvent, MessageMoveMenuAction, MessageMoveStatus, MoveRecoveryReason,
     SyncStatus, WellKnownFolderActionStatus, mail_error_message, well_known_folder_mail_action,
@@ -361,15 +361,14 @@ impl MailView {
         let MessageWriteFeedback {
             message,
             role,
-            show_permission_review,
+            action,
         } = feedback;
         let feedback_view = Self::message_write_feedback_view(message, role, feedback_id, cx);
-        self.with_permission_review(
-            feedback_view,
-            show_permission_review,
-            permission_review_id,
-            cx,
-        )
+        let permission_review_id = match action {
+            Some(MessageWriteFeedbackAction::ReviewPermission) => Some(permission_review_id),
+            None => None,
+        };
+        self.with_permission_review(feedback_view, permission_review_id, cx)
     }
 
     fn message_write_feedback_view(
@@ -395,27 +394,24 @@ impl MailView {
     fn with_permission_review(
         &self,
         feedback_view: Stateful<Div>,
-        show_permission_review: bool,
-        permission_review_id: &'static str,
+        permission_review_id: Option<&'static str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if show_permission_review
-            && self
-                .profile
-                .capabilities()
-                .can_review_mail_write_permission()
-        {
-            feedback_view
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(Self::render_permission_review_button(
-                    permission_review_id,
-                    cx,
-                ))
-                .into_any_element()
-        } else {
-            feedback_view.into_any_element()
+        match permission_review_id {
+            Some(id)
+                if self
+                    .profile
+                    .capabilities()
+                    .can_review_mail_write_permission() =>
+            {
+                feedback_view
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(Self::render_permission_review_button(id, cx))
+                    .into_any_element()
+            }
+            _ => feedback_view.into_any_element(),
         }
     }
 
