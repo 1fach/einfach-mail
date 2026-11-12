@@ -55,6 +55,13 @@ enum ProviderKind {
     ExchangeEws,
 }
 
+fn require_selected_provider<MissingError>(
+    selected: Option<ProviderKind>,
+    missing_error: MissingError,
+) -> Result<ProviderKind, MissingError> {
+    selected.ok_or(missing_error)
+}
+
 impl<E> AccountProvider for AccountProviderRouter<E>
 where
     E: einfach_mail_application::ExchangeEwsAccountSettingsStore + 'static,
@@ -192,10 +199,12 @@ where
     ) -> impl Future<Output = Result<Vec<MailFolder>, MailOperationError>> + Send + '_ {
         let account_id = account_id.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => self.graph.list_folders(&account_id).await,
-                Some(ProviderKind::ExchangeEws) => self.ews.list_folders(&account_id).await,
-                None => Err(MailOperationError::SignInRequired),
+            match require_selected_provider(
+                self.selected_provider().await,
+                MailOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => self.graph.list_folders(&account_id).await,
+                ProviderKind::ExchangeEws => self.ews.list_folders(&account_id).await,
             }
         }
     }
@@ -207,14 +216,14 @@ where
     ) -> impl Future<Output = Result<MessageDeltaResponse, MailOperationError>> + Send + '_ {
         let folder = folder.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => {
+            match require_selected_provider(
+                self.selected_provider().await,
+                MailOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => {
                     self.graph.message_delta_page(&folder, request).await
                 }
-                Some(ProviderKind::ExchangeEws) => {
-                    self.ews.message_delta_page(&folder, request).await
-                }
-                None => Err(MailOperationError::SignInRequired),
+                ProviderKind::ExchangeEws => self.ews.message_delta_page(&folder, request).await,
             }
         }
     }
@@ -224,14 +233,12 @@ where
         folder: &'a FolderReference,
         message_id: &'a MessageId,
     ) -> Result<MessageBody, MailOperationError> {
-        match self.selected_provider().await {
-            Some(ProviderKind::MicrosoftGraph) => {
-                self.graph.fetch_message_body(folder, message_id).await
-            }
-            Some(ProviderKind::ExchangeEws) => {
-                self.ews.fetch_message_body(folder, message_id).await
-            }
-            None => Err(MailOperationError::SignInRequired),
+        match require_selected_provider(
+            self.selected_provider().await,
+            MailOperationError::SignInRequired,
+        )? {
+            ProviderKind::MicrosoftGraph => self.graph.fetch_message_body(folder, message_id).await,
+            ProviderKind::ExchangeEws => self.ews.fetch_message_body(folder, message_id).await,
         }
     }
 
@@ -244,18 +251,20 @@ where
         let folder = folder.clone();
         let message_id = message_id.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => {
+            match require_selected_provider(
+                self.selected_provider().await,
+                MailOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => {
                     self.graph
                         .set_message_read_state(&folder, &message_id, requested)
                         .await
                 }
-                Some(ProviderKind::ExchangeEws) => {
+                ProviderKind::ExchangeEws => {
                     self.ews
                         .set_message_read_state(&folder, &message_id, requested)
                         .await
                 }
-                None => Err(MailOperationError::SignInRequired),
             }
         }
     }
@@ -269,18 +278,20 @@ where
         let folder = folder.clone();
         let message_id = message_id.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => {
+            match require_selected_provider(
+                self.selected_provider().await,
+                MailOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => {
                     self.graph
                         .set_message_follow_up_flag_status(&folder, &message_id, status)
                         .await
                 }
-                Some(ProviderKind::ExchangeEws) => {
+                ProviderKind::ExchangeEws => {
                     self.ews
                         .set_message_follow_up_flag_status(&folder, &message_id, status)
                         .await
                 }
-                None => Err(MailOperationError::SignInRequired),
             }
         }
     }
@@ -295,18 +306,20 @@ where
         let message_id = message_id.clone();
         let destination_folder = destination_folder.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => {
+            match require_selected_provider(
+                self.selected_provider().await,
+                MailOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => {
                     self.graph
                         .move_message(&source_folder, &message_id, &destination_folder)
                         .await
                 }
-                Some(ProviderKind::ExchangeEws) => {
+                ProviderKind::ExchangeEws => {
                     self.ews
                         .move_message(&source_folder, &message_id, &destination_folder)
                         .await
                 }
-                None => Err(MailOperationError::SignInRequired),
             }
         }
     }
@@ -318,14 +331,14 @@ where
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         let account_id = account_id.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => {
+            match require_selected_provider(
+                self.selected_provider().await,
+                MailOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => {
                     self.graph.well_known_folder(&account_id, folder).await
                 }
-                Some(ProviderKind::ExchangeEws) => {
-                    self.ews.well_known_folder(&account_id, folder).await
-                }
-                None => Err(MailOperationError::SignInRequired),
+                ProviderKind::ExchangeEws => self.ews.well_known_folder(&account_id, folder).await,
             }
         }
     }
@@ -337,12 +350,12 @@ where
     ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
         let account_id = account_id.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => {
-                    self.graph.send_mail(&account_id, draft).await
-                }
-                Some(ProviderKind::ExchangeEws) => self.ews.send_mail(&account_id, draft).await,
-                None => Err(MailSendProviderError::SignInRequired),
+            match require_selected_provider(
+                self.selected_provider().await,
+                MailSendProviderError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => self.graph.send_mail(&account_id, draft).await,
+                ProviderKind::ExchangeEws => self.ews.send_mail(&account_id, draft).await,
             }
         }
     }
@@ -354,14 +367,14 @@ where
     ) -> impl Future<Output = Result<(), MailSendProviderError>> + Send + '_ {
         let account_id = account_id.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => {
+            match require_selected_provider(
+                self.selected_provider().await,
+                MailSendProviderError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => {
                     self.graph.reply_to_message(&account_id, draft).await
                 }
-                Some(ProviderKind::ExchangeEws) => {
-                    self.ews.reply_to_message(&account_id, draft).await
-                }
-                None => Err(MailSendProviderError::SignInRequired),
+                ProviderKind::ExchangeEws => self.ews.reply_to_message(&account_id, draft).await,
             }
         }
     }
@@ -372,10 +385,12 @@ where
     E: einfach_mail_application::ExchangeEwsAccountSettingsStore + 'static,
 {
     async fn calendar_sync_strategy(&self) -> Result<CalendarSyncStrategy, CalendarOperationError> {
-        match self.selected_provider().await {
-            Some(ProviderKind::MicrosoftGraph) => self.graph.calendar_sync_strategy().await,
-            Some(ProviderKind::ExchangeEws) => self.ews.calendar_sync_strategy().await,
-            None => Err(CalendarOperationError::SignInRequired),
+        match require_selected_provider(
+            self.selected_provider().await,
+            CalendarOperationError::SignInRequired,
+        )? {
+            ProviderKind::MicrosoftGraph => self.graph.calendar_sync_strategy().await,
+            ProviderKind::ExchangeEws => self.ews.calendar_sync_strategy().await,
         }
     }
 
@@ -387,14 +402,14 @@ where
     {
         let view = view.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => {
+            match require_selected_provider(
+                self.selected_provider().await,
+                CalendarOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => {
                     self.graph.calendar_delta_page(&view, request).await
                 }
-                Some(ProviderKind::ExchangeEws) => {
-                    self.ews.calendar_delta_page(&view, request).await
-                }
-                None => Err(CalendarOperationError::SignInRequired),
+                ProviderKind::ExchangeEws => self.ews.calendar_delta_page(&view, request).await,
             }
         }
     }
@@ -406,12 +421,12 @@ where
     {
         let view = view.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => {
-                    self.graph.calendar_view_snapshot(&view).await
-                }
-                Some(ProviderKind::ExchangeEws) => self.ews.calendar_view_snapshot(&view).await,
-                None => Err(CalendarOperationError::SignInRequired),
+            match require_selected_provider(
+                self.selected_provider().await,
+                CalendarOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => self.graph.calendar_view_snapshot(&view).await,
+                ProviderKind::ExchangeEws => self.ews.calendar_view_snapshot(&view).await,
             }
         }
     }
@@ -422,10 +437,12 @@ where
     ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_ {
         let creation = creation.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => self.graph.create_event(&creation).await,
-                Some(ProviderKind::ExchangeEws) => self.ews.create_event(&creation).await,
-                None => Err(CalendarOperationError::SignInRequired),
+            match require_selected_provider(
+                self.selected_provider().await,
+                CalendarOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => self.graph.create_event(&creation).await,
+                ProviderKind::ExchangeEws => self.ews.create_event(&creation).await,
             }
         }
     }
@@ -437,10 +454,12 @@ where
     {
         let event = event.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => self.graph.editable_event(&event).await,
-                Some(ProviderKind::ExchangeEws) => self.ews.editable_event(&event).await,
-                None => Err(CalendarOperationError::SignInRequired),
+            match require_selected_provider(
+                self.selected_provider().await,
+                CalendarOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => self.graph.editable_event(&event).await,
+                ProviderKind::ExchangeEws => self.ews.editable_event(&event).await,
             }
         }
     }
@@ -451,10 +470,12 @@ where
     ) -> impl Future<Output = Result<CalendarOccurrence, CalendarOperationError>> + Send + '_ {
         let update = update.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => self.graph.update_event(&update).await,
-                Some(ProviderKind::ExchangeEws) => self.ews.update_event(&update).await,
-                None => Err(CalendarOperationError::SignInRequired),
+            match require_selected_provider(
+                self.selected_provider().await,
+                CalendarOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => self.graph.update_event(&update).await,
+                ProviderKind::ExchangeEws => self.ews.update_event(&update).await,
             }
         }
     }
@@ -465,10 +486,12 @@ where
     ) -> impl Future<Output = Result<(), CalendarOperationError>> + Send + '_ {
         let event = event.clone();
         async move {
-            match self.selected_provider().await {
-                Some(ProviderKind::MicrosoftGraph) => self.graph.delete_event(&event).await,
-                Some(ProviderKind::ExchangeEws) => self.ews.delete_event(&event).await,
-                None => Err(CalendarOperationError::SignInRequired),
+            match require_selected_provider(
+                self.selected_provider().await,
+                CalendarOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => self.graph.delete_event(&event).await,
+                ProviderKind::ExchangeEws => self.ews.delete_event(&event).await,
             }
         }
     }

@@ -72,6 +72,8 @@ Issue [#360](https://github.com/1fach/einfach-mail/issues/360) shares the mail v
 
 Issue [#361](https://github.com/1fach/einfach-mail/issues/361) adds a named shared lifetime to `MailProvider::fetch_message_body`. The account router and persistence fixture stop cloning inputs they can borrow; Graph and EWS keep values required by their owned worker tasks. [ADR 0062](../decisions/0062-target-borrowed-mail-provider-future.md) keeps this as a method-specific change pending evidence from other ports. `AccountSessionFuture` and `MailSession` boxing still compile, and all 511 workspace test names remain present. The Rust 1.95 Linux local gate passed. Continue #356 with [#362](https://github.com/1fach/einfach-mail/issues/362).
 
+PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persistence review in issue #363. The Rust 1.95 Linux local gate passed on 2026-11-12, and the workspace test count remains 511. PR [#378](https://github.com/1fach/einfach-mail/pull/378) contains the provider cleanup from issue #364. Its local gate passed; two medium-risk EWS findings remain as follow-ups. Issue [#365](https://github.com/1fach/einfach-mail/issues/365) covers the remaining desktop review.
+
 ## Active risks
 
 - GitHub Actions are disabled because the repository has no compute quota. PRs #275, #276, #277, #301, #320, #328, and #331 have no Actions runs; their Linux-local checks are recorded in their PRs. The application source, manifests, lockfile, and local-check scripts at PR #275 head `16c9ce9` match the locally checked code tree `d98fc69`. PR #331 merged after its local gate passed.
@@ -93,7 +95,7 @@ Issue [#361](https://github.com/1fach/einfach-mail/issues/361) adds a named shar
 ## Next actions
 
 1. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux; keep #273's theme review and #274's named-compositor check open.
-2. Continue the clean-code pass tracked in issue [#356](https://github.com/1fach/einfach-mail/issues/356): [#362](https://github.com/1fach/einfach-mail/issues/362) covers domain and application; the remaining independent reviews are #363 (persistence), #364 (providers), and #365 (desktop).
+2. Continue the clean-code pass tracked in issue [#356](https://github.com/1fach/einfach-mail/issues/356): #362 and #363 are complete. PR [#378](https://github.com/1fach/einfach-mail/pull/378) contains the #364 provider review; after it merges, continue with #365 (desktop).
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
