@@ -40,7 +40,7 @@ Store the password only in Linux Secret Service. Store the endpoint and mailbox 
 - EWS uses the existing account cache, message sanitizer, and native GPUI renderer.
 - The account model and views gate the initial read-only mail scope and unavailable calendar features. EWS writes remain unsupported until the operation-specific capability in ADR 0058 is implemented; calendar writes remain unsupported.
 - EWS authentication is enabled only for a validated HTTPS endpoint. A failed certificate check, redirect, malformed challenge, or connection change ends the request without sending another NTLM token.
-- SSPI 0.23.1 pins `rsa 0.10.0-rc.18`, which triggers RUSTSEC-2023-0071. This application invokes only SSPI's NTLM provider and has no RSA private key or private-key operation in its EWS path, so `.cargo/audit.toml` ignores only that advisory. Keep the rest of the RustSec audit active and remove the exception when SSPI adopts a fixed stable RSA release; [issue #259](https://github.com/1fach/einfach-mail/issues/259) tracks the update.
+- SSPI 0.23.1 and Picky 7.0.0-rc.27 pin `rsa 0.10.0-rc.18`. Stable `rsa 0.10.0` was released on 2026-11-08 and fixes RUSTSEC-2023-0071. The SSPI release predates stable RSA and still requires the prerelease. Upstream issue [#504](https://github.com/Devolutions/sspi-rs/issues/504) remains open. This application uses SSPI's NTLM provider and has no RSA private key or private-key operation in its EWS path. `.cargo/audit.toml` therefore ignores only this advisory. Keep the rest of the RustSec audit active. [Issue #259](https://github.com/1fach/einfach-mail/issues/259) tracks removing the exception when a maintained SSPI and Picky release adopts stable RSA.
 - The first implementation has no live-server evidence. Keep issue #257 open until a real Exchange Server or sanitized recording verifies authentication, hierarchy paging, message paging, and body retrieval.
 - The workspace remains at Rust 1.95 if the selected locked dependency graph compiles there. The maintainer has approved an MSRV increase when a better library requires one and its security, maintenance, platform, license, and dependency criteria pass.
 
@@ -51,6 +51,12 @@ Store the password only in Linux Secret Service. Store the endpoint and mailbox 
 - [Microsoft: Exchange Server on-premises Modern Authentication](https://learn.microsoft.com/en-us/exchange/plan-and-deploy/post-installation-tasks/enable-modern-auth-in-exchange-server-on-premises)
 - [Thunderbird `ews-rs`](https://github.com/thunderbird/ews-rs)
 - [Devolutions `sspi-rs` 0.23.1](https://docs.rs/crate/sspi/0.23.1)
+- [Devolutions `sspi-rs` 0.23.1 manifest](https://github.com/Devolutions/sspi-rs/blob/sspi-v0.23.1/Cargo.toml)
+- [Devolutions `sspi-rs` 0.23.1 changelog](https://github.com/Devolutions/sspi-rs/blob/sspi-v0.23.1/CHANGELOG.md)
+- [`picky` 7.0.0-rc.27 manifest](https://docs.rs/crate/picky/7.0.0-rc.27/source/Cargo.toml.orig)
+- [`rsa` 0.10.0 release](https://docs.rs/crate/rsa/0.10.0)
+- [SSPI upstream RSA advisory issue #504](https://github.com/Devolutions/sspi-rs/issues/504)
+- [RustSec RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html)
 - [`x509-parser` 0.18.1](https://docs.rs/crate/x509-parser/0.18.1)
 - [`negotiate-auth` 0.4.0](https://docs.rs/crate/negotiate-auth/0.4.0)
 - [`tls-cbt` 0.1.0](https://github.com/icedracon/tls-cbt)

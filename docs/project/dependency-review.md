@@ -226,11 +226,11 @@ ADR [0054](../decisions/0054-linux-exchange-ews-autodiscover.md) records the req
 
 The EWS request sends `CalendarView` bounds as explicit UTC instants and requests each item's original start/end time-zone IDs. It does not need `TimeZoneContext` or an IANA-to-Windows conversion for the range query. [Issue #266](https://github.com/1fach/einfach-mail/issues/266) tracks the remaining live-server verification. See [ADR 0057](../decisions/0057-read-only-ews-calendar-snapshots.md).
 
-#### RSA advisory exception — 2026-11-09
+#### RSA advisory exception — 2026-11-12
 
-A fresh RustSec advisory database checkout at `7a40350` loaded 1,422 advisories and scanned 1,021 locked dependencies. It reported `rsa 0.10.0-rc.18` under [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html); the current advisory patches stable `rsa >=0.10.0`, while the `sspi 0.23.1` manifest pins the affected release exactly. The upstream SSPI manifest still uses that pin.
+RustSec updated [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html) on 2026-11-08. The update marks stable `rsa >=0.10.0` as patched. Stable `rsa 0.10.0` was released on the same date. The latest SSPI release is 0.23.1 (2026-10-27). Its manifest pins `picky = 7.0.0-rc.27` and `rsa = 0.10.0-rc.18` exactly. The Picky 7.0.0-rc.27 manifest also pins the affected RSA prerelease exactly. `cargo tree --locked -p einfach-mail-exchange-ews -i rsa` confirms both paths in the application graph. Upstream SSPI issue [#504](https://github.com/Devolutions/sspi-rs/issues/504) remains open. No released SSPI or Picky dependency path uses stable RSA yet.
 
-The advisory covers timing leakage from RSA private-key operations. The application creates `sspi::Ntlm` directly, does not configure Kerberos or client certificates, and has no RSA private key or operation in the EWS path. SSPI's API stores the password in zeroizing secret storage. Based on that call path, ignore only this advisory using the checked-in `.cargo/audit.toml`; do not widen the exception. All other vulnerability and yanked checks remain active. Remove the exception when SSPI resolves to a fixed stable RSA release; [issue #259](https://github.com/1fach/einfach-mail/issues/259) tracks that update. The refreshed scan also reports nine informational unmaintained-crate advisories; they are unchanged transitive findings and remain warnings under the project's current policy.
+The advisory covers timing leakage from RSA private-key operations. The application creates `sspi::Ntlm` directly. It does not configure Kerberos or client certificates, and it has no RSA private key or operation in the EWS path. SSPI stores the password in zeroizing secret storage. Keep the single advisory exception in `.cargo/audit.toml`. Do not widen it. The 2026-11-12 offline audit loaded 1,458 advisories and scanned 1,037 locked dependencies. The audit found no unignored vulnerability and reported nine allowed unmaintained-crate notices. Cargo could not open the crates.io index during this run, so it did not verify current yanked status. Remove the exception when the maintained registry graph resolves to stable RSA. [Issue #259](https://github.com/1fach/einfach-mail/issues/259) tracks the update.
 
 ## Current constraints
 
@@ -297,6 +297,11 @@ The advisory covers timing leakage from RSA private-key operations. The applicat
 - [`huskarl-reqwest` 0.9.3 documentation and package metadata](https://docs.rs/crate/huskarl-reqwest/0.9.3)
 - [`huskarl-reqwest` 0.9.3 source](https://docs.rs/crate/huskarl-reqwest/0.9.3/source/src/lib.rs)
 - [`huskarl-core` custom JWS verifier guide](https://github.com/huskarl-rs/huskarl/blob/huskarl-v0.11.10/huskarl-core/docs/guide/configuring_jwt_verification.md)
+- [`sspi` 0.23.1 manifest](https://github.com/Devolutions/sspi-rs/blob/sspi-v0.23.1/Cargo.toml)
+- [`sspi` 0.23.1 changelog](https://github.com/Devolutions/sspi-rs/blob/sspi-v0.23.1/CHANGELOG.md)
+- [`picky` 7.0.0-rc.27 manifest](https://docs.rs/crate/picky/7.0.0-rc.27/source/Cargo.toml.orig)
+- [`rsa` 0.10.0 package metadata](https://docs.rs/crate/rsa/0.10.0)
+- [SSPI upstream RSA advisory issue #504](https://github.com/Devolutions/sspi-rs/issues/504)
 - [RustSec RUSTSEC-2023-0071 for RSA](https://rustsec.org/advisories/RUSTSEC-2023-0071.html)
 - [`jsonwebtoken` 11.1.0 documentation and dependency list](https://docs.rs/crate/jsonwebtoken/11.1.0)
 - [`jsonwebtoken` 11.1.0 package manifest](https://docs.rs/crate/jsonwebtoken/11.1.0/source/Cargo.toml.orig)
