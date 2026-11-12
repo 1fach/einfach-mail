@@ -1,15 +1,16 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::test_support::calendar_view;
 use einfach_mail_application::{
     AccountCache, AccountCacheRemovalError, CalendarCache, CalendarCacheError, MailCache,
     MailCacheError,
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrencePatch,
-    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange,
-    CalendarViewReference, EventId, FolderId, FolderReference, FollowUpFlagStatus, MailFolder,
-    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
-    MessageId, MessageMetadataPatch, PendingCalendarEventCreation, ReadState,
+    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewReference,
+    EventId, FolderId, FolderReference, FollowUpFlagStatus, MailFolder, MessageBodyType,
+    MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+    MessageMetadataPatch, PendingCalendarEventCreation, ReadState,
 };
 use tempfile::TempDir;
 use time::{Date, Month, PrimitiveDateTime, Time};
@@ -43,21 +44,6 @@ fn folder_reference(account_id: &AccountId, value: &str) -> FolderReference {
 
 fn message_id(value: &str) -> MessageId {
     MessageId::try_from(value.to_owned()).expect("synthetic message ID is non-empty")
-}
-
-fn calendar_view(account: &AccountId) -> CalendarViewReference {
-    let start_date = Date::from_calendar_date(2030, Month::January, 7)
-        .expect("synthetic view start date is valid");
-    let end_date = Date::from_calendar_date(2030, Month::January, 14)
-        .expect("synthetic view end date is valid");
-    let range = CalendarViewRange::new(
-        start_date.midnight().assume_utc(),
-        end_date.midnight().assume_utc(),
-        start_date,
-        end_date,
-    )
-    .expect("synthetic calendar range is valid");
-    CalendarViewReference::new(account.clone(), range)
 }
 
 fn calendar_creation(view: CalendarViewReference) -> CalendarEventCreation {

@@ -32,14 +32,14 @@ pub(super) fn commit_calendar_page(
     persist_calendar_progress(
         &transaction,
         CalendarProgressCommit {
-            account_id: account_id.clone(),
+            account_id,
             scope: commit.scope,
             progress: commit.progress,
             completed_at: commit.completed_at,
             finish_replacement,
         },
     )?;
-    let state = read_calendar_sync_state(&transaction, &account_id, commit.scope)?;
+    let state = read_calendar_sync_state(&transaction, scope.account_id(), commit.scope)?;
     transaction.commit()?;
     Ok(state)
 }
