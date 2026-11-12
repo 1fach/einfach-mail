@@ -4,7 +4,6 @@ mod app;
 mod components;
 mod features;
 mod platform;
-mod shared;
 #[cfg(test)]
 mod test_support;
 
