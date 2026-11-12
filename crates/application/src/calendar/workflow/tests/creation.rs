@@ -1,3 +1,17 @@
+use einfach_mail_domain::{
+    CalendarDeltaProgress, CalendarEventCreation, CalendarOccurrence, CalendarOccurrencePatch,
+    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, EventId, PendingCalendarEventCreation,
+};
+
+use crate::test_support::{
+    FixtureCache, FixtureProvider, creation, link, response, synchronize_empty_view, view,
+    view_for_week, workflow_account_id,
+};
+use crate::{
+    CalendarCache, CalendarCacheError, CalendarEventCreationOutcome, CalendarEventCreationStage,
+    CalendarOperationError, CalendarWorkflow, CalendarWorkflowError, CalendarWriteReadiness,
+};
+
 fn mismatched_creation_event(creation: &CalendarEventCreation) -> CalendarOccurrence {
     let CalendarOccurrenceTime::Timed { start, end } = creation.draft().time() else {
         panic!("synthetic creation fixture uses a timed draft");
@@ -75,11 +89,13 @@ fn event_creation_waits_for_a_successful_view_sync() {
                 .expect("synthetic creation log mutex is not poisoned"),
             vec![creation.id()]
         );
-        assert!(provider
-            .recoveries
-            .lock()
-            .expect("synthetic recovery log mutex is not poisoned")
-            .is_empty());
+        assert!(
+            provider
+                .recoveries
+                .lock()
+                .expect("synthetic recovery log mutex is not poisoned")
+                .is_empty()
+        );
     });
 }
 
@@ -117,11 +133,13 @@ fn event_creation_recovers_its_pending_id_after_an_uncertain_provider_failure() 
                 .expect("synthetic creation log mutex is not poisoned"),
             vec![creation.id()]
         );
-        assert!(provider
-            .recoveries
-            .lock()
-            .expect("synthetic recovery log mutex is not poisoned")
-            .is_empty());
+        assert!(
+            provider
+                .recoveries
+                .lock()
+                .expect("synthetic recovery log mutex is not poisoned")
+                .is_empty()
+        );
 
         let outcome = workflow
             .recover_event_creation(&creation)
@@ -164,11 +182,8 @@ fn unresolved_creation_uses_recovery_after_workflow_restart() {
         provider.fail_next_creation(CalendarOperationError::ServiceUnavailable);
         provider.fail_next_recovery(CalendarOperationError::ServiceUnavailable);
         let cache = FixtureCache::default();
-        let workflow = CalendarWorkflow::new(
-            workflow_account_id(),
-            provider.clone(),
-            cache.clone(),
-        );
+        let workflow =
+            CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache.clone());
         synchronize_empty_view(&workflow, &provider, &view, "create-restart-first-sync").await;
 
         assert_eq!(
@@ -180,13 +195,7 @@ fn unresolved_creation_uses_recovery_after_workflow_restart() {
         drop(workflow);
 
         let restarted = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
-        synchronize_empty_view(
-            &restarted,
-            &provider,
-            &view,
-            "create-restart-recovery-sync",
-        )
-        .await;
+        synchronize_empty_view(&restarted, &provider, &view, "create-restart-recovery-sync").await;
         assert_eq!(
             restarted.recover_event_creation(&creation).await,
             Err(CalendarWorkflowError::Provider(
@@ -252,16 +261,20 @@ fn event_creation_recovery_requires_the_exact_unresolved_cache_entry() {
             workflow.recover_event_creation(&creation).await,
             Err(CalendarWorkflowError::PendingCreationNotFound)
         );
-        assert!(provider
-            .creations
-            .lock()
-            .expect("synthetic creation log mutex is not poisoned")
-            .is_empty());
-        assert!(provider
-            .recoveries
-            .lock()
-            .expect("synthetic recovery log mutex is not poisoned")
-            .is_empty());
+        assert!(
+            provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned")
+                .is_empty()
+        );
+        assert!(
+            provider
+                .recoveries
+                .lock()
+                .expect("synthetic recovery log mutex is not poisoned")
+                .is_empty()
+        );
         assert!(matches!(
             cache
                 .pending_event_creation(creation.view().account_id())
@@ -286,23 +299,31 @@ fn creation_stage_cache_failure_does_not_call_the_provider() {
 
         assert_eq!(
             workflow.create_event(&creation).await,
-            Err(CalendarWorkflowError::Cache(CalendarCacheError::Unavailable))
+            Err(CalendarWorkflowError::Cache(
+                CalendarCacheError::Unavailable
+            ))
         );
-        assert!(provider
-            .creations
-            .lock()
-            .expect("synthetic creation log mutex is not poisoned")
-            .is_empty());
-        assert!(provider
-            .recoveries
-            .lock()
-            .expect("synthetic recovery log mutex is not poisoned")
-            .is_empty());
-        assert!(cache
-            .pending_event_creation(creation.view().account_id())
-            .await
-            .expect("synthetic pending state is readable")
-            .is_none());
+        assert!(
+            provider
+                .creations
+                .lock()
+                .expect("synthetic creation log mutex is not poisoned")
+                .is_empty()
+        );
+        assert!(
+            provider
+                .recoveries
+                .lock()
+                .expect("synthetic recovery log mutex is not poisoned")
+                .is_empty()
+        );
+        assert!(
+            cache
+                .pending_event_creation(creation.view().account_id())
+                .await
+                .expect("synthetic pending state is readable")
+                .is_none()
+        );
     });
 }
 

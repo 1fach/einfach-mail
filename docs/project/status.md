@@ -115,7 +115,7 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 
 ## Next actions
 
-1. Continue the post-#356 cleanup with issues [#416](https://github.com/1fach/einfach-mail/issues/416)–[#420](https://github.com/1fach/einfach-mail/issues/420). Start with #416. Plan the workspace ownership change in #420 before moving code.
+1. Continue the post-#356 cleanup with issues [#418](https://github.com/1fach/einfach-mail/issues/418)–[#420](https://github.com/1fach/einfach-mail/issues/420). Implement #418 next, then #419. Plan the workspace ownership change in #420 before moving code. Issues #416 and #417 are complete.
 2. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux. Keep #274's named-compositor check separate.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the remaining SQLCipher Git pin under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when released async and migration crates support rusqlite 0.42.
