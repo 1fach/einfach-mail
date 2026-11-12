@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+            xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+  <s:Header/>
+  <s:Body>
+    <m:GetItemResponse>
+      <m:ResponseMessages>
+        <m:GetItemResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Items>
+            <t:CalendarItem>
+              <t:ItemId Id="synthetic-calendar-event" ChangeKey="synthetic-change-key"/>
+              <t:Subject>Synthetic calendar appointment</t:Subject>
+              <t:Start>2026-11-12T10:00:00Z</t:Start>
+              <t:End>2026-11-12T11:00:00Z</t:End>
+              <t:CalendarItemType>Single</t:CalendarItemType>
+              <t:IsRecurring>false</t:IsRecurring>
+              <t:IsAllDayEvent>false</t:IsAllDayEvent>
+              <t:IsMeeting>false</t:IsMeeting>
+              <t:IsOnlineMeeting>false</t:IsOnlineMeeting>
+              <t:ExtendedProperty>
+                <t:ExtendedFieldURI PropertySetId="4c2a2922-972e-54f9-bf4a-21e6b6d66d82"
+                                    PropertyName="EinfachMailCalendarOperationId"
+                                    PropertyType="String"/>
+                <t:Value>00000000-0000-4000-8000-000000000401</t:Value>
+              </t:ExtendedProperty>
+            </t:CalendarItem>
+          </m:Items>
+        </m:GetItemResponseMessage>
+      </m:ResponseMessages>
+    </m:GetItemResponse>
+  </s:Body>
+</s:Envelope>
