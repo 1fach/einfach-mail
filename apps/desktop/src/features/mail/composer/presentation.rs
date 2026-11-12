@@ -1,3 +1,4 @@
+use einfach_mail_application::MailSendProviderError;
 use einfach_mail_domain::MailSendTarget;
 use gpui_kit::component::{
     ColorTokens, Disableable,
@@ -68,7 +69,7 @@ fn composer_status_presentation(status: ComposerStatus) -> Option<ComposerStatus
         ),
         ComposerStatus::PermissionRequired => ComposerStatusPresentation::new(
             Role::Alert,
-            "Microsoft denied send permission. Review the delegated Mail.Send request to continue.",
+            send_error_text(MailSendProviderError::PermissionRequired),
             Some(ComposerStatusAction::ReviewPermission),
         ),
         ComposerStatus::RenewingPermission => ComposerStatusPresentation::new(

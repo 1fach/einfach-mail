@@ -41,7 +41,6 @@ pub(super) enum MoveRecoveryReason {
     CacheNeedsSync,
 }
 
-#[derive(Clone)]
 pub(super) struct MessageMoveRequest {
     source_folder: FolderReference,
     message_id: MessageId,
@@ -181,13 +180,12 @@ impl MailView {
             message_id: request.message_id.clone(),
             destination_label: request.destination_label.clone(),
         };
-        let operation_request = request.clone();
         self.message_update_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let move_result = workflow
                 .move_message(
-                    &operation_request.source_folder,
-                    &operation_request.message_id,
-                    &operation_request.destination_folder,
+                    &request.source_folder,
+                    &request.message_id,
+                    &request.destination_folder,
                 )
                 .await;
             let _ = this.update(cx, |view, cx| {

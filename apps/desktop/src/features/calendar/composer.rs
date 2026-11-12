@@ -87,11 +87,6 @@ use state::{ComposerState, CreateState, EditState};
 
 impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     /// Creates a composer for event creation, recovery, or editing.
-    ///
-    /// # Panics
-    ///
-    /// Panics if Jiff's IANA or UTC time-zone identifier violates the domain's
-    /// time-zone identifier constraints.
     pub(crate) fn new(
         setup: EventComposerSetup<S>,
         window: &mut Window,

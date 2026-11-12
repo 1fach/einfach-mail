@@ -10,6 +10,18 @@ use super::{ComposerStatus, ComposerTarget, MAIL_COMPOSER_WRITE_PENDING_CONTEXT,
 
 const MAIL_COMPOSER_BODY_HEIGHT: Rems = rems(13.75);
 
+#[derive(Clone, Copy)]
+enum FieldAvailability {
+    Editable,
+    Disabled,
+}
+
+impl FieldAvailability {
+    fn is_disabled(self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+}
+
 impl MailComposer {
     pub(super) fn can_send(&self) -> bool {
         self.pending_send.pending().is_none()
@@ -37,19 +49,24 @@ impl MailComposer {
             .child(input)
     }
 
-    fn fields_disabled(&self) -> bool {
-        self.pending_send.pending().is_some()
+    fn field_availability(&self) -> FieldAvailability {
+        if self.pending_send.pending().is_some()
             || !self.pending_send.is_available()
             || self.task.is_some()
             || matches!(
                 self.status,
                 ComposerStatus::Accepted | ComposerStatus::DuplicateConfirmation
             )
+        {
+            FieldAvailability::Disabled
+        } else {
+            FieldAvailability::Editable
+        }
     }
 
     fn render_composer_content(
         &mut self,
-        fields_disabled: bool,
+        field_availability: FieldAvailability,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = cx.theme().semantic_tokens().colors;
@@ -65,29 +82,29 @@ impl MailComposer {
             .gap_4()
             .p_4()
             .overflow_y_scrollbar()
-            .children(self.render_composer_children(&colors, fields_disabled, cx))
+            .children(self.render_composer_children(&colors, field_availability, cx))
     }
 
     fn render_composer_children(
         &mut self,
         colors: &ColorTokens,
-        fields_disabled: bool,
+        field_availability: FieldAvailability,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut children = vec![self.render_pending(colors, cx)];
-        children.extend(self.render_target_fields(fields_disabled));
-        children.push(self.render_body_field(fields_disabled));
+        children.extend(self.render_target_fields(field_availability));
+        children.push(self.render_body_field(field_availability));
         children.extend(self.render_status(colors, cx));
         children.push(self.render_disclaimer(colors));
         children.push(self.render_send_action(cx));
         children
     }
 
-    fn render_target_fields(&self, fields_disabled: bool) -> Vec<AnyElement> {
+    fn render_target_fields(&self, field_availability: FieldAvailability) -> Vec<AnyElement> {
         match &self.target {
             ComposerTarget::NewMessage => vec![
-                self.render_recipient_field(fields_disabled),
-                self.render_subject_field(fields_disabled),
+                self.render_recipient_field(field_availability),
+                self.render_subject_field(field_availability),
             ],
             ComposerTarget::Reply { subject, .. } => {
                 vec![Self::render_reply_context(subject.as_deref())]
@@ -95,7 +112,7 @@ impl MailComposer {
         }
     }
 
-    fn render_recipient_field(&self, fields_disabled: bool) -> AnyElement {
+    fn render_recipient_field(&self, field_availability: FieldAvailability) -> AnyElement {
         Self::render_field(
             "mail-recipient-field",
             "To",
@@ -105,14 +122,14 @@ impl MailComposer {
                 .child(
                     Input::new(&self.recipient)
                         .aria_label("Recipient")
-                        .disabled(fields_disabled)
+                        .disabled(field_availability.is_disabled())
                         .w_full(),
                 ),
         )
         .into_any_element()
     }
 
-    fn render_subject_field(&self, fields_disabled: bool) -> AnyElement {
+    fn render_subject_field(&self, field_availability: FieldAvailability) -> AnyElement {
         Self::render_field(
             "mail-subject-field",
             "Subject",
@@ -122,7 +139,7 @@ impl MailComposer {
                 .child(
                     Input::new(&self.subject)
                         .aria_label("Subject")
-                        .disabled(fields_disabled)
+                        .disabled(field_availability.is_disabled())
                         .w_full(),
                 ),
         )
@@ -141,7 +158,7 @@ impl MailComposer {
             .into_any_element()
     }
 
-    fn render_body_field(&self, fields_disabled: bool) -> AnyElement {
+    fn render_body_field(&self, field_availability: FieldAvailability) -> AnyElement {
         let (label, aria_label) = self.body_labels();
         Self::render_field(
             "mail-body-field",
@@ -152,7 +169,7 @@ impl MailComposer {
                 .child(
                     Textarea::new(&self.body)
                         .aria_label(aria_label)
-                        .disabled(fields_disabled)
+                        .disabled(field_availability.is_disabled())
                         .h(MAIL_COMPOSER_BODY_HEIGHT)
                         .w_full(),
                 ),
@@ -207,7 +224,7 @@ impl MailComposer {
 
 impl Render for MailComposer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let fields_disabled = self.fields_disabled();
-        self.render_composer_content(fields_disabled, cx)
+        let field_availability = self.field_availability();
+        self.render_composer_content(field_availability, cx)
     }
 }
