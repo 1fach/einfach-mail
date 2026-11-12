@@ -10,7 +10,7 @@ use ews::{
     response::ResponseCode,
 };
 use jiff::{Timestamp, tz::TimeZone};
-use quick_xml::de::from_reader;
+use quick_xml::{NsReader, de::from_reader};
 use serde::Deserialize;
 use time::{Date, Month, OffsetDateTime, UtcOffset, format_description::well_known::Iso8601};
 use windows_timezones::WindowsTimezone;
@@ -37,9 +37,11 @@ const EWS_MESSAGES_NAMESPACE: &[u8] =
 const EWS_TYPES_NAMESPACE: &[u8] = b"http://schemas.microsoft.com/exchange/services/2006/types";
 const SOAP_ELEMENT_NAMES: &[&[u8]] = &[b"Envelope", b"Header", b"Body"];
 const EWS_MESSAGES_ELEMENT_NAMES: &[&[u8]] = &[
+    b"CreateItemResponse",
     b"FindItemResponse",
     b"GetItemResponse",
     b"ResponseMessages",
+    b"CreateItemResponseMessage",
     b"FindItemResponseMessage",
     b"GetItemResponseMessage",
     b"RootFolder",
@@ -114,14 +116,9 @@ const CALENDAR_UNQUALIFIED_ATTRIBUTE_NAMES: &[&[u8]] = &[
     b"Version",
 ];
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "issue #402 wires this parser into GetItem preflight; remove this expectation when that caller lands"
-    )
-)]
+mod create;
 mod item;
+mod recovery;
 
 const CALENDAR_FIELDS: [&str; 8] = [
     "item:Subject",
@@ -179,6 +176,128 @@ pub(crate) fn parse_calendar_view_snapshot(
     let root = complete_root_folder(response)?;
     let wire_items = root.items.ok_or(EwsError::InvalidResponse)?.inner;
     map_snapshot_items(wire_items, response_bytes, view)
+}
+
+pub(super) fn validate_calendar_operation_response(
+    document: &[u8],
+    operation_name: &[u8],
+    response_message_name: &[u8],
+) -> Result<(), EwsError> {
+    validate_soap_header(document)?;
+    validate_calendar_response_namespaces(document)?;
+    validate_calendar_response_shape(document, operation_name, response_message_name)
+}
+
+fn validate_calendar_response_shape(
+    document: &[u8],
+    operation_name: &[u8],
+    response_message_name: &[u8],
+) -> Result<(), EwsError> {
+    let mut reader = NsReader::from_reader(document);
+    let mut validator = CalendarResponseShape::new(operation_name, response_message_name);
+    loop {
+        let (_, event) = reader
+            .read_resolved_event()
+            .map_err(|_| EwsError::InvalidResponse)?;
+        if validator.read_event(event)? {
+            return validator.finish();
+        }
+    }
+}
+
+struct CalendarResponseShape<'a> {
+    operation_name: &'a [u8],
+    response_message_name: &'a [u8],
+    parents: Vec<Vec<u8>>,
+    operation_seen: bool,
+    response_messages_seen: bool,
+    response_message_seen: bool,
+}
+
+impl<'a> CalendarResponseShape<'a> {
+    fn new(operation_name: &'a [u8], response_message_name: &'a [u8]) -> Self {
+        Self {
+            operation_name,
+            response_message_name,
+            parents: Vec::new(),
+            operation_seen: false,
+            response_messages_seen: false,
+            response_message_seen: false,
+        }
+    }
+
+    fn read_event(&mut self, event: quick_xml::events::Event<'_>) -> Result<bool, EwsError> {
+        use quick_xml::events::Event;
+
+        match event {
+            Event::Start(element) => self.start_element(element.local_name().as_ref())?,
+            Event::Empty(_) => self.empty_element()?,
+            Event::End(_) => {
+                self.parents.pop().ok_or(EwsError::InvalidResponse)?;
+            }
+            Event::Eof => return Ok(true),
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn start_element(&mut self, name: &[u8]) -> Result<(), EwsError> {
+        self.validate_child(name)?;
+        self.parents.push(name.to_vec());
+        Ok(())
+    }
+
+    fn validate_child(&mut self, name: &[u8]) -> Result<(), EwsError> {
+        match self.parents.last().map(Vec::as_slice) {
+            Some(b"Body") => self.validate_operation_child(name),
+            Some(parent) if parent == self.operation_name => {
+                self.validate_response_messages_child(name)
+            }
+            Some(b"ResponseMessages") => self.validate_response_message_child(name),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_operation_child(&mut self, name: &[u8]) -> Result<(), EwsError> {
+        if name != self.operation_name || self.operation_seen {
+            return Err(EwsError::InvalidResponse);
+        }
+        self.operation_seen = true;
+        Ok(())
+    }
+
+    fn validate_response_messages_child(&mut self, name: &[u8]) -> Result<(), EwsError> {
+        if name != b"ResponseMessages" || self.response_messages_seen {
+            return Err(EwsError::InvalidResponse);
+        }
+        self.response_messages_seen = true;
+        Ok(())
+    }
+
+    fn validate_response_message_child(&mut self, name: &[u8]) -> Result<(), EwsError> {
+        if name != self.response_message_name || self.response_message_seen {
+            return Err(EwsError::InvalidResponse);
+        }
+        self.response_message_seen = true;
+        Ok(())
+    }
+
+    fn empty_element(&self) -> Result<(), EwsError> {
+        match self.parents.last().map(Vec::as_slice) {
+            Some(b"Body" | b"ResponseMessages") => Err(EwsError::InvalidResponse),
+            Some(parent) if parent == self.operation_name => Err(EwsError::InvalidResponse),
+            _ => Ok(()),
+        }
+    }
+
+    fn finish(self) -> Result<(), EwsError> {
+        (self.operation_seen
+            && self.response_messages_seen
+            && self.response_message_seen
+            && self.parents.is_empty())
+        .then_some(())
+        .ok_or(EwsError::InvalidResponse)
+    }
 }
 
 fn validate_calendar_response_namespaces(document: &[u8]) -> Result<(), EwsError> {
@@ -263,7 +382,9 @@ fn expected_calendar_namespace(
 ) -> Result<Option<&'static [u8]>, EwsError> {
     let expected = match local_name {
         b"Items" => Some(match parent {
-            Some(b"GetItemResponseMessage") => EWS_MESSAGES_NAMESPACE,
+            Some(b"GetItemResponseMessage" | b"CreateItemResponseMessage") => {
+                EWS_MESSAGES_NAMESPACE
+            }
             Some(b"RootFolder") => EWS_TYPES_NAMESPACE,
             _ => return Err(EwsError::InvalidResponse),
         }),
@@ -599,22 +720,42 @@ where
 
     fn create_event(
         &self,
-        _creation: &einfach_mail_domain::CalendarEventCreation,
+        creation: &einfach_mail_domain::CalendarEventCreation,
     ) -> impl Future<
         Output = Result<einfach_mail_domain::CalendarOccurrence, CalendarOperationError>,
     > + Send
     + '_ {
-        std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
+        let creation = creation.clone();
+        let session_store = Arc::clone(&self.session);
+        async move {
+            let session =
+                session_for_calendar(&session_store, creation.view().account_id()).await?;
+            worker::run(move |_cancellation: CancellationToken| async move {
+                let sequence = session.transport.sequence().await;
+                create::create_event(&sequence, &creation).await
+            })
+            .await
+        }
     }
 
     fn recover_event_creation(
         &self,
-        _creation: &einfach_mail_domain::CalendarEventCreation,
+        creation: &einfach_mail_domain::CalendarEventCreation,
     ) -> impl Future<
         Output = Result<einfach_mail_domain::CalendarOccurrence, CalendarOperationError>,
     > + Send
     + '_ {
-        std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
+        let creation = creation.clone();
+        let session_store = Arc::clone(&self.session);
+        async move {
+            let session =
+                session_for_calendar(&session_store, creation.view().account_id()).await?;
+            worker::run(move |_cancellation: CancellationToken| async move {
+                let sequence = session.transport.sequence().await;
+                recovery::recover_event_creation(&sequence, &creation).await
+            })
+            .await
+        }
     }
 
     fn load_versioned_event(

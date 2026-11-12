@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn ews_provider_rejects_calendar_event_writes() {
+async fn ews_provider_requires_a_session_for_create_and_recovery() {
     let provider = ExchangeEwsProvider::new(EmptySettingsStore);
     let view = synthetic_calendar_view();
     let creation = synthetic_event_creation(&view);
@@ -15,11 +15,11 @@ async fn ews_provider_rejects_calendar_event_writes() {
 
     assert!(matches!(
         provider.create_event(&creation).await,
-        Err(CalendarOperationError::UnsupportedOperation)
+        Err(CalendarOperationError::SignInRequired)
     ));
     assert!(matches!(
         provider.recover_event_creation(&creation).await,
-        Err(CalendarOperationError::UnsupportedOperation)
+        Err(CalendarOperationError::SignInRequired)
     ));
     assert!(matches!(
         provider.load_versioned_event(editable.occurrence()).await,

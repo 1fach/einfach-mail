@@ -39,7 +39,7 @@ impl EwsTransportState {
                 .post_soap_read(document)
                 .await
                 .map_err(EwsRequestError::Read),
-            EwsRequestMode::Update => self.post_soap_update(document).await,
+            EwsRequestMode::Write => self.post_soap_write(document).await,
         }
     }
 
@@ -83,7 +83,7 @@ impl EwsTransportState {
         Ok(authenticated.body)
     }
 
-    async fn post_soap_update(&mut self, document: &[u8]) -> Result<Vec<u8>, EwsRequestError> {
+    async fn post_soap_write(&mut self, document: &[u8]) -> Result<Vec<u8>, EwsRequestError> {
         let Some(authenticated_connection) = self.authenticated_connection.clone() else {
             return Err(EwsRequestError::NotDispatched(EwsError::ServiceUnavailable));
         };
