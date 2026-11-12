@@ -32,7 +32,7 @@ It then checks dependency boundaries and bans, the Linux target graph, Rust 1.95
 
 The GitHub workflow runs the module-layout checker before its dependency checks.
 
-Run `python3 scripts/untangle-code-map.py` for a compact Rust source inventory and recent cross-component change map. Use `--declarations crates/application/src/calendar.rs` to print item declaration lines from one tracked Rust file.
+Run `python3 scripts/untangle-code-map.py` for a compact Rust source inventory and recent cross-component change map. Recent-change counts use current tracked paths and omit history under older paths after renames. Use `--declarations crates/application/src/calendar.rs` to print item declaration lines from one tracked Rust file.
 
 Run `python3 -B -m unittest discover -s scripts/tests` to check the source-map inventory and Rust module-layout rules.
 

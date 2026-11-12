@@ -50,24 +50,24 @@ def component(path):
     return "/".join(parts[:2])
 
 
-def source_commits_from_log(output):
+def source_commits_from_log(output, tracked_paths):
     commits = []
-    current_paths = set()
+    commit_paths = set()
 
     for line in output.splitlines():
         if COMMIT_ID.fullmatch(line):
-            if current_paths:
-                commits.append(current_paths)
-            current_paths = set()
-        elif line.endswith(".rs"):
-            current_paths.add(line)
+            if commit_paths:
+                commits.append(commit_paths)
+            commit_paths = set()
+        elif line.endswith(".rs") and line in tracked_paths:
+            commit_paths.add(line)
 
-    if current_paths:
-        commits.append(current_paths)
+    if commit_paths:
+        commits.append(commit_paths)
     return commits
 
 
-def recent_file_changes(commit_count):
+def recent_file_changes(commit_count, files):
     output = git_output(
         "log",
         f"-n{commit_count}",
@@ -77,7 +77,8 @@ def recent_file_changes(commit_count):
         "apps",
         "crates",
     )
-    return source_commits_from_log(output)
+    tracked_paths = {path.relative_to(REPOSITORY).as_posix() for path in files}
+    return source_commits_from_log(output, tracked_paths)
 
 
 def source_inventory(files):
@@ -191,7 +192,7 @@ def main():
         return
 
     inventory = source_inventory(files)
-    commits = recent_file_changes(arguments.commits)
+    commits = recent_file_changes(arguments.commits, files)
     print_report(inventory, commits, arguments.top, arguments.min_cochange)
 
 

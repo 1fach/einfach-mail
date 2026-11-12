@@ -41,5 +41,35 @@ class TestAttributeCounts(unittest.TestCase):
         self.assertEqual(1, first_inventory[0]["tests"])
 
 
+class TestRecentSourceHistory(unittest.TestCase):
+    def test_ignores_renamed_and_deleted_paths_outside_current_inventory(self):
+        commit_log = (
+            f"{'a' * 40}\n"
+            "apps/desktop/src/account_view.rs\n"
+            f"{'b' * 40}\n"
+            "apps/desktop/src/features/account.rs\n"
+            f"{'c' * 40}\n"
+            "crates/application/src/calendar.rs\n"
+            f"{'d' * 40}\n"
+            "crates/application/src/obsolete_calendar_helper.rs\n"
+            f"{'e' * 40}\n"
+            "crates/application/src/calendar/workflow.rs\n"
+        )
+        tracked_paths = {
+            "apps/desktop/src/features/account.rs",
+            "crates/application/src/calendar/workflow.rs",
+        }
+
+        commits = CODE_MAP["source_commits_from_log"](commit_log, tracked_paths)
+
+        self.assertEqual(
+            [
+                {"apps/desktop/src/features/account.rs"},
+                {"crates/application/src/calendar/workflow.rs"},
+            ],
+            commits,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
