@@ -255,6 +255,103 @@ fn unknown_event_update_requires_successful_sync_before_another_write() {
 }
 
 #[test]
+fn reopened_workflow_requires_sync_for_every_previously_synced_view_after_unknown_update() {
+    smol::block_on(async {
+        let source_view = view();
+        let other_view = view_for_week(14);
+        let provider = FixtureProvider::default();
+        let cache = FixtureCache::default();
+        let workflow =
+            CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache.clone());
+        synchronize_empty_view(
+            &workflow,
+            &provider,
+            &source_view,
+            "restart-update-source-initial",
+        )
+        .await;
+        synchronize_empty_view(
+            &workflow,
+            &provider,
+            &other_view,
+            "restart-update-other-initial",
+        )
+        .await;
+        let CalendarEventCreationOutcome::Cached(event) = workflow
+            .create_event(&creation(source_view.clone()))
+            .await
+            .expect("synthetic event creation is confirmed")
+        else {
+            panic!("synthetic event is cached");
+        };
+        let editable = workflow
+            .load_versioned_event(&event)
+            .await
+            .expect("synthetic timed event is editable");
+        let update = update_request(editable);
+        provider.fail_next_update(CalendarOperationError::UpdateOutcomeUnknown);
+
+        assert_eq!(
+            workflow.update_event(&update).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::UpdateOutcomeUnknown
+            ))
+        );
+
+        let restarted = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
+        let mut patch = CalendarOccurrencePatch::new();
+        patch.set_subject(Some(update.draft().subject().to_owned()));
+        provider.push_page(Ok(response(
+            vec![CalendarDeltaChange::Upsert {
+                id: event.id().clone(),
+                patch,
+            }],
+            CalendarDeltaProgress::Complete(link("restart-update-source-reconciled")),
+        )));
+        restarted
+            .sync_view(&source_view)
+            .await
+            .expect("the source view completes its post-restart sync");
+        assert_eq!(
+            restarted
+                .load_cached_view(&source_view)
+                .await
+                .expect("the source view remains readable")
+                .write_readiness(),
+            CalendarWriteReadiness::AccountSyncRequired
+        );
+        assert_eq!(
+            restarted.create_event(&creation(source_view.clone())).await,
+            Err(CalendarWorkflowError::CalendarWriteSyncRequired)
+        );
+
+        provider.push_page(Ok(response(
+            Vec::new(),
+            CalendarDeltaProgress::Complete(link("restart-update-other-reconciled")),
+        )));
+        restarted
+            .sync_view(&other_view)
+            .await
+            .expect("the other previously synced view completes its post-restart sync");
+        let snapshot = restarted
+            .load_cached_view(&source_view)
+            .await
+            .expect("all account views are reconciled");
+        assert_eq!(snapshot.write_readiness(), CalendarWriteReadiness::Ready);
+        assert_eq!(snapshot.events()[0].subject(), Some(update.draft().subject()));
+        assert_eq!(
+            provider
+                .update_calls
+                .lock()
+                .expect("synthetic update log mutex is not poisoned")
+                .len(),
+            1,
+            "an uncertain update is not replayed after restart and sync"
+        );
+    });
+}
+
+#[test]
 fn uncertain_update_and_delete_recovery_blocks_sibling_workflows() {
     smol::block_on(async {
         let view = view();
@@ -377,7 +474,34 @@ fn definitive_event_write_rejections_clear_persisted_recovery_markers() {
         let editable = workflow
             .load_versioned_event(&event)
             .await
-            .expect("definitive rejection keeps the event editable");
+            .expect("an access rejection keeps the event editable");
+        let update = update_request(editable);
+        provider.fail_next_update(CalendarOperationError::EventUpdateRejected);
+        assert_eq!(
+            workflow.update_event(&update).await,
+            Err(CalendarWorkflowError::Provider(
+                CalendarOperationError::EventUpdateRejected
+            ))
+        );
+        assert!(
+            !cache
+                .account_has_calendar_write_sync_required(view.account_id())
+                .await
+                .expect("a known update rejection clears its recovery marker")
+        );
+        assert_eq!(
+            workflow
+                .load_cached_view(&view)
+                .await
+                .expect("cached view stays ready after known update rejection")
+                .write_readiness(),
+            CalendarWriteReadiness::Ready
+        );
+
+        let editable = workflow
+            .load_versioned_event(&event)
+            .await
+            .expect("a known update rejection keeps the event editable");
         provider.fail_next_deletion(CalendarOperationError::EventDeletionRejected);
         assert_eq!(
             workflow.delete_event(&editable).await,

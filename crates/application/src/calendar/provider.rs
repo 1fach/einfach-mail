@@ -29,6 +29,9 @@ pub enum CalendarOperationError {
     /// The provider confirmed that the event request was rejected.
     #[error("the calendar event request was rejected")]
     EventCreationRejected,
+    /// The provider confirmed that the event update was rejected.
+    #[error("the calendar event update was rejected")]
+    EventUpdateRejected,
     /// The event may exist, but the provider could not confirm its creation.
     #[error("the calendar event creation outcome is unknown")]
     CreationOutcomeUnknown,
