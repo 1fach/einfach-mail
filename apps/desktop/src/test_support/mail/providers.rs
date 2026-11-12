@@ -40,11 +40,11 @@ impl MailProvider for OfflineProvider {
         ready(Err(MailOperationError::ServiceUnavailable))
     }
 
-    fn fetch_message_body(
-        &self,
-        _: &FolderReference,
-        _: &MessageId,
-    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
+    fn fetch_message_body<'a>(
+        &'a self,
+        _: &'a FolderReference,
+        _: &'a MessageId,
+    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + 'a {
         self.body_fetches.fetch_add(1, Ordering::Relaxed);
         ready(Err(MailOperationError::ServiceUnavailable))
     }
@@ -242,11 +242,11 @@ impl MailProvider for ReadStateProvider {
         }
     }
 
-    fn fetch_message_body(
-        &self,
-        _: &FolderReference,
-        _: &MessageId,
-    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
+    fn fetch_message_body<'a>(
+        &'a self,
+        _: &'a FolderReference,
+        _: &'a MessageId,
+    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + 'a {
         ready(Err(MailOperationError::ServiceUnavailable))
     }
 
@@ -394,11 +394,11 @@ impl MailProvider for MessageMoveProvider {
         }
     }
 
-    fn fetch_message_body(
-        &self,
-        folder: &FolderReference,
-        message_id: &MessageId,
-    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
+    fn fetch_message_body<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + 'a {
         self.offline.fetch_message_body(folder, message_id)
     }
 
@@ -533,11 +533,11 @@ impl MailProvider for PermissionProvider {
         self.offline.message_delta_page(folder, request)
     }
 
-    fn fetch_message_body(
-        &self,
-        folder: &FolderReference,
-        message_id: &MessageId,
-    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
+    fn fetch_message_body<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        message_id: &'a MessageId,
+    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + 'a {
         self.offline.fetch_message_body(folder, message_id)
     }
 

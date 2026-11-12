@@ -66,3 +66,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0059](0059-native-mail-and-calendar-workspace.md) | Use a shared, adaptive mail and calendar workspace | Accepted; implementation tracked in M10 issues #268–#274 |
 | [0060](0060-one-active-account-first-release.md) | Support one active account in the first release | Accepted; Accounts UI tracked in #272 |
 | [0061](0061-feature-first-module-layout-and-test-placement.md) | Use a feature-first module layout and colocated tests | Accepted; refactor tracked in issue #282 |
+| [0062](0062-target-borrowed-mail-provider-future.md) | Tie the message-body future to its borrowed inputs | Accepted |

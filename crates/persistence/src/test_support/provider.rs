@@ -286,33 +286,26 @@ impl MailProvider for FixtureProvider {
         }
     }
 
-    fn fetch_message_body(
-        &self,
-        folder: &FolderReference,
-        _message_id: &MessageId,
-    ) -> impl Future<Output = Result<MessageBody, MailOperationError>> + Send + '_ {
-        let account_id = folder.account_id().clone();
-        let expected_account = self.account_id.clone();
-        let result = self.body_result.clone();
-        let fetches = Arc::clone(&self.body_fetches);
-        let body_gate = self.body_gate.clone();
-        async move {
-            if account_id != expected_account {
-                return Err(MailOperationError::AccountMismatch);
-            }
-            fetches.fetch_add(1, Ordering::Relaxed);
-            if let Some(gate) = body_gate {
-                gate.started
-                    .send(())
-                    .await
-                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
-                gate.release
-                    .recv()
-                    .await
-                    .map_err(|_| MailOperationError::ServiceUnavailable)?;
-            }
-            result
+    async fn fetch_message_body<'a>(
+        &'a self,
+        folder: &'a FolderReference,
+        _message_id: &'a MessageId,
+    ) -> Result<MessageBody, MailOperationError> {
+        if folder.account_id() != &self.account_id {
+            return Err(MailOperationError::AccountMismatch);
         }
+        self.body_fetches.fetch_add(1, Ordering::Relaxed);
+        if let Some(gate) = &self.body_gate {
+            gate.started
+                .send(())
+                .await
+                .map_err(|_| MailOperationError::ServiceUnavailable)?;
+            gate.release
+                .recv()
+                .await
+                .map_err(|_| MailOperationError::ServiceUnavailable)?;
+        }
+        self.body_result.clone()
     }
 
     fn set_message_read_state(
