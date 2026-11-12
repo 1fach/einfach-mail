@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use super::AccountView;
-use super::state::{AccountStatus, EwsDiscoveryState, ExchangeEwsConnectionForm};
+use super::state::{
+    AccountStatus, EwsDiscoveryState, ExchangeEwsConnectionForm, SavedCredentialState,
+};
 use einfach_mail_application::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
     AccountPermissionRequest, AccountProvider, AccountWorkflow, ConnectedAccount,
@@ -27,7 +29,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                     Ok(None) => AccountStatus::Disconnected,
                     Err(error) => AccountStatus::Failed {
                         error,
-                        saved_credential_may_exist: true,
+                        saved_credential_state: SavedCredentialState::MayExist,
                     },
                 };
                 cx.notify();
@@ -46,7 +48,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 &self.status,
                 AccountStatus::Disconnected
                     | AccountStatus::Failed {
-                        saved_credential_may_exist: false,
+                        saved_credential_state: SavedCredentialState::Absent,
                         ..
                     }
             )
@@ -60,7 +62,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     pub(super) fn cancel_exchange_ews_form(&mut self, cx: &mut Context<Self>) {
         if matches!(self.status, AccountStatus::Connecting { .. }) {
             self.cancel_connect(cx);
-        } else if !matches!(self.status, AccountStatus::CancellingConnect { .. }) {
+        } else if !matches!(self.status, AccountStatus::CancellingConnect) {
             let confirmation_pending = self.pending_ews_discovery_confirmation().is_some();
             let discovery_busy = self
                 .exchange_ews_form
@@ -262,32 +264,23 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             &self.status,
             AccountStatus::Disconnected
                 | AccountStatus::Failed {
-                    saved_credential_may_exist: false,
+                    saved_credential_state: SavedCredentialState::Absent,
                     ..
                 }
         ) {
             return;
         }
-        let saved_credential_may_exist = self.status.saved_credential_may_exist();
         let cancellation = AccountOperationCancellation::new();
         self.status = AccountStatus::Connecting {
-            saved_credential_may_exist,
             cancellation: cancellation.clone(),
         };
-        self.task = Some(Self::connect_task(
-            workflow,
-            request,
-            saved_credential_may_exist,
-            cancellation,
-            cx,
-        ));
+        self.task = Some(Self::connect_task(workflow, request, cancellation, cx));
         cx.notify();
     }
 
     fn connect_task(
         workflow: Arc<AccountWorkflow<P>>,
         request: AccountConnectionRequest,
-        saved_credential_may_exist: bool,
         cancellation: AccountOperationCancellation,
         cx: &mut Context<Self>,
     ) -> Task<()> {
@@ -295,41 +288,35 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             let connection_result = workflow
                 .connect_account_with_request_and_cancellation(request, cancellation)
                 .await;
-            let _ = this.update(cx, |view, cx| {
-                view.task = None;
-                let saved_credential_may_exist = saved_credential_may_exist
-                    || matches!(
-                        &connection_result,
-                        Err(AccountOperationError::SavedAccountIdentityUnavailable
-                            | AccountOperationError::AccountMismatch)
-                    );
-                view.status = match connection_result {
-                    Ok(account) => {
-                        view.exchange_ews_form = None;
-                        AccountStatus::Connected(account)
-                    }
-                    Err(error) => AccountStatus::Failed {
-                        error,
-                        saved_credential_may_exist,
-                    },
-                };
-                cx.notify();
-            });
+            let _ = this.update(cx, |view, cx| view.finish_connect(connection_result, cx));
         })
     }
 
+    fn finish_connect(
+        &mut self,
+        connection_result: Result<ConnectedAccount, AccountOperationError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.task = None;
+        self.status = match connection_result {
+            Ok(account) => {
+                self.exchange_ews_form = None;
+                AccountStatus::Connected(account)
+            }
+            Err(error) => AccountStatus::Failed {
+                saved_credential_state: SavedCredentialState::after_connection_error(error),
+                error,
+            },
+        };
+        cx.notify();
+    }
+
     pub(super) fn cancel_connect(&mut self, cx: &mut Context<Self>) {
-        let AccountStatus::Connecting {
-            saved_credential_may_exist,
-            cancellation,
-        } = &self.status
-        else {
+        let AccountStatus::Connecting { cancellation } = &self.status else {
             return;
         };
         cancellation.cancel();
-        self.status = AccountStatus::CancellingConnect {
-            saved_credential_may_exist: *saved_credential_may_exist,
-        };
+        self.status = AccountStatus::CancellingConnect;
         cx.notify();
     }
 

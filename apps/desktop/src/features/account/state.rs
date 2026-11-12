@@ -21,6 +21,22 @@ pub(crate) enum SetupIssue {
     ExchangeSettingsUnavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SavedCredentialState {
+    Absent,
+    MayExist,
+}
+
+impl SavedCredentialState {
+    pub(super) fn after_connection_error(error: AccountOperationError) -> Self {
+        match error {
+            AccountOperationError::SavedAccountIdentityUnavailable
+            | AccountOperationError::AccountMismatch => Self::MayExist,
+            _ => Self::Absent,
+        }
+    }
+}
+
 pub(crate) struct AccountServices<P> {
     pub(super) workflow: Arc<AccountWorkflow<P>>,
     pub(super) account_session_factory: Arc<dyn AccountSessionFactory>,
@@ -50,12 +66,9 @@ pub(super) enum AccountStatus {
     Restoring,
     Disconnected,
     Connecting {
-        saved_credential_may_exist: bool,
         cancellation: AccountOperationCancellation,
     },
-    CancellingConnect {
-        saved_credential_may_exist: bool,
-    },
+    CancellingConnect,
     SigningOut {
         account: Option<ConnectedAccount>,
     },
@@ -77,32 +90,27 @@ pub(super) enum AccountStatus {
     },
     Failed {
         error: AccountOperationError,
-        saved_credential_may_exist: bool,
+        saved_credential_state: SavedCredentialState,
     },
 }
 
 impl AccountStatus {
-    pub(super) fn saved_credential_may_exist(&self) -> bool {
+    pub(super) fn saved_credential_state(&self) -> SavedCredentialState {
         match self {
-            Self::Connecting {
-                saved_credential_may_exist,
-                ..
+            Self::Disconnected | Self::Connecting { .. } | Self::CancellingConnect => {
+                SavedCredentialState::Absent
             }
-            | Self::CancellingConnect {
-                saved_credential_may_exist,
-            }
-            | Self::Failed {
-                saved_credential_may_exist,
+            Self::Failed {
+                saved_credential_state,
                 ..
-            } => *saved_credential_may_exist,
+            } => *saved_credential_state,
             Self::SigningOut { .. }
             | Self::Connected(_)
             | Self::Reauthorizing { .. }
             | Self::CancellingReauthorization { .. }
             | Self::ReauthorizationFailed { .. }
             | Self::SignOutFailed { .. }
-            | Self::Restoring => true,
-            Self::Disconnected => false,
+            | Self::Restoring => SavedCredentialState::MayExist,
         }
     }
 

@@ -176,14 +176,12 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
 
     click(context, "sign-out");
 
-    assert!(
-        context
-            .cx
-            .update(|cx| view.read(cx).test_status_is_failed_with(
-                &AccountOperationError::SavedAccountIdentityUnavailable,
-                true,
-            ))
-    );
+    assert!(context.cx.update(|cx| {
+        view.read(cx)
+            .test_status_is_failed_with_possible_saved_credential(
+                AccountOperationError::SavedAccountIdentityUnavailable,
+            )
+    }));
     assert!(
         context
             .cx
