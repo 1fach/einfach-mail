@@ -112,7 +112,7 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 6. Continue the Linux real-window accessibility review tracked in issues #9 and #22.
 7. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
 8. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
-9. Continue [issue #389](https://github.com/1fach/einfach-mail/issues/389) by splitting the accepted ADR 0065 policy into fixture-backed implementation issues. Keep live Exchange verification separate and all EWS writes disabled until implementation review and live verification are complete.
+9. Start [issue #400](https://github.com/1fach/einfach-mail/issues/400), which separates a new calendar creation from recovery of an unresolved one. [Issue #401](https://github.com/1fach/einfach-mail/issues/401) can proceed in parallel to define the EWS appointment shape used by write preflight. Keep EWS writes disabled until each implementation passes review and its separate live Exchange verification issue passes.
 
 ## Update rule
 
