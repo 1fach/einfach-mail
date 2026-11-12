@@ -63,13 +63,13 @@ pub(super) fn workflows_sharing_account_state(
     provider: &FixtureProvider,
     cache: &FixtureCache,
 ) -> CalendarWorkflowPair {
-    let reservations = Arc::new(Mutex::new(ActiveOperations::default()));
+    let reservations = OperationReservations::default();
     let recovery = Arc::new(AccountWorkflowRecovery::default());
     let first = Arc::new(CalendarWorkflow::with_reservations(
         workflow_account_id(),
         provider.clone(),
         cache.clone(),
-        Arc::clone(&reservations),
+        reservations.clone(),
         Arc::clone(&recovery),
     ));
     let second = Arc::new(CalendarWorkflow::with_reservations(

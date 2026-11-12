@@ -5,7 +5,7 @@ use std::{
 
 use einfach_mail_domain::{AccountId, FolderReference, MailFolder, MessageDeltaProgress};
 
-use crate::shared::reservations::{OperationReservation, reserve_account};
+use crate::shared::reservations::OperationReservation;
 use crate::shared::sync_budget::{
     MAX_DELTA_PAGES_PER_ATTEMPT, MAX_DELTA_RESETS_PER_ATTEMPT, response_bytes_after,
 };
@@ -140,7 +140,9 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         &self,
         account: &AccountId,
     ) -> Result<OperationReservation, MailWorkflowError> {
-        reserve_account(&self.reservations, account).map_err(MailWorkflowError::from)
+        self.reservations
+            .reserve_account(account)
+            .map_err(MailWorkflowError::from)
     }
 }
 

@@ -16,7 +16,7 @@ use einfach_mail_domain::{
 };
 
 use crate::shared::recovery::AccountWorkflowRecovery;
-use crate::shared::reservations::{ActiveOperations, reserve_account};
+use crate::shared::reservations::OperationReservations;
 use crate::{
     AccountCache, AccountCacheOpenError, AccountCacheRemovalError, CalendarCache,
     CalendarEventCreationOutcome, CalendarEventDeletionOutcome, CalendarEventUpdateOutcome,
@@ -381,7 +381,7 @@ pub trait AccountCacheFactory: Send + Sync {
 pub struct AccountSessionWorkflowFactory<P, F> {
     provider: P,
     cache_factory: F,
-    reservations: Arc<Mutex<ActiveOperations>>,
+    reservations: OperationReservations,
     recovery_by_account: Mutex<HashMap<AccountId, Weak<AccountWorkflowRecovery>>>,
 }
 
@@ -392,7 +392,7 @@ impl<P, F> AccountSessionWorkflowFactory<P, F> {
         Self {
             provider,
             cache_factory,
-            reservations: Arc::new(Mutex::new(ActiveOperations::default())),
+            reservations: OperationReservations::default(),
             recovery_by_account: Mutex::new(HashMap::new()),
         }
     }
@@ -435,7 +435,7 @@ where
                 account_id.clone(),
                 self.provider.clone(),
                 cache.clone(),
-                Arc::clone(&self.reservations),
+                self.reservations.clone(),
                 Arc::clone(&recovery),
             ));
             let calendar_workflow: Arc<dyn CalendarSession> =
@@ -443,7 +443,7 @@ where
                     account_id.clone(),
                     self.provider.clone(),
                     cache.clone(),
-                    Arc::clone(&self.reservations),
+                    self.reservations.clone(),
                     recovery,
                 ));
             Ok(Arc::new(AccountSessionWorkflow::new(
@@ -451,7 +451,7 @@ where
                 mail_workflow,
                 calendar_workflow,
                 cache,
-                Arc::clone(&self.reservations),
+                self.reservations.clone(),
             )) as Arc<dyn AccountSession>)
         })
     }
@@ -461,7 +461,9 @@ where
         account_id: &'a AccountId,
     ) -> AccountSessionFuture<'a, Result<(), AccountCacheRemovalError>> {
         Box::pin(async move {
-            let _reservation = reserve_account(&self.reservations, account_id)
+            let _reservation = self
+                .reservations
+                .reserve_account(account_id)
                 .map_err(AccountCacheRemovalError::from)?;
             self.cache_factory.remove_for_account(account_id).await
         })
@@ -473,7 +475,7 @@ pub(crate) struct AccountSessionWorkflow<C> {
     mail: Arc<dyn MailSession>,
     calendar: Arc<dyn CalendarSession>,
     cache: C,
-    reservations: Arc<Mutex<ActiveOperations>>,
+    reservations: OperationReservations,
 }
 
 impl<C> AccountSessionWorkflow<C> {
@@ -482,7 +484,7 @@ impl<C> AccountSessionWorkflow<C> {
         mail: Arc<dyn MailSession>,
         calendar: Arc<dyn CalendarSession>,
         cache: C,
-        reservations: Arc<Mutex<ActiveOperations>>,
+        reservations: OperationReservations,
     ) -> Self {
         Self {
             account_id,

@@ -1,10 +1,6 @@
 //! Calendar synchronization and event workflows for account-scoped views.
 
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-    time::SystemTime,
-};
+use std::{collections::HashSet, sync::Arc, time::SystemTime};
 
 use einfach_mail_domain::{
     AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation, CalendarEventUpdate,
@@ -21,9 +17,7 @@ use super::{
 };
 use crate::shared::recovery::{AccountWorkflowRecovery, CalendarWriteReadiness};
 use crate::{
-    shared::reservations::{
-        AccountReservationError, ActiveOperations, reserve_account, reserve_calendar_view,
-    },
+    shared::reservations::{AccountReservationError, OperationReservations},
     shared::sync_budget::{
         MAX_DELTA_PAGES_PER_ATTEMPT, MAX_DELTA_RESETS_PER_ATTEMPT, response_bytes_after,
     },
@@ -255,7 +249,7 @@ where
     account_id: AccountId,
     provider: P,
     cache: C,
-    reservations: Arc<Mutex<ActiveOperations>>,
+    reservations: OperationReservations,
     recovery: Arc<AccountWorkflowRecovery>,
 }
 
@@ -271,7 +265,7 @@ where
             account_id,
             provider,
             cache,
-            Arc::new(Mutex::new(ActiveOperations::default())),
+            OperationReservations::default(),
             Arc::new(AccountWorkflowRecovery::default()),
         )
     }
@@ -280,7 +274,7 @@ where
         account_id: AccountId,
         provider: P,
         cache: C,
-        reservations: Arc<Mutex<ActiveOperations>>,
+        reservations: OperationReservations,
         recovery: Arc<AccountWorkflowRecovery>,
     ) -> Self {
         Self {
@@ -351,8 +345,10 @@ where
         view: &CalendarViewReference,
     ) -> Result<CalendarSyncReport, CalendarWorkflowError> {
         self.ensure_account(view.account_id())?;
-        let _reservation =
-            reserve_calendar_view(&self.reservations, view).map_err(CalendarWorkflowError::from)?;
+        let _reservation = self
+            .reservations
+            .reserve_calendar_view(view)
+            .map_err(CalendarWorkflowError::from)?;
         let strategy = self.provider.calendar_sync_strategy().await?;
         let report = self.sync_by_strategy(view, strategy).await?;
         self.recovery
@@ -390,7 +386,9 @@ where
         creation: &CalendarEventCreation,
     ) -> Result<CalendarEventCreationOutcome, CalendarWorkflowError> {
         self.ensure_account(creation.view().account_id())?;
-        let _reservation = reserve_account(&self.reservations, creation.view().account_id())
+        let _reservation = self
+            .reservations
+            .reserve_account(creation.view().account_id())
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(creation.view()).await?;
         self.cache.stage_event_creation(creation).await?;
@@ -439,7 +437,9 @@ where
         creation: &CalendarEventCreation,
     ) -> Result<(), CalendarWorkflowError> {
         self.ensure_account(creation.view().account_id())?;
-        let _reservation = reserve_calendar_view(&self.reservations, creation.view())
+        let _reservation = self
+            .reservations
+            .reserve_calendar_view(creation.view())
             .map_err(CalendarWorkflowError::from)?;
         self.cache.mark_event_creation_rejected(creation).await?;
         self.cache.discard_event_creation(creation).await?;
@@ -470,8 +470,10 @@ where
     ) -> Result<EditableCalendarEvent, CalendarWorkflowError> {
         let account_id = event.reference().account_id();
         self.ensure_account(account_id)?;
-        let _reservation =
-            reserve_account(&self.reservations, account_id).map_err(CalendarWorkflowError::from)?;
+        let _reservation = self
+            .reservations
+            .reserve_account(account_id)
+            .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(event.reference()).await?;
         let editable = self.provider.editable_event(event).await?;
         if editable.occurrence().reference() != event.reference()
@@ -512,7 +514,9 @@ where
         let view = update.source().occurrence().reference();
         self.ensure_account(view.account_id())?;
         let account_id = view.account_id().clone();
-        let _reservation = reserve_account(&self.reservations, &account_id)
+        let _reservation = self
+            .reservations
+            .reserve_account(&account_id)
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
         self.cache.mark_calendar_write_sync_required(view).await?;
@@ -569,7 +573,9 @@ where
         let view = event.occurrence().reference();
         self.ensure_account(view.account_id())?;
         let account_id = view.account_id().clone();
-        let _reservation = reserve_account(&self.reservations, &account_id)
+        let _reservation = self
+            .reservations
+            .reserve_account(&account_id)
             .map_err(CalendarWorkflowError::from)?;
         self.ensure_calendar_write_ready(view).await?;
         self.cache.mark_calendar_write_sync_required(view).await?;

@@ -4,7 +4,7 @@ use einfach_mail_domain::{
     AccountId, MailDraft, MailReplyDraft, MailSendOperationId, PendingMailSend,
 };
 
-use crate::shared::reservations::{AccountReservationError, OperationReservation, reserve_account};
+use crate::shared::reservations::{AccountReservationError, OperationReservation};
 use crate::{MailCache, MailCacheError, MailProvider, MailSendProviderError};
 
 use super::{
@@ -210,6 +210,6 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         &self,
         account: &AccountId,
     ) -> Result<OperationReservation, AccountReservationError> {
-        reserve_account(&self.reservations, account)
+        self.reservations.reserve_account(account)
     }
 }
