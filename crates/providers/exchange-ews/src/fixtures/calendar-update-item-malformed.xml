@@ -1,0 +1,4 @@
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">
+  <s:Body><m:UpdateItemResponse><m:ResponseMessages></m:UpdateItemResponse></s:Body>
+</s:Envelope>

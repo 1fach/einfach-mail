@@ -44,6 +44,8 @@ const EWS_MESSAGES_ELEMENT_NAMES: &[&[u8]] = &[
     b"CreateItemResponseMessage",
     b"FindItemResponseMessage",
     b"GetItemResponseMessage",
+    b"UpdateItemResponse",
+    b"UpdateItemResponseMessage",
     b"RootFolder",
     b"ResponseCode",
     b"MessageText",
@@ -119,6 +121,7 @@ const CALENDAR_UNQUALIFIED_ATTRIBUTE_NAMES: &[&[u8]] = &[
 mod create;
 mod item;
 mod recovery;
+mod update;
 
 const CALENDAR_FIELDS: [&str; 8] = [
     "item:Subject",
@@ -382,9 +385,11 @@ fn expected_calendar_namespace(
 ) -> Result<Option<&'static [u8]>, EwsError> {
     let expected = match local_name {
         b"Items" => Some(match parent {
-            Some(b"GetItemResponseMessage" | b"CreateItemResponseMessage") => {
-                EWS_MESSAGES_NAMESPACE
-            }
+            Some(
+                b"GetItemResponseMessage"
+                | b"CreateItemResponseMessage"
+                | b"UpdateItemResponseMessage",
+            ) => EWS_MESSAGES_NAMESPACE,
             Some(b"RootFolder") => EWS_TYPES_NAMESPACE,
             _ => return Err(EwsError::InvalidResponse),
         }),
@@ -760,22 +765,45 @@ where
 
     fn load_versioned_event(
         &self,
-        _event: &einfach_mail_domain::CalendarOccurrence,
+        event: &einfach_mail_domain::CalendarOccurrence,
     ) -> impl Future<
         Output = Result<einfach_mail_domain::VersionedCalendarEvent, CalendarOperationError>,
     > + Send
     + '_ {
-        std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
+        let event = event.clone();
+        let session_store = Arc::clone(&self.session);
+        async move {
+            let session =
+                session_for_calendar(&session_store, event.reference().account_id()).await?;
+            worker::run(move |_cancellation: CancellationToken| async move {
+                let sequence = session.transport.sequence().await;
+                update::load_versioned_event(&sequence, &event).await
+            })
+            .await
+        }
     }
 
     fn update_event(
         &self,
-        _update: &einfach_mail_domain::CalendarEventUpdate,
+        update: &einfach_mail_domain::CalendarEventUpdate,
     ) -> impl Future<
         Output = Result<einfach_mail_domain::CalendarOccurrence, CalendarOperationError>,
     > + Send
     + '_ {
-        std::future::ready(Err(CalendarOperationError::UnsupportedOperation))
+        let update = update.clone();
+        let session_store = Arc::clone(&self.session);
+        async move {
+            let session = session_for_calendar(
+                &session_store,
+                update.source().occurrence().reference().account_id(),
+            )
+            .await?;
+            worker::run(move |_cancellation: CancellationToken| async move {
+                let sequence = session.transport.sequence().await;
+                update::update_event(&sequence, &update).await
+            })
+            .await
+        }
     }
 
     fn delete_event(
