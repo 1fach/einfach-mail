@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Header/><s:Body>
+  <m:DeleteItemResponse xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">
+    <m:ResponseMessages><m:DeleteItemResponseMessage ResponseClass="Success">
+      <m:ResponseCode>NoError</m:ResponseCode>
+    </m:ResponseMessages>
+  </m:DeleteItemResponse>
+</s:Body></s:Envelope>

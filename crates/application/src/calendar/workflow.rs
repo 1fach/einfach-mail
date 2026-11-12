@@ -42,7 +42,7 @@ pub enum CalendarWorkflowError {
     /// The provider returned an event that does not match the staged creation.
     #[error("the calendar service returned an unexpected created event")]
     InvalidConfirmation,
-    /// Graph did not return the event and values submitted for update.
+    /// The provider did not return the event and values submitted for update.
     #[error("the calendar service returned an unexpected updated event")]
     InvalidUpdateConfirmation,
     /// The provider returned a versioned event for another event or account.
@@ -147,14 +147,14 @@ pub enum CalendarEventCreationOutcome {
     },
 }
 
-/// The Graph update was confirmed and whether the encrypted cache committed it.
+/// The provider update was confirmed and whether the encrypted cache committed it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CalendarEventUpdateOutcome {
-    /// Graph confirmed the event and the encrypted cache committed it.
+    /// The provider confirmed the event and the encrypted cache committed it.
     Cached(CalendarOccurrence),
-    /// Graph confirmed the event, but the encrypted cache still needs recovery.
+    /// The provider confirmed the event, but the encrypted cache still needs recovery.
     ConfirmedButNotCached {
-        /// The event returned by Graph.
+        /// The event returned by the provider.
         event: CalendarOccurrence,
         /// The user-safe category returned by the cache boundary.
         cache_error: CalendarCacheError,
@@ -164,9 +164,9 @@ pub enum CalendarEventUpdateOutcome {
 /// The result of a confirmed event deletion and its cache update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CalendarEventDeletionOutcome {
-    /// Graph confirmed deletion and the encrypted cache removed every copy.
+    /// The provider confirmed deletion and the encrypted cache removed every copy.
     Deleted,
-    /// Graph confirmed deletion, but the encrypted cache still needs recovery.
+    /// The provider confirmed deletion, but the encrypted cache still needs recovery.
     DeletedButNotCached {
         /// The user-safe category returned by the cache boundary.
         cache_error: CalendarCacheError,
@@ -515,7 +515,7 @@ where
     /// [`CalendarWorkflowError::StateUnavailable`] when the account reservation
     /// or shared recovery state cannot be accessed,
     /// [`CalendarWorkflowError::InvalidUpdateConfirmation`] when the provider
-    /// returns different event values. A cache failure after Graph confirmation
+    /// returns different event values. A cache failure after provider confirmation
     /// is returned as [`CalendarEventUpdateOutcome::ConfirmedButNotCached`].
     pub async fn update_event(
         &self,
@@ -557,7 +557,7 @@ where
 
     /// Deletes one checked event and removes every cached account copy atomically.
     ///
-    /// The account reservation covers the final provider check, Graph request,
+    /// The account reservation covers the final provider check, provider request,
     /// and cache transaction. A changed event, uncertain result, or cache
     /// failure requires successful syncs for previously synchronized account
     /// views before another calendar write can start. Dropping this future
@@ -573,7 +573,7 @@ where
     /// when the source view has not completed a sync or another account view
     /// needs recovery, or [`CalendarWorkflowError::StateUnavailable`] when the
     /// account reservation or shared recovery state cannot be accessed. A cache
-    /// failure after Graph confirms deletion is returned as
+    /// failure after the provider confirms deletion is returned as
     /// [`CalendarEventDeletionOutcome::DeletedButNotCached`].
     pub async fn delete_event(
         &self,

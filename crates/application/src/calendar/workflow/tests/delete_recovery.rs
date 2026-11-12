@@ -475,7 +475,7 @@ fn canceled_event_deletion_requires_sync_before_another_write() {
 }
 
 #[test]
-fn reopened_workflow_requires_sync_for_every_previously_synced_view() {
+fn reopened_workflow_reconciles_a_committed_delete_after_response_timeout() {
     smol::block_on(async {
         let view = view();
         let other_view = view_for_week(14);
@@ -507,21 +507,24 @@ fn reopened_workflow_requires_sync_for_every_previously_synced_view() {
 
         let restarted = CalendarWorkflow::new(workflow_account_id(), provider.clone(), cache);
         provider.push_page(Ok(response(
-            Vec::new(),
+            vec![CalendarDeltaChange::Removed {
+                id: event.id().clone(),
+            }],
             CalendarDeltaProgress::Complete(link("restart-delete-source-reconciled")),
         )));
         restarted
             .sync_view(&view)
             .await
             .expect("the source view completes its post-restart sync");
+        let source_snapshot = restarted
+            .load_cached_view(&view)
+            .await
+            .expect("the source view remains readable");
         assert_eq!(
-            restarted
-                .load_cached_view(&view)
-                .await
-                .expect("the source view remains readable")
-                .write_readiness(),
+            source_snapshot.write_readiness(),
             CalendarWriteReadiness::AccountSyncRequired
         );
+        assert!(source_snapshot.events().is_empty());
         assert_eq!(
             restarted.create_event(&creation(view.clone())).await,
             Err(CalendarWorkflowError::CalendarWriteSyncRequired)
@@ -535,17 +538,26 @@ fn reopened_workflow_requires_sync_for_every_previously_synced_view() {
             .sync_view(&other_view)
             .await
             .expect("the other previously synced view completes its post-restart sync");
+        let reconciled_snapshot = restarted
+            .load_cached_view(&view)
+            .await
+            .expect("all account views are reconciled");
         assert_eq!(
-            restarted
-                .load_cached_view(&view)
-                .await
-                .expect("all account views are reconciled")
-                .write_readiness(),
+            reconciled_snapshot.write_readiness(),
             CalendarWriteReadiness::Ready
         );
+        assert!(reconciled_snapshot.events().is_empty());
         assert!(matches!(
             restarted.create_event(&creation(view)).await,
             Ok(CalendarEventCreationOutcome::Cached(_))
         ));
+        assert_eq!(
+            *provider
+                .deletion_calls
+                .lock()
+                .expect("synthetic deletion counter mutex is not poisoned"),
+            1,
+            "a committed deletion with a lost response is never replayed"
+        );
     });
 }
