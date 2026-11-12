@@ -57,7 +57,7 @@ where
         let account_id = account_id.clone();
         let session_store = Arc::clone(&self.session);
         async move {
-            let session = session_for_mail(&session_store, account_id).await?;
+            let session = session_for_mail(&session_store, &account_id).await?;
             worker::run(move |_cancellation: CancellationToken| async move {
                 collect_folders(&session)
                     .await
@@ -76,7 +76,7 @@ where
         let folder = folder.clone();
         let session_store = Arc::clone(&self.session);
         async move {
-            let session = session_for_mail(&session_store, folder.account_id().clone()).await?;
+            let session = session_for_mail(&session_store, folder.account_id()).await?;
             worker::run(move |_cancellation: CancellationToken| async move {
                 let request_state = match request {
                     MessageDeltaRequest::Initial => None,
@@ -116,7 +116,7 @@ where
         folder: &'a FolderReference,
         message_id: &'a MessageId,
     ) -> Result<MessageBody, MailOperationError> {
-        let session = session_for_mail(&self.session, folder.account_id().clone()).await?;
+        let session = session_for_mail(&self.session, folder.account_id()).await?;
         let message_id = message_id.clone();
         worker::run(move |_cancellation: CancellationToken| async move {
             let request = GetItem {
@@ -176,7 +176,7 @@ where
         let message_id = message_id.clone();
         let session_store = Arc::clone(&self.session);
         async move {
-            let session = session_for_mail(&session_store, folder.account_id().clone()).await?;
+            let session = session_for_mail(&session_store, folder.account_id()).await?;
             if !session
                 .profile
                 .capabilities()

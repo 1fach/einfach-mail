@@ -23,14 +23,14 @@ pub(super) struct EwsSession {
 
 pub(super) async fn session_for_mail(
     sessions: &RwLock<Option<Arc<EwsSession>>>,
-    account_id: AccountId,
+    account_id: &AccountId,
 ) -> Result<Arc<EwsSession>, MailOperationError> {
     let session = sessions
         .read()
         .await
         .clone()
         .ok_or(MailOperationError::SignInRequired)?;
-    if session.profile.id() != &account_id {
+    if session.profile.id() != account_id {
         return Err(MailOperationError::AccountMismatch);
     }
     Ok(session)
