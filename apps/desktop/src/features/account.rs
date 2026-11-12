@@ -240,6 +240,8 @@ impl<P: AccountProvider + 'static> AccountView<P> {
     fn apply_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mode = self.appearance_preference.theme_mode(window.appearance());
         gpui_kit::component::Theme::change(mode, Some(window), cx);
+        // GPUI Kit halves the ring opacity. The primary color keeps it above 3:1.
+        gpui_kit::component::Theme::update(cx, |theme| theme.ring = theme.primary);
     }
 
     fn change_appearance(

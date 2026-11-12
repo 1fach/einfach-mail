@@ -1,7 +1,7 @@
 use std::fs;
 
-use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{Modifiers, Role, TestAppContext, VisualTestContext};
+use gpui_kit::component::{ColorTokens, Theme, ThemeMode};
+use gpui_kit::{Entity, Hsla, Modifiers, Role, TestAppContext, VisualTestContext, px, size};
 use tempfile::tempdir;
 
 use crate::features::{AppearancePreference, AppearanceSettingsNotice, AppearanceSettingsStore};
@@ -184,7 +184,111 @@ fn appearance_save_failure_keeps_the_session_theme_and_reports_the_failure(
         context.cx.update(|cx| Theme::global(cx).mode),
         ThemeMode::Dark
     );
+    let colors = context
+        .cx
+        .update(|cx| Theme::global(cx).semantic_tokens().colors);
+    assert_settings_text_contrast(colors);
     assert!(context.debug_bounds("settings-appearance-notice").is_some());
+}
+
+#[gpui_kit::test]
+fn settings_appearance_keeps_text_contrast_focus_and_layout_across_themes(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let directory = tempdir().expect("temporary settings directory is created");
+    let store = AppearanceSettingsStore::at_path(directory.path().join("preferences.json"));
+    let (view, context) = settings_view(cx, store);
+
+    draw_account_view(context);
+    click(context, "nav-settings");
+    focus_settings_radio(&view, context);
+
+    let light_layouts = settings_layouts_for_theme(context, "Light", ThemeMode::Light);
+    let dark_layouts = settings_layouts_for_theme(context, "Dark", ThemeMode::Dark);
+    assert_layouts_stable_across_themes(light_layouts, dark_layouts);
+}
+
+const SETTINGS_VIEWPORT_WIDTHS: [f32; 2] = [1280., 640.];
+
+#[derive(Debug, PartialEq)]
+struct SettingsLayout {
+    window: gpui_kit::Bounds<gpui_kit::Pixels>,
+    appearance_group: gpui_kit::Bounds<gpui_kit::Pixels>,
+    radios: Vec<gpui_kit::Bounds<gpui_kit::Pixels>>,
+}
+
+fn settings_view(
+    cx: &mut TestAppContext,
+    store: AppearanceSettingsStore,
+) -> (Entity<AccountView<TestProvider>>, &mut VisualTestContext) {
+    let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
+    let factory = unused_account_session_factory();
+    cx.add_window_view(move |window, cx| {
+        AccountView::new_with_appearance_store_for_test(
+            Ok(AccountServices::new(workflow, factory)),
+            Ok(store),
+            window,
+            cx,
+        )
+    })
+}
+
+fn focus_settings_radio(view: &Entity<AccountView<TestProvider>>, context: &mut VisualTestContext) {
+    let settings_focus = context.cx.update(|cx| {
+        view.read(cx)
+            .test_navigation_focus(AccountViewTestSection::Settings)
+    });
+    context.update(|window, cx| {
+        settings_focus.focus(window, cx);
+        assert!(settings_focus.is_focused(window));
+        window.focus_next(cx);
+    });
+    draw_account_view(context);
+    assert_settings_radio_is_focused(context);
+}
+
+fn settings_layouts_for_theme(
+    context: &mut VisualTestContext,
+    label: &str,
+    expected_mode: ThemeMode,
+) -> [SettingsLayout; 2] {
+    click_radio(context, label);
+    assert_settings_theme_accessibility(context, expected_mode);
+
+    SETTINGS_VIEWPORT_WIDTHS.map(|width| {
+        context.simulate_resize(size(px(width), px(720.)));
+        context.run_until_parked();
+        draw_account_view(context);
+        assert_settings_layout_fits(context);
+        settings_layout(context)
+    })
+}
+
+fn assert_settings_theme_accessibility(context: &mut VisualTestContext, expected_mode: ThemeMode) {
+    assert_eq!(
+        context.cx.update(|cx| Theme::global(cx).mode),
+        expected_mode
+    );
+    let colors = context
+        .cx
+        .update(|cx| Theme::global(cx).semantic_tokens().colors);
+    assert_settings_text_contrast(colors);
+    assert!(context.cx.update(|cx| Theme::global(cx).focus_ring));
+    assert_settings_radio_is_focused(context);
+}
+
+fn assert_layouts_stable_across_themes(
+    light_layouts: [SettingsLayout; 2],
+    dark_layouts: [SettingsLayout; 2],
+) {
+    for (width, (light, dark)) in SETTINGS_VIEWPORT_WIDTHS
+        .into_iter()
+        .zip(light_layouts.into_iter().zip(dark_layouts))
+    {
+        assert_eq!(
+            light, dark,
+            "changing themes does not move Settings controls at {width}px"
+        );
+    }
 }
 
 fn click_radio(context: &mut VisualTestContext, label: &str) {
@@ -214,4 +318,108 @@ fn assert_appearance_radio_is_selected(context: &mut VisualTestContext, label: &
             .collect::<Vec<_>>(),
         ["System", "Light", "Dark"]
     );
+}
+
+fn assert_settings_radio_is_focused(context: &mut VisualTestContext) {
+    let focused_count = context.update(|window, _| {
+        window
+            .find_all_by_role(Role::RadioButton)
+            .iter()
+            .filter(|radio| radio.focused() == Some(true))
+            .count()
+    });
+    assert_eq!(focused_count, 1, "Tab reaches one focused appearance radio");
+}
+
+fn assert_settings_layout_fits(context: &mut VisualTestContext) {
+    let layout = settings_layout(context);
+    let group = layout.appearance_group;
+    assert!(group.size.width > px(0.) && group.size.height > px(0.));
+    assert!(group.left() >= layout.window.left());
+    assert!(group.right() <= layout.window.right());
+    assert!(group.top() >= layout.window.top());
+    assert!(group.bottom() <= layout.window.bottom());
+    assert_eq!(layout.radios.len(), 3);
+    for bounds in layout.radios {
+        assert!(bounds.left() > group.left());
+        assert!(bounds.right() < group.right());
+        assert!(bounds.top() > group.top());
+        assert!(bounds.bottom() < group.bottom());
+    }
+}
+
+fn settings_layout(context: &mut VisualTestContext) -> SettingsLayout {
+    let window = context.update(|window, _| window.bounds());
+    let appearance_group = context
+        .debug_bounds("settings-appearance-group")
+        .expect("the appearance group lays out");
+    let radios = context.update(|window, _| {
+        window
+            .find_all_by_role(Role::RadioButton)
+            .into_iter()
+            .map(|radio| radio.bounds())
+            .collect()
+    });
+    SettingsLayout {
+        window,
+        appearance_group,
+        radios,
+    }
+}
+
+fn assert_settings_text_contrast(colors: ColorTokens) {
+    for (label, foreground, background) in [
+        ("primary text/page", colors.foreground, colors.background),
+        (
+            "primary text/card",
+            colors.surface_foreground,
+            colors.surface,
+        ),
+        (
+            "muted text/page",
+            colors.muted_foreground,
+            colors.background,
+        ),
+        ("muted text/card", colors.muted_foreground, colors.surface),
+    ] {
+        assert_contrast_ratio(foreground, background, 4.5, label);
+    }
+    assert_contrast_ratio(colors.destructive, colors.background, 3.0, "error marker");
+    assert_contrast_ratio(
+        colors.ring.alpha(0.5),
+        colors.surface,
+        3.0,
+        "focused control ring",
+    );
+}
+
+fn assert_contrast_ratio(foreground: Hsla, background: Hsla, minimum: f32, label: &str) {
+    let ratio = contrast_ratio(foreground, background);
+    assert!(
+        ratio >= minimum,
+        "{label} has {ratio:.2}:1 contrast, below the {minimum}:1 minimum"
+    );
+}
+
+fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
+    let background_rgb = background.to_rgb();
+    let foreground_rgb = background_rgb.blend(foreground.to_rgb());
+    let foreground_luminance =
+        relative_luminance(foreground_rgb.r, foreground_rgb.g, foreground_rgb.b);
+    let background_luminance =
+        relative_luminance(background_rgb.r, background_rgb.g, background_rgb.b);
+    let lighter = foreground_luminance.max(background_luminance);
+    let darker = foreground_luminance.min(background_luminance);
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+fn relative_luminance(red: f32, green: f32, blue: f32) -> f32 {
+    let linearize = |channel: f32| {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linearize(red) + 0.7152 * linearize(green) + 0.0722 * linearize(blue)
 }
