@@ -123,6 +123,7 @@ fn appearance_group_frame(
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
     div()
         .id("settings-appearance-group")
+        .debug_selector(|| "settings-appearance-group".to_owned())
         .w_full()
         .role(Role::Group)
         .aria_label("Appearance")
@@ -161,7 +162,10 @@ fn render_notice(notice: AppearanceSettingsNotice, colors: ColorTokens) -> impl 
         .debug_selector(|| "settings-appearance-notice".to_owned())
         .role(Role::Status)
         .text_sm()
-        .text_color(colors.destructive);
+        .text_color(colors.foreground)
+        .border_l_2()
+        .border_color(colors.destructive)
+        .pl_2();
     #[cfg(test)]
     let notice = notice.test_support();
     notice.child(message)
