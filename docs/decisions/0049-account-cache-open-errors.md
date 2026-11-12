@@ -12,7 +12,7 @@ ADR 0046 gives account-wide cache removal its own port and error type. Opening t
 
 ## Decision
 
-Define `AccountCacheOpenError` in the application crate for failures opening the shared account cache. Use it as the result error for `AccountCacheFactory::open_for_account` and `AccountSessionFactory::open_session`. Keep `MailCacheError` for mail operations. The persistence adapter maps cache initialization failures to the account-scoped error at its boundary, and AccountView presents the same account-cache recovery message for Mail and Calendar.
+Define `AccountCacheOpenError` in the application crate for failures opening the shared account cache. Use it as the result error for `AccountCacheFactory::open_for_account` and `AccountSessionFactory::open_session`. Keep `MailCacheError` for mail operations. The persistence adapter maps cache initialization failures to the account-scoped error at its boundary, and AccountView presents the same account-cache recovery message for Mail and Calendar. Persistence uses a crate-private lifecycle error for shared path, key, lock, file, and initialization failures, then translates it at the account-open or account-removal boundary.
 
 ## Alternatives
 
@@ -25,6 +25,7 @@ Define `AccountCacheOpenError` in the application crate for failures opening the
 ## Consequences
 
 - Account-wide cache opening and mail operations have separate error contracts.
+- Shared persistence lifecycle helpers do not depend on a feature-specific cache error; account adapters translate their failures without changing the application-visible variants.
 - Mail and Calendar show account-level guidance when the shared cache cannot open.
 - This changes no stored data, cache-key behavior, Graph request, or cache lifecycle ordering.
 - Implementations and tests of the public account-session ports must handle the new error type.

@@ -14,7 +14,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::shared::{
-    schema,
+    CacheLifecycleError, schema,
     store::{
         CacheFailure, CacheResult, SqliteAccountCache,
         time::{system_time_from_parts, system_time_parts},
@@ -670,7 +670,10 @@ impl MailCache for SqliteAccountCache {
                         Some(source.message_id().as_str().to_owned()),
                     ),
                 };
-            if !database_identity.matches_path(&database_path)? {
+            if !database_identity
+                .matches_path(&database_path)
+                .map_err(CacheLifecycleError::into_mail_cache_error)?
+            {
                 return Err(MailCacheError::Unavailable);
             }
             client
