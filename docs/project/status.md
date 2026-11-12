@@ -58,7 +58,9 @@ Issue #324's Account split merged in [PR #331](https://github.com/1fach/einfach-
 
 Issue [#345](https://github.com/1fach/einfach-mail/issues/345) moves the shared sync-age label from the removed desktop `shared` module into `components`, where Mail and Calendar both use it. The Rust 1.95 Linux gate passed. `cargo +1.95.0 test --workspace --locked -- --list` returned the same 511 test names before and after the move; #341 records that baseline count.
 
-Issue [#346](https://github.com/1fach/einfach-mail/issues/346) applies the `foo.rs` and `foo/` convention to the Graph and EWS providers with nine exact file moves. The Rust 1.95 Linux gate passed, and all 511 workspace test names match the baseline. Complete #347, keep #348 last, then start [#356](https://github.com/1fach/einfach-mail/issues/356) after #336 closes.
+Issue [#346](https://github.com/1fach/einfach-mail/issues/346) applies the `foo.rs` and `foo/` convention to the Graph and EWS providers with nine exact file moves. The Rust 1.95 Linux gate passed, and all 511 workspace test names match the baseline.
+
+Issue [#347](https://github.com/1fach/einfach-mail/issues/347) confirms ADR 0061's account-router decision. [PR #349](https://github.com/1fach/einfach-mail/pull/349) records provider selection in one `crates/providers/account-router/src/lib.rs`; the crate still exports `AccountProviderRouter` from that file. No source change was needed. Finish #336 with #348, then start [#356](https://github.com/1fach/einfach-mail/issues/356) after #336 closes.
 
 ## Active risks
 
