@@ -15,6 +15,7 @@ fn prefers_display_name_for_the_account_label() {
         Some("  Ada Example  ".to_owned()),
         Some("ada@example.test".to_owned()),
         Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("profile includes display values");
 
@@ -36,6 +37,7 @@ fn falls_back_to_mailbox_then_user_principal_name() {
         None,
         Some("ada@example.test".to_owned()),
         Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("mailbox identifies the account");
     let upn_profile = AccountProfile::try_new(
@@ -43,6 +45,7 @@ fn falls_back_to_mailbox_then_user_principal_name() {
         None,
         None,
         Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("user principal name identifies the account");
 
@@ -52,7 +55,13 @@ fn falls_back_to_mailbox_then_user_principal_name() {
 
 #[test]
 fn rejects_profiles_without_a_user_facing_identity() {
-    let profile_result = AccountProfile::try_new(account_id(), Some("  ".to_owned()), None, None);
+    let profile_result = AccountProfile::try_new(
+        account_id(),
+        Some("  ".to_owned()),
+        None,
+        None,
+        AccountCapabilities::full_access(),
+    );
 
     assert_eq!(profile_result, Err(MissingAccountLabel));
 }
@@ -66,6 +75,7 @@ fn account_profile_debug_output_redacts_identity_values() {
         Some("account-display-marker".to_owned()),
         Some("mailbox-address-marker@example.test".to_owned()),
         Some("user-principal-marker@example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic account profile is valid");
 
@@ -83,7 +93,7 @@ fn account_profile_debug_output_redacts_identity_values() {
 
 #[test]
 fn profile_retains_read_only_mail_capabilities() {
-    let profile = AccountProfile::try_new_with_capabilities(
+    let profile = AccountProfile::try_new(
         account_id(),
         None,
         Some("ada@example.test".to_owned()),

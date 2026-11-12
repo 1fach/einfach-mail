@@ -246,7 +246,8 @@ impl fmt::Debug for AccountProfile {
 }
 
 impl AccountProfile {
-    /// Creates an account profile with at least one user-facing identity value.
+    /// Creates a profile with provider-selected capabilities and at least one
+    /// user-facing identity value.
     ///
     /// Empty or whitespace-only optional values are discarded. The mailbox
     /// address remains separate from the sign-in user principal name.
@@ -255,29 +256,6 @@ impl AccountProfile {
     ///
     /// Returns [`MissingAccountLabel`] when all display values are empty.
     pub fn try_new(
-        id: AccountId,
-        display_name: Option<String>,
-        mailbox_address: Option<String>,
-        user_principal_name: Option<String>,
-    ) -> Result<Self, MissingAccountLabel> {
-        Self::try_new_with_capabilities(
-            id,
-            display_name,
-            mailbox_address,
-            user_principal_name,
-            AccountCapabilities::full_access(),
-        )
-    }
-
-    /// Creates an account profile with explicit mail and calendar capabilities.
-    ///
-    /// Empty or whitespace-only optional values are discarded. The mailbox
-    /// address remains separate from the sign-in user principal name.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MissingAccountLabel`] when all display values are empty.
-    pub fn try_new_with_capabilities(
         id: AccountId,
         display_name: Option<String>,
         mailbox_address: Option<String>,

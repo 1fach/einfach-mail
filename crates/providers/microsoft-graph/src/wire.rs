@@ -8,7 +8,7 @@ use crate::{
     error::GraphError,
     transport::{GraphAuthority, GraphReadOperation, GraphTransportHandle},
 };
-use einfach_mail_domain::{AccountId, AccountProfile};
+use einfach_mail_domain::{AccountCapabilities, AccountId, AccountProfile};
 
 mod calendar;
 mod mail;
@@ -69,6 +69,7 @@ impl TryFrom<GraphUserProfile> for AccountProfile {
             profile.display_name,
             profile.mail,
             profile.user_principal_name,
+            AccountCapabilities::full_access(),
         )
         .map_err(|_| GraphError::InvalidRecord)
     }

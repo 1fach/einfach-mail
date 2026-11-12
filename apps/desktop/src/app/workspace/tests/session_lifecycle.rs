@@ -87,6 +87,7 @@ fn stale_content_open_failure_does_not_replace_a_reconnected_account(cx: &mut Te
         Some("Lin Example".to_owned()),
         Some("lin@example.test".to_owned()),
         Some("lin@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("replacement account profile is valid");
     context.cx.update(|cx| {
@@ -134,6 +135,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
         Some("Ada Example".to_owned()),
         Some("ada@example.test".to_owned()),
         Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic account profile is valid");
     let profile_b = AccountProfile::try_new(
@@ -141,6 +143,7 @@ fn restore_to_another_account_opens_and_removes_its_session(cx: &mut TestAppCont
         Some("Lin Example".to_owned()),
         Some("lin@example.test".to_owned()),
         Some("lin@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic account profile is valid");
     let session_a_removals = Arc::new(Mutex::new(Vec::new()));

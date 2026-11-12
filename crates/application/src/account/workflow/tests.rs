@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use einfach_mail_domain::{AccountId, AccountProfile};
+use einfach_mail_domain::{AccountCapabilities, AccountId, AccountProfile};
 
 use crate::account::{
     AccountConnectionRequest, AccountOperationCancellation, AccountOperationError, AccountProvider,
@@ -73,6 +73,7 @@ fn synthetic_profile() -> AccountProfile {
         Some("Ada Example".to_owned()),
         None,
         Some("ada@example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic identity is available")
 }

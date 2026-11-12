@@ -18,6 +18,8 @@ Issue [#274](https://github.com/1fach/einfach-mail/issues/274) tracks the opt-in
 
 The engineering-health refactor under [issue #282](https://github.com/1fach/einfach-mail/issues/282) reached `main` through PR #275 at `e19fd37`. [PR #301](https://github.com/1fach/einfach-mail/pull/301) records ADR 0061 and the reviewed path map. [PR #302](https://github.com/1fach/einfach-mail/pull/302) moved the domain modules and tests; the ordered #285 application subissues #303–#309 and later persistence, provider, and desktop splits are in the merged stack. All eight #282 subissues are now closed. At the repository owner's direction, #290 replaced its screenshot criterion with headless GPUI UI integration evidence for Account, Mail, Calendar, both composers, and their keyboard paths. The refactor's full Linux local gate passed on PR #331's exact head, including synthetic-data desktop tests. PR #334's updated folder-navigation test and desktop Clippy also passed locally. No native window was launched. Keep the integrated real-window review under #296 and the named-compositor review under #274; #273 has separate headless theme coverage.
 
+Issue [#418](https://github.com/1fach/einfach-mail/issues/418) requires providers to pass an explicit `AccountCapabilities` value to `AccountProfile::try_new`. Graph retains its full mail and calendar actions and mail permission review. EWS retains its version-gated read-state action and view-only calendar access. The Rust 1.95 Linux local gate passed: 566 tests passed across 16 suites, 3 system-session tests were ignored, and the 569-test workspace inventory is intact. No live provider verification ran.
+
 Issue #272's account details and #280's setup refinements are included in PR #275 through PRs #277 and #281. PR #298 was closed as superseded after confirming its behavior and headless coverage in the current branch. Issue #296 tracks the integrated real-window review.
 
 M7 Exchange Server EWS support provides a Linux read-only mail baseline and keeps Exchange Online on Microsoft Graph. ADR 0053 records the accepted provider boundary, authentication, TLS, and account-capability decisions. Linux Autodiscover merged into `main` in [PR #261](https://github.com/1fach/einfach-mail/pull/261) and remains tracked in [issue #258](https://github.com/1fach/einfach-mail/issues/258) for live verification.
@@ -115,7 +117,7 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 
 ## Next actions
 
-1. Continue the post-#356 cleanup with issues [#418](https://github.com/1fach/einfach-mail/issues/418)–[#420](https://github.com/1fach/einfach-mail/issues/420). Implement #418 next, then #419. Plan the workspace ownership change in #420 before moving code. Issues #416 and #417 are complete.
+1. Continue the post-#356 cleanup with issue [#419](https://github.com/1fach/einfach-mail/issues/419). Plan the workspace ownership change in [#420](https://github.com/1fach/einfach-mail/issues/420) before moving code. Issues #416–#418 are complete.
 2. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux. Keep #274's named-compositor check separate.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the remaining SQLCipher Git pin under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when released async and migration crates support rusqlite 0.42.

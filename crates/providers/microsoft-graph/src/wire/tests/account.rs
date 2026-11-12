@@ -8,8 +8,10 @@ fn graph_profile_advertises_all_current_calendar_actions() {
     })
     .expect("synthetic Graph profile is valid");
 
-    let calendar = profile.capabilities().calendar();
-    assert_eq!(calendar, CalendarCapabilities::full_access());
+    let capabilities = profile.capabilities();
+    assert!(capabilities.can_review_mail_write_permission());
+    assert_eq!(capabilities.mail(), MailCapabilities::full_access());
+    assert_eq!(capabilities.calendar(), CalendarCapabilities::full_access());
 }
 
 #[tokio::test]
