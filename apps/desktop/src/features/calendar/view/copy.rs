@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use crate::shared::relative_age_label;
+use crate::components::relative_age_label;
 use einfach_mail_application::{
     CalendarOperationError, CalendarWorkflowError, CalendarWriteReadiness,
 };

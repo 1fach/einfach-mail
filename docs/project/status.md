@@ -56,6 +56,8 @@ PR #328 merged issue #278's compact Mail layout into `feat/mail-list-resizing` a
 
 Issue #324's Account split merged in [PR #331](https://github.com/1fach/einfach-mail/pull/331) into `feat/mail-list-resizing` at `dd7656e037da5fb89338083ead9c8a534cabe3a8`. The root workspace retains `AccountSession`, navigation, and view lifecycle. All 498 test function identifiers match the post-#272/#280 baseline; module-qualified paths reflect the moves. Account production files and test files stay within the size limits. The full Linux local gate passed on PR head `0585302611c4a905c21b9dc3a8855ff003a47ce0` on 2026-11-11 with localhost access for synthetic EWS HTTP mocks. Review found no behavior regression. GitHub Actions did not run per repository-owner direction. The initial Noctalia capture covered only the isolated Account restore fallback. Issue #290 later closed after its screenshot criterion was replaced with synthetic headless GPUI evidence. Issue #282's refactor acceptance is complete; the remaining native-window review is tracked under #296.
 
+Issue [#345](https://github.com/1fach/einfach-mail/issues/345) moves the shared sync-age label from the removed desktop `shared` module into `components`, where Mail and Calendar both use it. The Rust 1.95 Linux gate passed. `cargo +1.95.0 test --workspace --locked -- --list` returned the same 511 test names before and after the move; #341 records that baseline count. Complete #346 and #347, keep #348 last, then start [#356](https://github.com/1fach/einfach-mail/issues/356) after #336 closes.
+
 ## Active risks
 
 - GitHub Actions are disabled because the repository has no compute quota. PRs #275, #276, #277, #301, #320, #328, and #331 have no Actions runs; their Linux-local checks are recorded in their PRs. The application source, manifests, lockfile, and local-check scripts at PR #275 head `16c9ce9` match the locally checked code tree `d98fc69`. PR #331 merged after its local gate passed.
@@ -77,7 +79,7 @@ Issue #324's Account split merged in [PR #331](https://github.com/1fach/einfach-
 ## Next actions
 
 1. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux; keep #273's theme review and #274's named-compositor check open.
-2. Complete the remaining behavior-preserving module-tree work tracked in issue [#336](https://github.com/1fach/einfach-mail/issues/336), then close it after #348 lands.
+2. Complete the remaining behavior-preserving module-tree work tracked in issue [#336](https://github.com/1fach/einfach-mail/issues/336), with #348 last, then start refactor [#356](https://github.com/1fach/einfach-mail/issues/356).
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
