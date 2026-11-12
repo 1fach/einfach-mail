@@ -1,4 +1,4 @@
-use einfach_mail_application::{MailOperationError, MailWorkflowError, WellKnownMailFolder};
+use einfach_mail_application::{MailWorkflowError, WellKnownMailFolder};
 use einfach_mail_domain::{FolderReference, MailAction, MailFolder, MessageId, ReadState};
 use gpui_kit::component::{
     ActiveTheme, Disableable,
@@ -11,14 +11,10 @@ use gpui_kit::{
     AnyElement, Context, Div, IntoElement, Role, Stateful, WeakEntity, div, prelude::*,
 };
 
-use super::follow_up_flag::{
-    follow_up_flag_cache_sync_message, follow_up_flag_confirmed_message,
-    follow_up_flag_failure_message, follow_up_flag_progress_message,
-};
+use super::message_write::MessageWriteFeedback;
 use super::{
-    FollowUpFlagUpdateStatus, MailView, MailViewEvent, MessageMoveMenuAction, MessageMoveStatus,
-    MoveRecoveryReason, ReadStateFeedback, SyncStatus, WellKnownFolderActionStatus,
-    mail_error_message, well_known_folder_mail_action,
+    MailView, MailViewEvent, MessageMoveMenuAction, MessageMoveStatus, MoveRecoveryReason,
+    SyncStatus, WellKnownFolderActionStatus, mail_error_message, well_known_folder_mail_action,
 };
 
 impl MailView {
@@ -344,37 +340,48 @@ impl MailView {
 
     pub(super) fn render_read_state_feedback_element(
         &self,
-        feedback: ReadStateFeedback,
+        feedback: MessageWriteFeedback,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (message, role, show_permission_review) = feedback.into_parts();
-        let feedback_view = Self::read_state_feedback_view(message, role, cx);
-        if show_permission_review
-            && self
-                .profile
-                .capabilities()
-                .can_review_mail_write_permission()
-        {
-            feedback_view
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(Self::render_permission_review_button(cx))
-                .into_any_element()
-        } else {
-            feedback_view.into_any_element()
-        }
+        self.render_message_write_feedback(
+            feedback,
+            "message-read-state-feedback",
+            "review-mail-permissions-from-message",
+            cx,
+        )
     }
 
-    fn read_state_feedback_view(
+    fn render_message_write_feedback(
+        &self,
+        feedback: MessageWriteFeedback,
+        feedback_id: &'static str,
+        permission_review_id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let MessageWriteFeedback {
+            message,
+            role,
+            show_permission_review,
+        } = feedback;
+        let feedback_view = Self::message_write_feedback_view(message, role, feedback_id, cx);
+        self.with_permission_review(
+            feedback_view,
+            show_permission_review,
+            permission_review_id,
+            cx,
+        )
+    }
+
+    fn message_write_feedback_view(
         message: String,
         role: Role,
+        feedback_id: &'static str,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let colors = cx.theme().semantic_tokens().colors;
         div()
-            .id("message-read-state-feedback")
-            .debug_selector(|| "message-read-state-feedback".to_owned())
+            .id(feedback_id)
+            .debug_selector(move || feedback_id.to_owned())
             .role(role)
             .text_sm()
             .text_color(if role == Role::Alert {
@@ -385,10 +392,37 @@ impl MailView {
             .child(message)
     }
 
-    fn render_permission_review_button(cx: &mut Context<Self>) -> AnyElement {
-        Button::new("review-mail-permissions-from-message")
+    fn with_permission_review(
+        &self,
+        feedback_view: Stateful<Div>,
+        show_permission_review: bool,
+        permission_review_id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if show_permission_review
+            && self
+                .profile
+                .capabilities()
+                .can_review_mail_write_permission()
+        {
+            feedback_view
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(Self::render_permission_review_button(
+                    permission_review_id,
+                    cx,
+                ))
+                .into_any_element()
+        } else {
+            feedback_view.into_any_element()
+        }
+    }
+
+    fn render_permission_review_button(id: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        Button::new(id)
             .ghost()
-            .debug_selector(|| "review-mail-permissions-from-message".to_owned())
+            .debug_selector(move || id.to_owned())
             .label("Review mail permissions…")
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.emit(MailViewEvent::ReviewMailWritePermission);
@@ -401,83 +435,13 @@ impl MailView {
         message_id: &MessageId,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if matches!(&self.follow_up_flag_update, FollowUpFlagUpdateStatus::Idle) {
-            return None;
-        }
-        let (message, role) = match &self.follow_up_flag_update {
-            FollowUpFlagUpdateStatus::Pending {
-                message_id: pending_id,
-                requested,
-            } if pending_id == message_id => {
-                (follow_up_flag_progress_message(*requested), Role::Status)
-            }
-            FollowUpFlagUpdateStatus::Confirmed {
-                message_id: confirmed_id,
-                status,
-            } if confirmed_id == message_id => (
-                follow_up_flag_confirmed_message(*status).to_owned(),
-                Role::Status,
-            ),
-            FollowUpFlagUpdateStatus::ConfirmedNeedsSync {
-                message_id: confirmed_id,
-                status,
-            } if confirmed_id == message_id => (
-                follow_up_flag_cache_sync_message(*status).to_owned(),
-                Role::Status,
-            ),
-            FollowUpFlagUpdateStatus::Failed {
-                message_id: failed_id,
-                requested,
-                error,
-            } if failed_id == message_id => (
-                follow_up_flag_failure_message(*requested, *error),
-                Role::Alert,
-            ),
-            _ => return None,
-        };
-        let colors = cx.theme().semantic_tokens().colors;
-        let feedback = div()
-            .id("message-follow-up-flag-feedback")
-            .debug_selector(|| "message-follow-up-flag-feedback".to_owned())
-            .role(role)
-            .text_sm()
-            .text_color(if role == Role::Alert {
-                colors.destructive
-            } else {
-                colors.muted_foreground
-            })
-            .child(message);
-        if matches!(
-            &self.follow_up_flag_update,
-            FollowUpFlagUpdateStatus::Failed {
-                message_id: failed_id,
-                error: MailWorkflowError::Provider(MailOperationError::AccessDenied),
-                ..
-            } if failed_id == message_id
-        ) && self
-            .profile
-            .capabilities()
-            .can_review_mail_write_permission()
-        {
-            Some(
-                feedback
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        Button::new("review-mail-permissions-from-flag")
-                            .ghost()
-                            .debug_selector(|| "review-mail-permissions-from-flag".to_owned())
-                            .label("Review mail permissions…")
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(MailViewEvent::ReviewMailWritePermission);
-                            })),
-                    )
-                    .into_any_element(),
-            )
-        } else {
-            Some(feedback.into_any_element())
-        }
+        let feedback = self.follow_up_flag_update.feedback_for(message_id)?;
+        Some(self.render_message_write_feedback(
+            feedback,
+            "message-follow-up-flag-feedback",
+            "review-mail-permissions-from-flag",
+            cx,
+        ))
     }
 
     pub(super) fn render_read_state_reconciliation_notice(&self) -> Option<AnyElement> {

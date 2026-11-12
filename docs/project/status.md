@@ -68,6 +68,8 @@ Issue [#358](https://github.com/1fach/einfach-mail/issues/358) replaces the shar
 
 Issue [#359](https://github.com/1fach/einfach-mail/issues/359) collects persistence fault-injection state and gates in one `cfg(test)` `TestHooks` field. The hooks still fire at their original points, and workflow tests use their existing setup methods. All 511 workspace test names match the baseline. The Rust 1.95 Linux local gate passed with localhost access for synthetic EWS mocks. Continue #356 with [#360](https://github.com/1fach/einfach-mail/issues/360).
 
+Issue [#360](https://github.com/1fach/einfach-mail/issues/360) shares the mail view's read-state and follow-up status, request, and feedback-rendering logic. The status copy helpers remain feature-specific, and message-move statuses remain separate because they model destination-specific actions. All 511 workspace test names remain present; read-state assertions now match the shared `status` field. Synthetic GPUI screenshots show the read-state feedback ([PNG](evidence/issue-360-read-state.png)) and follow-up feedback ([PNG](evidence/issue-360-follow-up.png)). The Rust 1.95 Linux local gate passed. Continue #356 with [#361](https://github.com/1fach/einfach-mail/issues/361).
+
 ## Active risks
 
 - GitHub Actions are disabled because the repository has no compute quota. PRs #275, #276, #277, #301, #320, #328, and #331 have no Actions runs; their Linux-local checks are recorded in their PRs. The application source, manifests, lockfile, and local-check scripts at PR #275 head `16c9ce9` match the locally checked code tree `d98fc69`. PR #331 merged after its local gate passed.
@@ -89,7 +91,7 @@ Issue [#359](https://github.com/1fach/einfach-mail/issues/359) collects persiste
 ## Next actions
 
 1. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux; keep #273's theme review and #274's named-compositor check open.
-2. Continue the clean-code pass tracked in issue [#356](https://github.com/1fach/einfach-mail/issues/356), starting with #360 after #359 merges.
+2. Continue the clean-code pass tracked in issue [#356](https://github.com/1fach/einfach-mail/issues/356), starting with #361 after #360 merges.
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.

@@ -32,7 +32,7 @@ async fn confirmed_read_state_updates_the_view_and_encrypted_cache(cx: &mut Test
     assert!(context.cx.update(|cx| matches!(
         &view.read(cx).read_state_update,
         ReadStateUpdateStatus::Confirmed {
-            state: ReadState::Read,
+            status: ReadState::Read,
             ..
         }
     )));
@@ -138,7 +138,7 @@ async fn confirmed_read_state_stays_visible_when_cache_write_fails(cx: &mut Test
         let needs_sync = matches!(
             &view.read_state_update,
             ReadStateUpdateStatus::ConfirmedNeedsSync {
-                state: ReadState::Read,
+                status: ReadState::Read,
                 ..
             }
         );

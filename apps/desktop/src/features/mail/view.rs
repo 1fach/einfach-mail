@@ -28,6 +28,7 @@ mod message_list;
 mod message_move;
 mod message_navigation;
 mod message_reader;
+mod message_write;
 mod read_state;
 mod synchronization;
 
@@ -40,9 +41,9 @@ use message_move::{
 };
 pub(crate) use message_navigation::bind_message_navigation_keys;
 use message_navigation::{MESSAGE_LIST_CONTEXT, MESSAGE_READER_CONTEXT};
+use read_state::ReadStateUpdateStatus;
 #[cfg(test)]
 use read_state::read_state_failure_message;
-use read_state::{ReadStateFeedback, ReadStateUpdateStatus};
 use synchronization::SyncStatus;
 
 const MESSAGE_ROW_HEIGHT: Rems = rems(4.5);
