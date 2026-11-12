@@ -35,6 +35,94 @@ const MAX_CALENDAR_OCCURRENCES: usize = 512;
 const EWS_MESSAGES_NAMESPACE: &[u8] =
     b"http://schemas.microsoft.com/exchange/services/2006/messages";
 const EWS_TYPES_NAMESPACE: &[u8] = b"http://schemas.microsoft.com/exchange/services/2006/types";
+const SOAP_ELEMENT_NAMES: &[&[u8]] = &[b"Envelope", b"Header", b"Body"];
+const EWS_MESSAGES_ELEMENT_NAMES: &[&[u8]] = &[
+    b"FindItemResponse",
+    b"GetItemResponse",
+    b"ResponseMessages",
+    b"FindItemResponseMessage",
+    b"GetItemResponseMessage",
+    b"RootFolder",
+    b"ResponseCode",
+    b"MessageText",
+];
+const EWS_TYPES_ELEMENT_NAMES: &[&[u8]] = &[
+    b"ServerVersionInfo",
+    b"CalendarItem",
+    b"Item",
+    b"Message",
+    b"Contact",
+    b"DistributionList",
+    b"MeetingMessage",
+    b"MeetingRequest",
+    b"MeetingResponse",
+    b"MeetingCancellation",
+    b"Task",
+    b"PostItem",
+    b"ItemId",
+    b"Subject",
+    b"Location",
+    b"Start",
+    b"End",
+    b"IsRecurring",
+    b"Recurrence",
+    b"IsAllDayEvent",
+    b"IsMeeting",
+    b"IsOnlineMeeting",
+    b"CalendarItemType",
+    b"StartTimeZoneId",
+    b"EndTimeZoneId",
+    b"RequiredAttendees",
+    b"OptionalAttendees",
+    b"Resources",
+    b"Attendee",
+    b"Mailbox",
+    b"Name",
+    b"EmailAddress",
+    b"RoutingType",
+    b"MailboxType",
+    b"ExtendedProperty",
+    b"ExtendedFieldURI",
+    b"Value",
+];
+const CALENDAR_UNQUALIFIED_ATTRIBUTE_NAMES: &[&[u8]] = &[
+    b"AbsoluteDenominator",
+    b"BodyType",
+    b"ChangeKey",
+    b"CharacterSet",
+    b"DistinguishedPropertySetId",
+    b"HeaderName",
+    b"Id",
+    b"IncludesLastItemInRange",
+    b"IndexedPagingOffset",
+    b"IsTruncated",
+    b"MajorBuildNumber",
+    b"MajorVersion",
+    b"MinorBuildNumber",
+    b"MinorVersion",
+    b"Name",
+    b"NumeratorOffset",
+    b"PropertyId",
+    b"PropertyName",
+    b"PropertySetId",
+    b"PropertyTag",
+    b"PropertyType",
+    b"ResponseClass",
+    b"RootItemChangeKey",
+    b"RootItemId",
+    b"TotalItemsInView",
+    b"Version",
+];
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "issue #402 wires this parser into GetItem preflight; remove this expectation when that caller lands"
+    )
+)]
+mod item;
+
 const CALENDAR_FIELDS: [&str; 8] = [
     "item:Subject",
     "calendar:Location",
@@ -94,42 +182,97 @@ pub(crate) fn parse_calendar_view_snapshot(
 }
 
 fn validate_calendar_response_namespaces(document: &[u8]) -> Result<(), EwsError> {
-    use quick_xml::{NsReader, events::Event, name::ResolveResult};
+    use quick_xml::{NsReader, events::Event};
 
     let mut reader = NsReader::from_reader(document);
+    let mut parents = Vec::<Vec<u8>>::new();
     loop {
         let (namespace, event) = reader
             .read_resolved_event()
             .map_err(|_| EwsError::InvalidResponse)?;
-        let element = match event {
-            Event::Start(element) | Event::Empty(element) => element,
-            Event::Eof => return Ok(()),
-            _ => continue,
-        };
-        let Some(expected_namespace) = expected_calendar_namespace(element.local_name().as_ref())
-        else {
-            continue;
-        };
-        if !matches!(namespace, ResolveResult::Bound(actual) if actual.as_ref() == expected_namespace)
+        if matches!(event, Event::Eof) {
+            return Ok(());
+        }
+        validate_calendar_event(&namespace, event, &mut parents)?;
+    }
+}
+
+fn validate_calendar_event(
+    namespace: &quick_xml::name::ResolveResult<'_>,
+    event: quick_xml::events::Event<'_>,
+    parents: &mut Vec<Vec<u8>>,
+) -> Result<(), EwsError> {
+    match event {
+        quick_xml::events::Event::Start(element) => {
+            validate_calendar_attributes(&element)?;
+            let local_name = element.local_name().as_ref().to_vec();
+            validate_calendar_namespace(namespace, &local_name, parents.last().map(Vec::as_slice))?;
+            parents.push(local_name);
+        }
+        quick_xml::events::Event::Empty(element) => {
+            validate_calendar_attributes(&element)?;
+            validate_calendar_namespace(
+                namespace,
+                element.local_name().as_ref(),
+                parents.last().map(Vec::as_slice),
+            )?;
+        }
+        quick_xml::events::Event::End(_) => {
+            parents.pop().ok_or(EwsError::InvalidResponse)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_calendar_attributes(
+    element: &quick_xml::events::BytesStart<'_>,
+) -> Result<(), EwsError> {
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|_| EwsError::InvalidResponse)?;
+        let attribute_name = attribute.key.as_ref();
+        let local_name = attribute.key.local_name();
+        if CALENDAR_UNQUALIFIED_ATTRIBUTE_NAMES.contains(&local_name.as_ref())
+            && attribute_name != local_name.as_ref()
         {
             return Err(EwsError::InvalidResponse);
         }
     }
+    Ok(())
 }
 
-fn expected_calendar_namespace(local_name: &[u8]) -> Option<&'static [u8]> {
-    match local_name {
-        b"Envelope" | b"Header" | b"Body" => Some(SOAP_NAMESPACE),
-        b"FindItemResponse"
-        | b"ResponseMessages"
-        | b"FindItemResponseMessage"
-        | b"RootFolder"
-        | b"ResponseCode" => Some(EWS_MESSAGES_NAMESPACE),
-        b"ServerVersionInfo" | b"Items" | b"CalendarItem" | b"ItemId" | b"Subject"
-        | b"Location" | b"Start" | b"End" | b"IsAllDayEvent" | b"CalendarItemType"
-        | b"StartTimeZoneId" | b"EndTimeZoneId" => Some(EWS_TYPES_NAMESPACE),
-        _ => None,
+fn validate_calendar_namespace(
+    namespace: &quick_xml::name::ResolveResult<'_>,
+    local_name: &[u8],
+    parent: Option<&[u8]>,
+) -> Result<(), EwsError> {
+    use quick_xml::name::ResolveResult;
+
+    let expected_namespace = expected_calendar_namespace(local_name, parent)?;
+    if expected_namespace.is_some_and(|expected| {
+        !matches!(namespace, ResolveResult::Bound(actual) if actual.as_ref() == expected)
+    }) {
+        return Err(EwsError::InvalidResponse);
     }
+    Ok(())
+}
+
+fn expected_calendar_namespace(
+    local_name: &[u8],
+    parent: Option<&[u8]>,
+) -> Result<Option<&'static [u8]>, EwsError> {
+    let expected = match local_name {
+        b"Items" => Some(match parent {
+            Some(b"GetItemResponseMessage") => EWS_MESSAGES_NAMESPACE,
+            Some(b"RootFolder") => EWS_TYPES_NAMESPACE,
+            _ => return Err(EwsError::InvalidResponse),
+        }),
+        _ if SOAP_ELEMENT_NAMES.contains(&local_name) => Some(SOAP_NAMESPACE),
+        _ if EWS_MESSAGES_ELEMENT_NAMES.contains(&local_name) => Some(EWS_MESSAGES_NAMESPACE),
+        _ if EWS_TYPES_ELEMENT_NAMES.contains(&local_name) => Some(EWS_TYPES_NAMESPACE),
+        _ => return Ok(None),
+    };
+    Ok(expected)
 }
 
 fn format_ews_datetime(datetime: OffsetDateTime) -> Result<String, EwsError> {
