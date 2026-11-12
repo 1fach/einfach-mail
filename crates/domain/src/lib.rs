@@ -13,8 +13,8 @@ use mail::mailbox;
 use shared::identifiers;
 
 pub use account::{
-    AccountCapabilities, AccountProfile, CalendarAccess, MailAction, MailCapabilities,
-    MissingAccountLabel,
+    AccountCapabilities, AccountProfile, CalendarAction, CalendarCapabilities, MailAction,
+    MailCapabilities, MissingAccountLabel,
 };
 pub use calendar::{
     CalendarDeltaChange, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,

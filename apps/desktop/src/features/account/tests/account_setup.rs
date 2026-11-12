@@ -76,7 +76,7 @@ fn exchange_server_form_connects_without_microsoft_client_configuration(cx: &mut
                 && account.profile().capabilities()
                 == AccountCapabilities::new(
                     MailCapabilities::from_actions([MailAction::SetReadState]),
-                    CalendarAccess::ReadOnly,
+                    CalendarCapabilities::view_only(),
                 )
     )));
     assert!(context.debug_bounds("account-provider").is_some());

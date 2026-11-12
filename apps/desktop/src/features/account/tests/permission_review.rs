@@ -21,7 +21,7 @@ fn partial_mail_profile_rejects_graph_permission_review(cx: &mut TestAppContext)
         Some("ada@example.test".to_owned()),
         AccountCapabilities::new(
             MailCapabilities::from_actions([MailAction::SetReadState]),
-            CalendarAccess::ReadOnly,
+            CalendarCapabilities::view_only(),
         ),
     )
     .expect("synthetic account profile has an identity");

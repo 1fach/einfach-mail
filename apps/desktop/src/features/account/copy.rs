@@ -2,7 +2,7 @@ use einfach_mail_application::{
     AccountCacheOpenError, AccountCacheRemovalError, AccountOperationError,
     AccountPermissionRequest,
 };
-use einfach_mail_domain::{MailAction, MailCapabilities};
+use einfach_mail_domain::{CalendarAction, CalendarCapabilities, MailAction, MailCapabilities};
 
 use super::state::{AccountStatus, EwsDiscoveryState, SetupIssue};
 
@@ -143,6 +143,25 @@ pub(super) fn mail_access_summary(capabilities: MailCapabilities) -> String {
         }
     }
     format!("Mail actions: {}.", actions.join(", "))
+}
+
+pub(super) fn calendar_actions_summary(capabilities: CalendarCapabilities) -> String {
+    let mut actions = Vec::new();
+    for (action, label) in [
+        (CalendarAction::ViewEvents, "view events"),
+        (CalendarAction::CreateEvent, "create events"),
+        (CalendarAction::UpdateEvent, "update events"),
+        (CalendarAction::DeleteEvent, "delete events"),
+    ] {
+        if capabilities.supports(action) {
+            actions.push(label);
+        }
+    }
+    if actions.is_empty() {
+        "Calendar actions: unavailable.".to_owned()
+    } else {
+        format!("Calendar actions: {}.", actions.join(", "))
+    }
 }
 
 pub(super) fn account_cache_open_error_message(error: AccountCacheOpenError) -> &'static str {

@@ -1,6 +1,6 @@
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, CalendarAccess, MailCapabilities, MailMessage,
-    MessageId,
+    AccountCapabilities, AccountId, AccountProfile, CalendarCapabilities, MailCapabilities,
+    MailMessage, MessageId,
 };
 
 use super::super::synthetic_account_profile;
@@ -16,7 +16,7 @@ pub(crate) fn mail_profile_with_capabilities(
     synthetic_account_profile(
         account,
         Some("ada@tenant.example.test".to_owned()),
-        AccountCapabilities::new(mail, CalendarAccess::ReadOnly),
+        AccountCapabilities::new(mail, CalendarCapabilities::view_only()),
     )
     .expect("synthetic account profile has an identity")
 }

@@ -25,7 +25,7 @@ use einfach_mail_application::{
     ReadStateUpdateOutcome, WellKnownFolderMoveOutcome, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, CalendarAccess, CalendarEventCreation,
+    AccountCapabilities, AccountId, AccountProfile, CalendarCapabilities, CalendarEventCreation,
     CalendarEventUpdate, CalendarOccurrence, CalendarViewReference, EditableCalendarEvent,
     FolderReference, FollowUpFlagStatus, MailAction, MailCapabilities, MailDraft, MailFolder,
     MailMessage, MailReplyDraft, MailSendOperationId, MessageId, MissingAccountLabel,
@@ -515,7 +515,7 @@ impl AccountProvider for TestProvider {
                         Some("EXAMPLE\\ada".to_owned()),
                         AccountCapabilities::new(
                             MailCapabilities::from_actions([MailAction::SetReadState]),
-                            CalendarAccess::ReadOnly,
+                            CalendarCapabilities::view_only(),
                         ),
                     )
                     .expect("synthetic EWS account profile has an identity");

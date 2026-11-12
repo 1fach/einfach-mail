@@ -1,6 +1,6 @@
 use super::{
-    AccountCapabilities, AccountProfile, CalendarAccess, MailAction, MailCapabilities,
-    MissingAccountLabel,
+    AccountCapabilities, AccountProfile, CalendarAction, CalendarCapabilities, MailAction,
+    MailCapabilities, MissingAccountLabel,
 };
 use crate::AccountId;
 
@@ -96,7 +96,7 @@ fn profile_retains_read_only_mail_capabilities() {
     assert!(!profile.capabilities().can_review_mail_write_permission());
     assert_eq!(
         profile.capabilities().calendar(),
-        CalendarAccess::Unavailable
+        CalendarCapabilities::unavailable()
     );
 }
 
@@ -112,12 +112,41 @@ fn mail_capabilities_only_include_the_requested_actions() {
     assert!(!capabilities.supports(MailAction::Move));
     assert!(!capabilities.supports(MailAction::Delete));
 
-    let account = AccountCapabilities::new(capabilities, CalendarAccess::ReadOnly);
+    let account = AccountCapabilities::new(capabilities, CalendarCapabilities::view_only());
     assert!(!account.can_review_mail_write_permission());
 }
 
 #[test]
-fn full_access_includes_every_current_mail_action_and_permission_review() {
+fn calendar_capabilities_distinguish_unavailable_and_view_only() {
+    let unavailable = CalendarCapabilities::unavailable();
+    assert!(!unavailable.supports(CalendarAction::ViewEvents));
+    assert!(!unavailable.is_read_only());
+
+    let view_only = CalendarCapabilities::view_only();
+    assert!(view_only.supports(CalendarAction::ViewEvents));
+    assert!(!view_only.supports(CalendarAction::CreateEvent));
+    assert!(!view_only.supports(CalendarAction::UpdateEvent));
+    assert!(!view_only.supports(CalendarAction::DeleteEvent));
+    assert!(view_only.is_read_only());
+}
+
+#[test]
+fn every_calendar_write_capability_also_enables_event_viewing() {
+    for action in [
+        CalendarAction::CreateEvent,
+        CalendarAction::UpdateEvent,
+        CalendarAction::DeleteEvent,
+    ] {
+        let capabilities = CalendarCapabilities::from_actions([action]);
+
+        assert!(capabilities.supports(CalendarAction::ViewEvents));
+        assert!(capabilities.supports(action));
+        assert!(!capabilities.is_read_only());
+    }
+}
+
+#[test]
+fn full_access_includes_all_actions_and_permission_review() {
     let capabilities = AccountCapabilities::full_access();
     let mail = capabilities.mail();
 
@@ -128,4 +157,10 @@ fn full_access_includes_every_current_mail_action_and_permission_review() {
     assert!(mail.supports(MailAction::Move));
     assert!(mail.supports(MailAction::Delete));
     assert!(capabilities.can_review_mail_write_permission());
+
+    let calendar = capabilities.calendar();
+    assert!(calendar.supports(CalendarAction::ViewEvents));
+    assert!(calendar.supports(CalendarAction::CreateEvent));
+    assert!(calendar.supports(CalendarAction::UpdateEvent));
+    assert!(calendar.supports(CalendarAction::DeleteEvent));
 }

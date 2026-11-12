@@ -14,7 +14,8 @@ use einfach_mail_application::{
     AccountWorkflow,
 };
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, CalendarAccess, MailAction, MailCapabilities,
+    AccountCapabilities, AccountId, AccountProfile, CalendarAction, CalendarCapabilities,
+    MailAction, MailCapabilities,
 };
 
 mod account_setup;

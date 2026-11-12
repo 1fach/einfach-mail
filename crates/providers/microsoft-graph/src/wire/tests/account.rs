@@ -1,4 +1,16 @@
+#[test]
+fn graph_profile_advertises_all_current_calendar_actions() {
+    let profile = AccountProfile::try_from(super::GraphUserProfile {
+        id: Some("synthetic-account".to_owned()),
+        display_name: Some("Ada Example".to_owned()),
+        mail: Some("ada@example.test".to_owned()),
+        user_principal_name: Some("ada@example.test".to_owned()),
+    })
+    .expect("synthetic Graph profile is valid");
 
+    let calendar = profile.capabilities().calendar();
+    assert_eq!(calendar, CalendarCapabilities::full_access());
+}
 
 #[tokio::test]
 async fn profile_read_does_not_follow_a_graph_redirect() {
