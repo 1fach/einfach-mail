@@ -2,12 +2,6 @@
 
 use std::{future::Future, sync::Arc};
 
-#[cfg(test)]
-use std::sync::{
-    Mutex,
-    atomic::{AtomicBool, Ordering},
-};
-
 use async_sqlite::Client;
 use einfach_mail_application::{
     AccountCache, AccountCacheFactory, AccountCacheOpenError, AccountCacheRemovalError,
@@ -17,6 +11,12 @@ use einfach_mail_domain::AccountId;
 use thiserror::Error;
 
 use crate::platform::linux::security;
+
+#[cfg(test)]
+mod test_hooks;
+
+#[cfg(test)]
+pub(crate) use self::test_hooks::{Gate, TestHooks};
 
 pub(crate) mod time;
 
@@ -76,15 +76,8 @@ pub struct SqliteAccountCache {
     lifecycle_lock_path: std::path::PathBuf,
     account_lock: Arc<std::fs::File>,
     #[cfg(test)]
-    pub(crate) fail_next_pending_send_clear: Arc<AtomicBool>,
-    #[cfg(test)]
-    removal_gate: Arc<Mutex<Option<TestOperationGate>>>,
-    #[cfg(test)]
-    pub(crate) pending_send_read_gate: Arc<Mutex<Option<TestOperationGate>>>,
+    pub(crate) test_hooks: Arc<TestHooks>,
 }
-
-#[cfg(test)]
-type TestOperationGate = (smol::channel::Sender<()>, smol::channel::Receiver<()>);
 
 /// Opens and removes account-scoped [`SqliteAccountCache`] values.
 #[derive(Clone, Copy, Debug, Default)]
@@ -134,11 +127,7 @@ impl SqliteAccountCache {
             lifecycle_lock_path: opened.lifecycle_lock_path,
             account_lock: opened.account_lock,
             #[cfg(test)]
-            fail_next_pending_send_clear: Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            removal_gate: Arc::new(Mutex::new(None)),
-            #[cfg(test)]
-            pending_send_read_gate: Arc::new(Mutex::new(None)),
+            test_hooks: Arc::new(TestHooks::default()),
         })
     }
 
@@ -176,9 +165,7 @@ impl SqliteAccountCache {
             credential_account: opened.credential_account,
             lifecycle_lock_path: opened.lifecycle_lock_path,
             account_lock: opened.account_lock,
-            fail_next_pending_send_clear: Arc::new(AtomicBool::new(false)),
-            removal_gate: Arc::new(Mutex::new(None)),
-            pending_send_read_gate: Arc::new(Mutex::new(None)),
+            test_hooks: Arc::new(TestHooks::default()),
         }
     }
 
@@ -186,34 +173,19 @@ impl SqliteAccountCache {
     pub(crate) fn hold_removal_after_marker_check_for_tests(
         &self,
     ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
-        let (checked_tx, checked_rx) = smol::channel::bounded(1);
-        let (release_tx, release_rx) = smol::channel::bounded(1);
-        *self
-            .removal_gate
-            .lock()
-            .expect("synthetic account-removal gate mutex is healthy") =
-            Some((checked_tx, release_rx));
-        (checked_rx, release_tx)
+        self.test_hooks.hold_at(Gate::RemovalAfterMarkerCheck)
     }
 
     #[cfg(test)]
     pub(crate) fn hold_pending_send_read_for_tests(
         &self,
     ) -> (smol::channel::Receiver<()>, smol::channel::Sender<()>) {
-        let (started_tx, started_rx) = smol::channel::bounded(1);
-        let (release_tx, release_rx) = smol::channel::bounded(1);
-        *self
-            .pending_send_read_gate
-            .lock()
-            .expect("synthetic pending-send read gate mutex is healthy") =
-            Some((started_tx, release_rx));
-        (started_rx, release_tx)
+        self.test_hooks.hold_at(Gate::PendingSendRead)
     }
 
     #[cfg(test)]
     pub(crate) fn fail_next_pending_send_clear(&self) {
-        self.fail_next_pending_send_clear
-            .store(true, Ordering::Relaxed);
+        self.test_hooks.fail_next_pending_send_clear();
     }
 
     #[cfg(test)]
@@ -239,18 +211,7 @@ impl SqliteAccountCache {
 
     #[cfg(test)]
     pub(crate) async fn set_message_move_failure_for_tests(&self, enabled: bool) {
-        let statement = if enabled {
-            "CREATE TRIGGER fail_message_move BEFORE DELETE ON mail_messages BEGIN SELECT RAISE(ABORT, 'synthetic move failure'); END;"
-        } else {
-            "DROP TRIGGER IF EXISTS fail_message_move;"
-        };
-        self.client
-            .conn_and_then(|connection| -> Result<(), async_sqlite::Error> {
-                connection.execute_batch(statement)?;
-                Ok(())
-            })
-            .await
-            .expect("synthetic message move trigger can be updated");
+        TestHooks::set_message_move_failure(&self.client, enabled).await;
     }
 
     pub(crate) fn check_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
@@ -316,29 +277,10 @@ impl SqliteAccountCache {
             return Err(AccountCacheRemovalError::PendingCalendarEventCreation);
         }
         #[cfg(test)]
-        self.wait_for_removal_test_gate().await;
+        self.test_hooks.wait_at(Gate::RemovalAfterMarkerCheck).await;
         security::delete_database_files(&self.client, &self.database_path).await?;
         security::remove_credential(&self.credential_account)
             .map_err(AccountCacheRemovalError::from)
-    }
-
-    #[cfg(test)]
-    async fn wait_for_removal_test_gate(&self) {
-        let gate = self
-            .removal_gate
-            .lock()
-            .expect("synthetic account-removal gate mutex is healthy")
-            .take();
-        if let Some((checked, release)) = gate {
-            checked
-                .send(())
-                .await
-                .expect("the account-removal test is waiting at the gate");
-            release
-                .recv()
-                .await
-                .expect("the account-removal test releases the gate");
-        }
     }
 }
 

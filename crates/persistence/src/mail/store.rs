@@ -1,8 +1,5 @@
 use std::{collections::HashSet, future::Future, time::SystemTime};
 
-#[cfg(test)]
-use std::sync::{Arc, atomic::Ordering};
-
 use async_sqlite::rusqlite::{
     Connection, OptionalExtension, Result as SqlResult, Transaction, TransactionBehavior, params,
 };
@@ -23,6 +20,9 @@ use crate::shared::{
         time::{system_time_from_parts, system_time_parts},
     },
 };
+
+#[cfg(test)]
+use crate::shared::store::Gate;
 
 mod folders;
 mod messages;
@@ -627,26 +627,10 @@ impl MailCache for SqliteAccountCache {
         let validation = self.check_account(account_id);
         let account_id = account_id.as_str().to_owned();
         let client = self.client.clone();
-        #[cfg(test)]
-        let pending_send_read_gate = Arc::clone(&self.pending_send_read_gate);
         async move {
             validation?;
             #[cfg(test)]
-            let gate = pending_send_read_gate
-                .lock()
-                .expect("synthetic pending-send read gate mutex is healthy")
-                .take();
-            #[cfg(test)]
-            if let Some((started, release)) = gate {
-                started
-                    .send(())
-                    .await
-                    .expect("the pending-send test is waiting at the gate");
-                release
-                    .recv()
-                    .await
-                    .expect("the pending-send test releases the gate");
-            }
+            self.test_hooks.wait_at(Gate::PendingSendRead).await;
             client
                 .conn_and_then(move |connection| read_pending_send(connection, &account_id))
                 .await
@@ -728,14 +712,10 @@ impl MailCache for SqliteAccountCache {
         let account_id = account_id.as_str().to_owned();
         let operation_id = operation_id.as_uuid().to_string();
         let client = self.client.clone();
-        #[cfg(test)]
-        let fail_next_pending_send_clear = Arc::clone(&self.fail_next_pending_send_clear);
         async move {
             validation?;
             #[cfg(test)]
-            if fail_next_pending_send_clear.swap(false, Ordering::Relaxed) {
-                return Err(MailCacheError::Unavailable);
-            }
+            self.test_hooks.ensure_pending_send_clear_succeeds()?;
             client
                 .conn_mut_and_then(move |connection| {
                     let transaction = connection.transaction()?;
