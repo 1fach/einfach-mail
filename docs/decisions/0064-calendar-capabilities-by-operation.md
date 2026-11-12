@@ -18,6 +18,7 @@ EWS calendar writes need separate request, conflict, and recovery rules. Issue [
 - Gate each desktop action from its matching capability. Event creation requires create support. Event fields and saving require update support. The delete action requires delete support. If a provider supports deletion without updates, show the selected event read-only and keep the delete action available. Apply the same checks to keyboard entry points.
 - Keep provider methods as the enforcement boundary. A provider must reject unsupported operations even if a caller bypasses the desktop. Tests must check that each account profile's advertised actions match its provider behavior.
 - Keep capabilities derived from the connected provider. They do not change the encrypted cache schema or represent Microsoft permissions.
+- Require `AccountProfile::try_new` to receive the capabilities selected by the connected provider. Profile construction must not grant broad capabilities implicitly.
 
 This decision changes the capability model only. It does not enable EWS calendar writes or change the current Graph behavior. Issue [#390](https://github.com/1fach/einfach-mail/issues/390) tracks the domain and desktop migration. Issue #389 retains the EWS request, response, and recovery decisions.
 

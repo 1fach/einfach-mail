@@ -516,7 +516,7 @@ impl AccountProvider for TestProvider {
                         return Err(AccountOperationError::InvalidConnectionDetails);
                     }
                     cancellation.begin_credential_commit()?;
-                    let profile = AccountProfile::try_new_with_capabilities(
+                    let profile = AccountProfile::try_new(
                         AccountId::try_from("synthetic-ews-account".to_owned())
                             .expect("synthetic EWS account ID is valid"),
                         Some("Ada Example".to_owned()),
@@ -700,7 +700,7 @@ pub(crate) fn synthetic_account_profile(
     user_principal_name: Option<String>,
     capabilities: AccountCapabilities,
 ) -> Result<AccountProfile, MissingAccountLabel> {
-    AccountProfile::try_new_with_capabilities(
+    AccountProfile::try_new(
         account_id,
         Some("Ada Example".to_owned()),
         Some("ada@example.test".to_owned()),

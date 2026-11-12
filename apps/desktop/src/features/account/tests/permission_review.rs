@@ -13,7 +13,7 @@ fn partial_mail_profile_rejects_graph_permission_review(cx: &mut TestAppContext)
             cx,
         )
     });
-    let profile = AccountProfile::try_new_with_capabilities(
+    let profile = AccountProfile::try_new(
         AccountId::try_from("synthetic-ews-account".to_owned())
             .expect("synthetic EWS account ID is valid"),
         Some("Ada Example".to_owned()),
@@ -60,6 +60,7 @@ fn mail_and_calendar_permission_reviews_work_after_content_opens(cx: &mut TestAp
         Some("Ada Example".to_owned()),
         Some("ada@example.test".to_owned()),
         Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic account profile is valid");
     context.cx.update(|cx| {

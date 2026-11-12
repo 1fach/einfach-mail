@@ -127,7 +127,7 @@ pub(super) fn profile_for(
         } else {
             MailCapabilities::read_only()
         };
-    AccountProfile::try_new_with_capabilities(
+    AccountProfile::try_new(
         id,
         Some(mailbox_address.to_owned()),
         Some(mailbox_address.to_owned()),

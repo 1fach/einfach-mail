@@ -144,6 +144,7 @@ fn connect_synthetic_workspace_account(view: &WorkspaceTestView, context: &mut V
         Some("Ada Example".to_owned()),
         Some("ada@example.test".to_owned()),
         Some("ada@tenant.example.test".to_owned()),
+        AccountCapabilities::full_access(),
     )
     .expect("synthetic account profile is valid");
     context.cx.update(|cx| {
