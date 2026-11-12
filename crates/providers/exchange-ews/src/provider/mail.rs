@@ -247,7 +247,7 @@ pub(super) async fn update_message_read_state(
     let current = current_message_version_for_write(&sequence, message_id).await?;
     let request =
         serialize_update_item_request(&current, requested).map_err(MailOperationError::from)?;
-    let response = match sequence.execute_update_item(&request).await {
+    let response = match sequence.execute_xml_write(&request).await {
         Ok(response) => response,
         Err(EwsWriteError::NotDispatched(error)) => {
             return Err(MailOperationError::from(error));

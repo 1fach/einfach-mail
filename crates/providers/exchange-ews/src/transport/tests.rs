@@ -263,7 +263,7 @@ async fn updates_read_state_after_a_fresh_authenticated_item_read() {
     let request = serialize_update_item_request(&current, ReadState::Read)
         .expect("synthetic read-state UpdateItem serializes");
     let update_response = sequence
-        .execute_update_item(&request)
+        .execute_xml_write(&request)
         .await
         .expect("authenticated connection accepts one UpdateItem request");
     let confirmation = parse_update_item_response(&update_response)
@@ -276,7 +276,7 @@ async fn updates_read_state_after_a_fresh_authenticated_item_read() {
         .expect("synthetic UpdateItem request is UTF-8")
         .replace("synthetic-change-key", "synthetic-stale-change-key");
     assert!(matches!(
-        sequence.execute_update_item(stale_request.as_bytes()).await,
+        sequence.execute_xml_write(stale_request.as_bytes()).await,
         Err(EwsWriteError::NotDispatched(EwsError::ServiceUnavailable))
     ));
     anonymous_request.assert_async().await;
@@ -364,7 +364,7 @@ async fn queued_requests_are_classified_before_shutdown_dispatch() {
     commands
         .send(EwsCommand {
             document: b"synthetic UpdateItem".to_vec(),
-            mode: EwsRequestMode::Update,
+            mode: EwsRequestMode::Write,
             response: update_response_sender,
         })
         .await
@@ -407,12 +407,10 @@ async fn shutdown_interrupts_in_flight_read_without_waiting_for_http_timeout() {
 }
 
 #[tokio::test]
-async fn shutdown_marks_in_flight_update_outcome_unknown() {
-    let error = shutdown_in_flight_request(
-        EwsRequestMode::Update,
-        Some(synthetic_connection_identity()),
-    )
-    .await;
+async fn shutdown_marks_a_dispatched_write_outcome_unknown() {
+    let error =
+        shutdown_in_flight_request(EwsRequestMode::Write, Some(synthetic_connection_identity()))
+            .await;
 
     assert!(matches!(error, EwsRequestError::OutcomeUnknown));
 }
@@ -493,6 +491,7 @@ async fn shutdown_in_flight_request(
         .await
         .expect("worker accepts request");
     wait_for_mock_call(&pending_request).await;
+    assert_eq!(pending_request.calls_async().await, 1);
     shutdown_sender
         .send(())
         .expect("worker shutdown is signaled");

@@ -71,7 +71,7 @@ struct EwsCommand {
 #[derive(Clone, Copy)]
 enum EwsRequestMode {
     Read,
-    Update,
+    Write,
 }
 
 #[derive(Clone, Copy)]
@@ -267,21 +267,24 @@ impl EwsRequestSequence<'_> {
         O: Operation,
     {
         let document = serialize_soap_request(operation)?;
-        let response = self
-            .request(&document, EwsRequestMode::Read)
-            .await
-            .map_err(read_request_error)?;
+        let response = self.execute_xml_read(&document).await?;
         let response_size = response.len();
         Ok((response, response_size))
     }
 
-    pub(crate) async fn execute_update_item(
+    pub(crate) async fn execute_xml_read(&self, document: &[u8]) -> Result<Vec<u8>, EwsError> {
+        self.request(document, EwsRequestMode::Read)
+            .await
+            .map_err(read_request_error)
+    }
+
+    pub(crate) async fn execute_xml_write(
         &self,
         document: &[u8],
     ) -> Result<Vec<u8>, EwsWriteError> {
-        self.request(document, EwsRequestMode::Update)
+        self.request(document, EwsRequestMode::Write)
             .await
-            .map_err(update_request_error)
+            .map_err(write_request_error)
     }
 
     async fn request(
@@ -291,7 +294,7 @@ impl EwsRequestSequence<'_> {
     ) -> Result<Vec<u8>, EwsRequestError> {
         let before_dispatch = match mode {
             EwsRequestMode::Read => EwsRequestError::Read(EwsError::ResourceLimitExceeded),
-            EwsRequestMode::Update => {
+            EwsRequestMode::Write => {
                 EwsRequestError::NotDispatched(EwsError::ResourceLimitExceeded)
             }
         };
@@ -309,13 +312,13 @@ impl EwsRequestSequence<'_> {
             .await
             .map_err(|_| match mode {
                 EwsRequestMode::Read => EwsRequestError::Read(EwsError::ServiceUnavailable),
-                EwsRequestMode::Update => {
+                EwsRequestMode::Write => {
                     EwsRequestError::NotDispatched(EwsError::ServiceUnavailable)
                 }
             })?;
         response_receiver.await.map_err(|_| match mode {
             EwsRequestMode::Read => EwsRequestError::Read(EwsError::ServiceUnavailable),
-            EwsRequestMode::Update => EwsRequestError::OutcomeUnknown,
+            EwsRequestMode::Write => EwsRequestError::OutcomeUnknown,
         })?
     }
 }
@@ -327,7 +330,7 @@ fn read_request_error(error: EwsRequestError) -> EwsError {
     }
 }
 
-fn update_request_error(error: EwsRequestError) -> EwsWriteError {
+fn write_request_error(error: EwsRequestError) -> EwsWriteError {
     match error {
         EwsRequestError::NotDispatched(error) => EwsWriteError::NotDispatched(error),
         EwsRequestError::OutcomeUnknown | EwsRequestError::Read(_) => EwsWriteError::OutcomeUnknown,
@@ -368,10 +371,10 @@ fn worker_reaper_sender() -> Result<sync_mpsc::Sender<JoinHandle<()>>, EwsError>
 fn shutdown_error(mode: EwsRequestMode, phase: EwsRequestPhase) -> EwsRequestError {
     match mode {
         EwsRequestMode::Read => EwsRequestError::Read(EwsError::ServiceUnavailable),
-        EwsRequestMode::Update if matches!(phase, EwsRequestPhase::Executing) => {
+        EwsRequestMode::Write if matches!(phase, EwsRequestPhase::Executing) => {
             EwsRequestError::OutcomeUnknown
         }
-        EwsRequestMode::Update => EwsRequestError::NotDispatched(EwsError::ServiceUnavailable),
+        EwsRequestMode::Write => EwsRequestError::NotDispatched(EwsError::ServiceUnavailable),
     }
 }
 
