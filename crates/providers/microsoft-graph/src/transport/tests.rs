@@ -12,10 +12,7 @@ use httpmock::{
     Method::{DELETE, GET, PATCH, POST},
     Mock, MockServer,
 };
-use huskarl::{
-    core::secrets::SecretString,
-    token::{AccessToken, BearerAccessToken},
-};
+use huskarl::token::AccessToken;
 use reqwest::header::HeaderMap;
 use tokio::{io::AsyncReadExt, net::TcpListener, time::timeout};
 use url::Url;
@@ -28,7 +25,9 @@ use super::{
 };
 use crate::{
     error::GraphError,
-    test_support::{http_base_url, http_url},
+    test_support::{
+        http_base_url, http_url, synthetic_access_token as make_synthetic_access_token,
+    },
     transport::GraphUrl,
 };
 
@@ -36,11 +35,7 @@ const SYSTEM_PROXY_CHILD: &str = "EINFACH_MAIL_GRAPH_PROVIDER_PROXY_TEST_CHILD";
 const REQUEST_WAIT: Duration = Duration::from_secs(3);
 
 fn synthetic_access_token() -> Arc<AccessToken> {
-    Arc::new(AccessToken::Bearer(BearerAccessToken::new(
-        SecretString::new("synthetic-access-token"),
-        SystemTime::now(),
-        Some(Duration::from_secs(3600)),
-    )))
+    make_synthetic_access_token("synthetic-access-token")
 }
 
 fn graph_url(value: &str) -> GraphUrl {

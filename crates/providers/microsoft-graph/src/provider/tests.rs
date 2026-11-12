@@ -4,22 +4,19 @@ use std::{
         Arc, Barrier, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use httpmock::{
     Method::{GET, POST},
     MockServer,
 };
-use huskarl::{
-    core::secrets::SecretString,
-    token::{AccessToken, BearerAccessToken, RefreshToken},
-};
+use huskarl::token::RefreshToken;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
-use crate::test_support::{http_base_url, http_url};
+use crate::test_support::{http_base_url, http_url, synthetic_access_token as access_token};
 use crate::{
     CallbackPort,
     auth::{
@@ -171,14 +168,6 @@ impl BrowserLauncher for TestBrowser {
 fn refresh_token(token_text: &str) -> RefreshToken {
     serde_json::from_str(&format!(r#"{{"token":"{token_text}"}}"#))
         .expect("synthetic refresh token is valid")
-}
-
-fn access_token(token_text: &str) -> Arc<AccessToken> {
-    Arc::new(AccessToken::Bearer(BearerAccessToken::new(
-        SecretString::new(token_text),
-        SystemTime::now(),
-        Some(Duration::from_secs(3_600)),
-    )))
 }
 
 fn synthetic_provider<C>(

@@ -4,10 +4,7 @@ use httpmock::{
     Method::{DELETE, GET, PATCH, POST},
     MockServer,
 };
-use huskarl::{
-    core::secrets::SecretString,
-    token::{AccessToken, BearerAccessToken},
-};
+use huskarl::token::AccessToken;
 use serde_json::json;
 use time::{
     Date, Month, OffsetDateTime, PrimitiveDateTime, format_description::well_known::Rfc3339,
@@ -37,7 +34,9 @@ use super::{
     },
     pagination::{MAX_PAGINATION_PAGES, MAX_PAGINATION_RESPONSE_BYTES, PaginationBudget},
 };
-use crate::test_support::{http_base_url, http_url};
+use crate::test_support::{
+    http_base_url, http_url, synthetic_access_token as make_synthetic_access_token,
+};
 use crate::{
     error::GraphError,
     transport::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority},
@@ -45,11 +44,7 @@ use crate::{
 };
 
 fn synthetic_access_token() -> Arc<AccessToken> {
-    Arc::new(AccessToken::Bearer(BearerAccessToken::new(
-        SecretString::new("synthetic-calendar-access-token"),
-        SystemTime::now(),
-        Some(std::time::Duration::from_secs(3600)),
-    )))
+    make_synthetic_access_token("synthetic-calendar-access-token")
 }
 
 fn synthetic_view() -> CalendarViewReference {
