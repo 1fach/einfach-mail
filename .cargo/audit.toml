@@ -1,5 +1,6 @@
-# SSPI 0.23.1 pins rsa 0.10.0-rc.18, which RustSec still marks vulnerable.
+# SSPI 0.23.1 and Picky 7.0.0-rc.27 pin vulnerable rsa 0.10.0-rc.18.
+# Stable rsa 0.10.0 is patched, but no released SSPI/Picky graph uses it yet.
 # This app uses only SSPI's NTLM provider and has no RSA private-key operation.
-# Remove the exception when the dependency updates; see issue #259.
+# Remove the exception when the maintained dependency graph uses patched RSA; see issue #259.
 [advisories]
 ignore = ["RUSTSEC-2023-0071"]
