@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use einfach_mail_application::{CalendarOperationError, CalendarWorkflow, CalendarWriteReadiness};
-use einfach_mail_domain::PendingCalendarEventCreation;
+use einfach_mail_domain::{CalendarAction, CalendarCapabilities, PendingCalendarEventCreation};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestQueryExt as _;
 use gpui_kit::{AppContext as _, Modifiers, TestAppContext};
@@ -14,8 +14,8 @@ use tokio::sync::oneshot;
 use super::CalendarView;
 use super::support::{system_calendar_view, utc_fallback_calendar_week};
 use crate::test_support::calendar::{
-    TestCache, TestProvider, draw_calendar_view, profile, select_default_timed_event,
-    workflow_account_id,
+    TestCache, TestProvider, draw_calendar_view, profile, profile_with_calendar_capabilities,
+    select_default_timed_event, workflow_account_id,
 };
 use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
 
@@ -300,7 +300,9 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
     let (_, context) = cx.add_window_view(|window, cx| {
         let calendar = cx.new(|cx| {
             CalendarView::new_for_week(
-                profile(),
+                profile_with_calendar_capabilities(CalendarCapabilities::from_actions([
+                    CalendarAction::UpdateEvent,
+                ])),
                 workflow,
                 utc_fallback_calendar_week(week_start),
                 cx,
@@ -323,7 +325,7 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
 
     select_default_timed_event(context);
     let edit = context
-        .debug_bounds("calendar-event-edit")
+        .debug_bounds("calendar-event-open")
         .expect("timed calendar event offers an edit action");
     context.simulate_click(edit.center(), Modifiers::default());
     context.run_until_parked();
@@ -333,6 +335,7 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
     })
     .await;
     assert!(context.debug_bounds("event-composer-fields").is_some());
+    assert!(context.debug_bounds("event-composer-delete").is_none());
 
     let title = context
         .debug_bounds("event-composer-subject-input")
@@ -455,7 +458,7 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
 
     select_default_timed_event(context);
     let edit = context
-        .debug_bounds("calendar-event-edit")
+        .debug_bounds("calendar-event-open")
         .expect("timed appointment offers an edit action");
     context.simulate_click(edit.center(), Modifiers::default());
     wait_for_ui_condition(context, |window, _| {
@@ -573,7 +576,7 @@ async fn native_event_editor_confirms_and_serializes_deletion(cx: &mut TestAppCo
     );
 
     let edit = context
-        .debug_bounds("calendar-event-edit")
+        .debug_bounds("calendar-event-open")
         .expect("successful sync restores event editing");
     context.simulate_click(edit.center(), Modifiers::default());
     wait_for_ui_condition(context, |window, _| {

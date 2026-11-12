@@ -235,7 +235,7 @@ async fn read_only_calendar_keeps_agenda_navigation_and_blocks_event_writes(
     context.run_until_parked();
     draw_calendar_view(context);
     assert_selected_event(context, &view, "synthetic-calendar-event-1");
-    assert!(context.debug_bounds("calendar-event-edit").is_none());
+    assert!(context.debug_bounds("calendar-event-open").is_none());
 
     context.simulate_keystrokes("enter");
     context.run_until_parked();
@@ -314,7 +314,7 @@ async fn calendar_agenda_navigates_events_with_one_focus_stop_and_keeps_selectio
             .cx
             .update(|cx| view.read(cx).selected_agenda_event.is_none())
     );
-    assert!(context.debug_bounds("calendar-event-edit").is_none());
+    assert!(context.debug_bounds("calendar-event-open").is_none());
 
     context.update(gpui_kit::Window::focus_next);
     let mut list_focused =
@@ -337,7 +337,7 @@ async fn calendar_agenda_navigates_events_with_one_focus_stop_and_keeps_selectio
     assert_selected_event(context, &view, "synthetic-calendar-event-20");
     assert_accessible_selection(context, LAST_OPTION_LABEL);
     let edit_bounds = context
-        .debug_bounds("calendar-event-edit")
+        .debug_bounds("calendar-event-open")
         .expect("selecting a timed event exposes its edit command");
     let list_bounds = context
         .debug_bounds("calendar-event-list")

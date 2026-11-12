@@ -27,6 +27,28 @@ gpui_kit::actions!(
 
 pub(super) const CALENDAR_EVENT_LIST_CONTEXT: &str = "CalendarEventList";
 
+#[derive(Clone, Copy)]
+pub(super) enum SelectedEventAction {
+    Edit,
+    Details,
+}
+
+impl SelectedEventAction {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Edit => "Edit",
+            Self::Details => "Details",
+        }
+    }
+
+    const fn sheet_title(self) -> &'static str {
+        match self {
+            Self::Edit => "Edit calendar event",
+            Self::Details => "Calendar event details",
+        }
+    }
+}
+
 pub(crate) fn bind_calendar_event_navigation_keys(cx: &mut App) {
     let context = Some(CALENDAR_EVENT_LIST_CONTEXT);
     cx.bind_keys([
@@ -43,7 +65,9 @@ where
     S: CalendarSession + ?Sized + 'static,
 {
     pub(super) fn open_event_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.can_write_events() || self.write_readiness != CalendarWriteReadiness::Ready {
+        if !self.supports_calendar_action(CalendarAction::CreateEvent)
+            || self.write_readiness != CalendarWriteReadiness::Ready
+        {
             return;
         }
         let intent = EventComposerIntent::Create {
@@ -57,24 +81,44 @@ where
         self.open_composer(intent, title, window, cx);
     }
 
-    pub(super) fn open_event_editor(
+    pub(super) fn open_selected_event(
         &mut self,
         cached_event: CalendarOccurrence,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.can_write_events()
-            || self.write_readiness != CalendarWriteReadiness::Ready
+        let Some(action) = self.selected_event_action() else {
+            return;
+        };
+        if self.write_readiness != CalendarWriteReadiness::Ready
             || !matches!(cached_event.time(), CalendarOccurrenceTime::Timed { .. })
         {
             return;
         }
         self.open_composer(
-            EventComposerIntent::Edit { cached_event },
-            "Edit calendar event",
+            EventComposerIntent::Existing { cached_event },
+            action.sheet_title(),
             window,
             cx,
         );
+    }
+
+    pub(super) fn selected_event_action(&self) -> Option<SelectedEventAction> {
+        if self.supports_calendar_action(CalendarAction::UpdateEvent) {
+            Some(SelectedEventAction::Edit)
+        } else if self.supports_calendar_action(CalendarAction::DeleteEvent) {
+            Some(SelectedEventAction::Details)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn selected_calendar_event(&self) -> Option<CalendarOccurrence> {
+        let selected = self.selected_agenda_event.as_ref()?;
+        self.events
+            .iter()
+            .find(|event| event.id() == &selected.event_id)
+            .cloned()
     }
 
     fn open_composer(
@@ -112,6 +156,7 @@ where
         EventComposerSetup {
             session: Arc::clone(&self.session),
             week: self.week.clone(),
+            capabilities: self.profile.capabilities().calendar(),
             intent,
         }
     }
@@ -218,18 +263,10 @@ where
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(selected) = self.selected_agenda_event.as_ref() else {
+        let Some(event) = self.selected_calendar_event() else {
             return;
         };
-        let Some(event) = self
-            .events
-            .iter()
-            .find(|event| event.id() == &selected.event_id)
-            .cloned()
-        else {
-            return;
-        };
-        self.open_event_editor(event, window, cx);
+        self.open_selected_event(event, window, cx);
     }
 
     pub(super) fn change_week(&mut self, weeks: i64, cx: &mut Context<Self>) {
@@ -251,14 +288,7 @@ where
         self.refresh(cx);
     }
 
-    pub(super) fn can_write_events(&self) -> bool {
-        let calendar = self.profile.capabilities().calendar();
-        [
-            CalendarAction::CreateEvent,
-            CalendarAction::UpdateEvent,
-            CalendarAction::DeleteEvent,
-        ]
-        .into_iter()
-        .all(|action| calendar.supports(action))
+    pub(super) fn supports_calendar_action(&self, action: CalendarAction) -> bool {
+        self.profile.capabilities().calendar().supports(action)
     }
 }

@@ -160,7 +160,7 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
 
     select_default_timed_event(context);
     let edit = context
-        .debug_bounds("calendar-event-edit")
+        .debug_bounds("calendar-event-open")
         .expect("timed appointment offers an edit action");
     context.simulate_click(edit.center(), Modifiers::default());
     wait_for_ui_condition(context, |window, _| {
@@ -202,7 +202,7 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
     assert!(!context.update(|window, cx| window.has_active_sheet(cx)));
 
     let edit = context
-        .debug_bounds("calendar-event-edit")
+        .debug_bounds("calendar-event-open")
         .expect("cached appointment remains visible until sync");
     context.simulate_click(edit.center(), Modifiers::default());
     draw_calendar_view(context);
@@ -228,7 +228,7 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
             .update(|cx| calendar.read(cx).write_readiness != CalendarWriteReadiness::Ready)
     );
     let edit = context
-        .debug_bounds("calendar-event-edit")
+        .debug_bounds("calendar-event-open")
         .expect("failed sync keeps the appointment visible");
     context.simulate_click(edit.center(), Modifiers::default());
     draw_calendar_view(context);
@@ -249,7 +249,7 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
             .update(|cx| { calendar.read(cx).write_readiness == CalendarWriteReadiness::Ready })
     );
     let edit = context
-        .debug_bounds("calendar-event-edit")
+        .debug_bounds("calendar-event-open")
         .expect("successful sync restores Edit");
     context.simulate_click(edit.center(), Modifiers::default());
     wait_for_ui_condition(context, |window, _| {

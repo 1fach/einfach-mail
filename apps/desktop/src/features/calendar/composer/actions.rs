@@ -71,7 +71,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     }
 
     pub(super) fn submit(&mut self, cx: &mut Context<Self>) {
-        if !self.state.can_submit() {
+        if !self.can_submit() {
             return;
         }
         if matches!(
@@ -221,7 +221,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
     }
 
     pub(super) fn confirm_deletion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.state.can_delete() {
+        if !self.can_delete() {
             return;
         }
         let Some(event) = self.versioned_event() else {
@@ -265,7 +265,7 @@ impl<S: CalendarSession + ?Sized + 'static> EventComposer<S> {
         let Some(event) = self.versioned_event().cloned() else {
             return;
         };
-        if !self.state.can_delete() {
+        if !self.can_delete() {
             return;
         }
         if let ComposerState::Edit(EditState::Ready { status, .. }) = &mut self.state {
