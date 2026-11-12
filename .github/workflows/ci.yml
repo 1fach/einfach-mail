@@ -19,6 +19,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Check Rust module layout
+        run: python3 -B scripts/check-rust-module-layout.py
+
       - name: Install cargo-depgraph-check
         run: cargo install cargo-depgraph-check --version 0.1.0 --locked
 

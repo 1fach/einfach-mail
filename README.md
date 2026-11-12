@@ -26,11 +26,15 @@ Run the Linux project gate from the repository root before updating a branch:
 bash scripts/check-linux-local.sh
 ```
 
-The script checks the source-map unit tests, dependency boundaries and bans, the Linux target graph, Rust 1.95 compilation, formatting, Clippy, documentation, RustSec, and workspace tests. It checks for pinned tools first and prints install commands when any are missing. It does not invoke `gh` or start GitHub Actions.
+The script runs the source-map and module-layout unit tests. It rejects `#[path]` attributes and `mod.rs` files under `apps/` and `crates/`.
+
+It then checks dependency boundaries and bans, the Linux target graph, Rust 1.95 compilation, formatting, Clippy, documentation, RustSec, and workspace tests. It checks for pinned tools first and prints install commands when any are missing. It does not invoke `gh` or start GitHub Actions.
+
+The GitHub workflow runs the module-layout checker before its dependency checks.
 
 Run `python3 scripts/untangle-code-map.py` for a compact Rust source inventory and recent cross-component change map. Use `--declarations crates/application/src/calendar.rs` to print item declaration lines from one tracked Rust file.
 
-Run `python3 -B -m unittest discover -s scripts/tests` to check the source-map inventory rules.
+Run `python3 -B -m unittest discover -s scripts/tests` to check the source-map inventory and Rust module-layout rules.
 
 `cargo audit` uses its standard advisory database at `~/.cargo/advisory-db` and may fetch updates. For an offline audit, set `EINFACH_RUSTSEC_DB` to an existing advisory database path. The script passes `--no-fetch` when you set this variable, so refresh the database while online before relying on offline results. If Perl lacks `FindBin.pm`, the script reports when it uses system OpenSSL. Workspace tests skip ignored live Secret Service checks; see [development setup](docs/project/setup.md) to run them separately.
 

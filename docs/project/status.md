@@ -44,7 +44,7 @@ Issue #288 aligns the EWS provider with ADR 0061. Account, mail, calendar, sessi
 
 Issue [#336](https://github.com/1fach/einfach-mail/issues/336) tracks the follow-up that aligns Rust module declarations with the feature-first directory tree. [ADR 0061](../decisions/0061-feature-first-module-layout-and-test-placement.md) now requires `foo.rs` and `foo/`, forbids `mod.rs` and `#[path]`, and keeps account-router in one `lib.rs`.
 
-PRs #352–#355 completed the domain, application, and persistence splits. The desktop account move tracked by #342 passes the Rust 1.95 Linux local gate, and all 511 test function names match the baseline. Headless GPUI tests pass. No GitHub Actions or native window ran. Issues #343 and #344 are closed. Continue with #345–#347, then finish the module-tree work with #348.
+PRs #352–#355 completed the domain, application, and persistence splits. The desktop account move tracked by #342 passes the Rust 1.95 Linux local gate, and all 511 test function names match the baseline. Headless GPUI tests pass. No GitHub Actions or native window ran. Issues #343–#348 are closed. The #336 module-tree cleanup is complete; issue #356 is next.
 
 Issue #289 moved desktop startup, workspace, mail and calendar features, Linux process locking, shared helpers, and GPUI test support under their agreed ownership paths in [PR #320](https://github.com/1fach/einfach-mail/pull/320), targeting `feat/mail-list-resizing`. All 494 test function identifiers match the baseline. The full Linux local gate passes with localhost socket access for synthetic HTTP tests. Existing headless account and workspace tests passed. No real window was launched because Xvfb and Weston are unavailable. The #290 plan has children #321 through #324.
 
@@ -60,7 +60,9 @@ Issue [#345](https://github.com/1fach/einfach-mail/issues/345) moves the shared 
 
 Issue [#346](https://github.com/1fach/einfach-mail/issues/346) applies the `foo.rs` and `foo/` convention to the Graph and EWS providers with nine exact file moves. The Rust 1.95 Linux gate passed, and all 511 workspace test names match the baseline.
 
-Issue [#347](https://github.com/1fach/einfach-mail/issues/347) confirms ADR 0061's account-router decision. [PR #349](https://github.com/1fach/einfach-mail/pull/349) records provider selection in one `crates/providers/account-router/src/lib.rs`; the crate still exports `AccountProviderRouter` from that file. No source change was needed. Finish #336 with #348, then start [#356](https://github.com/1fach/einfach-mail/issues/356) after #336 closes.
+Issue [#347](https://github.com/1fach/einfach-mail/issues/347) confirms ADR 0061's account-router decision. [PR #349](https://github.com/1fach/einfach-mail/pull/349) records provider selection in one `crates/providers/account-router/src/lib.rs`; the crate still exports `AccountProviderRouter` from that file. No source change was needed.
+
+Issue [#348](https://github.com/1fach/einfach-mail/issues/348) moved the 11 remaining desktop module files to the `foo.rs` and `foo/` convention. The module-layout checker rejects `#[path]` and `mod.rs` under `apps/` and `crates/`; the local gate and GitHub workflow run it. The 511 test names match the pre-move inventory. The full Rust 1.95 Linux local gate passed. This completes #336; start [#356](https://github.com/1fach/einfach-mail/issues/356).
 
 ## Active risks
 
@@ -83,7 +85,7 @@ Issue [#347](https://github.com/1fach/einfach-mail/issues/347) confirms ADR 0061
 ## Next actions
 
 1. Complete the integrated M10 real-window review under [issue #296](https://github.com/1fach/einfach-mail/issues/296) on Linux; keep #273's theme review and #274's named-compositor check open.
-2. Complete the remaining behavior-preserving module-tree work tracked in issue [#336](https://github.com/1fach/einfach-mail/issues/336), with #348 last, then start refactor [#356](https://github.com/1fach/einfach-mail/issues/356).
+2. Start the clean-code pass tracked in issue [#356](https://github.com/1fach/einfach-mail/issues/356).
 3. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 4. Replace the SQLCipher and migration Git pins with released crates under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when compatible official releases are available.
 5. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
