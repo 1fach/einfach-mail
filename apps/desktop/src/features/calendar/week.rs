@@ -1,8 +1,8 @@
 use super::time::{to_calendar_date, to_offset_date_time};
-use std::time::SystemTime;
 
+use crate::components::LocalClock;
 use einfach_mail_domain::{CalendarViewRange, CalendarViewReference};
-use jiff::{Span, Timestamp, civil, tz::TimeZone};
+use jiff::{Span, civil, tz::TimeZone};
 
 #[derive(Clone)]
 enum CalendarTimeZoneChoice {
@@ -39,11 +39,7 @@ pub(crate) struct CalendarWeek {
 
 impl CalendarWeek {
     pub(crate) fn for_system(account_id: &einfach_mail_domain::AccountId) -> Self {
-        let system_time_zone = TimeZone::try_system()
-            .ok()
-            .filter(|time_zone| time_zone.iana_name().is_some());
-
-        if let Some(time_zone) = system_time_zone {
+        if let Some(time_zone) = LocalClock::system_time_zone() {
             if let Some(week_start) = current_week_start(&time_zone)
                 && let Some(week) = Self::in_system_zone(account_id, week_start, time_zone)
             {
@@ -124,8 +120,7 @@ impl CalendarWeek {
 }
 
 fn current_week_start(time_zone: &TimeZone) -> Option<civil::Date> {
-    let now = Timestamp::try_from(SystemTime::now()).ok()?;
-    monday_start(now.to_zoned(time_zone.clone()).date())
+    monday_start(LocalClock::today_in(time_zone)?)
 }
 
 fn monday_start(date: civil::Date) -> Option<civil::Date> {
