@@ -1,16 +1,24 @@
 use std::fs;
 
 use gpui_kit::component::{ColorTokens, Theme, ThemeMode};
-use gpui_kit::{Entity, Hsla, Modifiers, Role, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{App, Entity, Hsla, Modifiers, Role, TestAppContext, VisualTestContext, px, size};
 use tempfile::tempdir;
 
+use crate::components::{StatusTone, install_theme, status_colors};
 use crate::features::{AppearancePreference, AppearanceSettingsNotice, AppearanceSettingsStore};
 
 use super::*;
 
+fn init_fluent_app(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        install_theme(cx);
+    });
+}
+
 #[gpui_kit::test]
 fn settings_navigation_applies_and_persists_appearance_preferences(cx: &mut TestAppContext) {
-    cx.update(gpui_kit::init);
+    init_fluent_app(cx);
     let directory = tempdir().expect("temporary settings directory is created");
     let settings_path = directory.path().join("preferences.json");
     let store = AppearanceSettingsStore::at_path(settings_path.clone());
@@ -73,7 +81,7 @@ fn settings_navigation_applies_and_persists_appearance_preferences(cx: &mut Test
 
 #[gpui_kit::test]
 fn saved_appearance_is_applied_when_the_window_opens(cx: &mut TestAppContext) {
-    cx.update(gpui_kit::init);
+    init_fluent_app(cx);
     let directory = tempdir().expect("temporary settings directory is created");
     let settings_path = directory.path().join("preferences.json");
     AppearanceSettingsStore::at_path(settings_path.clone())
@@ -108,7 +116,7 @@ fn saved_appearance_is_applied_when_the_window_opens(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn invalid_appearance_file_is_preserved_and_falls_back_to_system(cx: &mut TestAppContext) {
-    cx.update(gpui_kit::init);
+    init_fluent_app(cx);
     let directory = tempdir().expect("temporary settings directory is created");
     let settings_path = directory.path().join("preferences.json");
     fs::write(&settings_path, b"invalid settings").expect("invalid settings fixture is written");
@@ -150,7 +158,7 @@ fn invalid_appearance_file_is_preserved_and_falls_back_to_system(cx: &mut TestAp
 fn appearance_save_failure_keeps_the_session_theme_and_reports_the_failure(
     cx: &mut TestAppContext,
 ) {
-    cx.update(gpui_kit::init);
+    init_fluent_app(cx);
     let directory = tempdir().expect("temporary settings directory is created");
     let parent_file = directory.path().join("not-a-directory");
     fs::write(&parent_file, b"fixture").expect("parent file fixture is written");
@@ -195,7 +203,7 @@ fn appearance_save_failure_keeps_the_session_theme_and_reports_the_failure(
 
 #[gpui_kit::test]
 fn settings_appearance_keeps_text_contrast_focus_and_layout_across_themes(cx: &mut TestAppContext) {
-    cx.update(gpui_kit::init);
+    init_fluent_app(cx);
     let directory = tempdir().expect("temporary settings directory is created");
     let store = AppearanceSettingsStore::at_path(directory.path().join("preferences.json"));
     let (view, context) = settings_view(cx, store);
@@ -424,4 +432,166 @@ fn relative_luminance(red: f32, green: f32, blue: f32) -> f32 {
         }
     };
     0.2126 * linearize(red) + 0.7152 * linearize(green) + 0.0722 * linearize(blue)
+}
+
+#[gpui_kit::test]
+fn fluent_palette_meets_contrast_minimums_in_light_and_dark(cx: &mut TestAppContext) {
+    init_fluent_app(cx);
+
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        cx.update(|cx| Theme::change(mode, None, cx));
+        cx.read(|cx| assert_fluent_contrast(Theme::global(cx), mode));
+    }
+}
+
+fn assert_fluent_contrast(theme: &Theme, mode: ThemeMode) {
+    let selected_row = theme.background.blend(theme.list_active);
+    let page = ("page", theme.background);
+    let navigation = ("navigation", theme.sidebar);
+    let card = ("card", theme.group_box);
+    let popover = ("popover", theme.popover);
+    let hover = ("row hover", theme.list_hover);
+    let selected = ("selected row", selected_row);
+
+    for (role, foreground, minimum, surfaces) in [
+        (
+            "primary text",
+            theme.foreground,
+            4.5,
+            vec![
+                page,
+                navigation,
+                card,
+                popover,
+                hover,
+                selected,
+                ("selected navigation item", theme.secondary_active),
+                ("subtle hover", theme.accent),
+            ],
+        ),
+        (
+            "secondary text",
+            theme.muted_foreground,
+            4.5,
+            vec![
+                page,
+                navigation,
+                card,
+                popover,
+                hover,
+                selected,
+                ("group header", theme.list_head),
+            ],
+        ),
+        (
+            "accent text",
+            theme.primary,
+            4.5,
+            vec![page, navigation, card, selected],
+        ),
+        (
+            "text on accent",
+            theme.primary_foreground,
+            4.5,
+            vec![
+                ("rest", theme.primary),
+                ("hover", theme.primary_hover),
+                ("pressed", theme.primary_active),
+            ],
+        ),
+        (
+            "text on danger",
+            theme.danger_foreground,
+            4.5,
+            vec![("button", theme.danger)],
+        ),
+        (
+            "control outline",
+            theme.input,
+            3.0,
+            vec![page, card, popover],
+        ),
+        (
+            "selection pill",
+            theme.primary,
+            3.0,
+            vec![
+                navigation,
+                ("selected navigation item", theme.secondary_active),
+            ],
+        ),
+    ] {
+        for (surface, background) in surfaces {
+            assert_contrast_ratio(
+                foreground,
+                background,
+                minimum,
+                &format!("{mode:?} {role}/{surface}"),
+            );
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn fluent_focus_ring_and_status_colors_stay_visible(cx: &mut TestAppContext) {
+    init_fluent_app(cx);
+
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        cx.update(|cx| Theme::change(mode, None, cx));
+        cx.read(|cx| {
+            let theme = Theme::global(cx);
+            for (surface, background) in [
+                ("page", theme.background),
+                ("navigation", theme.sidebar),
+                ("card", theme.group_box),
+                ("popover", theme.popover),
+            ] {
+                assert_contrast_ratio(
+                    theme.ring,
+                    background,
+                    3.0,
+                    &format!("{mode:?} focus ring/{surface}"),
+                );
+                assert_contrast_ratio(
+                    theme.ring.alpha(0.5),
+                    background,
+                    3.0,
+                    &format!("{mode:?} half-opacity focus halo/{surface}"),
+                );
+            }
+            assert_status_contrast(theme, cx, mode);
+        });
+    }
+}
+
+fn assert_status_contrast(theme: &Theme, cx: &App, mode: ThemeMode) {
+    for tone in [
+        StatusTone::Informational,
+        StatusTone::Success,
+        StatusTone::Warning,
+        StatusTone::Error,
+    ] {
+        let colors = status_colors(tone, cx);
+        for (surface, background) in [("page", theme.background), ("card", theme.group_box)] {
+            let tinted = background.blend(colors.background);
+            assert_contrast_ratio(
+                colors.icon,
+                background,
+                3.0,
+                &format!("{mode:?} {tone:?} icon/{surface}"),
+            );
+            assert_contrast_ratio(
+                colors.icon,
+                tinted,
+                3.0,
+                &format!("{mode:?} {tone:?} icon/tinted {surface}"),
+            );
+            assert_contrast_ratio(
+                theme.foreground,
+                tinted,
+                4.5,
+                &format!("{mode:?} {tone:?} text/tinted {surface}"),
+            );
+        }
+    }
 }

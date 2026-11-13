@@ -26,6 +26,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use super::{NavigationSurfaceAppearance, Workspace};
+use crate::components::{AppAssets, install_theme};
 use crate::features::{
     AccountServices, AppearanceSettingsStore, SetupIssue, bind_calendar_event_navigation_keys,
     bind_event_composer_keys, bind_mail_composer_keys, bind_message_navigation_keys,
@@ -246,7 +247,7 @@ fn run_application_with<P: AccountProvider + 'static>(
 ) -> io::Result<()> {
     let (window_open_attempt_sender, window_open_attempt_receiver) =
         mpsc::channel::<io::Result<()>>();
-    application().with_assets(assets::Assets).run(move |cx| {
+    application().with_assets(AppAssets).run(move |cx| {
         initialize_application(cx);
         open_workspace_window(setup, window_open_attempt_sender, cx);
     });
@@ -256,6 +257,7 @@ fn run_application_with<P: AccountProvider + 'static>(
 
 fn initialize_application(cx: &mut App) {
     init(cx);
+    install_theme(cx);
     bind_message_navigation_keys(cx);
     bind_mail_composer_keys(cx);
     bind_event_composer_keys(cx);

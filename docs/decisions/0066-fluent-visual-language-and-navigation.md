@@ -45,12 +45,12 @@ This ADR amends the navigation-selection bullet and the destination placement in
 | Separate app rail beside the folder pane | Separates destinations from folders. | Four permanent regions leave less room for the message list and reader. ADR 0059 already rejected it. |
 | gpui-component `Sidebar` | Ready-made. | No focus handle, debug selector, or pill, and tree-item semantics. It would break the `nav-*` contract. |
 | Runtime `Theme::update` patches after each `change` (the current pattern, extended) | No new files. | Two writers of theme state. Every new role needs a repeat call. Easy to forget on a new appearance path. |
-| Full `AllAssets` bundle | No icon list to maintain. | Embeds about 749 KB of SVG for about two dozen icons. |
+| Full `AllAssets` bundle | No icon list to maintain. | Embeds about 749 KB of SVG for 22 icons. |
 
 ## Consequences
 
 - Every color in `apps/desktop/src` comes from the theme JSON. A source scan test enforces it. Light and dark values are pinned by exact-value and contrast tests, because a bad color silently falls back to the default.
-- The light focus ring must keep a 3:1 contrast against the card surface at the half opacity GPUI Kit paints around the ring. The JSON therefore uses a darker ring than the accent in light mode.
+- GPUI Kit paints a half-opacity halo around the focus ring, and the existing accessibility test requires that halo to keep 3:1 contrast against every surface. The JSON therefore sets `ring` apart from the accent. It is a deep navy in light mode and a slightly lighter blue in dark mode. Control outlines (`input.border`) use a stronger stroke than hairlines so unselected radios and inputs keep 3:1.
 - Existing layouts pick up the palette in the foundation unit and change structure in later units (#453–#457). Behavior, ids, roles, labels, and keyboard paths stay unchanged. Tests that read row heights or click collapsed actions get deliberate updates in those units.
 - The selected row fill is a translucent accent tint, because GPUI Kit clamps `list.active.background` to an alpha of 0.2.
 - Message times use a 24-hour clock with English date labels until localization exists.

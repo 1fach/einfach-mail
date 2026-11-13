@@ -11,7 +11,7 @@ Einfach Mail should look and feel like a Windows 11 app on Linux, using Wino Mai
 3. [Grounding](fluent-workspace/grounding.md) maps the current code and lists the constraints both candidates worked from.
 4. [Candidate B](fluent-workspace/candidate-b.md) is the alternative design. Read it for the grafted ideas and the rejected alternatives.
 
-ADR 0066 records the lasting decision once the foundation unit lands. It covers the Fluent visual language and amends ADR 0059's navigation selection and destination placement.
+[ADR 0066](../decisions/0066-fluent-visual-language-and-navigation.md) records the lasting decision. It covers the Fluent visual language and amends ADR 0059's navigation selection and destination placement.
 
 ## Decisions from the repository owner
 
@@ -58,3 +58,4 @@ On Hyprland, `hyprctl clients -j` gives the window geometry and `grim -g "<x>,<y
 Each unit appends one line when it merges: date, unit, PR, and verification evidence.
 
 - 2026-11-13: The design was produced by three `how` explorers and a two-candidate architect arena. No cross-judge ran because only Claude models were configured. The baseline screenshot [`fluent-baseline-accounts-dark.png`](../project/evidence/fluent-baseline-accounts-dark.png) shows the Accounts view: centered nav text buttons and a narrow centered column.
+- 2026-11-13: U1–U3 foundation, PR pending, [#452](https://github.com/1fach/einfach-mail/issues/452). ADR 0066 accepted. `scripts/preview-shots.sh` captured Mail, Mail with reader, Calendar, Accounts, and Settings in light and dark (`docs/project/evidence/fluent-foundation-*.png`). The theme JSON installs once at startup, and contrast, exact-value, and no-raw-color tests pass. No view changed structure.

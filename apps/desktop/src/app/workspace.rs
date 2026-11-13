@@ -162,8 +162,6 @@ impl<P: AccountProvider + 'static> Workspace<P> {
     fn apply_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mode = self.appearance_preference.theme_mode(window.appearance());
         gpui_kit::component::Theme::change(mode, Some(window), cx);
-        // Use the primary color to keep GPUI Kit's half-opacity focus ring above 3:1 contrast.
-        gpui_kit::component::Theme::update(cx, |theme| theme.ring = theme.primary);
     }
 
     pub(crate) fn with_navigation_surface_appearance(
