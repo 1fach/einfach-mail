@@ -63,6 +63,9 @@ app_icons! {
     Error => CircleX,
     NarrowList => PanelLeftClose,
     WidenList => PanelLeftOpen,
+    Success => CircleCheck,
+    Permissions => ShieldCheck,
+    Server => Server,
 }
 
 /// The application's asset source: the `AppIcon` subset first, then GPUI Kit's default icons.

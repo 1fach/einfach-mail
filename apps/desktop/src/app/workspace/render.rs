@@ -1,12 +1,11 @@
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt, avatar::Avatar, button::Button,
-    scroll::ScrollableElement,
 };
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{Context, IntoElement, Render, Role, Window, div, prelude::*, rems};
 
-use crate::components::{NAVIGATION_PANE_WIDTH, NavItem};
+use crate::components::{InfoBar, NAVIGATION_PANE_WIDTH, NavItem};
 use crate::features::{
     AppearancePreference, SettingsViewState, account_cache_open_error_message, render_settings,
 };
@@ -149,7 +148,7 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
             WorkspaceContent::Calendar { view, .. } => {
                 div().size_full().child(view.clone()).into_any_element()
             }
-            WorkspaceContent::Settings => self.render_settings_workspace_content(colors, cx),
+            WorkspaceContent::Settings => self.render_settings_workspace_content(cx),
             WorkspaceContent::Accounts | WorkspaceContent::Opening(_) => {
                 self.render_account_workspace_content(colors)
             }
@@ -157,39 +156,43 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
     }
 
     fn render_account_workspace_content(&self, colors: ColorTokens) -> gpui_kit::AnyElement {
-        let mut account_content = div().flex().flex_col().child(self.account_view.clone());
-        if let Some(error) = self.session_open_error {
-            account_content = account_content.child(Self::render_session_open_error(error));
-        }
-        if let Some(opening) = self.content.opening_kind() {
-            account_content = account_content.child(Self::render_opening_progress(opening));
-        }
+        let notices = self.account_workspace_notices();
         div()
             .size_full()
-            .overflow_y_scrollbar()
-            .id("account-scroll-viewport")
+            .flex()
+            .flex_col()
             .bg(colors.background)
-            .child(
-                div()
-                    .min_h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .p_8()
-                    .child(account_content),
-            )
+            .child(div().flex_1().min_h_0().child(self.account_view.clone()))
+            .children(notices)
             .into_any_element()
     }
 
+    fn account_workspace_notices(&self) -> Option<gpui_kit::Div> {
+        let error = self.session_open_error;
+        let opening = self.content.opening_kind();
+        if error.is_none() && opening.is_none() {
+            return None;
+        }
+        Some(
+            div()
+                .w_full()
+                .max_w(rems(44.))
+                .mx_auto()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .px_8()
+                .pb_8()
+                .children(error.map(Self::render_session_open_error))
+                .children(opening.map(Self::render_opening_progress)),
+        )
+    }
+
     fn render_session_open_error(error: AccountCacheOpenError) -> impl IntoElement {
-        div()
-            .id("account-cache-error")
-            .debug_selector(|| "account-cache-error".to_owned())
-            .role(Role::Alert)
-            .w_full()
-            .max_w(rems(48.))
-            .text_sm()
-            .child(account_cache_open_error_message(error))
+        InfoBar::alert(
+            "account-cache-error",
+            account_cache_open_error_message(error),
+        )
     }
 
     fn render_opening_progress(opening: super::state::OpeningContent) -> impl IntoElement {
@@ -197,7 +200,7 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
             super::state::OpeningContent::Mail => "Opening mail…",
             super::state::OpeningContent::Calendar => "Opening calendar…",
         };
-        div().flex().justify_center().child(
+        div().flex().child(
             Button::new("account-operation-progress")
                 .debug_selector(|| "account-operation-progress".to_owned())
                 .label(label)
@@ -206,11 +209,7 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
         )
     }
 
-    fn render_settings_workspace_content(
-        &self,
-        colors: ColorTokens,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::AnyElement {
+    fn render_settings_workspace_content(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let on_change = cx.listener(|workspace, index, window, cx| {
             if let Some(appearance) = AppearancePreference::from_radio_index(*index) {
                 workspace.change_appearance(appearance, window, cx);
@@ -219,12 +218,7 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
         div()
             .size_full()
             .child(render_settings(
-                SettingsViewState::new(
-                    self.appearance_preference,
-                    self.appearance_settings_notice,
-                    colors,
-                    cx.theme().radius,
-                ),
+                SettingsViewState::new(self.appearance_preference, self.appearance_settings_notice),
                 on_change,
             ))
             .into_any_element()

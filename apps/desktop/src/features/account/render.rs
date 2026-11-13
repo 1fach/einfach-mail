@@ -6,190 +6,204 @@ use super::state::{
     AccountStatus, EwsDiscoveryState, ExchangeEwsConnectionForm, SavedCredentialState,
 };
 use super::{AccountView, SetupIssue};
+use crate::components::{AppIcon, InfoBar, Page, SettingsCard, StatusTone, status_colors};
 use einfach_mail_application::{
     AccountOperationError, AccountPermissionRequest, AccountProvider, AccountProviderKind,
-    ExchangeEwsDiscoveryConfirmation,
+    ConnectedAccount, ExchangeEwsDiscoveryConfirmation,
 };
 use einfach_mail_domain::AccountProfile;
 use gpui_kit::component::{
-    ColorTokens, Disableable, StyledExt,
+    ColorTokens, Disableable, Icon,
+    avatar::Avatar,
     button::{Button, ButtonVariants},
     form::{Field, Form},
+    h_flex,
     input::Input,
+    v_flex,
 };
-use gpui_kit::{Context, Div, IntoElement, Role, Stateful, div, prelude::*};
+use gpui_kit::{AnyElement, Context, Div, IntoElement, Role, Stateful, div, prelude::*};
 
 impl<P: AccountProvider + 'static> AccountView<P> {
-    fn account_identity(&self, profile: &AccountProfile, colors: ColorTokens) -> impl IntoElement {
-        let mut identity = div()
-            .id("connected-account")
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_4()
-            .bg(colors.surface)
-            .border_1()
-            .border_color(colors.border)
-            .rounded_lg()
-            .child(
-                div()
-                    .text_base()
-                    .font_bold()
-                    .child(profile.label().to_owned()),
-            );
-
-        if let Some(mailbox) = profile.mailbox() {
-            identity = identity.child(
-                div()
-                    .text_sm()
-                    .text_color(colors.muted_foreground)
-                    .child(format!("Mailbox: {}", mailbox.address())),
-            );
-        }
-        if let Some(user_principal_name) = profile
+    fn account_identity(&self, profile: &AccountProfile, cx: &Context<Self>) -> SettingsCard {
+        let connected = self.render_connected_status(cx);
+        let mailbox = profile
+            .mailbox()
+            .map(|mailbox| div().child(format!("Mailbox: {}", mailbox.address())));
+        let user_principal_name = profile
             .user_principal_name()
             .filter(|upn| !profile.label().eq_ignore_ascii_case(upn))
-        {
-            identity = identity.child(
-                div()
-                    .text_sm()
-                    .text_color(colors.muted_foreground)
-                    .child(format!("Sign-in: {user_principal_name}")),
-            );
-        }
-
-        identity
-    }
-
-    fn render_permissions(&self, colors: ColorTokens) -> impl IntoElement {
-        div()
-            .id("account-requested-access")
-            .debug_selector(|| "account-requested-access".to_owned())
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_4()
-            .bg(colors.surface)
-            .border_1()
-            .border_color(colors.border)
-            .rounded_lg()
-            .child(div().text_base().font_bold().child("Requested access"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(colors.muted_foreground)
-                    .child("Initial sign-in requests User.Read, Mail.Read, Calendars.Read, and offline_access. Mail.Read lets Einfach Mail read your mail, and Calendars.Read lets it read your primary calendar. If Microsoft denies a read-state change, follow-up flag change, message move, or message deletion, a separate review can request Mail.ReadWrite, which permits creating, reading, updating, and deleting mail. The app uses this access to set messages read or unread, update or clear follow-up flags, move messages between folders, and delete selected messages after confirmation. If Microsoft denies a supported calendar change, a separate review can request Calendars.ReadWrite, which permits creating, reading, updating, and deleting calendar events. Einfach Mail uses it to create one-off timed appointments, update the title or time of supported standalone appointments you organize that have no attendees, and delete those appointments after confirmation. It does not create recurring or all-day events, send invitations, or create online meetings. The app does not request Mail.Send."),
+            .map(|upn| div().child(format!("Sign-in: {upn}")));
+        SettingsCard::new("connected-account", profile.label().to_owned())
+            .leading(Avatar::new().name(profile.label().to_owned()))
+            .description(
+                v_flex()
+                    .gap_1()
+                    .children(connected)
+                    .children(mailbox)
+                    .children(user_principal_name),
             )
     }
 
-    fn render_status(&self) -> impl IntoElement {
-        let (label, message, role) = match &self.status {
+    fn render_connected_status(&self, cx: &Context<Self>) -> Option<Stateful<Div>> {
+        let AccountStatus::Connected(account) = &self.status else {
+            return None;
+        };
+        let success = status_colors(StatusTone::Success, cx).icon;
+        Some(
+            h_flex()
+                .id("account-status")
+                .role(Role::Status)
+                .aria_label(format!("Connected to {}", account.profile().label()))
+                .gap_1()
+                .items_center()
+                .child(Icon::new(AppIcon::Success).size_3().text_color(success))
+                .child("Connected"),
+        )
+    }
+
+    fn render_requested_access() -> SettingsCard {
+        SettingsCard::new("account-requested-access", "Requested access")
+            .icon(AppIcon::Permissions)
+            .child("Initial sign-in requests User.Read, Mail.Read, Calendars.Read, and offline_access. Mail.Read lets Einfach Mail read your mail, and Calendars.Read lets it read your primary calendar. If Microsoft denies a read-state change, follow-up flag change, message move, or message deletion, a separate review can request Mail.ReadWrite, which permits creating, reading, updating, and deleting mail. The app uses this access to set messages read or unread, update or clear follow-up flags, move messages between folders, and delete selected messages after confirmation. If Microsoft denies a supported calendar change, a separate review can request Calendars.ReadWrite, which permits creating, reading, updating, and deleting calendar events. Einfach Mail uses it to create one-off timed appointments, update the title or time of supported standalone appointments you organize that have no attendees, and delete those appointments after confirmation. It does not create recurring or all-day events, send invitations, or create online meetings. The app does not request Mail.Send.")
+    }
+
+    fn render_status(&self) -> Option<InfoBar> {
+        let (label, message, alert) = match &self.status {
             AccountStatus::Restoring => (
                 "Checking for a saved account",
                 "Checking for a saved account…",
-                Role::Status,
+                false,
             ),
-            AccountStatus::Disconnected => {
-                ("Not connected", "No account is connected.", Role::Status)
+            AccountStatus::Disconnected => ("Not connected", "No account is connected.", false),
+            AccountStatus::Connecting { .. } => {
+                ("Connecting to account", "Connecting to account…", false)
             }
-            AccountStatus::Connecting { .. } => (
-                "Connecting to account",
-                "Connecting to account…",
-                Role::Status,
-            ),
             AccountStatus::CancellingConnect => (
                 "Finishing account connection",
                 "Finishing connection…",
-                Role::Status,
+                false,
             ),
-            AccountStatus::SigningOut { .. } => (
-                "Removing saved sign-in",
-                "Removing saved sign-in…",
-                Role::Status,
-            ),
+            AccountStatus::SigningOut { .. } => {
+                ("Removing saved sign-in", "Removing saved sign-in…", false)
+            }
             AccountStatus::SignOutFailed { error, .. } => (
                 AccountStatus::error_message(*error),
                 AccountStatus::error_message(*error),
-                Role::Alert,
+                true,
             ),
             AccountStatus::Reauthorizing { .. } => (
                 "Reviewing Microsoft permissions",
                 "Waiting for Microsoft permission review in your browser…",
-                Role::Status,
+                false,
             ),
             AccountStatus::CancellingReauthorization { .. } => (
                 "Finishing Microsoft permission review",
                 "Finishing permission review…",
-                Role::Status,
+                false,
             ),
             AccountStatus::ReauthorizationFailed { error, .. } => (
                 AccountStatus::reauthorization_error_message(*error),
                 AccountStatus::reauthorization_error_message(*error),
-                Role::Alert,
+                true,
             ),
-            AccountStatus::Connected(_) => ("Connected", "Connected", Role::Status),
+            AccountStatus::Connected(_) => return None,
             AccountStatus::Failed { error, .. } => (
                 AccountStatus::error_message(*error),
                 AccountStatus::error_message(*error),
-                Role::Alert,
+                true,
             ),
         };
-        let label = match &self.status {
-            AccountStatus::Connected(account) => {
-                format!("Connected to {}", account.profile().label())
-            }
-            _ => label.to_owned(),
+        let bar = if alert {
+            InfoBar::alert("account-status", message)
+        } else {
+            InfoBar::status("account-status", message)
         };
-
-        div()
-            .id("account-status")
-            .role(role)
-            .aria_label(label)
-            .text_sm()
-            .child(message)
+        Some(bar.accessible_label(label))
     }
 
-    fn render_account_details(&self, colors: ColorTokens) -> Option<impl IntoElement> {
+    /// A row that is as wide as its button, so the row's bounds are the button's bounds.
+    fn action_slot() -> Div {
+        div().flex().self_start()
+    }
+
+    fn render_account_details(
+        &self,
+        sign_out_label: Option<&'static str>,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         let account = self.status.connected_account()?;
         let profile = account.profile();
+        let mut identity = self.account_identity(profile, cx);
+        if let Some(label) = sign_out_label {
+            identity = identity.trailing(self.render_saved_sign_out(cx, label));
+        }
+        let identity = Self::with_account_detail_rows(identity, account, colors);
+        let can_review_permissions = matches!(
+            &self.status,
+            AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. }
+        ) && profile.capabilities().can_review_mail_write_permission();
+        let permissions = can_review_permissions.then(|| self.render_permission_review(cx));
+        Some(v_flex().gap_1().child(identity).children(permissions))
+    }
+
+    fn with_account_detail_rows(
+        identity: SettingsCard,
+        account: &ConnectedAccount,
+        colors: ColorTokens,
+    ) -> SettingsCard {
+        let capabilities = account.profile().capabilities();
         let provider = match account.provider_kind() {
             AccountProviderKind::MicrosoftGraph => "Microsoft Graph (Microsoft 365)",
             AccountProviderKind::ExchangeEws => "Exchange Web Services (Exchange Server)",
             _ => "Other provider",
         };
-        let mut details = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(self.account_identity(profile, colors))
+        identity
             .child(
                 div()
                     .id("account-provider")
                     .debug_selector(|| "account-provider".to_owned())
-                    .text_sm()
                     .child(format!("Provider: {provider}")),
             )
             .child(
                 div()
                     .id("account-mail-capabilities")
                     .debug_selector(|| "account-mail-capabilities".to_owned())
-                    .text_sm()
-                    .child(mail_access_summary(profile.capabilities().mail())),
-            );
-        let calendar_summary = calendar_actions_summary(profile.capabilities().calendar());
-        details = details.child(
-            div()
-                .id("account-calendar-capabilities")
-                .debug_selector(|| "account-calendar-capabilities".to_owned())
-                .text_sm()
-                .child(calendar_summary),
-        );
-        Some(details.child(
-            div()
-                .text_sm()
-                .text_color(colors.muted_foreground)
-                .child("Signing out removes the saved sign-in and encrypted account cache from this device."),
-        ))
+                    .child(mail_access_summary(capabilities.mail())),
+            )
+            .child(
+                div()
+                    .id("account-calendar-capabilities")
+                    .debug_selector(|| "account-calendar-capabilities".to_owned())
+                    .child(calendar_actions_summary(capabilities.calendar())),
+            )
+            .child(
+                div()
+                    .text_color(colors.muted_foreground)
+                    .child("Signing out removes the saved sign-in and encrypted account cache from this device."),
+            )
+    }
+
+    fn sign_out_label(&self) -> Option<&'static str> {
+        match &self.status {
+            AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. } => self
+                .pending_permission_review
+                .is_none()
+                .then_some("Sign out"),
+            AccountStatus::SignOutFailed { .. } => Some("Retry sign out"),
+            AccountStatus::Failed {
+                saved_credential_state: SavedCredentialState::MayExist,
+                error:
+                    AccountOperationError::SavedAccountIdentityUnavailable
+                    | AccountOperationError::AccountMismatch,
+                ..
+            } => None,
+            AccountStatus::Failed {
+                saved_credential_state: SavedCredentialState::MayExist,
+                ..
+            } => Some("Remove saved sign-in"),
+            _ => None,
+        }
     }
 
     fn render_saved_sign_out(
@@ -197,9 +211,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         cx: &mut Context<Self>,
         label: &'static str,
     ) -> impl IntoElement {
-        div()
-            .flex()
-            .justify_center()
+        Self::action_slot()
             .debug_selector(|| "sign-out".to_owned())
             .child(
                 Button::new("sign-out")
@@ -210,20 +222,29 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             )
     }
 
-    fn render_permission_review(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(request) = self.pending_permission_review {
-            div()
-                .flex()
-                .flex_col()
+    fn render_permission_review(&self, cx: &mut Context<Self>) -> SettingsCard {
+        let card =
+            SettingsCard::new("account-permissions", "Permissions").icon(AppIcon::Permissions);
+        let Some(request) = self.pending_permission_review else {
+            return card.trailing(
+                Button::new("review-app-permissions")
+                    .debug_selector(|| "review-app-permissions".to_owned())
+                    .label("Review sign-in permissions")
+                    .disabled(self.workspace_is_opening || self.task.is_some())
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.prepare_permission_review(AccountPermissionRequest::Current, cx);
+                    })),
+            );
+        };
+        card.child(
+            v_flex()
                 .gap_3()
                 .id("permission-review-disclosure")
                 .debug_selector(|| "permission-review-disclosure".to_owned())
                 .role(Role::Alert)
                 .child(permission_review_disclosure(request))
                 .child(
-                    div()
-                        .flex()
-                        .justify_center()
+                    h_flex()
                         .gap_2()
                         .child(
                             Button::new("continue-permission-review")
@@ -245,189 +266,138 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                                     view.cancel_permission_review(cx);
                                 })),
                         ),
-                )
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .justify_center()
-                .child(
-                    Button::new("review-app-permissions")
-                        .debug_selector(|| "review-app-permissions".to_owned())
-                        .label("Review sign-in permissions")
-                        .disabled(self.workspace_is_opening || self.task.is_some())
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.prepare_permission_review(AccountPermissionRequest::Current, cx);
-                        })),
-                )
-                .into_any_element()
-        }
-    }
-
-    fn render_progress_action(label: &'static str) -> gpui_kit::Div {
-        div().flex().justify_center().child(
-            Button::new("account-operation-progress")
-                .debug_selector(|| "account-operation-progress".to_owned())
-                .label(label)
-                .loading(true)
-                .disabled(true),
+                ),
         )
     }
 
-    fn render_primary_action(
-        &self,
-        colors: ColorTokens,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_progress_action(label: &'static str) -> AnyElement {
+        Self::action_slot()
+            .child(
+                Button::new("account-operation-progress")
+                    .debug_selector(|| "account-operation-progress".to_owned())
+                    .label(label)
+                    .loading(true)
+                    .disabled(true),
+            )
+            .into_any_element()
+    }
+
+    fn render_primary_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         match &self.status {
-            AccountStatus::Restoring => Self::render_progress_action("Checking account…"),
-            AccountStatus::SigningOut { .. } => Self::render_progress_action("Signing out…"),
-            AccountStatus::SignOutFailed { .. } => div(),
-            AccountStatus::CancellingConnect => Self::render_progress_action("Finishing sign-in…"),
-            AccountStatus::Reauthorizing { .. } => div()
-                .flex()
-                .justify_center()
-                .debug_selector(|| "cancel-permission-update".to_owned())
-                .child(
-                    Button::new("cancel-permission-update")
-                        .ghost()
-                        .label("Cancel permission review")
-                        .on_click(cx.listener(|view, _, _, cx| view.cancel_reauthorization(cx))),
-                ),
-            AccountStatus::CancellingReauthorization { .. } => {
-                Self::render_progress_action("Finishing permission review…")
+            AccountStatus::Restoring => Some(Self::render_progress_action("Checking account…")),
+            AccountStatus::SigningOut { .. } => Some(Self::render_progress_action("Signing out…")),
+            AccountStatus::CancellingConnect => {
+                Some(Self::render_progress_action("Finishing sign-in…"))
             }
-            AccountStatus::Connecting { .. } => div()
-                .flex()
-                .justify_center()
-                .debug_selector(|| "cancel-sign-in".to_owned())
-                .child(
-                    Button::new("cancel-sign-in")
-                        .ghost()
-                        .label("Cancel sign-in")
-                        .on_click(cx.listener(|view, _, _, cx| view.cancel_connect(cx))),
-                ),
-            AccountStatus::Connected(_) if self.services.is_ok() => div(),
+            AccountStatus::CancellingReauthorization { .. } => {
+                Some(Self::render_progress_action("Finishing permission review…"))
+            }
+            AccountStatus::Reauthorizing { .. } => Some(
+                Self::action_slot()
+                    .debug_selector(|| "cancel-permission-update".to_owned())
+                    .child(
+                        Button::new("cancel-permission-update")
+                            .ghost()
+                            .label("Cancel permission review")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.cancel_reauthorization(cx);
+                            })),
+                    )
+                    .into_any_element(),
+            ),
+            AccountStatus::Connecting { .. } => Some(
+                Self::action_slot()
+                    .debug_selector(|| "cancel-sign-in".to_owned())
+                    .child(
+                        Button::new("cancel-sign-in")
+                            .ghost()
+                            .label("Cancel sign-in")
+                            .on_click(cx.listener(|view, _, _, cx| view.cancel_connect(cx))),
+                    )
+                    .into_any_element(),
+            ),
             AccountStatus::Failed {
                 saved_credential_state: SavedCredentialState::MayExist,
                 ..
-            } => div()
-                .flex()
-                .justify_center()
-                .debug_selector(|| "retry-account-restore".to_owned())
-                .child(
-                    Button::new("retry-account-restore")
-                        .primary()
-                        .label("Retry account restore")
-                        .on_click(cx.listener(|view, _, _, cx| view.start_restore(cx))),
-                ),
+            } => Some(
+                Self::action_slot()
+                    .debug_selector(|| "retry-account-restore".to_owned())
+                    .child(
+                        Button::new("retry-account-restore")
+                            .primary()
+                            .label("Retry account restore")
+                            .on_click(cx.listener(|view, _, _, cx| view.start_restore(cx))),
+                    )
+                    .into_any_element(),
+            ),
             AccountStatus::Disconnected
             | AccountStatus::Failed {
                 saved_credential_state: SavedCredentialState::Absent,
                 ..
-            } => self.render_connect_options(colors, cx),
-            AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. } => div(),
+            } => Some(self.render_connect_options(cx).into_any_element()),
+            AccountStatus::SignOutFailed { .. }
+            | AccountStatus::Connected(_)
+            | AccountStatus::ReauthorizationFailed { .. } => None,
         }
     }
 
-    fn render_connect_options(&self, colors: ColorTokens, cx: &mut Context<Self>) -> gpui_kit::Div {
-        div()
+    fn render_connect_options(&self, cx: &mut Context<Self>) -> Div {
+        v_flex()
             .w_full()
-            .max_w_48()
-            .flex()
-            .flex_col()
-            .gap_5()
-            .child(self.render_microsoft365_choice(colors, cx))
-            .child(self.render_exchange_ews_choice(colors, cx))
+            .gap_6()
+            .child(self.render_microsoft365_choice(cx))
+            .child(self.render_exchange_ews_choice(cx))
     }
 
-    fn render_microsoft365_choice(
-        &self,
-        colors: ColorTokens,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::Div {
-        let mut choice = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(div().text_base().font_semibold().child("Microsoft 365"))
-            .child(Self::render_microsoft365_provider_description(colors));
-        if matches!(
-            &self.services,
-            Ok(services) if services.microsoft365_setup_issue.is_none()
-        ) {
-            choice = choice.child(self.render_permissions(colors));
+    fn render_microsoft365_choice(&self, cx: &mut Context<Self>) -> Div {
+        let card = SettingsCard::new("microsoft365-provider", "Microsoft 365")
+            .icon(AppIcon::Mail)
+            .description(Self::render_microsoft365_provider_description());
+        let group = v_flex().gap_1();
+        match self.microsoft365_setup_issue() {
+            Some(issue) => group
+                .child(card)
+                .child(Self::render_microsoft365_setup_status(issue)),
+            None => group
+                .child(card.trailing(self.render_microsoft365_connect_button(cx)))
+                .child(Self::render_requested_access()),
         }
-        self.add_microsoft365_connect_option(choice, cx)
     }
 
-    fn render_microsoft365_provider_description(colors: ColorTokens) -> Stateful<Div> {
+    fn microsoft365_setup_issue(&self) -> Option<SetupIssue> {
+        self.services
+            .as_ref()
+            .ok()
+            .and_then(|services| services.microsoft365_setup_issue)
+    }
+
+    fn render_microsoft365_provider_description() -> Stateful<Div> {
         div()
             .id("microsoft365-provider-description")
             .debug_selector(|| "microsoft365-provider-description".to_owned())
-            .text_sm()
-            .text_color(colors.muted_foreground)
             .child(
                 "Connect a work or school Microsoft 365 account with Microsoft Graph through the system browser.",
             )
     }
 
-    fn render_exchange_ews_choice(
-        &self,
-        colors: ColorTokens,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::Div {
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(div().text_base().font_semibold().child("Exchange Server"))
-            .child(Self::render_exchange_ews_provider_description(colors))
-            .child(self.render_ews_connect_button(cx))
+    fn render_exchange_ews_choice(&self, cx: &mut Context<Self>) -> SettingsCard {
+        SettingsCard::new("exchange-ews-provider", "Exchange Server")
+            .icon(AppIcon::Server)
+            .description(Self::render_exchange_ews_provider_description())
+            .trailing(self.render_ews_connect_button(cx))
     }
 
-    fn render_exchange_ews_provider_description(colors: ColorTokens) -> Stateful<Div> {
+    fn render_exchange_ews_provider_description() -> Stateful<Div> {
         div()
             .id("exchange-ews-provider-description")
             .debug_selector(|| "exchange-ews-provider-description".to_owned())
-            .text_sm()
-            .text_color(colors.muted_foreground)
             .child(
                 "Connect to an on-premises Exchange Server with EWS. Enter an HTTPS endpoint or discover one from your mailbox.",
             )
     }
 
-    fn add_microsoft365_connect_option(
-        &self,
-        options: gpui_kit::Div,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::Div {
-        let Ok(services) = &self.services else {
-            return options;
-        };
-        self.add_microsoft365_setup_action(options, services.microsoft365_setup_issue, cx)
-    }
-
-    fn add_microsoft365_setup_action(
-        &self,
-        options: gpui_kit::Div,
-        issue: Option<SetupIssue>,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::Div {
-        match issue {
-            Some(issue) => options.child(Self::render_microsoft365_setup_status(issue)),
-            None => options.child(self.render_microsoft365_connect_button(cx)),
-        }
-    }
-
-    fn render_microsoft365_setup_status(issue: SetupIssue) -> Stateful<Div> {
-        div()
-            .id("microsoft365-setup-status")
-            .role(Role::Status)
-            .text_sm()
-            .child(issue.message())
+    fn render_microsoft365_setup_status(issue: SetupIssue) -> InfoBar {
+        InfoBar::status("microsoft365-setup-status", issue.message()).tone(StatusTone::Warning)
     }
 
     fn render_microsoft365_connect_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -447,21 +417,15 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             }))
     }
 
-    fn render_exchange_ews_form(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let Some(form) = &self.exchange_ews_form else {
-            return div();
-        };
-        div()
-            .w_full()
-            .max_w_48()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(div().text_lg().font_bold().child("Exchange Server"))
+    fn render_exchange_ews_form(
+        &self,
+        form: &ExchangeEwsConnectionForm,
+        cx: &mut Context<Self>,
+    ) -> SettingsCard {
+        SettingsCard::new("exchange-ews-form", "Exchange Server")
+            .icon(AppIcon::Server)
             .child(
-                div().text_sm().child(
-                    "Enter your server's HTTPS EWS address or discover it from your mailbox. Discovery sends the mailbox address without credentials. Review the endpoint before connecting; your NTLM username and password are sent only after you press Connect.",
-                ),
+                "Enter your server's HTTPS EWS address or discover it from your mailbox. Discovery sends the mailbox address without credentials. Review the endpoint before connecting; your NTLM username and password are sent only after you press Connect.",
             )
             .child(self.render_ews_form(form, cx))
     }
@@ -485,7 +449,7 @@ impl<P: AccountProvider + 'static> AccountView<P> {
                 .gap_2()
                 .child(self.render_ews_endpoint_input(form))
                 .child(self.render_ews_discovery_button(form, cx))
-                .child(self.render_ews_discovery_feedback(&form.discovery, cx)),
+                .children(self.render_ews_discovery_feedback(&form.discovery, cx)),
         )
     }
 
@@ -506,15 +470,17 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         form: &ExchangeEwsConnectionForm,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        Button::new("discover-ews-endpoint")
-            .debug_selector(|| "discover-ews-endpoint".to_owned())
-            .outline()
-            .label(form.discovery.button_label())
-            .loading(form.discovery.is_busy())
-            .disabled(self.ews_discovery_button_disabled(&form.discovery))
-            .on_click(cx.listener(|view, _, window, cx| {
-                view.discover_exchange_ews_endpoint(window, cx);
-            }))
+        div().flex().child(
+            Button::new("discover-ews-endpoint")
+                .debug_selector(|| "discover-ews-endpoint".to_owned())
+                .outline()
+                .label(form.discovery.button_label())
+                .loading(form.discovery.is_busy())
+                .disabled(self.ews_discovery_button_disabled(&form.discovery))
+                .on_click(cx.listener(|view, _, window, cx| {
+                    view.discover_exchange_ews_endpoint(window, cx);
+                })),
+        )
     }
 
     fn ews_discovery_button_disabled(&self, state: &EwsDiscoveryState) -> bool {
@@ -528,22 +494,23 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         &self,
         state: &EwsDiscoveryState,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> Option<AnyElement> {
         if let EwsDiscoveryState::Confirmation(confirmation) = state {
-            return self.render_ews_discovery_confirmation(confirmation, cx);
+            return Some(
+                self.render_ews_discovery_confirmation(confirmation, cx)
+                    .into_any_element(),
+            );
         }
-        state.feedback_message().map_or_else(
-            || div().id("ews-discovery-status"),
-            Self::render_ews_discovery_message,
-        )
-    }
-
-    fn render_ews_discovery_message(message: &'static str) -> Stateful<Div> {
-        div()
-            .id("ews-discovery-status")
-            .role(Role::Status)
-            .text_sm()
-            .child(message)
+        let tone = match state {
+            EwsDiscoveryState::Found => StatusTone::Success,
+            EwsDiscoveryState::Failed => StatusTone::Warning,
+            _ => StatusTone::Informational,
+        };
+        state.feedback_message().map(|message| {
+            InfoBar::status("ews-discovery-status", message)
+                .tone(tone)
+                .into_any_element()
+        })
     }
 
     fn render_ews_discovery_confirmation(
@@ -560,18 +527,15 @@ impl<P: AccountProvider + 'static> AccountView<P> {
             .child(self.render_ews_confirmation_actions(cx))
     }
 
-    fn render_ews_confirmation_prompt(
-        confirmation: &ExchangeEwsDiscoveryConfirmation,
-    ) -> Stateful<Div> {
-        div()
-            .id("ews-discovery-confirmation-status")
-            .role(Role::Status)
-            .text_sm()
-            .child(format!(
+    fn render_ews_confirmation_prompt(confirmation: &ExchangeEwsDiscoveryConfirmation) -> InfoBar {
+        InfoBar::status(
+            "ews-discovery-confirmation-status",
+            format!(
                 "Send {} to {} to continue Autodiscover?",
                 confirmation.mailbox_address(),
                 confirmation.destination()
-            ))
+            ),
+        )
     }
 
     fn render_ews_confirmation_actions(&self, cx: &mut Context<Self>) -> gpui_kit::Div {
@@ -717,24 +681,6 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         )
     }
 
-    fn render_header(&self, colors: ColorTokens) -> gpui_kit::Div {
-        let description = self.account_header_description();
-        div()
-            .w_full()
-            .max_w_48()
-            .flex()
-            .flex_col()
-            .gap_5()
-            .child(div().text_lg().font_bold().child("Accounts"))
-            .child(
-                div()
-                    .id("account-header-description")
-                    .text_sm()
-                    .text_color(colors.muted_foreground)
-                    .child(description),
-            )
-    }
-
     pub(super) fn account_header_description(&self) -> &'static str {
         if self.exchange_ews_form.is_some() {
             return "Complete or cancel the Exchange Server connection below.";
@@ -812,87 +758,49 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         }
     }
 
-    fn render_setup_status(&self, issue: SetupIssue) -> impl IntoElement {
+    fn render_setup_status(&self, issue: SetupIssue) -> InfoBar {
         let message = issue.message();
-        div()
-            .id("account-status")
-            .role(Role::Status)
-            .aria_label(message)
-            .text_sm()
-            .child(message)
+        InfoBar::status("account-status", message)
+            .tone(StatusTone::Warning)
+            .accessible_label(message)
     }
 
-    fn render_account_content(&self, colors: ColorTokens, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let content = self.render_header(colors);
+    fn render_account_content(&self, colors: ColorTokens, cx: &mut Context<Self>) -> Page {
+        let page = Page::new("account-scroll-viewport", "Accounts")
+            .description(self.account_header_description());
         if let Err(issue) = &self.services {
-            return content.child(self.render_setup_status(*issue));
+            return page.child(self.render_setup_status(*issue));
         }
-        let mut content = content.child(self.render_status());
-        if let Some(error) = self.cache_removal_error {
-            let message = account_cache_removal_error_message(error);
-            content = content.child(
-                div()
-                    .id("account-cache-error")
-                    .debug_selector(|| "account-cache-error".to_owned())
-                    .role(Role::Alert)
-                    .text_sm()
-                    .child(message),
-            );
-        }
-        self.render_account_actions(content, colors, cx)
+        let cache_removal_error = self.cache_removal_error.map(|error| {
+            InfoBar::alert(
+                "account-cache-error",
+                account_cache_removal_error_message(error),
+            )
+        });
+        let page = page
+            .children(self.render_status())
+            .children(cache_removal_error);
+        self.render_account_actions(page, colors, cx)
     }
 
     fn render_account_actions(
         &self,
-        mut content: gpui_kit::Div,
+        page: Page,
         colors: ColorTokens,
         cx: &mut Context<Self>,
-    ) -> gpui_kit::Div {
-        if self.exchange_ews_form.is_some() {
-            return content.child(self.render_exchange_ews_form(cx));
+    ) -> Page {
+        if let Some(form) = &self.exchange_ews_form {
+            return page.child(self.render_exchange_ews_form(form, cx));
         }
-        if let Some(details) = self.render_account_details(colors) {
-            content = content.child(details);
-        }
-        if matches!(
-            &self.status,
-            AccountStatus::Connected(_) | AccountStatus::ReauthorizationFailed { .. }
-        ) {
-            if self
-                .status
-                .connected_profile()
-                .is_some_and(|profile| profile.capabilities().can_review_mail_write_permission())
-            {
-                content = content.child(self.render_permission_review(cx));
-            }
-            if self.pending_permission_review.is_none() {
-                content = content.child(self.render_saved_sign_out(cx, "Sign out"));
-            }
-        }
-        if matches!(&self.status, AccountStatus::SignOutFailed { .. }) {
-            return content.child(self.render_saved_sign_out(cx, "Retry sign out"));
-        }
-        if matches!(
-            &self.status,
-            AccountStatus::Failed {
-                saved_credential_state: SavedCredentialState::MayExist,
-                error: AccountOperationError::SavedAccountIdentityUnavailable
-                    | AccountOperationError::AccountMismatch,
-                ..
-            }
-        ) {
-            return content.child(self.render_primary_action(colors, cx));
-        }
-        if matches!(
-            &self.status,
-            AccountStatus::Failed {
-                saved_credential_state: SavedCredentialState::MayExist,
-                ..
-            }
-        ) {
-            content = content.child(self.render_saved_sign_out(cx, "Remove saved sign-in"));
-        }
-        content.child(self.render_primary_action(colors, cx))
+        let sign_out_label = self.sign_out_label();
+        let details = self.render_account_details(sign_out_label, colors, cx);
+        let has_details = details.is_some();
+        let standalone_sign_out = sign_out_label
+            .filter(|_| !has_details)
+            .map(|label| self.render_saved_sign_out(cx, label));
+        page.children(details)
+            .children(standalone_sign_out)
+            .children(self.render_primary_action(cx))
     }
 
     pub(super) fn render_account_feature_content(

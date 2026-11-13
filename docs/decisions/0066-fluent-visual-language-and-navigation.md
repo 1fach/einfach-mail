@@ -45,7 +45,7 @@ This ADR amends the navigation-selection bullet and the destination placement in
 | Separate app rail beside the folder pane | Separates destinations from folders. | Four permanent regions leave less room for the message list and reader. ADR 0059 already rejected it. |
 | gpui-component `Sidebar` | Ready-made. | No focus handle, debug selector, or pill, and tree-item semantics. It would break the `nav-*` contract. |
 | Runtime `Theme::update` patches after each `change` (the current pattern, extended) | No new files. | Two writers of theme state. Every new role needs a repeat call. Easy to forget on a new appearance path. |
-| Full `AllAssets` bundle | No icon list to maintain. | Embeds about 749 KB of SVG for 22 icons. |
+| Full `AllAssets` bundle | No icon list to maintain. | Embeds about 749 KB of SVG for 25 icons. |
 
 ## Consequences
 
