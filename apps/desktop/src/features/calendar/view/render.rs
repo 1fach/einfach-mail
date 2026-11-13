@@ -1,86 +1,89 @@
-use einfach_mail_application::{CalendarSession, CalendarWorkflowError, CalendarWriteReadiness};
-use einfach_mail_domain::{CalendarAction, CalendarOccurrenceTime};
+use einfach_mail_application::{CalendarSession, CalendarWriteReadiness};
+use einfach_mail_domain::CalendarOccurrenceTime;
 use gpui_kit::component::{
-    ActiveTheme, ColorTokens, Disableable, StyledExt,
+    ActiveTheme, ColorTokens, Disableable, Icon, StyledExt,
     button::{Button, ButtonVariants},
     scroll::ScrollableElement,
+    v_flex,
 };
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
-use gpui_kit::{AnyElement, Context, IntoElement, Render, Role, Window, div, prelude::*, rems};
-use jiff::civil;
+use gpui_kit::{
+    AnyElement, Context, Div, IntoElement, Render, Role, Stateful, Window, div, prelude::*, rems,
+};
+
+use crate::components::{
+    AppIcon, GroupHeader, InfoBar, OptionFill, PaneHeader, SetPosition, StatusTone,
+    filled_list_option, list_option,
+};
 
 use super::CalendarView;
 use super::actions::CALENDAR_EVENT_LIST_CONTEXT;
 use super::copy::{
     UTC_FALLBACK_STATUS_LABEL, calendar_error_message, calendar_event_accessible_label, date_label,
-    elapsed_label, event_creation_action_copy, week_label, write_readiness_message,
+    elapsed_label, week_title, write_readiness_message,
 };
 use super::state::{
-    AgendaEvent, AgendaEventKey, AgendaOptionPosition, AgendaRow, CalendarStatus, DisplayEvent,
+    AgendaEvent, AgendaEventKey, CalendarLayout, CalendarStatus, DisplayEvent, WeekAgenda,
 };
 
 impl<S> CalendarView<S>
 where
     S: CalendarSession + ?Sized + 'static,
 {
-    fn render_header(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_4()
-            .border_b_1()
-            .border_color(colors.border)
-            .child(self.render_title_bar(cx))
-            .child(self.render_week_navigation(cx))
-            .child(self.render_status(colors))
-            .when(self.week.is_utc_fallback(), |element| {
-                element.child(render_utc_fallback(colors))
+    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let caption = (self.layout == CalendarLayout::Grid)
+            .then(|| self.render_sync_caption(cx.theme().semantic_tokens().colors))
+            .flatten();
+        PaneHeader::new("calendar-week-label", week_title(self.week.start()))
+            .when(
+                self.profile.capabilities().calendar().is_read_only(),
+                |header| {
+                    header.tag_status(
+                        "calendar-read-only-status",
+                        "Calendar is read-only",
+                        "Read-only",
+                    )
+                },
+            )
+            .when_some(caption, |header, caption| header.status(caption))
+            .when_some(self.render_selected_event_action(cx), |header, action| {
+                header.action(action)
             })
+            .action(self.render_today_button(cx))
+            .action(week_navigation_button(
+                IconControl {
+                    id: "calendar-previous-week",
+                    label: "Previous week",
+                    icon: AppIcon::ChevronLeft,
+                },
+                -1,
+                cx,
+            ))
+            .action(week_navigation_button(
+                IconControl {
+                    id: "calendar-next-week",
+                    label: "Next week",
+                    icon: AppIcon::ChevronRight,
+                },
+                1,
+                cx,
+            ))
+            .action(self.render_sync_button(cx))
     }
 
-    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut title_bar = div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .child(self.render_calendar_title());
-        if self.profile.capabilities().calendar().is_read_only() {
-            let read_only_status = div()
-                .id("calendar-read-only-status")
-                .debug_selector(|| "calendar-read-only-status".to_owned())
-                .role(Role::Status)
-                .aria_label("Calendar is read-only")
-                .flex_shrink_0()
-                .text_sm()
-                .text_color(cx.theme().semantic_tokens().colors.muted_foreground)
-                .child("Read-only");
-            #[cfg(test)]
-            let read_only_status = read_only_status.test_support();
-            title_bar = title_bar.child(read_only_status);
-        }
-        if let Some(selected_event_action) = self.render_selected_event_action(cx) {
-            title_bar = title_bar.child(selected_event_action);
-        }
-        if self.supports_calendar_action(CalendarAction::CreateEvent)
-            || self.pending_creation.is_some()
-        {
-            title_bar = title_bar.child(self.render_event_button(cx));
-        }
-        title_bar.child(self.render_sync_button(cx))
-    }
-
-    fn render_calendar_title(&self) -> impl IntoElement {
+    fn render_today_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .flex_1()
-            .min_w(rems(12.))
-            .text_lg()
-            .font_bold()
-            .truncate()
-            .child(format!("Calendar · {}", self.profile.label()))
+            .flex()
+            .flex_shrink_0()
+            .debug_selector(|| "calendar-today".to_owned())
+            .child(
+                Button::new("calendar-today")
+                    .ghost()
+                    .label("Today")
+                    .disabled(self.shows_today())
+                    .on_click(cx.listener(|view, _, _, cx| view.show_today(cx))),
+            )
     }
 
     fn render_sync_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -89,178 +92,205 @@ where
             .flex_shrink_0()
             .debug_selector(|| "calendar-sync".to_owned())
             .child(
-                Button::new("calendar-sync")
-                    .label("Sync now")
-                    .loading(self.status.is_sync_active())
-                    .disabled(self.status.is_sync_active())
-                    .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
+                IconControl {
+                    id: "calendar-sync",
+                    label: "Sync",
+                    icon: AppIcon::Sync,
+                }
+                .button()
+                .loading(self.status.is_sync_active())
+                .disabled(self.status.is_sync_active())
+                .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
             )
     }
 
-    fn render_event_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let action_copy = event_creation_action_copy(self.pending_creation.as_ref());
-        div()
-            .flex()
-            .flex_shrink_0()
-            .debug_selector(|| "calendar-new-event".to_owned())
-            .child(
-                Button::new("calendar-new-event")
-                    .label(action_copy.button_label)
-                    .disabled(
-                        self.status.is_sync_active()
-                            || self.write_readiness != CalendarWriteReadiness::Ready,
-                    )
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.open_event_composer(window, cx);
-                    })),
-            )
-    }
-
-    fn render_week_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .debug_selector(|| "calendar-week-navigation".to_owned())
-            .child(Self::previous_week_button(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(rems(10.))
-                    .text_base()
-                    .font_bold()
-                    .truncate()
-                    .debug_selector(|| "calendar-week-label".to_owned())
-                    .child(week_label(self.week.start())),
-            )
-            .child(Self::next_week_button(cx))
-    }
-
-    fn previous_week_button(cx: &mut Context<Self>) -> impl IntoElement {
-        week_navigation_button("calendar-previous-week", "Previous week", -1, cx)
-    }
-
-    fn next_week_button(cx: &mut Context<Self>) -> impl IntoElement {
-        week_navigation_button("calendar-next-week", "Next week", 1, cx)
-    }
-
-    fn render_status(&self, colors: ColorTokens) -> AnyElement {
-        if let CalendarStatus::Failed(error) = self.status {
-            return self.render_sync_error(error, colors);
-        }
-        self.render_sync_progress(colors)
-    }
-
-    fn render_sync_error(&self, error: CalendarWorkflowError, colors: ColorTokens) -> AnyElement {
-        let mut status = div()
-            .id("calendar-sync-error")
-            .debug_selector(|| "calendar-sync-error".to_owned())
-            .role(Role::Alert)
-            .text_sm()
-            .text_color(colors.destructive)
-            .child(calendar_error_message(error, !self.events.is_empty()));
-        if let Some(message) = write_readiness_message(self.write_readiness) {
-            status = status.child(message);
-        }
-        #[cfg(test)]
-        let status = status.test_support();
-        status.into_any_element()
-    }
-
-    fn render_sync_progress(&self, colors: ColorTokens) -> AnyElement {
-        if matches!(self.status, CalendarStatus::UpToDate)
-            && let Some(message) = write_readiness_message(self.write_readiness)
-        {
-            return render_status_label(message.to_owned(), Role::Alert, colors);
-        }
-        let (label, role) = match self.status {
-            CalendarStatus::Idle => ("Calendar is ready to sync".to_owned(), Role::Status),
-            CalendarStatus::LoadingCache => {
-                ("Loading saved calendar events…".to_owned(), Role::Status)
-            }
-            CalendarStatus::Syncing => ("Refreshing calendar events…".to_owned(), Role::Status),
+    /// The short sync state beside the title. A failure has its own notice, so it has no caption.
+    fn render_sync_caption(&self, colors: ColorTokens) -> Option<AnyElement> {
+        let label = match self.status {
+            CalendarStatus::Idle => "Calendar is ready to sync".to_owned(),
+            CalendarStatus::LoadingCache => "Loading saved calendar events…".to_owned(),
+            CalendarStatus::Syncing => "Refreshing calendar events…".to_owned(),
             CalendarStatus::UpToDate => match self
                 .sync_state
                 .as_ref()
                 .and_then(|state| state.last_synchronized_at())
             {
-                Some(last_sync) => (elapsed_label(last_sync), Role::Status),
-                None => ("Calendar is ready.".to_owned(), Role::Status),
+                Some(last_sync) => elapsed_label(last_sync),
+                None => "Calendar is ready.".to_owned(),
             },
-            CalendarStatus::Failed(error) => return self.render_sync_error(error, colors),
+            CalendarStatus::Failed(_) => return None,
         };
-        render_status_label(label, role, colors)
+        Some(
+            div()
+                .id("calendar-sync-status")
+                .role(Role::Status)
+                .aria_label(label.clone())
+                .text_sm()
+                .text_color(colors.muted_foreground)
+                .truncate()
+                .child(label)
+                .into_any_element(),
+        )
     }
 
-    fn render_agenda(&self, colors: ColorTokens, cx: &mut Context<Self>) -> AnyElement {
-        let agenda = div()
+    /// The sync state on its own line under the header, where the agenda layout has no room for
+    /// it beside the title.
+    fn render_agenda_caption(&self, colors: ColorTokens) -> Option<AnyElement> {
+        if self.layout != CalendarLayout::Agenda {
+            return None;
+        }
+        self.render_sync_caption(colors).map(|caption| {
+            div()
+                .flex_shrink_0()
+                .px_4()
+                .pt_2()
+                .child(caption)
+                .into_any_element()
+        })
+    }
+
+    /// The notices about this week: a failed sync, unsynchronized writes and a missing time zone.
+    fn render_notices(&self) -> Option<AnyElement> {
+        let mut notices = Vec::new();
+        match self.status {
+            CalendarStatus::Failed(error) => {
+                let mut message = calendar_error_message(error, !self.events.is_empty());
+                if let Some(readiness) = write_readiness_message(self.write_readiness) {
+                    message.push(' ');
+                    message.push_str(readiness);
+                }
+                notices.push(InfoBar::alert("calendar-sync-error", message).into_any_element());
+            }
+            CalendarStatus::UpToDate => {
+                if let Some(readiness) = write_readiness_message(self.write_readiness) {
+                    notices.push(
+                        InfoBar::alert("calendar-write-notice", readiness)
+                            .tone(StatusTone::Warning)
+                            .into_any_element(),
+                    );
+                }
+            }
+            CalendarStatus::Idle | CalendarStatus::LoadingCache | CalendarStatus::Syncing => {}
+        }
+        if self.week.is_utc_fallback() {
+            notices.push(
+                InfoBar::status("calendar-utc-fallback", UTC_FALLBACK_STATUS_LABEL)
+                    .tone(StatusTone::Warning)
+                    .accessible_label(UTC_FALLBACK_STATUS_LABEL)
+                    .into_any_element(),
+            );
+        }
+        (!notices.is_empty()).then(|| {
+            v_flex()
+                .w_full()
+                .flex_shrink_0()
+                .gap_2()
+                .px_4()
+                .pt_3()
+                .children(notices)
+                .into_any_element()
+        })
+    }
+
+    fn render_week(&self, cx: &mut Context<Self>) -> AnyElement {
+        let agenda = self.week_agenda();
+        match self.layout {
+            CalendarLayout::Grid => self.render_week_grid(&agenda, cx),
+            CalendarLayout::Agenda => self.render_agenda(&agenda, cx),
+        }
+    }
+
+    fn render_agenda(&self, agenda: &WeekAgenda<'_>, cx: &mut Context<Self>) -> AnyElement {
+        let content = if agenda.events.is_empty() {
+            render_empty_agenda(self.status, cx.theme().semantic_tokens().colors).into_any_element()
+        } else {
+            self.render_agenda_list(agenda, cx)
+        };
+        div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .gap_2()
-            .p_4()
-            .child(primary_calendar_heading());
-        let rows = self.agenda_rows();
-        let event_count = rows
-            .iter()
-            .filter(|row| matches!(row, AgendaRow::Event(_)))
-            .count();
-        if event_count == 0 {
-            return agenda
-                .child(render_empty_agenda(self.status, colors))
-                .into_any_element();
-        }
+            .child(content)
+            .into_any_element()
+    }
 
-        let mut event_position = 0;
-        let event_list = div()
+    fn render_agenda_list(&self, agenda: &WeekAgenda<'_>, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().semantic_tokens().colors;
+        let mut children = Vec::new();
+        for day in &agenda.grid.days {
+            children.push(
+                GroupHeader::new(
+                    format!("calendar-day-header-{}", day.date.strftime("%Y-%m-%d")),
+                    date_label(day.date),
+                )
+                .into_any_element(),
+            );
+            if day.events.is_empty() {
+                children.push(render_empty_day(colors).into_any_element());
+            }
+            for event_index in day.events.clone() {
+                if let Some(option) =
+                    self.render_week_event(agenda, event_index, EventPresentation::Row, cx)
+                {
+                    children.push(div().w_full().px_2().child(option).into_any_element());
+                }
+            }
+        }
+        self.render_event_listbox(
+            |listbox| listbox.flex_1().min_h_0().flex().flex_col().gap_1().py_1(),
+            children,
+            cx,
+        )
+    }
+
+    /// The one listbox of the week. Both layouts fill it with the events in the same flat
+    /// order, so the Tab stop, the keys and the set positions do not depend on the layout.
+    pub(super) fn render_event_listbox(
+        &self,
+        arrange: impl FnOnce(Stateful<Div>) -> Stateful<Div>,
+        children: Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ring = cx.theme().ring;
+        let listbox = div()
             .id("calendar-event-list")
             .debug_selector(|| "calendar-event-list".to_owned())
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .gap_2()
             .track_scroll(&self.agenda_scroll)
             .key_context(CALENDAR_EVENT_LIST_CONTEXT)
             .role(Role::ListBox)
             .aria_label("Events this week");
+        let listbox = arrange(listbox);
         #[cfg(test)]
-        let event_list = event_list.test_support();
-        let mut event_list = event_list
+        let listbox = listbox.test_support();
+        listbox
             .track_focus(&self.event_list_focus)
             .on_action(cx.listener(Self::on_select_previous_calendar_event))
             .on_action(cx.listener(Self::on_select_next_calendar_event))
             .on_action(cx.listener(Self::on_select_first_calendar_event))
             .on_action(cx.listener(Self::on_select_last_calendar_event))
             .on_action(cx.listener(Self::on_open_selected_calendar_event))
-            .focus_visible(|style| style.border_1().border_color(colors.ring))
-            .overflow_y_scroll();
-
-        for row in &rows {
-            event_list = match row {
-                AgendaRow::DayHeading(date) => event_list.child(render_agenda_day_heading(*date)),
-                AgendaRow::EmptyDay => event_list.child(render_empty_day(colors)),
-                AgendaRow::Event(event) => {
-                    event_position += 1;
-                    event_list.child(render_agenda_event(
-                        event,
-                        AgendaOptionPosition {
-                            event_position,
-                            event_count,
-                            selected: self.selected_agenda_event.as_ref() == Some(&event.key),
-                        },
-                        colors,
-                        cx,
-                    ))
-                }
-            };
-        }
-        agenda
-            .child(event_list.vertical_scrollbar(&self.agenda_scroll))
+            .focus_visible(move |style| style.border_1().border_color(ring))
+            .overflow_y_scroll()
+            .children(children)
+            .vertical_scrollbar(&self.agenda_scroll)
             .into_any_element()
+    }
+
+    /// The option for the event at `event_index` of the flat order, in `presentation`.
+    pub(super) fn render_week_event(
+        &self,
+        agenda: &WeekAgenda<'_>,
+        event_index: usize,
+        presentation: EventPresentation,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let event = agenda.events.get(event_index)?;
+        let option_state = OptionState {
+            position: SetPosition::new(event_index, agenda.events.len()),
+            selected: self.selected_agenda_event.as_ref() == Some(&event.key),
+        };
+        Some(render_event_option(event, option_state, presentation, cx))
     }
 
     fn render_selected_event_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -292,7 +322,9 @@ impl<S> Render for CalendarView<S>
 where
     S: CalendarSession + ?Sized + 'static,
 {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.layout =
+            CalendarLayout::for_window_width(window.bounds().size.width, window.rem_size());
         let colors = cx.theme().semantic_tokens().colors;
         div()
             .id("calendar-view")
@@ -301,14 +333,33 @@ where
             .flex_col()
             .bg(colors.background)
             .text_color(colors.foreground)
-            .child(self.render_header(colors, cx))
-            .child(self.render_agenda(colors, cx))
+            .child(self.render_header(cx))
+            .children(self.render_agenda_caption(colors))
+            .children(self.render_notices())
+            .child(self.render_week(cx))
+    }
+}
+
+/// A ghost button that shows only an icon. The label is its accessible name and its tooltip.
+#[derive(Clone, Copy)]
+pub(super) struct IconControl {
+    pub(super) id: &'static str,
+    pub(super) label: &'static str,
+    pub(super) icon: AppIcon,
+}
+
+impl IconControl {
+    pub(super) fn button(self) -> Button {
+        Button::new(self.id)
+            .ghost()
+            .icon(Icon::new(self.icon))
+            .accessibility_label(self.label)
+            .tooltip(self.label)
     }
 }
 
 fn week_navigation_button<S>(
-    id: &'static str,
-    label: &'static str,
+    control: IconControl,
     week_offset: i64,
     cx: &mut Context<CalendarView<S>>,
 ) -> impl IntoElement
@@ -318,34 +369,15 @@ where
     div()
         .flex()
         .flex_shrink_0()
-        .debug_selector(move || id.to_owned())
+        .debug_selector(move || control.id.to_owned())
         .child(
-            Button::new(id)
-                .ghost()
-                .label(label)
+            control
+                .button()
                 .on_click(cx.listener(move |view, _, _, cx| view.change_week(week_offset, cx))),
         )
 }
 
-fn render_utc_fallback(colors: ColorTokens) -> impl IntoElement {
-    let status = div()
-        .id("calendar-utc-fallback")
-        .debug_selector(|| "calendar-utc-fallback".to_owned())
-        .role(Role::Status)
-        .aria_label(UTC_FALLBACK_STATUS_LABEL)
-        .text_sm()
-        .text_color(colors.muted_foreground)
-        .child(UTC_FALLBACK_STATUS_LABEL);
-    #[cfg(test)]
-    let status = status.test_support();
-    status
-}
-
-fn primary_calendar_heading() -> impl IntoElement {
-    div().text_sm().font_bold().child("Primary calendar")
-}
-
-fn render_empty_agenda(status: CalendarStatus, colors: ColorTokens) -> impl IntoElement {
+pub(super) fn render_empty_agenda(status: CalendarStatus, colors: ColorTokens) -> impl IntoElement {
     let message = match status {
         CalendarStatus::Idle => "Sync this calendar to load events for this week.",
         CalendarStatus::LoadingCache | CalendarStatus::Syncing => "Loading events for this week…",
@@ -361,111 +393,110 @@ fn render_empty_agenda(status: CalendarStatus, colors: ColorTokens) -> impl Into
         .child(message)
 }
 
-fn render_status_label(label: String, role: Role, colors: ColorTokens) -> AnyElement {
-    div()
-        .id("calendar-sync-status")
-        .role(role)
-        .text_sm()
-        .text_color(colors.muted_foreground)
-        .child(label)
-        .into_any_element()
-}
-
-fn render_agenda_day_heading(date: civil::Date) -> impl IntoElement {
-    div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .text_sm()
-        .font_bold()
-        .child(date_label(date))
-}
-
 fn render_empty_day(colors: ColorTokens) -> impl IntoElement {
     div()
         .w_full()
-        .p_3()
+        .px_4()
+        .py_2()
         .text_sm()
         .text_color(colors.muted_foreground)
         .child("No events")
 }
 
-fn render_agenda_event<S>(
+/// Where an event option sits in its listbox and whether it is the selected one.
+#[derive(Clone, Copy)]
+struct OptionState {
+    position: SetPosition,
+    selected: bool,
+}
+
+/// How an event option looks: a row of the agenda or a bar of a day column.
+#[derive(Clone, Copy)]
+pub(super) enum EventPresentation {
+    Row,
+    Bar,
+}
+
+/// One event as an option of the week's listbox, for either layout.
+///
+/// The option keeps its id, selector, name and click handling in both layouts. Only its content
+/// and styling follow `presentation`.
+fn render_event_option<S>(
     agenda_event: &AgendaEvent<'_>,
-    position: AgendaOptionPosition,
-    colors: ColorTokens,
+    option_state: OptionState,
+    presentation: EventPresentation,
     cx: &mut Context<CalendarView<S>>,
-) -> impl IntoElement
+) -> AnyElement
 where
     S: CalendarSession + ?Sized + 'static,
 {
-    let selected = position.selected;
+    let OptionState { position, selected } = option_state;
     let event_key = agenda_event.key.clone();
     let date_id = event_key.date.strftime("%Y-%m-%d").to_string();
     let event_id = event_key.event_id.as_str().to_owned();
     let accessible_label = calendar_event_accessible_label(&agenda_event.display, event_key.date);
-    let card = div()
-        .id(format!("calendar-event-option-{date_id}-{event_id}"))
-        .debug_selector(move || format!("calendar-event-row-{date_id}-{event_id}"))
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_3()
-        .bg(if selected {
-            colors.accent
-        } else {
-            colors.surface
-        })
-        .text_color(if selected {
-            colors.accent_foreground
-        } else {
-            colors.foreground
-        })
+    let colors = cx.theme().semantic_tokens().colors;
+    let primary = cx.theme().primary;
+    let content = match presentation {
+        EventPresentation::Row => {
+            render_event_row_content(&agenda_event.display, &agenda_event.key, colors)
+        }
+        EventPresentation::Bar => {
+            render_event_bar_content(&agenda_event.display, &agenda_event.key, colors, primary)
+        }
+    };
+    let id = format!("calendar-event-option-{date_id}-{event_id}");
+    let option = match presentation {
+        EventPresentation::Row => list_option(id, position, selected, cx).px_4().py_2(),
+        EventPresentation::Bar => filled_list_option(
+            id,
+            position,
+            selected,
+            OptionFill {
+                rest: primary.opacity(BAR_TINT_OPACITY),
+                hover: primary.opacity(BAR_HOVER_TINT_OPACITY),
+            },
+            cx,
+        )
+        .p_2()
         .border_1()
         .border_color(if selected {
-            colors.accent
+            primary
         } else {
-            colors.border
-        })
-        .rounded_md()
-        .role(Role::ListBoxOption)
-        .aria_label(accessible_label)
-        .aria_position_in_set(position.event_position)
-        .aria_size_of_set(position.event_count)
-        .aria_selected(selected)
-        .when(selected, |option| option.aria_active_descendant())
-        .hover(|option| {
-            option.bg(if selected {
-                colors.accent
-            } else {
-                colors.muted
-            })
-        })
-        .child(render_event_heading(
-            &agenda_event.display,
-            &agenda_event.key,
-            colors,
-            selected,
-        ));
+            primary.opacity(BAR_OUTLINE_OPACITY)
+        }),
+    }
+    .debug_selector(move || format!("calendar-event-row-{date_id}-{event_id}"))
+    .aria_label(accessible_label)
+    .child(content);
     #[cfg(test)]
-    let card = card.test_support();
-    card.on_click(cx.listener(move |view, _, window, cx| {
-        view.select_event_from_option(event_key.clone(), window, cx);
-    }))
+    let option = option.test_support();
+    option
+        .on_click(cx.listener(move |view, _, window, cx| {
+            view.select_event_from_option(event_key.clone(), window, cx);
+        }))
+        .into_any_element()
 }
 
-fn render_event_heading(
-    event: &DisplayEvent<'_>,
-    key: &AgendaEventKey,
-    colors: ColorTokens,
-    selected: bool,
-) -> impl IntoElement {
-    let event_identity = format!(
+/// The accent tint of an unselected event bar, and its outline and hover strengths.
+const BAR_TINT_OPACITY: f32 = 0.08;
+const BAR_HOVER_TINT_OPACITY: f32 = 0.16;
+const BAR_OUTLINE_OPACITY: f32 = 0.3;
+
+fn event_identity(key: &AgendaEventKey) -> String {
+    format!(
         "{}-{}",
         key.date.strftime("%Y-%m-%d"),
         key.event_id.as_str()
-    );
+    )
+}
+
+fn render_event_row_content(
+    event: &DisplayEvent<'_>,
+    key: &AgendaEventKey,
+    colors: ColorTokens,
+) -> AnyElement {
+    let event_identity = event_identity(key);
     let details_selector = format!("calendar-event-details-{event_identity}");
     let time_selector = format!("calendar-event-time-{event_identity}");
     let mut details = div()
@@ -477,25 +508,68 @@ fn render_event_heading(
         .gap_1()
         .child(render_event_subject(event));
     if let Some(location) = event.event.location() {
-        details = details.child(render_event_location(location, colors, selected));
+        details = details.child(render_event_location(location, colors));
     }
     div()
         .flex()
         .flex_wrap()
         .items_start()
         .gap_3()
-        .child(render_event_time(event, time_selector))
+        .child(
+            div()
+                .debug_selector(move || time_selector.clone())
+                .w(rems(11.))
+                .flex_shrink_0()
+                .pt_0p5()
+                .text_sm()
+                .font_medium()
+                .child(event.time_label.clone()),
+        )
         .child(details)
+        .into_any_element()
 }
 
-fn render_event_time(event: &DisplayEvent<'_>, selector: String) -> impl IntoElement {
-    div()
-        .debug_selector(move || selector.clone())
-        .w_32()
-        .flex_shrink_0()
-        .text_sm()
-        .font_medium()
-        .child(event.time_label.clone())
+/// The content of an event bar: the time, the subject and the location, each on one line.
+fn render_event_bar_content(
+    event: &DisplayEvent<'_>,
+    key: &AgendaEventKey,
+    colors: ColorTokens,
+    accent: gpui_kit::Hsla,
+) -> AnyElement {
+    let event_identity = event_identity(key);
+    let details_selector = format!("calendar-event-details-{event_identity}");
+    let time_selector = format!("calendar-event-time-{event_identity}");
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap_0p5()
+        .child(
+            div()
+                .debug_selector(move || time_selector.clone())
+                .w_full()
+                .truncate()
+                .text_xs()
+                .font_medium()
+                .text_color(accent)
+                .child(event.bar_time_label.clone()),
+        )
+        .child(
+            div()
+                .debug_selector(move || details_selector.clone())
+                .w_full()
+                .min_w_0()
+                .truncate()
+                .text_sm()
+                .font_medium()
+                .child(event.event.subject().unwrap_or("(No title)").to_owned()),
+        )
+        .children(
+            event
+                .event
+                .location()
+                .map(|location| render_event_location(location, colors)),
+        )
+        .into_any_element()
 }
 
 fn render_event_subject(event: &DisplayEvent<'_>) -> impl IntoElement {
@@ -503,15 +577,12 @@ fn render_event_subject(event: &DisplayEvent<'_>) -> impl IntoElement {
     div().font_medium().child(subject.to_owned())
 }
 
-fn render_event_location(location: &str, colors: ColorTokens, selected: bool) -> impl IntoElement {
+fn render_event_location(location: &str, colors: ColorTokens) -> Div {
     div()
         .w_full()
         .min_w_0()
-        .text_sm()
-        .text_color(if selected {
-            colors.accent_foreground
-        } else {
-            colors.muted_foreground
-        })
+        .truncate()
+        .text_xs()
+        .text_color(colors.muted_foreground)
         .child(location.to_owned())
 }

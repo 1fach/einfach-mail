@@ -16,7 +16,7 @@ use time::{Date, Month};
 
 use self::support::{system_calendar_week, utc_fallback_calendar_week};
 use super::{
-    AgendaEventKey, AgendaRow, CalendarStatus, CalendarView, CalendarViewEvent,
+    AgendaEventKey, CalendarStatus, CalendarView, CalendarViewEvent,
     bind_calendar_event_navigation_keys, display_events,
 };
 use crate::test_support::calendar::{
@@ -38,3 +38,5 @@ mod composer;
 mod support;
 #[cfg(test)]
 mod synchronization;
+#[cfg(test)]
+mod week_grid;

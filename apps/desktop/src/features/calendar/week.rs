@@ -123,7 +123,8 @@ fn current_week_start(time_zone: &TimeZone) -> Option<civil::Date> {
     monday_start(LocalClock::today_in(time_zone)?)
 }
 
-fn monday_start(date: civil::Date) -> Option<civil::Date> {
+/// The Monday that starts the week containing `date`.
+pub(super) fn monday_start(date: civil::Date) -> Option<civil::Date> {
     date.checked_sub(Span::new().days(i64::from(date.weekday().to_monday_zero_offset())))
         .ok()
 }

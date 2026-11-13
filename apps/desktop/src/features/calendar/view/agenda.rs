@@ -4,36 +4,56 @@ use time::{Date, OffsetDateTime};
 
 use super::super::time::{to_calendar_date, to_timestamp};
 use super::CalendarView;
-use super::state::{AgendaEvent, AgendaEventKey, AgendaRow, DisplayEvent, EventSortKey};
+use super::state::{
+    AgendaEvent, AgendaEventKey, DayColumn, DisplayEvent, EventSortKey, WeekAgenda, WeekGrid,
+};
 
 impl<S> CalendarView<S>
 where
     S: einfach_mail_application::CalendarSession + ?Sized + 'static,
 {
-    pub(super) fn agenda_rows(&self) -> Vec<AgendaRow<'_>> {
-        let mut rows = Vec::new();
-        let time_zone = self.week.time_zone();
-        for offset in 0..7_i64 {
-            let Some(date) = self.week.start().checked_add(Span::new().days(offset)).ok() else {
-                continue;
-            };
-            rows.push(AgendaRow::DayHeading(date));
-            let day_events = display_events(&self.events, date, &time_zone);
-            if day_events.is_empty() {
-                rows.push(AgendaRow::EmptyDay);
-            } else {
-                rows.extend(day_events.into_iter().map(|display| {
-                    AgendaRow::Event(AgendaEvent {
-                        key: AgendaEventKey {
-                            date,
-                            event_id: display.event.id().clone(),
-                        },
-                        display,
-                    })
-                }));
-            }
+    pub(super) fn week_agenda(&self) -> WeekAgenda<'_> {
+        week_agenda(
+            &self.events,
+            self.week.start(),
+            &self.week.time_zone(),
+            self.clock.today(),
+        )
+    }
+}
+
+/// Groups `events` into the seven days that start at `week_start`, ordered day by day and then
+/// by time.
+pub(super) fn week_agenda<'a>(
+    events: &'a [CalendarOccurrence],
+    week_start: civil::Date,
+    time_zone: &TimeZone,
+    today: civil::Date,
+) -> WeekAgenda<'a> {
+    let mut ordered = Vec::new();
+    let days = [0_i64, 1, 2, 3, 4, 5, 6].map(|offset| {
+        let date = week_start.saturating_add(Span::new().days(offset));
+        let first = ordered.len();
+        ordered.extend(
+            display_events(events, date, time_zone)
+                .into_iter()
+                .map(|display| AgendaEvent {
+                    key: AgendaEventKey {
+                        date,
+                        event_id: display.event.id().clone(),
+                    },
+                    display,
+                }),
+        );
+        DayColumn {
+            date,
+            is_today: date == today,
+            events: first..ordered.len(),
         }
-        rows
+    });
+    WeekAgenda {
+        events: ordered,
+        grid: WeekGrid { days },
     }
 }
 
@@ -101,12 +121,18 @@ pub(super) fn display_events<'a>(
     display_events
 }
 
+/// How one event reads on one day: the full range and the range an event bar can show.
+struct EventTimeLabels {
+    full: String,
+    bar: String,
+}
+
 fn display_event_for_day<'a>(
     event: &'a CalendarOccurrence,
     original_index: usize,
     day: &CalendarDayRange,
 ) -> Option<DisplayEvent<'a>> {
-    let (sort_key, time_label) = match event.time() {
+    let (sort_key, labels) = match event.time() {
         CalendarOccurrenceTime::AllDay {
             start,
             end_exclusive,
@@ -118,7 +144,8 @@ fn display_event_for_day<'a>(
     Some(DisplayEvent {
         event,
         sort_key,
-        time_label,
+        time_label: labels.full,
+        bar_time_label: labels.bar,
     })
 }
 
@@ -127,7 +154,7 @@ fn all_day_event_display(
     end_exclusive: Date,
     original_index: usize,
     day: &CalendarDayRange,
-) -> Option<(EventSortKey, String)> {
+) -> Option<(EventSortKey, EventTimeLabels)> {
     if start > day.date || day.date >= end_exclusive {
         return None;
     }
@@ -138,7 +165,10 @@ fn all_day_event_display(
             nanoseconds: 0,
             original_index,
         },
-        "All day".to_owned(),
+        EventTimeLabels {
+            full: "All day".to_owned(),
+            bar: "All day".to_owned(),
+        },
     ))
 }
 
@@ -147,9 +177,8 @@ fn timed_event_display(
     end: OffsetDateTime,
     original_index: usize,
     day: &CalendarDayRange,
-) -> Option<(EventSortKey, String)> {
+) -> Option<(EventSortKey, EventTimeLabels)> {
     let display_range = TimedEventDisplayRange::new(start, end, day)?;
-    let time_label = timed_event_time_label(&display_range);
     Some((
         EventSortKey {
             kind: 1,
@@ -157,25 +186,28 @@ fn timed_event_display(
             nanoseconds: display_range.sort_start.subsec_nanosecond(),
             original_index,
         },
-        time_label,
+        EventTimeLabels {
+            full: timed_event_time_label(&display_range, "%H:%M %Z"),
+            bar: timed_event_time_label(&display_range, "%H:%M"),
+        },
     ))
 }
 
-fn timed_event_time_label(display_range: &TimedEventDisplayRange) -> String {
+fn timed_event_time_label(display_range: &TimedEventDisplayRange, time_format: &str) -> String {
     match (
         display_range.starts_before_day,
         display_range.ends_after_day,
     ) {
         (true, true) => "Continues".to_owned(),
-        (true, false) => format!("Until {}", display_range.local_end.strftime("%H:%M %Z")),
+        (true, false) => format!("Until {}", display_range.local_end.strftime(time_format)),
         (false, true) => format!(
             "{} · continues",
-            display_range.local_start.strftime("%H:%M %Z")
+            display_range.local_start.strftime(time_format)
         ),
         (false, false) => format!(
             "{}–{}",
-            display_range.local_start.strftime("%H:%M %Z"),
-            display_range.local_end.strftime("%H:%M %Z")
+            display_range.local_start.strftime(time_format),
+            display_range.local_end.strftime(time_format)
         ),
     }
 }

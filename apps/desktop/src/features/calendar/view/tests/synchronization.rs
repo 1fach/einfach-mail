@@ -144,7 +144,7 @@ async fn unknown_event_update_requires_sync_before_another_write(cx: &mut TestAp
             )
         });
         calendar_handle = Some(calendar.clone());
-        gpui_kit::base::Root::new(calendar, window, cx)
+        super::support::calendar_workspace(calendar, window, cx)
     });
     let calendar = calendar_handle.expect("calendar entity is retained for assertions");
 

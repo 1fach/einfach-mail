@@ -18,7 +18,7 @@ pub(super) use group_header::{GROUP_HEADER_HEIGHT, GroupHeader};
 pub(super) use icon::{AppAssets, AppIcon};
 pub(super) use info_bar::InfoBar;
 pub(super) use list_navigation::ListNavigation;
-pub(super) use list_option::{SetPosition, list_option};
+pub(super) use list_option::{OptionFill, SetPosition, filled_list_option, list_option};
 pub(super) use local_time::LocalClock;
 pub(super) use nav_item::NavItem;
 pub(super) use page::Page;

@@ -5,8 +5,8 @@ use einfach_mail_domain::AccountProfile;
 use gpui_kit::{App, AppContext, AsyncApp, Context, Task, Window};
 
 use crate::features::{
-    AccountViewEvent, CalendarView, CalendarViewEvent, MailFolderNavigation, MailView,
-    MailViewEvent, SignOutSessionDisposition,
+    AccountViewEvent, CalendarNavigation, CalendarView, CalendarViewEvent, MailFolderNavigation,
+    MailView, MailViewEvent, SignOutSessionDisposition,
 };
 
 use super::Workspace;
@@ -242,6 +242,7 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
     ) -> WorkspaceContent {
         let calendar_session = session.calendar_session();
         let calendar_view = cx.new(|cx| CalendarView::new(profile, calendar_session, cx));
+        let navigation = cx.new(|cx| CalendarNavigation::new(calendar_view.clone(), cx));
         let subscription = cx.subscribe(
             &calendar_view,
             |workspace, _, event: &CalendarViewEvent, cx| {
@@ -252,6 +253,7 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
         );
         WorkspaceContent::Calendar {
             view: calendar_view,
+            navigation,
             subscription,
         }
     }
@@ -277,8 +279,13 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
                 drop(folder_navigation);
                 view.update(cx, |view, _| view.stop_pending_work());
             }
-            WorkspaceContent::Calendar { view, subscription } => {
+            WorkspaceContent::Calendar {
+                view,
+                navigation,
+                subscription,
+            } => {
                 drop(subscription);
+                drop(navigation);
                 view.update(cx, |view, _| view.stop_pending_work());
             }
             content => self.content = content,

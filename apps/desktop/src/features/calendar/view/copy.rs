@@ -65,15 +65,40 @@ pub(super) fn calendar_event_accessible_label(
     }
 }
 
-pub(super) fn week_label(start: civil::Date) -> String {
-    let Some(end) = start.checked_add(Span::new().days(6)).ok() else {
-        return start.strftime("%B %-d, %Y").to_string();
-    };
-    format!(
-        "{} – {}",
-        start.strftime("%b %-d"),
-        end.strftime("%b %-d, %Y")
-    )
+/// The header title of the week that starts on `start`: its month, or the two months it spans.
+pub(super) fn week_title(start: civil::Date) -> String {
+    let end = start.saturating_add(Span::new().days(6));
+    if start.month() == end.month() && start.year() == end.year() {
+        start.strftime("%B %Y").to_string()
+    } else if start.year() == end.year() {
+        format!("{} – {}", start.strftime("%b"), end.strftime("%b %Y"))
+    } else {
+        format!("{} – {}", start.strftime("%b %Y"), end.strftime("%b %Y"))
+    }
+}
+
+/// The day name on a column header, for example "Mon".
+pub(super) fn weekday_abbreviation(date: civil::Date) -> String {
+    date.strftime("%a").to_string()
+}
+
+/// The name of a day column header. Today is named, so it does not rely on its highlight.
+pub(super) fn day_header_label(date: civil::Date, is_today: bool) -> String {
+    if is_today {
+        format!("{}, today", date_label(date))
+    } else {
+        date_label(date)
+    }
+}
+
+/// The name of the displayed month in the mini month.
+pub(super) fn month_title(month_start: civil::Date) -> String {
+    month_start.strftime("%B %Y").to_string()
+}
+
+/// The name of one day cell in the mini month.
+pub(super) fn full_date_label(date: civil::Date) -> String {
+    date.strftime("%A, %B %-d, %Y").to_string()
 }
 
 pub(super) fn date_label(date: civil::Date) -> String {

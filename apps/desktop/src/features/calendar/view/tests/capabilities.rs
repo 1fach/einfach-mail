@@ -41,7 +41,7 @@ async fn calendar_actions_follow_each_provider_capability(cx: &mut TestAppContex
             )
         });
         calendar_view = Some(view.clone());
-        gpui_kit::base::Root::new(view, window, cx)
+        super::support::calendar_workspace(view, window, cx)
     });
     let view = calendar_view.expect("calendar view is retained for capability checks");
     wait_for_ui_condition(context, |_, app| {

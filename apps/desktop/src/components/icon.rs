@@ -62,6 +62,9 @@ app_icons! {
     Success => CircleCheck,
     Permissions => ShieldCheck,
     Server => Server,
+    NewEvent => CalendarPlus,
+    ChevronLeft => ChevronLeft,
+    ChevronRight => ChevronRight,
 }
 
 /// The application's asset source: the `AppIcon` subset first, then GPUI Kit's default icons.

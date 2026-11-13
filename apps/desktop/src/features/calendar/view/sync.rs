@@ -5,7 +5,7 @@ use einfach_mail_domain::CalendarViewReference;
 use gpui_kit::{AsyncApp, Context, WeakEntity};
 
 use super::CalendarView;
-use super::state::{AgendaRow, CalendarStatus};
+use super::state::CalendarStatus;
 
 struct CalendarRefreshRequest<S: CalendarSession + ?Sized> {
     session: Arc<S>,
@@ -142,11 +142,11 @@ where
         self.pending_creation = snapshot.pending_creation().cloned();
         self.write_readiness = snapshot.write_readiness();
         if let Some(selected) = self.selected_agenda_event.clone() {
-            let selected_row = self
-                .agenda_rows()
-                .iter()
-                .position(|row| matches!(row, AgendaRow::Event(event) if event.key == selected));
-            if let Some(scroll_index) = selected_row {
+            let agenda = self.week_agenda();
+            let scroll_index = agenda
+                .position_of(&selected)
+                .map(|event_index| agenda.scroll_index(event_index, self.layout));
+            if let Some(scroll_index) = scroll_index {
                 self.agenda_scroll.scroll_to_item(scroll_index);
             } else {
                 self.selected_agenda_event = None;
