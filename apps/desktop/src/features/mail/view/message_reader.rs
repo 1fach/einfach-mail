@@ -120,7 +120,10 @@ impl MailView {
                 .child(div().w_full().max_w(rems(32.)).px_6().child(notice))
                 .into_any_element()
         } else {
-            panel.child(empty_state).into_any_element()
+            let label = div().id("mail-reader-empty-state").child(empty_state);
+            #[cfg(test)]
+            let label = label.test_support();
+            panel.child(label).into_any_element()
         }
     }
 
@@ -339,8 +342,11 @@ impl MailView {
             .role(Role::Group)
             .aria_label("Message reader")
             .flex_1()
+            .size_full()
             .min_w_0()
             .min_h_0()
+            .flex()
+            .flex_col()
             .child(detail);
         #[cfg(test)]
         let reader = reader.test_support();
