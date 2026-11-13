@@ -10,6 +10,7 @@ use gpui_kit::{AnyElement, Context, IntoElement, Pixels, Render, Role, Window, d
 use crate::components::{AppIcon, NAVIGATION_PANE_WIDTH, PaneHeader};
 
 use super::message_list::{MessageListLayout, record_resized_message_list_width};
+use super::message_reader::ReaderLayout;
 use super::{
     CompactMailPane, MAIL_SPLIT_HANDLE_RESERVE, MESSAGE_LIST_MAX_WIDTH, MESSAGE_LIST_MIN_WIDTH,
     MESSAGE_READER_CONTEXT, MESSAGE_READER_MIN_WIDTH, MailView, MessageListWidthChange, SyncStatus,
@@ -93,6 +94,7 @@ impl MailView {
     fn render_resizable_message_panes(
         &self,
         rem_size: Pixels,
+        reader: ReaderLayout,
         colors: ColorTokens,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -116,7 +118,7 @@ impl MailView {
             .child(
                 resizable_panel()
                     .size_range(MESSAGE_READER_MIN_WIDTH.to_pixels(rem_size)..Pixels::MAX)
-                    .child(self.render_message_detail(&colors, cx)),
+                    .child(self.render_message_detail(&colors, reader, cx)),
             )
             .into_any_element()
     }
@@ -124,6 +126,7 @@ impl MailView {
     fn render_message_panes(
         &mut self,
         layout: MessageListLayout,
+        reader: ReaderLayout,
         rem_size: Pixels,
         colors: ColorTokens,
         cx: &mut Context<Self>,
@@ -132,13 +135,16 @@ impl MailView {
         self.update_message_row_sizes(rem_size);
 
         match layout {
-            MessageListLayout::Compact => self.render_compact_message_pane(colors, cx),
-            MessageListLayout::Split => self.render_resizable_message_panes(rem_size, colors, cx),
+            MessageListLayout::Compact => self.render_compact_message_pane(reader, colors, cx),
+            MessageListLayout::Split => {
+                self.render_resizable_message_panes(rem_size, reader, colors, cx)
+            }
         }
     }
 
     fn render_compact_message_pane(
         &self,
+        reader: ReaderLayout,
         colors: ColorTokens,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -152,7 +158,9 @@ impl MailView {
                 .flex_col()
                 .child(self.render_message_list(&colors, cx))
                 .into_any_element(),
-            CompactMailPane::MessageReader => self.render_compact_message_reader(colors, cx),
+            CompactMailPane::MessageReader => {
+                self.render_compact_message_reader(reader, colors, cx)
+            }
         }
     }
 
@@ -174,6 +182,7 @@ impl MailView {
 
     fn render_compact_message_reader(
         &self,
+        reader: ReaderLayout,
         colors: ColorTokens,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -187,32 +196,40 @@ impl MailView {
             .bg(colors.background)
             .key_context(MESSAGE_READER_CONTEXT)
             .on_action(cx.listener(Self::on_return_to_message_list))
-            .child(self.render_compact_reader_toolbar(colors, cx))
-            .child(self.render_message_detail(&colors, cx))
+            .child(self.render_compact_reader_toolbar(reader, colors, cx))
+            .child(self.render_message_detail(&colors, reader, cx))
             .into_any_element()
     }
 
     fn render_compact_reader_toolbar(
         &self,
+        reader: ReaderLayout,
         colors: ColorTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
+        let toolbar = div()
             .id("mail-compact-reader-toolbar")
             .w_full()
             .flex()
             .items_center()
-            .px_3()
-            .py_2()
+            .gap_1()
+            .px_2()
+            .py_1()
             .border_b_1()
-            .border_color(colors.border)
+            .border_color(colors.border);
+        #[cfg(test)]
+        let toolbar = toolbar.test_support();
+        toolbar
             .child(self.render_back_to_messages_button(cx))
+            .children(self.message_command_bar(reader, cx))
     }
 
     fn render_back_to_messages_button(&self, cx: &mut Context<Self>) -> Button {
         Button::new("mail-reader-back")
             .ghost()
-            .label("Back to messages")
+            .icon(Icon::new(AppIcon::Back))
+            .accessibility_label("Back to messages")
+            .tooltip("Back to messages")
             .track_focus(&self.message_list_focus)
             .on_click(cx.listener(|view, _, window, cx| {
                 view.return_to_message_list(window, cx);
@@ -225,7 +242,12 @@ impl Render for MailView {
         let colors = cx.theme().semantic_tokens().colors;
         let rem_size = window.rem_size();
         let layout = self.message_list_layout(window, rem_size);
-        let panes = self.render_message_panes(layout, rem_size, colors, cx);
+        let reader = self.reader_layout(
+            window,
+            rem_size,
+            matches!(layout, MessageListLayout::Compact),
+        );
+        let panes = self.render_message_panes(layout, reader, rem_size, colors, cx);
         div()
             .size_full()
             .flex()

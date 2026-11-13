@@ -58,6 +58,7 @@ mod message_move;
 #[cfg(feature = "ui-preview")]
 mod preview_start;
 mod read_state;
+mod reader_command_bar;
 mod status_copy;
 
 use helpers::*;

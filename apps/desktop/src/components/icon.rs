@@ -13,10 +13,6 @@ macro_rules! app_icons {
     ($($variant:ident => $lucide:ident),+ $(,)?) => {
         /// An icon the product shows. Every variant maps to one embedded Lucide icon.
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        #[cfg_attr(
-            not(test),
-            expect(dead_code, reason = "the Fluent primitives are the first consumers")
-        )]
         pub(crate) enum AppIcon {
             $($variant),+
         }

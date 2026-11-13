@@ -1,3 +1,4 @@
+mod command_bar;
 mod group_header;
 mod icon;
 mod info_bar;
@@ -12,6 +13,7 @@ mod shell;
 mod sync_age;
 mod theme;
 
+pub(super) use command_bar::{Command, CommandBar};
 pub(super) use group_header::{GROUP_HEADER_HEIGHT, GroupHeader};
 pub(super) use icon::{AppAssets, AppIcon};
 pub(super) use info_bar::InfoBar;

@@ -1,6 +1,6 @@
 //! A tinted message bar that reports the state of an operation or a setting.
 
-use gpui_kit::component::{ActiveTheme as _, Icon, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, button::Button, h_flex};
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{App, IntoElement, RenderOnce, Role, SharedString, Window, div, prelude::*};
@@ -19,6 +19,7 @@ pub(crate) struct InfoBar {
     tone: StatusTone,
     message: SharedString,
     accessible_label: Option<SharedString>,
+    action: Option<Button>,
 }
 
 impl InfoBar {
@@ -44,6 +45,7 @@ impl InfoBar {
             tone,
             message: message.into(),
             accessible_label: None,
+            action: None,
         }
     }
 
@@ -56,6 +58,12 @@ impl InfoBar {
     /// Names the bar with text other than its message.
     pub(crate) fn accessible_label(mut self, label: impl Into<SharedString>) -> Self {
         self.accessible_label = Some(label.into());
+        self
+    }
+
+    /// Adds a button after the message, for the one step that resolves the notice.
+    pub(crate) fn action(mut self, action: Button) -> Self {
+        self.action = Some(action);
         self
     }
 }
@@ -100,5 +108,9 @@ impl RenderOnce for InfoBar {
                 .text_color(colors.icon),
         )
         .child(div().flex_1().min_w_0().child(self.message))
+        .children(
+            self.action
+                .map(|action| div().flex_shrink_0().self_center().child(action)),
+        )
     }
 }
