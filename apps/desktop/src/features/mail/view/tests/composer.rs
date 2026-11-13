@@ -246,9 +246,10 @@ async fn permission_review_requires_a_separate_send_action(cx: &mut TestAppConte
     let workflow = Arc::new(MailWorkflow::new(profile.id().clone(), provider, cache));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| MailView::new(profile, workflow, requester, cx));
-        mail_view = Some(view.clone());
-        gpui_kit::base::Root::new(view, window, cx)
+        let (root, view) =
+            test_mail_workspace_with_requester(profile, workflow, requester, window, cx);
+        mail_view = Some(view);
+        root
     });
     let view = mail_view.expect("mail view is created with the test window");
 
@@ -353,9 +354,9 @@ async fn pending_send_cannot_be_dismissed_by_escape_or_outside_click(cx: &mut Te
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
-        mail_view = Some(view.clone());
-        gpui_kit::base::Root::new(view, window, cx)
+        let (root, view) = test_mail_workspace(profile, workflow, window, cx);
+        mail_view = Some(view);
+        root
     });
     let view = mail_view.expect("mail view is created with the test window");
 
@@ -439,9 +440,9 @@ async fn send_staging_failure_skips_provider_and_accepted_cleanup_failure_can_be
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
-        mail_view = Some(view.clone());
-        gpui_kit::base::Root::new(view, window, cx)
+        let (root, view) = test_mail_workspace(profile, workflow, window, cx);
+        mail_view = Some(view);
+        root
     });
     let view = mail_view.expect("mail view is created with the test window");
 

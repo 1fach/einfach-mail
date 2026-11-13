@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use einfach_mail_domain::{FolderReference, MailFolder};
+use einfach_mail_domain::{FolderReference, MailAction, MailFolder};
 use gpui_kit::component::{
-    ActiveTheme, ColorTokens, Disableable, Selectable, StyledExt,
+    ActiveTheme, ColorTokens, Disableable, Icon, StyledExt,
     button::{Button, ButtonVariants},
     scroll::ScrollableElement,
 };
@@ -12,6 +12,8 @@ use gpui_kit::{
     AnyElement, AsyncApp, Context, Entity, IntoElement, Render, Role, Subscription, Window, div,
     prelude::*,
 };
+
+use crate::components::{AppIcon, NavItem};
 
 use super::{
     CompactMailPane, FollowUpFlagUpdateStatus, MailView, MessageDetailState, MessageListState,
@@ -87,7 +89,7 @@ impl Render for MailFolderNavigation {
         let state = self.folder_navigation_state(cx);
         let colors = cx.theme().semantic_tokens().colors;
         let folder_list = self.render_folder_list(&state, colors);
-        self.render_folder_navigation(folder_list, colors)
+        self.render_folder_navigation(&state, folder_list, colors)
     }
 }
 
@@ -96,6 +98,13 @@ struct FolderNavigationState {
     selected_folder: Option<FolderReference>,
     folder_actions_disabled: bool,
     empty_state_label: &'static str,
+    new_mail: Option<NewMailControl>,
+}
+
+/// The "New mail" button, present only when the account can send.
+struct NewMailControl {
+    label: &'static str,
+    disabled: bool,
 }
 
 impl MailFolderNavigation {
@@ -112,6 +121,35 @@ impl MailFolderNavigation {
                     SyncStatus::Failed(_) => "Folders unavailable.",
                     SyncStatus::Idle | SyncStatus::UpToDate => "No visible folders.",
                 },
+                new_mail: mail_view
+                    .profile
+                    .capabilities()
+                    .mail()
+                    .supports(MailAction::Send)
+                    .then(|| NewMailControl {
+                        label: if matches!(&mail_view.pending_send, Ok(Some(_))) {
+                            "Resolve send"
+                        } else {
+                            "New mail"
+                        },
+                        disabled: mail_view.sync_status.is_sync_active(),
+                    }),
+            })
+    }
+
+    fn render_new_mail_button(&self, control: &NewMailControl) -> impl IntoElement {
+        let mail_view = self.mail_view.downgrade();
+        Button::new("new-mail-message")
+            .debug_selector(|| "new-mail-message".to_owned())
+            .primary()
+            .icon(Icon::new(AppIcon::NewMail))
+            .label(control.label)
+            .w_full()
+            .disabled(control.disabled)
+            .on_click(move |_, window, cx| {
+                if let Some(mail_view) = mail_view.upgrade() {
+                    mail_view.update(cx, |view, cx| view.open_composer(window, cx));
+                }
             })
     }
 
@@ -126,7 +164,7 @@ impl MailFolderNavigation {
             folder_list = folder_list.child(self.render_empty_folder_status(state, colors));
         }
         for folder in &state.folders {
-            folder_list = folder_list.child(self.render_folder_button(folder, state));
+            folder_list = folder_list.child(self.render_folder_item(folder, state));
         }
         folder_list.flex_1().min_h_0().into_any_element()
     }
@@ -139,30 +177,29 @@ impl MailFolderNavigation {
         div()
             .id("mail-folder-status")
             .role(Role::Status)
-            .px_2()
+            .px_3()
             .py_2()
             .text_sm()
             .text_color(colors.muted_foreground)
             .child(state.empty_state_label)
     }
 
-    fn render_folder_button(
+    fn render_folder_item(
         &self,
         folder: &MailFolder,
         state: &FolderNavigationState,
     ) -> impl IntoElement {
         let reference = folder.reference().clone();
         let selector = format!("folder:{}", reference.folder_id().as_str());
-        let label = folder.display_name().to_owned();
         let selected = state.selected_folder.as_ref() == Some(&reference);
         let mail_view = self.mail_view.downgrade();
-        Button::new(selector.clone())
-            .debug_selector(move || selector.clone())
-            .ghost()
+        NavItem::new(selector, folder.display_name().to_owned(), AppIcon::Folder)
             .selected(selected)
-            .label(label)
-            .w_full()
-            .disabled(state.folder_actions_disabled)
+            .unavailable(
+                state
+                    .folder_actions_disabled
+                    .then_some("Wait for the current mail update to finish."),
+            )
             .on_click(move |_, _, cx| {
                 if let Some(mail_view) = mail_view.upgrade() {
                     mail_view.update(cx, |view, cx| {
@@ -174,11 +211,12 @@ impl MailFolderNavigation {
 
     fn render_folder_navigation(
         &self,
-        folder_list: impl IntoElement,
+        state: &FolderNavigationState,
+        folder_list: AnyElement,
         colors: ColorTokens,
-    ) -> impl IntoElement {
-        let navigation = div()
-            .id("mail-folder-navigation")
+    ) -> AnyElement {
+        let folders = div()
+            .id("mail-folders")
             .role(Role::Group)
             .aria_label("Mail folders")
             .w_full()
@@ -186,20 +224,34 @@ impl MailFolderNavigation {
             .min_h_0()
             .flex()
             .flex_col()
-            .gap_2()
-            .px_2()
-            .py_3()
+            .gap_1()
             .child(
                 div()
-                    .px_2()
-                    .text_sm()
+                    .px_3()
+                    .text_xs()
                     .font_semibold()
                     .text_color(colors.muted_foreground)
                     .child("Folders"),
             )
             .child(folder_list);
         #[cfg(test)]
+        let folders = folders.test_support();
+        let navigation = div()
+            .id("mail-folder-navigation")
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .px_2()
+            .py_2()
+            .when_some(state.new_mail.as_ref(), |navigation, control| {
+                navigation.child(self.render_new_mail_button(control))
+            })
+            .child(folders);
+        #[cfg(test)]
         let navigation = navigation.test_support();
-        navigation
+        navigation.into_any_element()
     }
 }

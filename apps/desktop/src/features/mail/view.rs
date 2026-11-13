@@ -52,8 +52,11 @@ const MESSAGE_LIST_MIN_WIDTH: Rems = rems(18.);
 const MESSAGE_LIST_MAX_WIDTH: Rems = rems(30.);
 const MESSAGE_LIST_WIDTH_STEP: Rems = rems(1.);
 const MESSAGE_READER_MIN_WIDTH: Rems = rems(30.);
-const MAIL_SHELL_NAVIGATION_WIDTH: Rems = rems(16.);
 const MAIL_SPLIT_HANDLE_RESERVE: Rems = rems(1.);
+/// The narrowest width Mail supports beside the navigation pane: the message list and the
+/// split handle's reserve.
+pub(crate) const MAIL_MINIMUM_WIDTH: Rems =
+    rems(MESSAGE_LIST_MIN_WIDTH.0 + MAIL_SPLIT_HANDLE_RESERVE.0);
 const MAIL_COMPOSER_SHEET_WIDTH: Rems = rems(30.);
 const ACCOUNT_SYNC_REQUIRED_MESSAGE: &str = "Complete a successful mail sync for this account before archiving, moving, or deleting messages.";
 

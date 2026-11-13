@@ -17,6 +17,7 @@ use einfach_mail_exchange_ews::ExchangeEwsProvider;
 use einfach_mail_microsoft_graph::{CallbackPort, MicrosoftGraphProvider};
 #[cfg(not(feature = "ui-preview"))]
 use einfach_mail_persistence::{SqliteAccountCacheFactory, XdgExchangeEwsAccountSettingsStore};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 #[cfg(not(feature = "ui-preview"))]
 use std::ffi::OsStr;
@@ -26,12 +27,14 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use super::{NavigationSurfaceAppearance, Workspace};
-use crate::components::{AppAssets, install_theme};
+use crate::components::{AppAssets, NAVIGATION_PANE_WIDTH, install_theme};
 use crate::features::{
-    AccountServices, AppearanceSettingsStore, SetupIssue, bind_calendar_event_navigation_keys,
-    bind_event_composer_keys, bind_mail_composer_keys, bind_message_navigation_keys,
+    AccountServices, AppearanceSettingsStore, MAIL_MINIMUM_WIDTH, SetupIssue,
+    bind_calendar_event_navigation_keys, bind_event_composer_keys, bind_mail_composer_keys,
+    bind_message_navigation_keys,
 };
 
+const WINDOW_MINIMUM_HEIGHT: Rems = rems(30.);
 #[cfg(not(feature = "ui-preview"))]
 const CLIENT_ID_ENV: &str = "EINFACH_MAIL_ENTRA_CLIENT_ID";
 #[cfg(not(feature = "ui-preview"))]
@@ -72,9 +75,19 @@ fn configured_navigation_surface_appearance() -> NavigationSurfaceAppearance {
     }
 }
 
-fn window_options(appearance: NavigationSurfaceAppearance) -> WindowOptions {
+/// The smallest window that keeps the navigation pane at full width beside Mail's narrowest
+/// layout.
+fn minimum_window_size(rem_size: Pixels) -> Size<Pixels> {
+    size(
+        NAVIGATION_PANE_WIDTH.to_pixels(rem_size) + MAIL_MINIMUM_WIDTH.to_pixels(rem_size),
+        WINDOW_MINIMUM_HEIGHT.to_pixels(rem_size),
+    )
+}
+
+fn window_options(appearance: NavigationSurfaceAppearance, rem_size: Pixels) -> WindowOptions {
     WindowOptions {
         window_background: appearance.window_background(),
+        window_min_size: Some(minimum_window_size(rem_size)),
         ..WindowOptions::default()
     }
 }
@@ -281,7 +294,7 @@ fn open_workspace_window<P: AccountProvider + 'static>(
     #[cfg(feature = "ui-preview")]
     let preview_start = setup.preview_start;
     #[cfg_attr(not(feature = "ui-preview"), allow(unused_mut))]
-    let mut options = window_options(navigation_surface_appearance);
+    let mut options = window_options(navigation_surface_appearance, cx.theme().font_size);
     #[cfg(feature = "ui-preview")]
     if let Some(window_size) = preview_start.window_size {
         options.window_bounds = Some(WindowBounds::Windowed(Bounds::centered(

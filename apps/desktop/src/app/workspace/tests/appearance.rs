@@ -532,6 +532,55 @@ fn assert_fluent_contrast(theme: &Theme, mode: ThemeMode) {
     }
 }
 
+/// CIE lightness (L*) of a surface, on a 0 to 100 scale.
+fn lightness(surface: Hsla) -> f32 {
+    let rgb = surface.to_rgb();
+    let luminance = relative_luminance(rgb.r, rgb.g, rgb.b);
+    if luminance > 216. / 24389. {
+        116. * luminance.cbrt() - 16.
+    } else {
+        24389. / 27. * luminance
+    }
+}
+
+/// The least lightness gap that separates the selected navigation fill from the hover fill.
+///
+/// Two lightness units are barely noticeable and five are clear at a glance, so seven leaves
+/// room for screens that wash out small differences.
+const MIN_SELECTED_NAVIGATION_LIGHTNESS_GAP: f32 = 7.;
+
+#[gpui_kit::test]
+fn the_selected_navigation_fill_is_clearly_stronger_than_hover(cx: &mut TestAppContext) {
+    init_fluent_app(cx);
+
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        cx.update(|cx| Theme::change(mode, None, cx));
+        cx.read(|cx| {
+            let theme = Theme::global(cx);
+            let selected = theme.sidebar.blend(theme.secondary_active);
+            // GPUI Kit draws a ghost button's hover fill as the accent color, at half strength
+            // in dark mode.
+            let hover_fill = if mode.is_dark() {
+                theme.accent.opacity(0.5)
+            } else {
+                theme.accent
+            };
+            let hover = theme.sidebar.blend(hover_fill);
+            let gap = (lightness(selected) - lightness(hover)).abs();
+
+            assert!(
+                gap >= MIN_SELECTED_NAVIGATION_LIGHTNESS_GAP,
+                "{mode:?} selected and hover navigation fills differ by {gap:.1} lightness, \
+                 below {MIN_SELECTED_NAVIGATION_LIGHTNESS_GAP}"
+            );
+            assert!(
+                lightness(hover) != lightness(theme.sidebar),
+                "{mode:?} hover is distinguishable from the resting pane"
+            );
+        });
+    }
+}
+
 #[gpui_kit::test]
 fn fluent_focus_ring_and_status_colors_stay_visible(cx: &mut TestAppContext) {
     init_fluent_app(cx);

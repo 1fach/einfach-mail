@@ -1,6 +1,6 @@
-use gpui_kit::component::IconName;
 use gpui_kit::{Background, WindowBackgroundAppearance};
 
+use crate::components::AppIcon;
 use crate::features::{CalendarView, MailFolderNavigation, MailView};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -44,12 +44,12 @@ impl NavigationSurfaceAppearance {
 pub(super) const NAVIGATION_SURFACE_OPACITY: f32 = 0.88;
 
 impl WorkspaceSection {
-    pub(super) fn navigation_identity(self) -> (&'static str, &'static str, IconName) {
+    pub(super) fn navigation_identity(self) -> (&'static str, &'static str, AppIcon) {
         match self {
-            Self::Mail => ("nav-mail", "Mail", IconName::Inbox),
-            Self::Calendar => ("nav-calendar", "Calendar", IconName::Calendar),
-            Self::Accounts => ("nav-accounts", "Accounts", IconName::User),
-            Self::Settings => ("nav-settings", "Settings", IconName::Settings),
+            Self::Mail => ("nav-mail", "Mail", AppIcon::Mail),
+            Self::Calendar => ("nav-calendar", "Calendar", AppIcon::Calendar),
+            Self::Accounts => ("nav-accounts", "Accounts", AppIcon::Accounts),
+            Self::Settings => ("nav-settings", "Settings", AppIcon::Settings),
         }
     }
 }
