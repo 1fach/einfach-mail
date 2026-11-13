@@ -1,6 +1,6 @@
 # ADR 0059: Use a shared, adaptive mail and calendar workspace
 
-- Status: Accepted
+- Status: Accepted; the navigation selection and destination placement are amended by [ADR 0066](0066-fluent-visual-language-and-navigation.md)
 - Date: 2026-11-10
 - Owners: Einfach Mail maintainers
 
