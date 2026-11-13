@@ -178,7 +178,11 @@ Other crates.io candidates also fail the bundled-source requirement. [`rusqlciph
 
 The `async-sqlite` wrapper and released migration library both use rusqlite 0.41. The application keeps `rusqlite_migration` rather than switching to Refinery because Refinery introduces a history table alongside the current `PRAGMA user_version` contract. Cargo.toml and Cargo.lock now use the registry migration release; one exact `libsqlite3-sys` Git pin remains. The source tests prove the resolved native SQLCipher runtime and the old encrypted cache behavior; no new database API or schema was introduced.
 
+As of 2026-11-13, neither released adapter supports rusqlite 0.42. That release contains the registry SQLCipher integration. The crates.io index lists `async-sqlite` 0.7.0 as published on 2026-11-01. Upstream marks the release in commit [`9ccf234`](https://github.com/ryanfowler/async-sqlite/commit/9ccf2342cc59d3a6ea671fe9c4bbd289b8b3abb8). Its manifest requires `rusqlite ^0.41.0`, declares Rust 1.95, and uses MIT. The latest `rusqlite_migration` release is 2.7.0, published on 2026-11-10. Its manifest also requires `rusqlite ^0.41.0`, declares Rust 1.89, and uses Apache-2.0. Both caret requirements exclude rusqlite 0.42.0. No 0.42 compatibility build was run because neither manifest accepts that release. Keep the Git pin until both publish compatible releases.
+
 RUSTSEC-2026-0459 is no longer ignored in `.cargo/audit.toml`. The 2026-11-09 offline audit passed against cached RustSec database revision `ba4d1245f77987d28e7a7f119ed21ad844c11f57`, which contained 1,429 advisories and scanned 1,031 locked dependencies. It reported nine unmaintained-crate notices. The separate RUSTSEC-2023-0071 exception for SSPI's unused RSA path remains tracked under issue #259. The sandbox could not refresh the Cargo advisory database because its lock path under the read-only Cargo home was unavailable.
+
+The 2026-11-13 offline audit loaded 1,490 advisories and scanned 1,037 locked dependencies. It completed with nine allowed unmaintained-crate notices and no denied vulnerability findings. Cargo could not acquire the crates.io index lock, so this run did not refresh yanked status.
 
 Linux persistence tests exercise SQLCipher encryption and Secret Service key handling through `SqliteAccountCache::open_for_account` and `remove_for_account`. The default child-process case covers unavailable D-Bus for new and existing caches; the ignored case covers key creation, encrypted reopen, wrong and malformed key rejection, missing-key preservation, and account removal. It passed on 2026-11-09 with the new dependency stack in an isolated GNOME Keyring D-Bus session with display variables unset. The tests use existing workspace dependencies, random synthetic account IDs, and temporary XDG storage; they add no crate or native build requirement.
 
@@ -381,6 +385,8 @@ The advisory covers timing leakage from RSA private-key operations. The applicat
 - [`async-rusqlite` 0.6.0 manifest](https://docs.rs/crate/async-rusqlite/0.6.0/source/Cargo.toml.orig)
 - [`async-sqlite` 0.7.0 documentation and manifest](https://docs.rs/crate/async-sqlite/0.7.0)
 - [`async-sqlite` 0.7.0 manifest](https://docs.rs/crate/async-sqlite/0.7.0/source/Cargo.toml.orig)
+- [`async-sqlite` 0.7.0 release commit](https://github.com/ryanfowler/async-sqlite/commit/9ccf2342cc59d3a6ea671fe9c4bbd289b8b3abb8)
+- [`rusqlite_migration` 2.7.0 release](https://github.com/cljoly/rusqlite_migration/releases/tag/v2.7.0)
 - [`refinery` 0.10.0 release notes](https://github.com/rust-db/refinery/releases)
 - [RustSec rusqlite advisories](https://rustsec.org/packages/rusqlite.html)
 - [RustSec RUSTSEC-2026-0459 details](https://github.com/RustSec/advisory-db/blob/main/crates/libsqlite3-sys/RUSTSEC-2026-0459.md)
