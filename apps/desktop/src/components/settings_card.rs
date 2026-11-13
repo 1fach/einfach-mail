@@ -81,7 +81,7 @@ impl RenderOnce for SettingsCard {
             .child(div().text_sm().font_semibold().child(self.title.clone()))
             .children(self.description.map(|description| {
                 div()
-                    .text_xs()
+                    .text_sm()
                     .text_color(theme.muted_foreground)
                     .child(description)
             }));
