@@ -1,12 +1,11 @@
 use gpui_kit::component::{
-    ActiveTheme, ColorTokens, Disableable, Icon, IconName, Selectable, StyledExt,
-    button::{Button, ButtonVariants},
+    ActiveTheme, ColorTokens, Disableable, StyledExt, avatar::Avatar, button::Button,
 };
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{Context, IntoElement, Render, Role, Window, div, prelude::*, rems};
 
-use crate::components::InfoBar;
+use crate::components::{InfoBar, NAVIGATION_PANE_WIDTH, NavItem};
 use crate::features::{
     AppearancePreference, SettingsViewState, account_cache_open_error_message, render_settings,
 };
@@ -21,9 +20,7 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
             .id("workspace-navigation")
             .role(Role::Navigation)
             .aria_label("Main navigation")
-            .w(rems(16.))
-            .min_w(rems(14.))
-            .max_w(rems(20.))
+            .w(NAVIGATION_PANE_WIDTH)
             .h_full()
             .flex()
             .flex_col()
@@ -33,44 +30,27 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
                 .navigation_background(cx.theme().tokens.sidebar.into()))
             .text_color(cx.theme().sidebar_foreground)
             .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            .child(self.render_navigation_brand())
-            .child(self.render_feature_navigation(cx));
+            .border_color(cx.theme().sidebar_border);
         #[cfg(test)]
         let navigation = navigation.test_support();
-        let mut navigation = navigation;
-        if let Some(profile) = self.account_view.read(cx).navigation_profile() {
-            navigation = navigation.child(Self::render_active_account_identity(&profile, cx));
-        }
-        if let WorkspaceContent::Mail {
-            folder_navigation, ..
-        } = &self.content
-        {
-            navigation = navigation.child(folder_navigation.clone());
-        } else {
-            navigation = navigation.child(div().flex_1());
-        }
-        navigation
-            .child(self.render_account_navigation(cx))
-            .child(self.render_settings_navigation(cx))
+        let navigation = navigation
+            .when_some(
+                self.account_view.read(cx).navigation_profile(),
+                |navigation, profile| {
+                    navigation.child(Self::render_active_account_identity(&profile, cx))
+                },
+            )
+            .child(self.render_contextual_navigation());
+        navigation.child(self.render_destination_switcher(cx))
     }
 
-    fn render_navigation_brand(&self) -> impl IntoElement {
-        div()
-            .px_4()
-            .py_4()
-            .child(div().text_lg().font_semibold().child("Einfach Mail"))
-    }
-
-    fn render_feature_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("workspace-feature-navigation")
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_2()
-            .child(self.render_navigation_button(WorkspaceSection::Mail, cx))
-            .child(self.render_navigation_button(WorkspaceSection::Calendar, cx))
+    fn render_contextual_navigation(&self) -> gpui_kit::AnyElement {
+        match &self.content {
+            WorkspaceContent::Mail {
+                folder_navigation, ..
+            } => folder_navigation.clone().into_any_element(),
+            _ => div().flex_1().into_any_element(),
+        }
     }
 
     fn render_active_account_identity(
@@ -85,10 +65,10 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
             .w_full()
             .flex()
             .items_center()
-            .gap_2()
-            .px_3()
+            .gap_3()
+            .px_5()
             .py_3()
-            .child(Icon::new(IconName::User).size_4())
+            .child(Avatar::new().name(profile.label().to_owned()).size_8())
             .child(Self::render_active_account_details(profile, colors));
         #[cfg(test)]
         let identity = identity.test_support();
@@ -107,7 +87,6 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap_1()
             .child(
                 div()
                     .w_full()
@@ -128,42 +107,32 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
             })
     }
 
-    fn render_account_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("workspace-account-navigation")
-            .border_t_1()
-            .border_color(cx.theme().sidebar_border)
+    fn render_destination_switcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let switcher = div()
+            .id("workspace-destination-switcher")
+            .role(Role::Group)
+            .aria_label("Destinations")
+            .flex()
+            .gap_1()
             .p_2()
-            .child(self.render_navigation_button(WorkspaceSection::Accounts, cx))
+            .border_t_1()
+            .border_color(cx.theme().sidebar_border);
+        #[cfg(test)]
+        let switcher = switcher.test_support();
+        switcher.children([
+            self.render_navigation_item(WorkspaceSection::Mail, cx),
+            self.render_navigation_item(WorkspaceSection::Calendar, cx),
+            self.render_navigation_item(WorkspaceSection::Accounts, cx),
+            self.render_navigation_item(WorkspaceSection::Settings, cx),
+        ])
     }
 
-    fn render_settings_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("workspace-settings-navigation")
-            .border_t_1()
-            .border_color(cx.theme().sidebar_border)
-            .p_2()
-            .child(self.render_navigation_button(WorkspaceSection::Settings, cx))
-    }
-
-    fn render_navigation_button(
-        &self,
-        section: WorkspaceSection,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_navigation_item(&self, section: WorkspaceSection, cx: &mut Context<Self>) -> NavItem {
         let (id, label, icon) = section.navigation_identity();
-        let selected = self.content.selected_section() == section;
-        let disabled_reason = self.navigation_disabled_reason(section, cx);
-        Button::new(id)
-            .debug_selector(move || id.to_owned())
-            .ghost()
-            .selected(selected)
-            .disabled(disabled_reason.is_some())
-            .label(label)
-            .icon(Icon::new(icon).size_4())
-            .w_full()
+        NavItem::icon_only(id, label, icon)
+            .selected(self.content.selected_section() == section)
+            .unavailable(self.navigation_disabled_reason(section, cx))
             .track_focus(self.navigation_focus(section))
-            .when_some(disabled_reason, |button, reason| button.tooltip(reason))
             .on_click(cx.listener(move |workspace, _, _, cx| workspace.navigate_to(section, cx)))
     }
 

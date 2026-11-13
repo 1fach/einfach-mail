@@ -1,4 +1,3 @@
-use einfach_mail_domain::MailAction;
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, StyledExt,
     button::{Button, ButtonVariants},
@@ -10,11 +9,12 @@ use gpui_kit::{
     AnyElement, Context, IntoElement, Pixels, Rems, Render, Role, Window, div, prelude::*, rems,
 };
 
+use crate::components::NAVIGATION_PANE_WIDTH;
+
 use super::message_list::{MessageListLayout, record_resized_message_list_width};
 use super::{
-    CompactMailPane, MAIL_SHELL_NAVIGATION_WIDTH, MAIL_SPLIT_HANDLE_RESERVE,
-    MESSAGE_LIST_MAX_WIDTH, MESSAGE_LIST_MIN_WIDTH, MESSAGE_READER_CONTEXT,
-    MESSAGE_READER_MIN_WIDTH, MailView, SyncStatus,
+    CompactMailPane, MAIL_SPLIT_HANDLE_RESERVE, MESSAGE_LIST_MAX_WIDTH, MESSAGE_LIST_MIN_WIDTH,
+    MESSAGE_READER_CONTEXT, MESSAGE_READER_MIN_WIDTH, MailView, SyncStatus,
 };
 
 const MAIL_HEADER_HEIGHT: Rems = rems(3.625);
@@ -41,29 +41,6 @@ impl MailView {
         let sync_status = sync_status
             .debug_selector(|| "mail-sync-status".to_owned())
             .test_support();
-
-        let mut header_actions = div().flex().items_center().gap_2().flex_shrink_0();
-        if self
-            .profile
-            .capabilities()
-            .mail()
-            .supports(MailAction::Send)
-        {
-            header_actions = header_actions.child(
-                Button::new("new-mail-message")
-                    .debug_selector(|| "new-mail-message".to_owned())
-                    .primary()
-                    .label(if matches!(&self.pending_send, Ok(Some(_))) {
-                        "Resolve send"
-                    } else {
-                        "Compose"
-                    })
-                    .disabled(self.sync_status.is_sync_active())
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.open_composer(window, cx);
-                    })),
-            );
-        }
 
         let sync_button = Button::new("sync-mail")
             .ghost()
@@ -102,7 +79,14 @@ impl MailView {
                 }
                 title.child(sync_status)
             })
-            .child(header_actions.child(sync_button))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_shrink_0()
+                    .child(sync_button),
+            )
     }
 
     fn render_resizable_message_panes(
@@ -173,7 +157,7 @@ impl MailView {
     }
 
     fn uses_compact_mail_layout(&self, window: &Window, rem_size: Pixels) -> bool {
-        let wide_minimum_width = MAIL_SHELL_NAVIGATION_WIDTH.to_pixels(rem_size)
+        let wide_minimum_width = NAVIGATION_PANE_WIDTH.to_pixels(rem_size)
             + self.pane_layout.message_list_width.0.to_pixels(rem_size)
             + MESSAGE_READER_MIN_WIDTH.to_pixels(rem_size)
             + MAIL_SPLIT_HANDLE_RESERVE.to_pixels(rem_size);

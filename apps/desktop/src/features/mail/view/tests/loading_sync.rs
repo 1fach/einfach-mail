@@ -434,11 +434,19 @@ async fn contextual_folder_navigation_updates_mail_selection(cx: &mut TestAppCon
         context
             .update(|_, app| { view.read(app).selected_folder.as_ref() == Some(&inbox_reference) })
     );
+    assert!(context.debug_bounds("folder:inbox-pill").is_some());
+    assert!(context.debug_bounds("folder:archive-pill").is_none());
     context.update(gpui_kit::Window::focus_next);
+    assert_eq!(
+        context.update(|window, _| window.find_by_label("New mail").focused()),
+        Some(true),
+        "Tab order starts at the New mail button"
+    );
+    press_window_key(context, "tab");
     assert_eq!(
         context.update(|window, _| window.find_by_label("Inbox").focused()),
         Some(true),
-        "Tab order starts at the Inbox folder button"
+        "Tab reaches the Inbox folder button after New mail"
     );
     press_window_key(context, "tab");
     assert_eq!(
@@ -453,6 +461,8 @@ async fn contextual_folder_navigation_updates_mail_selection(cx: &mut TestAppCon
     .await;
     draw_mail_view(context);
 
+    assert!(context.debug_bounds("folder:archive-pill").is_some());
+    assert!(context.debug_bounds("folder:inbox-pill").is_none());
     assert!(context.update(|window, _| {
         window.try_find_by_label("Inbox").is_some() && window.try_find_by_label("Archive").is_some()
     }));
