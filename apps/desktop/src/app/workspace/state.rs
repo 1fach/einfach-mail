@@ -1,7 +1,7 @@
 use gpui_kit::{Background, WindowBackgroundAppearance};
 
 use crate::components::AppIcon;
-use crate::features::{CalendarView, MailFolderNavigation, MailView};
+use crate::features::{CalendarNavigation, CalendarView, MailFolderNavigation, MailView};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum OpeningContent {
@@ -65,6 +65,7 @@ pub(super) enum WorkspaceContent {
     },
     Calendar {
         view: gpui_kit::Entity<CalendarView>,
+        navigation: gpui_kit::Entity<CalendarNavigation>,
         subscription: gpui_kit::Subscription,
     },
 }

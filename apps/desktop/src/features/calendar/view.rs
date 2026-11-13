@@ -4,12 +4,16 @@ use einfach_mail_application::{CalendarSession, CalendarWriteReadiness};
 use einfach_mail_domain::{AccountProfile, CalendarOccurrence, PendingCalendarEventCreation};
 use gpui_kit::{Context, EventEmitter, FocusHandle, ScrollHandle, Subscription, Task};
 
-use self::state::{AgendaEventKey, CalendarStatus};
+use self::state::{AgendaEventKey, CalendarLayout, CalendarStatus};
 use super::week::CalendarWeek;
+use crate::components::LocalClock;
 
 mod actions;
 mod agenda;
 mod copy;
+mod grid;
+mod mini_month;
+mod navigation;
 mod render;
 mod state;
 mod sync;
@@ -17,8 +21,8 @@ mod sync;
 pub(crate) use self::actions::bind_calendar_event_navigation_keys;
 #[cfg(test)]
 use agenda::display_events;
-#[cfg(test)]
-use state::AgendaRow;
+
+pub(crate) use navigation::CalendarNavigation;
 
 pub(crate) enum CalendarViewEvent {
     ReviewCalendarWritePermission,
@@ -28,6 +32,8 @@ pub(crate) struct CalendarView<S: CalendarSession + ?Sized = dyn CalendarSession
     profile: AccountProfile,
     session: Arc<S>,
     week: CalendarWeek,
+    clock: LocalClock,
+    layout: CalendarLayout,
     events: Vec<CalendarOccurrence>,
     pending_creation: Option<PendingCalendarEventCreation>,
     event_list_focus: FocusHandle,
@@ -71,6 +77,8 @@ where
             profile,
             session,
             week,
+            clock: LocalClock::system(),
+            layout: CalendarLayout::Grid,
             events: Vec::new(),
             pending_creation: None,
             event_list_focus: cx.focus_handle().tab_stop(true),

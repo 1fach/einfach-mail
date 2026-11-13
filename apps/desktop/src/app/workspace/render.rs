@@ -49,6 +49,7 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
             WorkspaceContent::Mail {
                 folder_navigation, ..
             } => folder_navigation.clone().into_any_element(),
+            WorkspaceContent::Calendar { navigation, .. } => navigation.clone().into_any_element(),
             _ => div().flex_1().into_any_element(),
         }
     }

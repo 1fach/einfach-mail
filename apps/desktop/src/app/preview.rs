@@ -604,38 +604,160 @@ fn preview_message(
     MailMessage::new(folder.clone(), message_id, metadata)
 }
 
-fn preview_calendar_events(view: &CalendarViewReference) -> Vec<CalendarOccurrence> {
-    [
-        ("preview-event-1", "Team stand-up", 9),
-        ("preview-event-2", "Design review", 11),
-        ("preview-event-3", "Project planning", 14),
-    ]
-    .into_iter()
-    .map(|(id, subject, hour)| preview_calendar_event(view, id, subject, hour))
-    .collect()
+/// A timed preview event: its day of the week (Monday is 0), start hour and minute, and length.
+struct PreviewTimedEvent {
+    id: &'static str,
+    subject: &'static str,
+    location: &'static str,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    minutes: i64,
 }
 
-fn preview_calendar_event(
+const PREVIEW_TIMED_EVENTS: [PreviewTimedEvent; 10] = [
+    PreviewTimedEvent {
+        id: "preview-event-1",
+        subject: "Team stand-up",
+        location: "Room 1",
+        day: 0,
+        hour: 9,
+        minute: 0,
+        minutes: 30,
+    },
+    PreviewTimedEvent {
+        id: "preview-event-2",
+        subject: "Design review",
+        location: "Room 4",
+        day: 0,
+        hour: 11,
+        minute: 0,
+        minutes: 60,
+    },
+    PreviewTimedEvent {
+        id: "preview-event-3",
+        subject: "Project planning",
+        location: "Room 2",
+        day: 1,
+        hour: 14,
+        minute: 0,
+        minutes: 90,
+    },
+    PreviewTimedEvent {
+        id: "preview-event-4",
+        subject: "Team stand-up",
+        location: "Room 1",
+        day: 1,
+        hour: 9,
+        minute: 0,
+        minutes: 30,
+    },
+    PreviewTimedEvent {
+        id: "preview-event-5",
+        subject: "Team stand-up",
+        location: "Room 1",
+        day: 2,
+        hour: 9,
+        minute: 0,
+        minutes: 30,
+    },
+    PreviewTimedEvent {
+        id: "preview-event-6",
+        subject: "Customer workshop",
+        location: "Studio",
+        day: 2,
+        hour: 10,
+        minute: 30,
+        minutes: 120,
+    },
+    PreviewTimedEvent {
+        id: "preview-event-7",
+        subject: "Budget check-in",
+        location: "Room 3",
+        day: 2,
+        hour: 15,
+        minute: 30,
+        minutes: 45,
+    },
+    PreviewTimedEvent {
+        id: "preview-event-8",
+        subject: "Team stand-up",
+        location: "Room 1",
+        day: 3,
+        hour: 9,
+        minute: 0,
+        minutes: 30,
+    },
+    PreviewTimedEvent {
+        id: "preview-event-9",
+        subject: "Release readiness",
+        location: "Room 2",
+        day: 4,
+        hour: 13,
+        minute: 0,
+        minutes: 60,
+    },
+    PreviewTimedEvent {
+        id: "preview-event-10",
+        subject: "Weekly retro",
+        location: "Room 1",
+        day: 4,
+        hour: 16,
+        minute: 0,
+        minutes: 45,
+    },
+];
+
+fn preview_calendar_events(view: &CalendarViewReference) -> Vec<CalendarOccurrence> {
+    let mut events = PREVIEW_TIMED_EVENTS
+        .iter()
+        .map(|event| preview_timed_event(view, event))
+        .collect::<Vec<_>>();
+    events.push(preview_all_day_event(view));
+    events
+}
+
+fn preview_timed_event(
     view: &CalendarViewReference,
-    id: &str,
-    subject: &str,
-    hour: i64,
+    event: &PreviewTimedEvent,
 ) -> CalendarOccurrence {
-    let start = view.range().start() + time::Duration::hours(hour);
+    let start = view.range().start()
+        + time::Duration::days(event.day)
+        + time::Duration::hours(event.hour)
+        + time::Duration::minutes(event.minute);
     let mut event_time = CalendarOccurrenceTimePatch::new();
     event_time.set_start(start);
-    event_time.set_end(start + time::Duration::minutes(30));
+    event_time.set_end(start + time::Duration::minutes(event.minutes));
     event_time.set_is_all_day(false);
     let mut patch = CalendarOccurrencePatch::new();
-    patch.set_subject(Some(subject.to_owned()));
-    patch.set_location(Some("Synthetic preview".to_owned()));
+    patch.set_subject(Some(event.subject.to_owned()));
+    patch.set_location(Some(event.location.to_owned()));
     patch.set_time(event_time);
     patch
         .into_new(
             view.clone(),
-            EventId::try_from(id.to_owned()).expect("synthetic event ID is valid"),
+            EventId::try_from(event.id.to_owned()).expect("synthetic event ID is valid"),
         )
         .expect("synthetic calendar event is valid")
+}
+
+/// An all-day event on Thursday and Friday, so the week has one that spans two columns.
+fn preview_all_day_event(view: &CalendarViewReference) -> CalendarOccurrence {
+    let first_day = view.range().start_date().midnight().assume_utc() + time::Duration::days(3);
+    let mut event_time = CalendarOccurrenceTimePatch::new();
+    event_time.set_start(first_day);
+    event_time.set_end(first_day + time::Duration::days(2));
+    event_time.set_is_all_day(true);
+    let mut patch = CalendarOccurrencePatch::new();
+    patch.set_subject(Some("Team offsite".to_owned()));
+    patch.set_time(event_time);
+    patch
+        .into_new(
+            view.clone(),
+            EventId::try_from("preview-event-all-day".to_owned())
+                .expect("synthetic event ID is valid"),
+        )
+        .expect("synthetic all-day event is valid")
 }
 
 #[cfg(test)]

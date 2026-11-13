@@ -91,8 +91,7 @@ fn assert_calendar_controls_fit(
     let viewport = context.update(|window, _| window.bounds());
     for selector in [
         "calendar-sync",
-        "calendar-new-event",
-        "calendar-week-navigation",
+        "calendar-today",
         "calendar-previous-week",
         "calendar-week-label",
         "calendar-next-week",
@@ -110,15 +109,15 @@ fn assert_calendar_controls_fit(
         );
     }
 
-    let navigation = context
-        .debug_bounds("calendar-week-navigation")
-        .expect("week navigation is rendered");
+    let previous = context
+        .debug_bounds("calendar-previous-week")
+        .expect("the previous week control is rendered");
     let label = context
         .debug_bounds("calendar-week-label")
         .expect("the current week remains visible");
     assert!(
-        label.left() >= navigation.left() && label.right() <= navigation.right(),
-        "the week label stays inside its navigation row at {width}px"
+        label.right() <= previous.left(),
+        "the week title does not run under the week controls at {width}px"
     );
 
     let event_row = context
@@ -447,16 +446,14 @@ async fn selecting_an_event_uses_its_current_row_after_agenda_rows_shift(cx: &mu
             .is_some(),
         "the first event is rendered before the rows change"
     );
-    let target_event = super::AgendaEventKey {
+    let target_event = AgendaEventKey {
         date: civil::Date::new(2030, 1, 7).expect("synthetic event date is valid"),
         event_id: EventId::try_from("synthetic-calendar-event-1".to_owned())
             .expect("synthetic event ID is valid"),
     };
-    let old_scroll_index = context.cx.update(|cx| {
-        view.read(cx).agenda_rows().iter().position(
-            |row| matches!(row, super::AgendaRow::Event(event) if event.key == target_event),
-        )
-    });
+    let old_scroll_index = context
+        .cx
+        .update(|cx| scroll_index_of(view.read(cx), &target_event));
     let old_scroll_index = old_scroll_index.expect("the target event has an agenda row");
     let date =
         Date::from_calendar_date(2030, Month::January, 7).expect("synthetic event date is valid");
@@ -478,11 +475,9 @@ async fn selecting_an_event_uses_its_current_row_after_agenda_rows_shift(cx: &mu
             view.events.extend(earlier_events);
         });
     });
-    let current_scroll_index = context.cx.update(|cx| {
-        view.read(cx).agenda_rows().iter().position(
-            |row| matches!(row, super::AgendaRow::Event(event) if event.key == target_event),
-        )
-    });
+    let current_scroll_index = context
+        .cx
+        .update(|cx| scroll_index_of(view.read(cx), &target_event));
     let current_scroll_index =
         current_scroll_index.expect("the target event remains in the changed agenda");
     assert_eq!(current_scroll_index, old_scroll_index + 24);
@@ -512,6 +507,16 @@ async fn selecting_an_event_uses_its_current_row_after_agenda_rows_shift(cx: &mu
         scroll_offset.y < px(0.),
         "the shifted event row requires scrolling; offset={scroll_offset:?}"
     );
+}
+
+fn scroll_index_of<S: CalendarSession + ?Sized + 'static>(
+    view: &CalendarView<S>,
+    key: &AgendaEventKey,
+) -> Option<usize> {
+    let agenda = view.week_agenda();
+    agenda
+        .position_of(key)
+        .map(|event_index| agenda.scroll_index(event_index, view.layout))
 }
 
 fn assert_accessible_agenda(context: &mut VisualTestContext, expected_event_count: usize) {

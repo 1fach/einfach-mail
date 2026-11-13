@@ -12,7 +12,8 @@ pub(super) use account::{
 #[cfg(feature = "ui-preview")]
 pub(crate) use calendar::CalendarWeek;
 pub(super) use calendar::{
-    CalendarView, CalendarViewEvent, bind_calendar_event_navigation_keys, bind_event_composer_keys,
+    CalendarNavigation, CalendarView, CalendarViewEvent, bind_calendar_event_navigation_keys,
+    bind_event_composer_keys,
 };
 pub(super) use mail::{
     MAIL_MINIMUM_WIDTH, MailFolderNavigation, MailPermissionRequester, MailView, MailViewEvent,

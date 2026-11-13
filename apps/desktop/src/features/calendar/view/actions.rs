@@ -4,15 +4,16 @@ use einfach_mail_application::{CalendarSession, CalendarWriteReadiness};
 use einfach_mail_domain::{CalendarAction, CalendarOccurrence, CalendarOccurrenceTime};
 use gpui_kit::component::{StyledExt, WindowExt};
 use gpui_kit::{App, Context, Entity, KeyBinding, Window, div, prelude::*};
-use jiff::Span;
+use jiff::{Span, civil};
 
 use crate::components::ListNavigation;
 
 use super::super::composer::{
     EventComposer, EventComposerEvent, EventComposerIntent, EventComposerSetup,
 };
+use super::super::week::monday_start;
 use super::copy::event_creation_action_copy;
-use super::state::{AgendaEventKey, AgendaRow, CalendarStatus};
+use super::state::{AgendaEventKey, CalendarStatus};
 use super::{CalendarView, CalendarViewEvent};
 
 gpui_kit::actions!(
@@ -59,6 +60,7 @@ pub(crate) fn bind_calendar_event_navigation_keys(cx: &mut App) {
         KeyBinding::new("end", SelectLastCalendarEvent, context),
         KeyBinding::new("enter", OpenSelectedCalendarEvent, context),
     ]);
+    super::navigation::bind_mini_month_keys(cx);
 }
 
 impl<S> CalendarView<S>
@@ -174,27 +176,20 @@ where
     }
 
     fn navigate_event(&mut self, navigation: ListNavigation, cx: &mut Context<Self>) {
-        let rows = self.agenda_rows();
-        let event_rows = rows
-            .iter()
-            .enumerate()
-            .filter_map(|(row_index, row)| match row {
-                AgendaRow::Event(event) => Some((row_index, &event.key)),
-                AgendaRow::DayHeading(_) | AgendaRow::EmptyDay => None,
-            })
-            .collect::<Vec<_>>();
+        let agenda = self.week_agenda();
         let selected_index = self
             .selected_agenda_event
             .as_ref()
-            .and_then(|selected| event_rows.iter().position(|(_, key)| *key == selected));
-        let Some(target_index) = navigation.target_index(selected_index, event_rows.len()) else {
+            .and_then(|selected| agenda.position_of(selected));
+        let Some(target_index) = navigation.target_index(selected_index, agenda.events.len())
+        else {
             return;
         };
-        let Some((scroll_index, selected_event)) = event_rows.get(target_index) else {
+        let Some(target) = agenda.events.get(target_index) else {
             return;
         };
-        let scroll_index = *scroll_index;
-        let selected_event = (*selected_event).clone();
+        let selected_event = target.key.clone();
+        let scroll_index = agenda.scroll_index(target_index, self.layout);
         self.agenda_scroll.scroll_to_item(scroll_index);
         self.selected_agenda_event = Some(selected_event);
         cx.notify();
@@ -206,13 +201,11 @@ where
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let rows = self.agenda_rows();
-        let Some(scroll_index) = rows
-            .iter()
-            .position(|row| matches!(row, AgendaRow::Event(event) if event.key == selected_event))
-        else {
+        let agenda = self.week_agenda();
+        let Some(event_index) = agenda.position_of(&selected_event) else {
             return;
         };
+        let scroll_index = agenda.scroll_index(event_index, self.layout);
         self.agenda_scroll.scroll_to_item(scroll_index);
         self.event_list_focus.focus(window, cx);
         self.selected_agenda_event = Some(selected_event);
@@ -271,6 +264,30 @@ where
         let Some(week_start) = self.week.start().checked_add(Span::new().weeks(weeks)).ok() else {
             return;
         };
+        self.show_week_starting(week_start, cx);
+    }
+
+    /// Shows the week that contains today.
+    pub(super) fn show_today(&mut self, cx: &mut Context<Self>) {
+        self.show_date(self.clock.today(), cx);
+    }
+
+    /// Shows the week that contains `date`.
+    pub(super) fn show_date(&mut self, date: civil::Date, cx: &mut Context<Self>) {
+        if let Some(week_start) = monday_start(date) {
+            self.show_week_starting(week_start, cx);
+        }
+    }
+
+    /// Whether the shown week is the one that contains today.
+    pub(super) fn shows_today(&self) -> bool {
+        monday_start(self.clock.today()) == Some(self.week.start())
+    }
+
+    fn show_week_starting(&mut self, week_start: civil::Date, cx: &mut Context<Self>) {
+        if week_start == self.week.start() {
+            return;
+        }
         let Some(week) = self.week.with_start(week_start) else {
             return;
         };

@@ -84,7 +84,7 @@ async fn native_event_composer_renders_date_pickers_and_recovers_create_outcomes
             )
         });
         calendar_handle = Some(calendar.clone());
-        gpui_kit::base::Root::new(calendar, window, cx)
+        super::super::support::calendar_workspace(calendar, window, cx)
     });
     let calendar = calendar_handle.expect("calendar entity is retained for assertions");
     wait_for_ui_condition(context, |window, _| {
@@ -298,7 +298,7 @@ async fn read_only_calendar_checks_pending_creation_status_by_keyboard(cx: &mut 
             )
         });
         calendar_handle = Some(calendar.clone());
-        gpui_kit::base::Root::new(calendar, window, cx)
+        super::super::support::calendar_workspace(calendar, window, cx)
     });
     let calendar = calendar_handle.expect("calendar entity is retained for assertions");
     wait_for_ui_condition(context, |window, app| {

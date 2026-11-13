@@ -51,7 +51,7 @@ async fn denied_calendar_write_emits_permission_review_request(cx: &mut TestAppC
                 }
             },
         ));
-        gpui_kit::base::Root::new(calendar, window, cx)
+        super::super::support::calendar_workspace(calendar, window, cx)
     });
     let calendar = calendar_handle.expect("calendar entity is retained for assertions");
     let _subscription = subscription;

@@ -40,7 +40,7 @@ async fn native_event_editor_updates_a_cached_timed_appointment(cx: &mut TestApp
             )
         });
         calendar_handle = Some(calendar.clone());
-        gpui_kit::base::Root::new(calendar, window, cx)
+        super::super::support::calendar_workspace(calendar, window, cx)
     });
     let calendar = calendar_handle.expect("calendar entity is retained for assertions");
 

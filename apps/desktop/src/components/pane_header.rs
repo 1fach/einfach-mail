@@ -1,8 +1,11 @@
 //! The header above a workspace pane: its title, a tag, a status caption, and icon actions.
 
 use gpui_kit::component::{ActiveTheme as _, StyledExt as _, h_flex};
+#[cfg(test)]
+use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, App, IntoElement, Rems, RenderOnce, SharedString, Window, div, prelude::*, rems,
+    AnyElement, App, IntoElement, Rems, RenderOnce, Role, SharedString, Window, div, prelude::*,
+    rems,
 };
 
 const HEADER_HEIGHT: Rems = rems(3.5);
@@ -13,9 +16,20 @@ const HEADER_HEIGHT: Rems = rems(3.5);
 pub(crate) struct PaneHeader {
     id: SharedString,
     title: SharedString,
-    tag: Option<SharedString>,
+    tag: Option<HeaderTag>,
     status: Option<AnyElement>,
     actions: Vec<AnyElement>,
+}
+
+/// The text of a tag and, when assistive technology should announce it, the status that names it.
+struct HeaderTag {
+    text: SharedString,
+    status: Option<TagStatus>,
+}
+
+struct TagStatus {
+    id: &'static str,
+    accessible_label: SharedString,
 }
 
 impl PaneHeader {
@@ -32,7 +46,28 @@ impl PaneHeader {
 
     /// Adds a short outlined tag after the title, such as "Read-only".
     pub(crate) fn tag(mut self, tag: impl Into<SharedString>) -> Self {
-        self.tag = Some(tag.into());
+        self.tag = Some(HeaderTag {
+            text: tag.into(),
+            status: None,
+        });
+        self
+    }
+
+    /// Adds a tag that is also a status, so assistive technology reads `accessible_label`.
+    /// `id` is the element id and the test selector of the tag.
+    pub(crate) fn tag_status(
+        mut self,
+        id: &'static str,
+        accessible_label: impl Into<SharedString>,
+        tag: impl Into<SharedString>,
+    ) -> Self {
+        self.tag = Some(HeaderTag {
+            text: tag.into(),
+            status: Some(TagStatus {
+                id,
+                accessible_label: accessible_label.into(),
+            }),
+        });
         self
     }
 
@@ -62,7 +97,7 @@ impl RenderOnce for PaneHeader {
             .font_semibold()
             .child(self.title);
         let tag = self.tag.map(|tag| {
-            div()
+            let element = div()
                 .flex_shrink_0()
                 .px_2()
                 .py_0p5()
@@ -71,7 +106,21 @@ impl RenderOnce for PaneHeader {
                 .border_color(theme.border)
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(tag)
+                .child(tag.text);
+            match tag.status {
+                Some(status) => {
+                    let selector = status.id.to_owned();
+                    let element = element
+                        .id(status.id)
+                        .debug_selector(move || selector)
+                        .role(Role::Status)
+                        .aria_label(status.accessible_label);
+                    #[cfg(test)]
+                    let element = element.test_support();
+                    element.into_any_element()
+                }
+                None => element.into_any_element(),
+            }
         });
         h_flex()
             .w_full()
