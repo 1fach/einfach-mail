@@ -35,10 +35,6 @@ pub(crate) fn install(cx: &mut App) {
 
 /// The meaning a status message carries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the info bar is the first consumer")
-)]
 pub(crate) enum StatusTone {
     Informational,
     Success,
@@ -48,10 +44,6 @@ pub(crate) enum StatusTone {
 
 /// Colors for one status message.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the info bar is the first consumer")
-)]
 pub(crate) struct StatusColors {
     /// A light tint of the tone, drawn behind the message.
     pub(crate) background: Hsla,
@@ -60,10 +52,6 @@ pub(crate) struct StatusColors {
 }
 
 /// Returns the colors for `tone` from the active theme.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the info bar is the first consumer")
-)]
 pub(crate) fn status_colors(tone: StatusTone, cx: &App) -> StatusColors {
     let theme = cx.theme();
     let icon = match tone {
