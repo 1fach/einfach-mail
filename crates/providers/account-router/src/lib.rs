@@ -11,9 +11,9 @@ use einfach_mail_application::{
     WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MailReplyDraft, MessageBody, MessageId, ReadState, VersionedCalendarEvent,
+    AccountId, CalendarCapabilities, CalendarEventCreation, CalendarEventUpdate,
+    CalendarOccurrence, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft,
+    MailFolder, MailReplyDraft, MessageBody, MessageId, ReadState, VersionedCalendarEvent,
 };
 use einfach_mail_exchange_ews::ExchangeEwsProvider;
 use einfach_mail_microsoft_graph::MicrosoftGraphProvider;
@@ -384,6 +384,16 @@ impl<E> CalendarProvider for AccountProviderRouter<E>
 where
     E: einfach_mail_application::ExchangeEwsAccountSettingsStore + 'static,
 {
+    async fn calendar_capabilities(&self) -> Result<CalendarCapabilities, CalendarOperationError> {
+        match require_selected_provider(
+            self.selected_provider().await,
+            CalendarOperationError::SignInRequired,
+        )? {
+            ProviderKind::MicrosoftGraph => self.graph.calendar_capabilities().await,
+            ProviderKind::ExchangeEws => self.ews.calendar_capabilities().await,
+        }
+    }
+
     async fn calendar_sync_strategy(&self) -> Result<CalendarSyncStrategy, CalendarOperationError> {
         match require_selected_provider(
             self.selected_provider().await,
@@ -517,9 +527,10 @@ where
 mod tests {
     use einfach_mail_application::{
         AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
-        AccountProvider, CalendarProvider, CalendarSyncStrategy, ExchangeEwsAccountSettings,
-        ExchangeEwsAccountSettingsStore, ExchangeEwsSettingsError,
+        AccountProvider, CalendarOperationError, CalendarProvider, CalendarSyncStrategy,
+        ExchangeEwsAccountSettings, ExchangeEwsAccountSettingsStore, ExchangeEwsSettingsError,
     };
+    use einfach_mail_domain::CalendarCapabilities;
     use einfach_mail_exchange_ews::ExchangeEwsProvider;
     use einfach_mail_microsoft_graph::MicrosoftGraphProvider;
 
@@ -577,24 +588,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reports_the_selected_provider_calendar_strategy() {
+    async fn reports_the_selected_provider_calendar_capabilities_and_strategy() {
         let router = AccountProviderRouter::new(
             MicrosoftGraphProvider::new_unconfigured(),
             ExchangeEwsProvider::new(EmptySettingsStore),
             false,
         );
         assert_eq!(
+            router.calendar_capabilities().await,
+            Err(CalendarOperationError::SignInRequired)
+        );
+        assert_eq!(
             router.calendar_sync_strategy().await,
-            Err(einfach_mail_application::CalendarOperationError::SignInRequired)
+            Err(CalendarOperationError::SignInRequired)
         );
 
         *router.active_provider.write().await = Some(ProviderKind::MicrosoftGraph);
+        assert_eq!(
+            router.calendar_capabilities().await,
+            Ok(CalendarCapabilities::full_access())
+        );
         assert_eq!(
             router.calendar_sync_strategy().await,
             Ok(CalendarSyncStrategy::Delta)
         );
 
         *router.active_provider.write().await = Some(ProviderKind::ExchangeEws);
+        assert_eq!(
+            router.calendar_capabilities().await,
+            Ok(CalendarCapabilities::view_only())
+        );
         assert_eq!(
             router.calendar_sync_strategy().await,
             Ok(CalendarSyncStrategy::Snapshot)

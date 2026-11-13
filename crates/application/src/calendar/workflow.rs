@@ -3,8 +3,8 @@
 use std::{collections::HashSet, sync::Arc, time::SystemTime};
 
 use einfach_mail_domain::{
-    AccountId, CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation, CalendarEventUpdate,
-    CalendarOccurrence, CalendarViewReference, PendingCalendarEventCreation,
+    AccountId, CalendarAction, CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation,
+    CalendarEventUpdate, CalendarOccurrence, CalendarViewReference, PendingCalendarEventCreation,
     VersionedCalendarEvent,
 };
 use thiserror::Error;
@@ -396,6 +396,8 @@ where
             .reservations
             .reserve_account(creation.view().account_id())
             .map_err(CalendarWorkflowError::from)?;
+        self.ensure_calendar_action(CalendarAction::CreateEvent)
+            .await?;
         self.ensure_calendar_write_ready(creation.view()).await?;
         let stage = self.cache.stage_event_creation(creation).await?;
         let creation_result = match stage {
@@ -592,6 +594,8 @@ where
             .reservations
             .reserve_account(view.account_id())
             .map_err(CalendarWorkflowError::from)?;
+        self.ensure_calendar_action(CalendarAction::UpdateEvent)
+            .await?;
         self.ensure_calendar_write_ready(view).await?;
         self.cache.mark_calendar_write_sync_required(view).await?;
         let event = match self.provider.update_event(update).await {
@@ -650,6 +654,8 @@ where
             .reservations
             .reserve_account(view.account_id())
             .map_err(CalendarWorkflowError::from)?;
+        self.ensure_calendar_action(CalendarAction::DeleteEvent)
+            .await?;
         self.ensure_calendar_write_ready(view).await?;
         self.cache.mark_calendar_write_sync_required(view).await?;
         if let Err(error) = self.provider.delete_event(event).await {
@@ -676,6 +682,22 @@ where
             Ok(())
         } else {
             Err(CalendarWorkflowError::AccountMismatch)
+        }
+    }
+
+    async fn ensure_calendar_action(
+        &self,
+        action: CalendarAction,
+    ) -> Result<(), CalendarWorkflowError> {
+        if self
+            .provider
+            .calendar_capabilities()
+            .await?
+            .supports(action)
+        {
+            Ok(())
+        } else {
+            Err(CalendarOperationError::UnsupportedOperation.into())
         }
     }
 

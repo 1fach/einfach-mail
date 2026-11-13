@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use einfach_mail_domain::{
-    CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTimePatch,
-    CalendarViewReference, EventId,
+    CalendarAction, CalendarCapabilities, CalendarOccurrence, CalendarOccurrencePatch,
+    CalendarOccurrenceTimePatch, CalendarViewReference, EventId,
 };
 use ews::{
     BaseFolderId, BaseShape, ItemShape, PathToElement, View,
@@ -20,7 +20,10 @@ use crate::{
     transport::{SOAP_NAMESPACE, validate_soap_header},
 };
 
-use std::{future::Future, sync::Arc};
+use std::{
+    future::{Future, ready},
+    sync::Arc,
+};
 
 use einfach_mail_application::{
     CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
@@ -689,6 +692,13 @@ impl<S> CalendarProvider for ExchangeEwsProvider<S>
 where
     S: ExchangeEwsAccountSettingsStore + 'static,
 {
+    fn calendar_capabilities(
+        &self,
+    ) -> impl Future<Output = Result<CalendarCapabilities, CalendarOperationError>> + Send + '_
+    {
+        ready(Ok(super::calendar_capabilities()))
+    }
+
     fn calendar_sync_strategy(
         &self,
     ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_
@@ -739,6 +749,7 @@ where
         let creation = creation.clone();
         let session_store = Arc::clone(&self.session);
         async move {
+            ensure_calendar_action(CalendarAction::CreateEvent)?;
             let session =
                 session_for_calendar(&session_store, creation.view().account_id()).await?;
             worker::run(move |_cancellation: CancellationToken| async move {
@@ -799,6 +810,7 @@ where
         let update = update.clone();
         let session_store = Arc::clone(&self.session);
         async move {
+            ensure_calendar_action(CalendarAction::UpdateEvent)?;
             let session = session_for_calendar(
                 &session_store,
                 update.source().occurrence().reference().account_id(),
@@ -819,6 +831,7 @@ where
         let event = event.clone();
         let session_store = Arc::clone(&self.session);
         async move {
+            ensure_calendar_action(CalendarAction::DeleteEvent)?;
             let session =
                 session_for_calendar(&session_store, event.occurrence().reference().account_id())
                     .await?;
@@ -828,6 +841,14 @@ where
             })
             .await
         }
+    }
+}
+
+fn ensure_calendar_action(action: CalendarAction) -> Result<(), CalendarOperationError> {
+    if super::calendar_capabilities().supports(action) {
+        Ok(())
+    } else {
+        Err(CalendarOperationError::UnsupportedOperation)
     }
 }
 

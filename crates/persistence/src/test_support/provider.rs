@@ -13,9 +13,9 @@ use einfach_mail_application::{
     MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MessageBody, MessageId, ReadState, VersionedCalendarEvent,
+    AccountId, CalendarCapabilities, CalendarEventCreation, CalendarEventUpdate,
+    CalendarOccurrence, CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus,
+    MailDraft, MailFolder, MessageBody, MessageId, ReadState, VersionedCalendarEvent,
 };
 
 pub(crate) type PageQueue = VecDeque<Result<MessageDeltaResponse, MailOperationError>>;
@@ -537,6 +537,13 @@ impl MailProvider for FixtureProvider {
 }
 
 impl CalendarProvider for FixtureProvider {
+    fn calendar_capabilities(
+        &self,
+    ) -> impl Future<Output = Result<CalendarCapabilities, CalendarOperationError>> + Send + '_
+    {
+        ready(Ok(CalendarCapabilities::full_access()))
+    }
+
     fn calendar_sync_strategy(
         &self,
     ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_

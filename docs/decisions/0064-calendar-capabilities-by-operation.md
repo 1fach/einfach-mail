@@ -16,7 +16,7 @@ EWS calendar writes need separate request, conflict, and recovery rules. Issue [
 - Use the existing `enumset` dependency in the domain crate. Provide constructors that make it impossible to advertise a write without also advertising calendar viewing. An empty set means unavailable; viewing alone means read-only.
 - Have the selected provider advertise only implemented and accepted operations. Graph advertises viewing and its current create, update, and delete support. EWS continues to advertise viewing alone. Do not expose an EWS write until its operation-specific request, response, and recovery rules are accepted and implemented.
 - Gate each desktop action from its matching capability. Event creation requires create support. Event fields and saving require update support. The delete action requires delete support. If a provider supports deletion without updates, show the selected event read-only and keep the delete action available. Apply the same checks to keyboard entry points.
-- Keep provider methods as the enforcement boundary. A provider must reject unsupported operations even if a caller bypasses the desktop. Tests must check that each account profile's advertised actions match its provider behavior.
+- Keep provider methods as the enforcement boundary. The application workflow checks the selected provider's capabilities before it writes recovery state, and provider methods reject unsupported operations before dispatch. This keeps unsupported actions from changing either the cache or the remote calendar when a caller bypasses the desktop. A pending-creation status check remains available because it does not submit a write. Tests must check that each account profile's advertised actions match its provider behavior.
 - Keep capabilities derived from the connected provider. They do not change the encrypted cache schema or represent Microsoft permissions.
 - Require `AccountProfile::try_new` to receive the capabilities selected by the connected provider. Profile construction must not grant broad capabilities implicitly.
 
@@ -37,6 +37,7 @@ Use the capability set. It follows the accepted mail capability model and keeps 
 - `AccountCapabilities`, provider profile construction, account details, calendar navigation, the event composer, and their tests must move from `CalendarAccess` to operation-level capabilities.
 - Graph continues to advertise all current event actions, so its existing behavior remains unchanged.
 - EWS continues to advertise only calendar viewing. No EWS write request becomes reachable through this decision.
+- Application capability checks happen before creation or write-recovery markers are changed. Provider checks remain in place for callers that bypass the workflow.
 - The desktop must represent partial support accurately. It must not show disabled-looking or inert event controls for unsupported operations.
 - The application workflows and provider ports already separate create, update, and delete. This decision does not add another workflow layer.
 - The domain already depends on `enumset`; no dependency or persistence migration is needed.
