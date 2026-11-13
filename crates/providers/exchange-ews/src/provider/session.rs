@@ -12,7 +12,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
 use crate::{
-    auth::MAX_CREDENTIAL_BYTES, error::EwsError, transport::EwsTransport,
+    auth::MAX_CREDENTIAL_BYTES,
+    error::EwsError,
+    transport::{EwsTransport, parse_endpoint},
     wire::ExchangeProductVersion,
 };
 
@@ -101,17 +103,7 @@ pub(super) fn profile_for(
     settings: &ExchangeEwsAccountSettings,
     server_version: Option<ExchangeProductVersion>,
 ) -> Result<AccountProfile, EwsError> {
-    let parsed_endpoint =
-        url::Url::parse(settings.endpoint()).map_err(|_| EwsError::InvalidConnectionDetails)?;
-    if parsed_endpoint.scheme() != "https"
-        || parsed_endpoint.host_str().is_none()
-        || !parsed_endpoint.username().is_empty()
-        || parsed_endpoint.password().is_some()
-        || parsed_endpoint.query().is_some()
-        || parsed_endpoint.fragment().is_some()
-    {
-        return Err(EwsError::InvalidConnectionDetails);
-    }
+    let parsed_endpoint = parse_endpoint(settings.endpoint())?;
     let mailbox_address = settings.mailbox_address().trim();
     let account_key = format!(
         "{}\n{}",
