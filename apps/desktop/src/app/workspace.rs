@@ -89,10 +89,11 @@ impl<P: AccountProvider + 'static> Workspace<P> {
 impl<P: AccountProvider + 'static> Workspace<P> {
     pub(crate) fn new_for_window(
         services: Result<AccountServices<P>, SetupIssue>,
+        store: std::io::Result<AppearanceSettingsStore>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_appearance_store(services, AppearanceSettingsStore::new(), window, cx)
+        Self::new_with_appearance_store(services, store, window, cx)
     }
 
     fn new_with_appearance_store(

@@ -40,6 +40,7 @@ impl TestCache {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn fail_rejected_cleanup_once(&self) {
         self.fail_next_rejected_cleanup
             .store(true, Ordering::SeqCst);

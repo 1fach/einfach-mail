@@ -7,8 +7,10 @@ use std::{
 use gpui_kit::{WindowAppearance, component::ThemeMode};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
+#[cfg(not(feature = "ui-preview"))]
 use xdg::BaseDirectories;
 
+#[cfg(not(feature = "ui-preview"))]
 const SETTINGS_FILE: &str = "preferences.json";
 const MAX_SETTINGS_BYTES: usize = 1024;
 
@@ -73,6 +75,7 @@ pub(crate) struct AppearanceSettingsStore {
 }
 
 impl AppearanceSettingsStore {
+    #[cfg(not(feature = "ui-preview"))]
     pub(crate) fn new() -> io::Result<Self> {
         let path = BaseDirectories::with_prefix("einfach-mail")
             .get_config_file(SETTINGS_FILE)
@@ -116,7 +119,7 @@ impl AppearanceSettingsStore {
         sync_directory(parent)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "ui-preview"))]
     pub(crate) fn at_path(path: PathBuf) -> Self {
         Self { path }
     }

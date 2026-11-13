@@ -9,6 +9,8 @@ pub(crate) use account::test_account_cache_open_error_message;
 pub(super) use account::{
     AccountServices, AccountView, AccountViewEvent, SetupIssue, SignOutSessionDisposition,
 };
+#[cfg(feature = "ui-preview")]
+pub(crate) use calendar::CalendarWeek;
 pub(super) use calendar::{
     CalendarView, CalendarViewEvent, bind_calendar_event_navigation_keys, bind_event_composer_keys,
 };

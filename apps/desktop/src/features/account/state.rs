@@ -12,6 +12,8 @@ use gpui_kit::{AppContext, Context, Entity, Window};
 
 use super::AccountView;
 
+// Preview startup bypasses the production configuration errors represented here.
+#[cfg_attr(feature = "ui-preview", allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SetupIssue {
     MissingClientId,
@@ -55,6 +57,7 @@ impl<P> AccountServices<P> {
         }
     }
 
+    #[cfg(any(test, not(feature = "ui-preview")))]
     pub(crate) fn with_microsoft365_setup_issue(mut self, issue: SetupIssue) -> Self {
         self.microsoft365_setup_issue = Some(issue);
         self

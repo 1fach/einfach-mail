@@ -1,20 +1,26 @@
 use std::{
     future::{Future, ready},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 use einfach_mail_application::{
     AccountCache, AccountCacheRemovalError, MailCache, MailCacheError, MailSyncState,
 };
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus,
-    MailFolder, MailMessage, MailSendOperationId, Mailbox, MessageBody, MessageBodyType,
-    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
-    PendingMailSend, ReadState,
+    AccountId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, MailSendOperationId,
+    MessageBody, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+    MessageMetadataPatch, PendingMailSend, ReadState,
 };
 
+#[cfg(test)]
 use super::super::synthetic_account_profile;
+#[cfg(test)]
+use einfach_mail_domain::{AccountCapabilities, AccountProfile};
+#[cfg(test)]
+use einfach_mail_domain::{FolderId, Mailbox, MessageBodyType};
+#[cfg(test)]
+use std::time::{Duration, UNIX_EPOCH};
 
 #[derive(Clone, Default)]
 pub(crate) struct FixtureCache(pub(crate) Arc<Mutex<FixtureData>>);
@@ -43,6 +49,7 @@ struct FolderListGate {
 }
 
 impl FixtureCache {
+    #[cfg(test)]
     pub(crate) fn hold_next_folder_list(
         &self,
     ) -> (
@@ -502,6 +509,7 @@ impl AccountCache for FixtureCache {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn fixture(profile_account: AccountId) -> (AccountProfile, FixtureCache, MessageId) {
     let folder_reference = FolderReference::new(
         profile_account.clone(),

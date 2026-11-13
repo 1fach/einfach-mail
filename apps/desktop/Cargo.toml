@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 autobins = false
 
+[features]
+ui-preview = []
+
 [[bin]]
 name = "einfach-mail"
 path = "src/main.rs"
