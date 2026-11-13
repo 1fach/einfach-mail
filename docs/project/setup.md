@@ -77,6 +77,23 @@ EINFACH_MAIL_UI_PREVIEW_SCENARIO=mail-sync-recovery cargo run --locked --package
 
 Open Mail to show a synthetic service error during its first Inbox sync. Select **Sync** to retry; the next request succeeds.
 
+To open the preview on a chosen view, appearance, and window size, set these developer-only variables. They exist only in `ui-preview` builds, and the preview exits with an error for any other value:
+
+| Variable | Values | Effect |
+| --- | --- | --- |
+| `EINFACH_MAIL_UI_PREVIEW_DESTINATION` | `accounts` (default), `mail`, `mail-reader`, `calendar`, `settings` | Opens that view once the preview account is restored. `mail-reader` also opens the first synthetic message. |
+| `EINFACH_MAIL_UI_PREVIEW_APPEARANCE` | `light`, `dark` | Seeds the temporary preferences file. Without it, the preview follows the system appearance. |
+| `EINFACH_MAIL_UI_PREVIEW_WINDOW_SIZE` | `WIDTHxHEIGHT`, for example `900x700` | Sets the window size in logical pixels. |
+
+On Hyprland, `scripts/preview-shots.sh` captures every view in light and dark with these variables. It builds the preview, opens one real window at a time on the active workspace, floats and sizes it by process ID because the window has no class or title, captures it with `grim`, and closes it. It needs `hyprctl`, `grim`, and `jq`. Leave the display alone while it runs.
+
+```sh
+scripts/preview-shots.sh -o docs/project/evidence -p my-change
+scripts/preview-shots.sh -a dark -s 900x700 mail mail-reader
+```
+
+The script sets `OPENSSL_NO_VENDOR=1` unless you set it, because the vendored OpenSSL build needs Perl `FindBin`. Use synthetic preview data only, and do not commit captures that contain anything else. Run the preview-only headless tests with `cargo test --locked --package einfach-mail-desktop --features ui-preview`.
+
 To enable the account view's sign-in action in the regular app, set `EINFACH_MAIL_ENTRA_CLIENT_ID` to the client ID of a public Microsoft Entra app registration. Set `EINFACH_MAIL_ENTRA_CALLBACK_PORT` to the nonzero port registered for `http://127.0.0.1:<port>/callback`. The app does not use a client secret. Initial sign-in requests delegated `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access`. It reads the signed-in profile through Graph `/me` and stores the refresh token in Linux Secret Service. The app requests `Mail.ReadWrite`, `Calendars.ReadWrite`, or `Mail.Send` only in a separate same-account permission review after Microsoft denies the related action. Each permission gives broader access than the app's current actions. The app explains the full Microsoft capability before opening the system browser. See the [Graph permission table](../research/microsoft-graph.md#permissions) and [ADR 0045](../decisions/0045-incremental-graph-permissions.md).
 
 Run the app from the repository root:

@@ -220,6 +220,8 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
             .clone();
         let mail_view = cx.new(|cx| MailView::new(profile, mail_session, permission_requester, cx));
         let folder_navigation = cx.new(|cx| MailFolderNavigation::new(mail_view.clone(), cx));
+        #[cfg(feature = "ui-preview")]
+        self.watch_mail_for_preview_start(&mail_view, cx);
         let subscription = cx.subscribe(&mail_view, |workspace, _, event: &MailViewEvent, cx| {
             if matches!(event, MailViewEvent::ReviewMailWritePermission) {
                 workspace.review_permission(AccountPermissionRequest::MailReadWrite, cx);

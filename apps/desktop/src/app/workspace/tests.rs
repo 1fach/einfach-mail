@@ -24,4 +24,6 @@ use super::{NavigationSurfaceAppearance, Workspace, WorkspaceTestContent, Worksp
 
 mod appearance;
 mod navigation;
+#[cfg(feature = "ui-preview")]
+mod preview_start;
 mod session_lifecycle;

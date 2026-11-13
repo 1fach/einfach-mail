@@ -72,6 +72,21 @@ impl MailView {
         cx.notify();
     }
 
+    /// Opens the first message in the reader when the list has loaded, and reports whether it did.
+    #[cfg(feature = "ui-preview")]
+    pub(crate) fn open_first_message_for_preview(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(first_message) = self.messages.first() else {
+            return false;
+        };
+        if self.selected_folder.is_none() {
+            return false;
+        }
+        let message_id = first_message.id().clone();
+        self.compact_pane = CompactMailPane::MessageReader;
+        self.select_message(message_id, cx);
+        self.selected_message_id().is_some()
+    }
+
     fn navigate_message(&mut self, navigation: ListNavigation, cx: &mut Context<Self>) {
         if self.message_update_in_progress() {
             return;

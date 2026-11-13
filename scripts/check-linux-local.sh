@@ -69,5 +69,6 @@ else
     run cargo audit --deny yanked
 fi
 run cargo test --workspace --locked
+run cargo test --package einfach-mail-desktop --features ui-preview --locked
 
 printf '\nLinux project checks passed.\n'

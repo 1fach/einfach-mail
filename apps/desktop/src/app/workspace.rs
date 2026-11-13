@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 mod actions;
+#[cfg(feature = "ui-preview")]
+mod preview_start;
 mod render;
 mod state;
 
@@ -44,6 +46,10 @@ pub(crate) struct Workspace<P: AccountProvider + 'static> {
     accounts_navigation_focus: FocusHandle,
     settings_navigation_focus: FocusHandle,
     task: Option<Task<()>>,
+    #[cfg(feature = "ui-preview")]
+    preview_start: Option<preview_start::PreviewStartStep>,
+    #[cfg(feature = "ui-preview")]
+    _preview_message_observation: Option<Subscription>,
 }
 
 impl<P: AccountProvider + 'static> Workspace<P> {
@@ -61,7 +67,11 @@ impl<P: AccountProvider + 'static> Workspace<P> {
             &account_view,
             |workspace, _, event: &AccountViewEvent, cx| workspace.on_account_view_event(event, cx),
         );
-        let account_view_observation = cx.observe(&account_view, |_, _, cx| cx.notify());
+        let account_view_observation = cx.observe(&account_view, |_workspace, _, cx| {
+            #[cfg(feature = "ui-preview")]
+            _workspace.advance_preview_start(cx);
+            cx.notify();
+        });
 
         Self {
             account_view,
@@ -82,6 +92,10 @@ impl<P: AccountProvider + 'static> Workspace<P> {
             accounts_navigation_focus: cx.focus_handle().tab_stop(true),
             settings_navigation_focus: cx.focus_handle().tab_stop(true),
             task: None,
+            #[cfg(feature = "ui-preview")]
+            preview_start: None,
+            #[cfg(feature = "ui-preview")]
+            _preview_message_observation: None,
         }
     }
 }

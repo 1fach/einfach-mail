@@ -1,3 +1,5 @@
+mod start;
+
 use std::{
     future::{Future, ready},
     io,
@@ -29,6 +31,10 @@ use einfach_mail_domain::{
     MailCapabilities, MailFolder, MailMessage, Mailbox, MessageBody, MessageBodyType,
     MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadata,
     MessageOrigin, ReadState, VersionedCalendarEvent,
+};
+
+pub(crate) use start::{
+    APPEARANCE_ENV, DESTINATION_ENV, PreviewDestination, PreviewStart, WINDOW_SIZE_ENV,
 };
 
 pub(super) fn account_services(
