@@ -84,6 +84,16 @@ I found no worthwhile app-owned dependency update. Each finding comes from a dep
 
 ## Candidates
 
+### Fluent icon assets — 2026-11-13
+
+The Fluent restyle ([ADR 0066](../decisions/0066-fluent-visual-language-and-navigation.md)) needs about two dozen Lucide icons that the default `gpui_kit::assets::Assets` bundle lacks, such as Reply, Archive, Flag, Trash, MailOpen, FolderInput, and SquarePen. This adds no package or lockfile entry. `gpui-kit-assets` 0.9.1 is already locked through `gpui-kit`.
+
+| Candidate | Evidence | Decision |
+| --- | --- | --- |
+| `gpui_kit::assets::icon_assets!` composed with `Assets` | The locked 0.9.1 source (`src/lib.rs`) defines an `icon_assets!` macro that generates an `AssetSource` for the listed `IconName` variants and returns `Ok(None)` for any other path. Its `extra_assets` example composes it with `Assets`. The crate is Apache-2.0 and bundles Lucide under the ISC license (`LICENSE-LUCIDE` in the crate). The default `Assets` embeds 106 icons. The selected SVGs are borrowed from static storage, about 8 KB for the 22 distinct icons `AppIcon` names. | Adopt. The app defines one `AssetSource` that tries the selected set first and falls back to `Assets`. A test loads every `AppIcon` path from it, so a renamed or missing icon fails the build or the test. |
+| `gpui_kit::assets::AllAssets` | Embeds every bundled Lucide SVG: 1,830 files, about 749 KB. | Reject. It ships about 740 KB of icons the product never shows. |
+| A vendored copy of the SVGs under `apps/desktop` | Adds files whose license notice and updates the project must track. | Reject. The locked crate already provides them. |
+
 ### Desktop appearance settings persistence — 2026-11-10
 
 The desktop needs one small app-wide setting with Linux XDG placement and atomic replacement. [`confy` 2.0.0](https://docs.rs/crate/confy/2.0.0) is maintained, supports Serde, defaults to TOML, and is licensed MIT OR Apache-2.0. Its [`store_path` implementation](https://docs.rs/confy/2.0.0/src/confy/lib.rs.html) opens the active file with truncate before writing; a failed write can leave a partial preferences file. [`Figment` 0.10.19](https://docs.rs/crate/figment/0.10.19) loads layered configuration but does not provide persistence. [`directories` 6.0.0](https://docs.rs/crate/directories/6.0.0) locates platform directories but does not serialize or save settings.

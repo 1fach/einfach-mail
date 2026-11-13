@@ -104,6 +104,8 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 
 [ADR 0065](../decisions/0065-safe-ews-calendar-event-writes.md) accepts a planned M11 scope for one-off timed standalone EWS appointments in the primary calendar. It keeps EWS capabilities view-only until implementation review and live Exchange verification. Issue [#389](https://github.com/1fach/einfach-mail/issues/389) remains open for small fixture-backed implementation issues and separate live verification.
 
+Issue [#452](https://github.com/1fach/einfach-mail/issues/452) lays the foundation for the Fluent restyle in [ADR 0066](../decisions/0066-fluent-visual-language-and-navigation.md). It adds preview-only start variables and `scripts/preview-shots.sh`, and it moves the palette into one theme file that loads at startup. No view changed structure. Screenshots are under [`evidence/fluent-foundation-*.png`](evidence/). The units that restyle the shell, pages, lists, reader, and calendar follow in issues [#453](https://github.com/1fach/einfach-mail/issues/453)–[#457](https://github.com/1fach/einfach-mail/issues/457); see the [design](../design/fluent-workspace.md) for the order.
+
 ## Active risks
 
 - GitHub Actions are disabled because the repository has no compute quota. PRs #275, #276, #277, #301, #320, #328, and #331 have no Actions runs; their Linux-local checks are recorded in their PRs. The application source, manifests, lockfile, and local-check scripts at PR #275 head `16c9ce9` match the locally checked code tree `d98fc69`. PR #331 merged after its local gate passed.

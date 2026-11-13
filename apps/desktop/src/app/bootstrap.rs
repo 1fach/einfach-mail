@@ -26,6 +26,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 use super::{NavigationSurfaceAppearance, Workspace};
+use crate::components::{AppAssets, install_theme};
 use crate::features::{
     AccountServices, AppearanceSettingsStore, SetupIssue, bind_calendar_event_navigation_keys,
     bind_event_composer_keys, bind_mail_composer_keys, bind_message_navigation_keys,
@@ -158,6 +159,8 @@ struct ApplicationSetup<P: AccountProvider + 'static> {
     navigation_surface_appearance: NavigationSurfaceAppearance,
     #[cfg(feature = "ui-preview")]
     preview_settings_directory: Option<Arc<TempDir>>,
+    #[cfg(feature = "ui-preview")]
+    preview_start: super::preview::PreviewStart,
 }
 
 #[cfg(feature = "ui-preview")]
@@ -181,15 +184,20 @@ pub(crate) fn run_application() -> io::Result<()> {
 #[cfg(feature = "ui-preview")]
 pub(crate) fn run_preview_application() -> io::Result<()> {
     let scenario = preview_scenario_from_environment()?;
+    let preview_start = preview_start_from_environment()?;
     let directory = Arc::new(tempfile::tempdir()?);
     let appearance_settings_store =
         AppearanceSettingsStore::at_path(directory.path().join("preferences.json"));
+    if let Some(appearance) = preview_start.appearance {
+        appearance_settings_store.save(appearance)?;
+    }
 
     run_application_with(ApplicationSetup {
         services: Ok(super::preview::account_services(scenario)),
         appearance_settings_store: Ok(appearance_settings_store),
         navigation_surface_appearance: NavigationSurfaceAppearance::Opaque,
         preview_settings_directory: Some(directory),
+        preview_start,
     })
 }
 
@@ -208,12 +216,38 @@ fn preview_scenario_from_environment() -> io::Result<super::preview::PreviewScen
     super::preview::PreviewScenario::parse(value.as_deref())
 }
 
+#[cfg(feature = "ui-preview")]
+fn preview_start_from_environment() -> io::Result<super::preview::PreviewStart> {
+    use super::preview::{APPEARANCE_ENV, DESTINATION_ENV, PreviewStart, WINDOW_SIZE_ENV};
+
+    let destination = preview_environment_value(DESTINATION_ENV)?;
+    let appearance = preview_environment_value(APPEARANCE_ENV)?;
+    let window_size = preview_environment_value(WINDOW_SIZE_ENV)?;
+    PreviewStart::parse(
+        destination.as_deref(),
+        appearance.as_deref(),
+        window_size.as_deref(),
+    )
+}
+
+#[cfg(feature = "ui-preview")]
+fn preview_environment_value(name: &str) -> io::Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} must contain valid Unicode"),
+        )),
+    }
+}
+
 fn run_application_with<P: AccountProvider + 'static>(
     setup: ApplicationSetup<P>,
 ) -> io::Result<()> {
     let (window_open_attempt_sender, window_open_attempt_receiver) =
         mpsc::channel::<io::Result<()>>();
-    application().with_assets(assets::Assets).run(move |cx| {
+    application().with_assets(AppAssets).run(move |cx| {
         initialize_application(cx);
         open_workspace_window(setup, window_open_attempt_sender, cx);
     });
@@ -223,6 +257,7 @@ fn run_application_with<P: AccountProvider + 'static>(
 
 fn initialize_application(cx: &mut App) {
     init(cx);
+    install_theme(cx);
     bind_message_navigation_keys(cx);
     bind_mail_composer_keys(cx);
     bind_event_composer_keys(cx);
@@ -243,16 +278,29 @@ fn open_workspace_window<P: AccountProvider + 'static>(
     let account_services = setup.services;
     let appearance_settings_store = setup.appearance_settings_store;
     let navigation_surface_appearance = setup.navigation_surface_appearance;
-    let window_open_attempt = open_window(
-        window_options(navigation_surface_appearance),
-        cx,
-        |window, cx| {
-            cx.new(|cx| {
+    #[cfg(feature = "ui-preview")]
+    let preview_start = setup.preview_start;
+    #[cfg_attr(not(feature = "ui-preview"), allow(unused_mut))]
+    let mut options = window_options(navigation_surface_appearance);
+    #[cfg(feature = "ui-preview")]
+    if let Some(window_size) = preview_start.window_size {
+        options.window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(window_size.width as f32), px(window_size.height as f32)),
+            cx,
+        )));
+    }
+    let window_open_attempt = open_window(options, cx, |window, cx| {
+        cx.new(|cx| {
+            #[cfg_attr(not(feature = "ui-preview"), allow(unused_mut))]
+            let mut workspace =
                 Workspace::new_for_window(account_services, appearance_settings_store, window, cx)
-                    .with_navigation_surface_appearance(navigation_surface_appearance)
-            })
-        },
-    )
+                    .with_navigation_surface_appearance(navigation_surface_appearance);
+            #[cfg(feature = "ui-preview")]
+            workspace.start_at_preview_destination(preview_start.destination);
+            workspace
+        })
+    })
     .map(|_| ())
     .map_err(|error| {
         io::Error::other(format!("failed to open the Einfach Mail window: {error:#}"))
