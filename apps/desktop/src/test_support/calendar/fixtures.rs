@@ -1,13 +1,19 @@
+#[cfg(test)]
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, CalendarCapabilities, CalendarOccurrence,
-    CalendarOccurrencePatch, CalendarOccurrenceTimePatch, CalendarViewRange, CalendarViewReference,
-    EventId, MailCapabilities,
+    AccountCapabilities, AccountProfile, CalendarCapabilities, MailCapabilities,
 };
+use einfach_mail_domain::{
+    AccountId, CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTimePatch,
+    CalendarViewRange, CalendarViewReference, EventId,
+};
+#[cfg(test)]
 use gpui_kit::{Modifiers, VisualTestContext};
 use time::{Date, Month, OffsetDateTime};
 
+#[cfg(test)]
 use super::super::{synthetic_account_id, synthetic_account_profile};
 
+#[cfg(test)]
 pub(crate) fn profile() -> AccountProfile {
     synthetic_account_profile(
         synthetic_account_id(),
@@ -17,10 +23,12 @@ pub(crate) fn profile() -> AccountProfile {
     .expect("synthetic account profile is valid")
 }
 
+#[cfg(test)]
 pub(crate) fn read_only_calendar_profile() -> AccountProfile {
     profile_with_calendar_capabilities(CalendarCapabilities::view_only())
 }
 
+#[cfg(test)]
 pub(crate) fn profile_with_calendar_capabilities(calendar: CalendarCapabilities) -> AccountProfile {
     synthetic_account_profile(
         synthetic_account_id(),
@@ -30,6 +38,7 @@ pub(crate) fn profile_with_calendar_capabilities(calendar: CalendarCapabilities)
     .expect("synthetic calendar profile is valid")
 }
 
+#[cfg(test)]
 pub(crate) fn workflow_account_id() -> AccountId {
     synthetic_account_id()
 }
@@ -43,7 +52,8 @@ pub(crate) fn timed_event_with_id(
     start: OffsetDateTime,
     end: OffsetDateTime,
 ) -> CalendarOccurrence {
-    let account = synthetic_account_id();
+    let account = AccountId::try_from("synthetic-account".to_owned())
+        .expect("synthetic calendar account ID is valid");
     let start_date = Date::from_calendar_date(2030, Month::January, 7)
         .expect("synthetic view start date is valid");
     let end_date = Date::from_calendar_date(2030, Month::January, 14)
@@ -70,6 +80,7 @@ pub(crate) fn timed_event_with_id(
         .expect("synthetic timed event is valid")
 }
 
+#[cfg(test)]
 pub(crate) fn agenda_events(count: usize) -> Vec<CalendarOccurrence> {
     let date = Date::from_calendar_date(2030, Month::January, 7).expect("synthetic date is valid");
     (0..count)
@@ -89,12 +100,14 @@ pub(crate) fn agenda_events(count: usize) -> Vec<CalendarOccurrence> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn draw_calendar_view(context: &mut VisualTestContext) {
     context.update(|window, app| {
         let _ = window.draw(app);
     });
 }
 
+#[cfg(test)]
 pub(crate) fn select_default_timed_event(context: &mut VisualTestContext) {
     let event = context
         .debug_bounds("calendar-event-row-2030-01-09-synthetic-timed-event")

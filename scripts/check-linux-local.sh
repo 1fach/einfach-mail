@@ -59,6 +59,7 @@ run python3 -B scripts/check-calendar-versioned-api.py
 run cargo depgraph-check check
 run cargo deny check bans
 run cargo +1.95.0 check --workspace --all-targets --locked
+run cargo +1.95.0 check --package einfach-mail-desktop --features ui-preview --locked
 run cargo fmt --all -- --check
 run cargo clippy --workspace --all-targets --locked -- -D warnings
 run cargo doc --workspace --no-deps --locked

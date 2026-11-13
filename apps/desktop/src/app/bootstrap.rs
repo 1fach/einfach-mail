@@ -1,30 +1,47 @@
 use std::{
-    env::{self, VarError},
-    ffi::OsStr,
+    io,
     sync::{Arc, mpsc},
 };
 
+#[cfg(not(feature = "ui-preview"))]
 use einfach_mail_account_router::AccountProviderRouter;
-use einfach_mail_application::{
-    AccountSessionFactory, AccountSessionWorkflowFactory, AccountWorkflow,
-};
+use einfach_mail_application::AccountProvider;
+#[cfg(not(feature = "ui-preview"))]
+use einfach_mail_application::AccountWorkflow;
+#[cfg(not(feature = "ui-preview"))]
+use einfach_mail_application::{AccountSessionFactory, AccountSessionWorkflowFactory};
+#[cfg(not(feature = "ui-preview"))]
 use einfach_mail_exchange_ews::ExchangeEwsProvider;
+#[cfg(not(feature = "ui-preview"))]
 use einfach_mail_microsoft_graph::{CallbackPort, MicrosoftGraphProvider};
+#[cfg(not(feature = "ui-preview"))]
 use einfach_mail_persistence::{SqliteAccountCacheFactory, XdgExchangeEwsAccountSettingsStore};
 use gpui_kit::*;
+#[cfg(not(feature = "ui-preview"))]
+use std::env::{self, VarError};
+#[cfg(not(feature = "ui-preview"))]
+use std::ffi::OsStr;
+#[cfg(feature = "ui-preview")]
+use tempfile::TempDir;
+#[cfg(not(feature = "ui-preview"))]
 use uuid::Uuid;
 
 use super::{NavigationSurfaceAppearance, Workspace};
 use crate::features::{
-    AccountServices, SetupIssue, bind_calendar_event_navigation_keys, bind_event_composer_keys,
-    bind_mail_composer_keys, bind_message_navigation_keys,
+    AccountServices, AppearanceSettingsStore, SetupIssue, bind_calendar_event_navigation_keys,
+    bind_event_composer_keys, bind_mail_composer_keys, bind_message_navigation_keys,
 };
 
+#[cfg(not(feature = "ui-preview"))]
 const CLIENT_ID_ENV: &str = "EINFACH_MAIL_ENTRA_CLIENT_ID";
+#[cfg(not(feature = "ui-preview"))]
 const CALLBACK_PORT_ENV: &str = "EINFACH_MAIL_ENTRA_CALLBACK_PORT";
+#[cfg(not(feature = "ui-preview"))]
 const EXPERIMENTAL_TRANSLUCENCY_ENV: &str = "EINFACH_MAIL_EXPERIMENTAL_TRANSLUCENCY";
+#[cfg(not(feature = "ui-preview"))]
 const WAYLAND_DISPLAY_ENV: &str = "WAYLAND_DISPLAY";
 
+#[cfg(not(feature = "ui-preview"))]
 fn navigation_surface_appearance_from_environment(
     experimental_opt_in: Option<&OsStr>,
     wayland_display: Option<&OsStr>,
@@ -38,6 +55,7 @@ fn navigation_surface_appearance_from_environment(
     }
 }
 
+#[cfg(not(feature = "ui-preview"))]
 fn configured_navigation_surface_appearance() -> NavigationSurfaceAppearance {
     #[cfg(target_os = "linux")]
     {
@@ -59,6 +77,7 @@ fn window_options(appearance: NavigationSurfaceAppearance) -> WindowOptions {
     }
 }
 
+#[cfg(not(feature = "ui-preview"))]
 fn configured_account_services()
 -> Result<AccountServices<AccountProviderRouter<XdgExchangeEwsAccountSettingsStore>>, SetupIssue> {
     let (graph_provider, graph_setup_issue) = configured_graph_provider();
@@ -78,6 +97,7 @@ fn configured_account_services()
     })
 }
 
+#[cfg(not(feature = "ui-preview"))]
 fn configured_graph_provider() -> (MicrosoftGraphProvider, Option<SetupIssue>) {
     let client_id = match env::var(CLIENT_ID_ENV) {
         Ok(client_id_value) => match Uuid::parse_str(&client_id_value) {
@@ -118,6 +138,7 @@ fn configured_graph_provider() -> (MicrosoftGraphProvider, Option<SetupIssue>) {
     }
 }
 
+#[cfg(not(feature = "ui-preview"))]
 fn configured_callback_port(port_text: Option<&str>) -> Result<CallbackPort, SetupIssue> {
     let Some(port_text) = port_text else {
         return Err(SetupIssue::MissingCallbackPort);
@@ -130,50 +151,113 @@ fn configured_callback_port(port_text: Option<&str>) -> Result<CallbackPort, Set
     }
 }
 
-pub(crate) fn run_application() -> Result<(), std::io::Error> {
+struct ApplicationSetup<P: AccountProvider + 'static> {
+    services: Result<AccountServices<P>, SetupIssue>,
+    appearance_settings_store: io::Result<AppearanceSettingsStore>,
+    navigation_surface_appearance: NavigationSurfaceAppearance,
+    #[cfg(feature = "ui-preview")]
+    preview_settings_directory: Option<Arc<TempDir>>,
+}
+
+#[cfg(feature = "ui-preview")]
+#[derive(Clone)]
+struct PreviewSettingsDirectory {
+    _directory: Arc<TempDir>,
+}
+
+#[cfg(feature = "ui-preview")]
+impl Global for PreviewSettingsDirectory {}
+
+#[cfg(not(feature = "ui-preview"))]
+pub(crate) fn run_application() -> io::Result<()> {
+    run_application_with(ApplicationSetup {
+        services: configured_account_services(),
+        appearance_settings_store: AppearanceSettingsStore::new(),
+        navigation_surface_appearance: configured_navigation_surface_appearance(),
+    })
+}
+
+#[cfg(feature = "ui-preview")]
+pub(crate) fn run_preview_application() -> io::Result<()> {
+    let directory = Arc::new(tempfile::tempdir()?);
+    let appearance_settings_store =
+        AppearanceSettingsStore::at_path(directory.path().join("preferences.json"));
+
+    run_application_with(ApplicationSetup {
+        services: Ok(super::preview::account_services()),
+        appearance_settings_store: Ok(appearance_settings_store),
+        navigation_surface_appearance: NavigationSurfaceAppearance::Opaque,
+        preview_settings_directory: Some(directory),
+    })
+}
+
+fn run_application_with<P: AccountProvider + 'static>(
+    setup: ApplicationSetup<P>,
+) -> io::Result<()> {
     let (window_open_attempt_sender, window_open_attempt_receiver) =
-        mpsc::channel::<std::io::Result<()>>();
-
+        mpsc::channel::<io::Result<()>>();
     application().with_assets(assets::Assets).run(move |cx| {
-        init(cx);
-        bind_message_navigation_keys(cx);
-        bind_mail_composer_keys(cx);
-        bind_event_composer_keys(cx);
-        bind_calendar_event_navigation_keys(cx);
-        let account_services = configured_account_services();
-        let navigation_surface_appearance = configured_navigation_surface_appearance();
-
-        let window_open_attempt = open_window(
-            window_options(navigation_surface_appearance),
-            cx,
-            |window, cx| {
-                cx.new(|cx| {
-                    Workspace::new_for_window(account_services, window, cx)
-                        .with_navigation_surface_appearance(navigation_surface_appearance)
-                })
-            },
-        )
-        .map(|_| ())
-        .map_err(|error| {
-            std::io::Error::other(format!("failed to open the Einfach Mail window: {error:#}"))
-        });
-
-        if window_open_attempt.is_err() {
-            cx.quit();
-        }
-
-        window_open_attempt_sender
-            .send(window_open_attempt)
-            .expect("the main thread keeps the receiver alive until GPUI exits");
+        initialize_application(cx);
+        open_workspace_window(setup, window_open_attempt_sender, cx);
     });
 
+    receive_window_open_attempt(window_open_attempt_receiver)
+}
+
+fn initialize_application(cx: &mut App) {
+    init(cx);
+    bind_message_navigation_keys(cx);
+    bind_mail_composer_keys(cx);
+    bind_event_composer_keys(cx);
+    bind_calendar_event_navigation_keys(cx);
+}
+
+fn open_workspace_window<P: AccountProvider + 'static>(
+    setup: ApplicationSetup<P>,
+    window_open_attempt_sender: mpsc::Sender<io::Result<()>>,
+    cx: &mut App,
+) {
+    #[cfg(feature = "ui-preview")]
+    if let Some(directory) = setup.preview_settings_directory {
+        cx.set_global(PreviewSettingsDirectory {
+            _directory: directory,
+        });
+    }
+    let account_services = setup.services;
+    let appearance_settings_store = setup.appearance_settings_store;
+    let navigation_surface_appearance = setup.navigation_surface_appearance;
+    let window_open_attempt = open_window(
+        window_options(navigation_surface_appearance),
+        cx,
+        |window, cx| {
+            cx.new(|cx| {
+                Workspace::new_for_window(account_services, appearance_settings_store, window, cx)
+                    .with_navigation_surface_appearance(navigation_surface_appearance)
+            })
+        },
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        io::Error::other(format!("failed to open the Einfach Mail window: {error:#}"))
+    });
+    if window_open_attempt.is_err() {
+        cx.quit();
+    }
+    window_open_attempt_sender
+        .send(window_open_attempt)
+        .expect("the main thread keeps the receiver alive until GPUI exits");
+}
+
+fn receive_window_open_attempt(
+    window_open_attempt_receiver: mpsc::Receiver<io::Result<()>>,
+) -> io::Result<()> {
     match window_open_attempt_receiver.try_recv() {
         Ok(window_open_attempt) => window_open_attempt,
-        Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => Err(
-            std::io::Error::other("GPUI exited before opening the Einfach Mail window"),
-        ),
+        Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => Err(io::Error::other(
+            "GPUI exited before opening the Einfach Mail window",
+        )),
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "ui-preview")))]
 mod tests;

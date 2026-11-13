@@ -20,6 +20,8 @@ pub(super) enum WorkspaceSection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NavigationSurfaceAppearance {
     Opaque,
+    // Preview startup uses opaque windows; normal startup retains the translucent opt-in.
+    #[cfg_attr(feature = "ui-preview", allow(dead_code))]
     Translucent,
 }
 
