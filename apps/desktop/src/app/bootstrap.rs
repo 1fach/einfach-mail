@@ -1,4 +1,5 @@
 use std::{
+    env::{self, VarError},
     io,
     sync::{Arc, mpsc},
 };
@@ -17,8 +18,6 @@ use einfach_mail_microsoft_graph::{CallbackPort, MicrosoftGraphProvider};
 #[cfg(not(feature = "ui-preview"))]
 use einfach_mail_persistence::{SqliteAccountCacheFactory, XdgExchangeEwsAccountSettingsStore};
 use gpui_kit::*;
-#[cfg(not(feature = "ui-preview"))]
-use std::env::{self, VarError};
 #[cfg(not(feature = "ui-preview"))]
 use std::ffi::OsStr;
 #[cfg(feature = "ui-preview")]
@@ -40,6 +39,8 @@ const CALLBACK_PORT_ENV: &str = "EINFACH_MAIL_ENTRA_CALLBACK_PORT";
 const EXPERIMENTAL_TRANSLUCENCY_ENV: &str = "EINFACH_MAIL_EXPERIMENTAL_TRANSLUCENCY";
 #[cfg(not(feature = "ui-preview"))]
 const WAYLAND_DISPLAY_ENV: &str = "WAYLAND_DISPLAY";
+#[cfg(feature = "ui-preview")]
+const PREVIEW_SCENARIO_ENV: &str = "EINFACH_MAIL_UI_PREVIEW_SCENARIO";
 
 #[cfg(not(feature = "ui-preview"))]
 fn navigation_surface_appearance_from_environment(
@@ -179,16 +180,32 @@ pub(crate) fn run_application() -> io::Result<()> {
 
 #[cfg(feature = "ui-preview")]
 pub(crate) fn run_preview_application() -> io::Result<()> {
+    let scenario = preview_scenario_from_environment()?;
     let directory = Arc::new(tempfile::tempdir()?);
     let appearance_settings_store =
         AppearanceSettingsStore::at_path(directory.path().join("preferences.json"));
 
     run_application_with(ApplicationSetup {
-        services: Ok(super::preview::account_services()),
+        services: Ok(super::preview::account_services(scenario)),
         appearance_settings_store: Ok(appearance_settings_store),
         navigation_surface_appearance: NavigationSurfaceAppearance::Opaque,
         preview_settings_directory: Some(directory),
     })
+}
+
+#[cfg(feature = "ui-preview")]
+fn preview_scenario_from_environment() -> io::Result<super::preview::PreviewScenario> {
+    let value = match env::var(PREVIEW_SCENARIO_ENV) {
+        Ok(value) => Some(value),
+        Err(VarError::NotPresent) => None,
+        Err(VarError::NotUnicode(_)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{PREVIEW_SCENARIO_ENV} must contain valid Unicode"),
+            ));
+        }
+    };
+    super::preview::PreviewScenario::parse(value.as_deref())
 }
 
 fn run_application_with<P: AccountProvider + 'static>(

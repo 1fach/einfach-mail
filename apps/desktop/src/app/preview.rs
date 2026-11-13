@@ -1,6 +1,10 @@
 use std::{
     future::{Future, ready},
-    sync::Arc,
+    io,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -27,10 +31,12 @@ use einfach_mail_domain::{
     MessageOrigin, ReadState, VersionedCalendarEvent,
 };
 
-pub(super) fn account_services() -> AccountServices<PreviewAccountProvider> {
+pub(super) fn account_services(
+    scenario: PreviewScenario,
+) -> AccountServices<PreviewAccountProvider> {
     let account = preview_account();
     let account_id = account.profile().id().clone();
-    let session = preview_session(account_id.clone());
+    let session = preview_session(account_id.clone(), scenario);
     let session_factory = Arc::new(PreviewAccountSessionFactory {
         account_id,
         session,
@@ -41,10 +47,30 @@ pub(super) fn account_services() -> AccountServices<PreviewAccountProvider> {
     )
 }
 
-fn preview_session(account_id: AccountId) -> Arc<dyn AccountSession> {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum PreviewScenario {
+    #[default]
+    Standard,
+    MailSyncRecovery,
+}
+
+impl PreviewScenario {
+    pub(super) fn parse(value: Option<&str>) -> io::Result<Self> {
+        match value {
+            None => Ok(Self::Standard),
+            Some("mail-sync-recovery") => Ok(Self::MailSyncRecovery),
+            Some(value) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported UI preview scenario {value:?}"),
+            )),
+        }
+    }
+}
+
+fn preview_session(account_id: AccountId, scenario: PreviewScenario) -> Arc<dyn AccountSession> {
     let mail_session = Arc::new(MailWorkflow::new(
         account_id.clone(),
-        PreviewMailProvider::new(account_id.clone()),
+        PreviewMailProvider::new(account_id.clone(), scenario),
         seed_mail_cache(account_id.clone()),
     )) as Arc<dyn MailSession>;
     let week = CalendarWeek::for_system(&account_id);
@@ -181,13 +207,15 @@ impl AccountSession for PreviewAccountSession {
 struct PreviewMailProvider {
     account_id: AccountId,
     folders: Vec<MailFolder>,
+    fail_next_mail_sync: AtomicBool,
 }
 
 impl PreviewMailProvider {
-    fn new(account_id: AccountId) -> Self {
+    fn new(account_id: AccountId, scenario: PreviewScenario) -> Self {
         Self {
             folders: preview_mail_folders(&account_id),
             account_id,
+            fail_next_mail_sync: AtomicBool::new(scenario == PreviewScenario::MailSyncRecovery),
         }
     }
 }
@@ -215,6 +243,9 @@ impl MailProvider for PreviewMailProvider {
         async move {
             if folder_account_id != self.account_id {
                 return Err(MailOperationError::AccountMismatch);
+            }
+            if self.fail_next_mail_sync.swap(false, Ordering::Relaxed) {
+                return Err(MailOperationError::ServiceUnavailable);
             }
             Ok(MessageDeltaResponse::Page(MessageDeltaPageResponse::new(
                 MessageDeltaPage::new(
@@ -574,3 +605,6 @@ fn preview_calendar_event(
         )
         .expect("synthetic calendar event is valid")
 }
+
+#[cfg(test)]
+mod tests;

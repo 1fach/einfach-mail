@@ -69,6 +69,14 @@ cargo run --locked --package einfach-mail-desktop --features ui-preview --bin ei
 
 The preview opens the same Mail, Calendar, Accounts, and Settings views with synthetic `example.test` data. Its providers and caches stay in memory; it does not use credentials, Secret Service, SQLite, or the normal user appearance file. Theme changes go to a temporary directory that is removed when the app exits. The `ui-preview` feature is rejected in release builds. This preview checks the native Linux UI only; it does not verify Graph, EWS, or live account behavior.
 
+To review Mail sync recovery, run the preview with the `mail-sync-recovery` scenario:
+
+```sh
+EINFACH_MAIL_UI_PREVIEW_SCENARIO=mail-sync-recovery cargo run --locked --package einfach-mail-desktop --features ui-preview --bin einfach-mail
+```
+
+Open Mail to show a synthetic service error during its first Inbox sync. Select **Sync** to retry; the next request succeeds.
+
 To enable the account view's sign-in action in the regular app, set `EINFACH_MAIL_ENTRA_CLIENT_ID` to the client ID of a public Microsoft Entra app registration. Set `EINFACH_MAIL_ENTRA_CALLBACK_PORT` to the nonzero port registered for `http://127.0.0.1:<port>/callback`. The app does not use a client secret. Initial sign-in requests delegated `User.Read`, `Mail.Read`, `Calendars.Read`, and `offline_access`. It reads the signed-in profile through Graph `/me` and stores the refresh token in Linux Secret Service. The app requests `Mail.ReadWrite`, `Calendars.ReadWrite`, or `Mail.Send` only in a separate same-account permission review after Microsoft denies the related action. Each permission gives broader access than the app's current actions. The app explains the full Microsoft capability before opening the system browser. See the [Graph permission table](../research/microsoft-graph.md#permissions) and [ADR 0045](../decisions/0045-incremental-graph-permissions.md).
 
 Run the app from the repository root:
