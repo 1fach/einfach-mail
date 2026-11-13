@@ -1,11 +1,11 @@
-use super::{PreviewMailProvider, PreviewScenario, folder_reference};
+use super::{PreviewMailProvider, PreviewScenario, folder_reference, preview_capabilities};
 use einfach_mail_application::{
     MailOperationError, MailProvider, MessageDeltaRequest, MessageDeltaResponse,
 };
-use einfach_mail_domain::AccountId;
+use einfach_mail_domain::{AccountId, CalendarCapabilities, MailCapabilities};
 
 #[test]
-fn preview_scenario_parser_accepts_default_and_recovery_scenarios() {
+fn preview_scenario_parser_accepts_default_recovery_and_full_access_scenarios() {
     assert_eq!(
         PreviewScenario::parse(None).expect("default preview scenario is valid"),
         PreviewScenario::Standard
@@ -15,7 +15,22 @@ fn preview_scenario_parser_accepts_default_and_recovery_scenarios() {
             .expect("mail recovery preview scenario is valid"),
         PreviewScenario::MailSyncRecovery
     );
+    assert_eq!(
+        PreviewScenario::parse(Some("full-access")).expect("full access preview scenario is valid"),
+        PreviewScenario::FullAccess
+    );
     assert!(PreviewScenario::parse(Some("unsupported")).is_err());
+}
+
+#[test]
+fn full_access_scenario_grants_every_mail_and_calendar_action() {
+    let full = preview_capabilities(PreviewScenario::FullAccess);
+    assert_eq!(full.mail(), MailCapabilities::full_access());
+    assert_eq!(full.calendar(), CalendarCapabilities::full_access());
+
+    let standard = preview_capabilities(PreviewScenario::Standard);
+    assert!(standard.mail().is_read_only());
+    assert!(standard.calendar().is_read_only());
 }
 
 #[tokio::test]

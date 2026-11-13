@@ -36,7 +36,16 @@ gpui_kit::actions!(
 );
 
 const CALENDAR_MINI_MONTH_CONTEXT: &str = "CalendarMiniMonth";
-const WEEKDAY_INITIALS: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+/// The visible initials of the weekday headers, with the full names assistive technology reads.
+const WEEKDAYS: [(&str, &str); 7] = [
+    ("Mo", "Monday"),
+    ("Tu", "Tuesday"),
+    ("We", "Wednesday"),
+    ("Th", "Thursday"),
+    ("Fr", "Friday"),
+    ("Sa", "Saturday"),
+    ("Su", "Sunday"),
+];
 
 pub(super) fn bind_mini_month_keys(cx: &mut App) {
     let context = Some(CALENDAR_MINI_MONTH_CONTEXT);
@@ -244,15 +253,25 @@ where
         for week in grid.weeks() {
             rows.push(self.render_week_row(week, &frame, cx));
         }
-        let weekday_row = h_flex().w_full().children(WEEKDAY_INITIALS.map(|initial| {
-            div()
-                .flex_1()
-                .flex()
-                .justify_center()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(initial)
-        }));
+        let weekday_row = h_flex()
+            .id("calendar-mini-weekdays")
+            .role(Role::Row)
+            .w_full()
+            .children(WEEKDAYS.map(|(initial, name)| {
+                let header = div()
+                    .id(format!("calendar-mini-weekday-{name}"))
+                    .role(Role::ColumnHeader)
+                    .aria_label(name);
+                #[cfg(test)]
+                let header = header.test_support();
+                header
+                    .flex_1()
+                    .flex()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(initial)
+            }));
         let days = v_flex()
             .id("calendar-mini-days")
             .debug_selector(|| "calendar-mini-days".to_owned())
@@ -270,8 +289,12 @@ where
             .w_full()
             .gap_1()
             .child(self.render_month_header(&grid, cx))
-            .child(weekday_row)
-            .child(Self::on_cursor_actions(days, cx).w_full().children(rows))
+            .child(
+                Self::on_cursor_actions(days, cx)
+                    .w_full()
+                    .child(weekday_row)
+                    .children(rows),
+            )
             .into_any_element()
     }
 

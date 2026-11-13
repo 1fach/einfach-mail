@@ -40,7 +40,7 @@ pub(crate) use start::{
 pub(super) fn account_services(
     scenario: PreviewScenario,
 ) -> AccountServices<PreviewAccountProvider> {
-    let account = preview_account();
+    let account = preview_account(scenario);
     let account_id = account.profile().id().clone();
     let session = preview_session(account_id.clone(), scenario);
     let session_factory = Arc::new(PreviewAccountSessionFactory {
@@ -58,6 +58,9 @@ pub(super) enum PreviewScenario {
     #[default]
     Standard,
     MailSyncRecovery,
+    /// Grants every mail action and calendar write so the commands that need them are visible.
+    /// The synthetic provider still rejects each write, because nothing is stored.
+    FullAccess,
 }
 
 impl PreviewScenario {
@@ -65,6 +68,7 @@ impl PreviewScenario {
         match value {
             None => Ok(Self::Standard),
             Some("mail-sync-recovery") => Ok(Self::MailSyncRecovery),
+            Some("full-access") => Ok(Self::FullAccess),
             Some(value) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported UI preview scenario {value:?}"),
@@ -82,7 +86,7 @@ fn preview_session(account_id: AccountId, scenario: PreviewScenario) -> Arc<dyn 
     let week = CalendarWeek::for_system(&account_id);
     let calendar_session = Arc::new(CalendarWorkflow::new(
         account_id.clone(),
-        PreviewCalendarProvider::new(account_id.clone()),
+        PreviewCalendarProvider::new(account_id.clone(), scenario),
         TestCache::with_events(preview_calendar_events(week.view())),
     )) as Arc<dyn CalendarSession>;
     Arc::new(PreviewAccountSession {
@@ -91,7 +95,7 @@ fn preview_session(account_id: AccountId, scenario: PreviewScenario) -> Arc<dyn 
     })
 }
 
-fn preview_account() -> ConnectedAccount {
+fn preview_account(scenario: PreviewScenario) -> ConnectedAccount {
     let account_id = AccountId::try_from("preview-account".to_owned())
         .expect("the synthetic preview account ID is valid");
     let profile = AccountProfile::try_new(
@@ -99,16 +103,23 @@ fn preview_account() -> ConnectedAccount {
         Some("Einfach Mail Preview".to_owned()),
         Some("preview@example.test".to_owned()),
         Some("preview@example.test".to_owned()),
-        AccountCapabilities::new(
-            MailCapabilities::read_only(),
-            CalendarCapabilities::view_only(),
-        ),
+        preview_capabilities(scenario),
     )
     .expect("the synthetic preview account profile is valid");
     ConnectedAccount::new(
         profile,
         einfach_mail_application::AccountProviderKind::MicrosoftGraph,
     )
+}
+
+fn preview_capabilities(scenario: PreviewScenario) -> AccountCapabilities {
+    match scenario {
+        PreviewScenario::FullAccess => AccountCapabilities::full_access(),
+        PreviewScenario::Standard | PreviewScenario::MailSyncRecovery => AccountCapabilities::new(
+            MailCapabilities::read_only(),
+            CalendarCapabilities::view_only(),
+        ),
+    }
 }
 
 #[derive(Clone)]
@@ -347,11 +358,15 @@ impl MailProvider for PreviewMailProvider {
 
 struct PreviewCalendarProvider {
     account_id: AccountId,
+    capabilities: CalendarCapabilities,
 }
 
 impl PreviewCalendarProvider {
-    fn new(account_id: AccountId) -> Self {
-        Self { account_id }
+    fn new(account_id: AccountId, scenario: PreviewScenario) -> Self {
+        Self {
+            account_id,
+            capabilities: preview_capabilities(scenario).calendar(),
+        }
     }
 }
 
@@ -360,7 +375,7 @@ impl CalendarProvider for PreviewCalendarProvider {
         &self,
     ) -> impl Future<Output = Result<CalendarCapabilities, CalendarOperationError>> + Send + '_
     {
-        ready(Ok(CalendarCapabilities::view_only()))
+        ready(Ok(self.capabilities))
     }
 
     fn calendar_sync_strategy(
