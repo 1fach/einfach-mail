@@ -5,7 +5,7 @@ use einfach_mail_application::{
 use einfach_mail_domain::{AccountId, CalendarCapabilities, MailCapabilities};
 
 #[test]
-fn preview_scenario_parser_accepts_default_recovery_and_full_access_scenarios() {
+fn preview_scenario_parser_accepts_every_documented_scenario() {
     assert_eq!(
         PreviewScenario::parse(None).expect("default preview scenario is valid"),
         PreviewScenario::Standard
@@ -19,7 +19,32 @@ fn preview_scenario_parser_accepts_default_recovery_and_full_access_scenarios() 
         PreviewScenario::parse(Some("full-access")).expect("full access preview scenario is valid"),
         PreviewScenario::FullAccess
     );
+    assert_eq!(
+        PreviewScenario::parse(Some("disconnected"))
+            .expect("disconnected preview scenario is valid"),
+        PreviewScenario::Disconnected
+    );
+    assert_eq!(
+        PreviewScenario::parse(Some("exchange-form"))
+            .expect("exchange form preview scenario is valid"),
+        PreviewScenario::ExchangeForm
+    );
     assert!(PreviewScenario::parse(Some("unsupported")).is_err());
+}
+
+#[test]
+fn only_the_disconnected_scenarios_skip_the_account_restore() {
+    for scenario in [
+        PreviewScenario::Standard,
+        PreviewScenario::MailSyncRecovery,
+        PreviewScenario::FullAccess,
+    ] {
+        assert!(scenario.restores_account());
+    }
+    assert!(!PreviewScenario::Disconnected.restores_account());
+    assert!(!PreviewScenario::ExchangeForm.restores_account());
+    assert!(PreviewScenario::ExchangeForm.opens_exchange_form());
+    assert!(!PreviewScenario::Disconnected.opens_exchange_form());
 }
 
 #[test]

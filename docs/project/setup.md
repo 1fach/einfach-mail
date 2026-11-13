@@ -85,6 +85,15 @@ EINFACH_MAIL_UI_PREVIEW_SCENARIO=full-access cargo run --locked --package einfac
 
 The scenario gives the synthetic account every mail action and calendar create, update, and delete, so the controls that need them are drawn. The synthetic providers store nothing, so each write still reports that it is unsupported. Use it for layout and accessibility review, not for write behavior.
 
+To review the Accounts page before an account is connected, run the `disconnected` scenario. It restores no account, so Accounts shows the Microsoft 365 and Exchange Server cards. The `exchange-form` scenario starts the same way and opens the Exchange Server form as soon as the restore finishes:
+
+```sh
+EINFACH_MAIL_UI_PREVIEW_SCENARIO=disconnected cargo run --locked --package einfach-mail-desktop --features ui-preview --bin einfach-mail
+EINFACH_MAIL_UI_PREVIEW_SCENARIO=exchange-form cargo run --locked --package einfach-mail-desktop --features ui-preview --bin einfach-mail
+```
+
+Neither scenario reads credentials, Secret Service, or the network. Mail, Calendar, and Settings stay in their disconnected state, so do not combine them with the `mail`, `calendar`, or `mail-reader` destinations. Selecting **Connect Microsoft 365 account** still connects the synthetic preview account.
+
 To open the preview on a chosen view, appearance, and window size, set these developer-only variables. They exist only in `ui-preview` builds, and the preview exits with an error for any other value:
 
 | Variable | Values | Effect |
@@ -99,6 +108,7 @@ On Hyprland, `scripts/preview-shots.sh` captures every view in light and dark wi
 scripts/preview-shots.sh -o docs/project/evidence -p my-change
 scripts/preview-shots.sh -a dark -s 900x700 mail mail-reader
 scripts/preview-shots.sh -e full-access -p my-change-full-access mail-reader calendar
+scripts/preview-shots.sh -e exchange-form -p my-change-ews-form accounts
 ```
 
 `-e` passes the scenario to the preview. The script also moves the pointer to the bottom-right corner of the first monitor, so no hover state reaches a capture.

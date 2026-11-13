@@ -61,6 +61,17 @@ impl<P: AccountProvider + 'static> AccountView<P> {
         cx.notify();
     }
 
+    /// Reports whether the form is open, so the preview can stop waiting once it is.
+    #[cfg(feature = "ui-preview")]
+    pub(crate) fn open_exchange_form_for_preview(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.begin_exchange_ews_form(window, cx);
+        self.exchange_ews_form.is_some()
+    }
+
     pub(super) fn cancel_exchange_ews_form(&mut self, cx: &mut Context<Self>) {
         if matches!(self.status, AccountStatus::Connecting { .. }) {
             self.cancel_connect(cx);

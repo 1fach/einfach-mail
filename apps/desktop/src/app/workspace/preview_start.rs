@@ -1,7 +1,7 @@
 //! Opens the UI preview on the view chosen by `EINFACH_MAIL_UI_PREVIEW_DESTINATION`.
 
 use einfach_mail_application::AccountProvider;
-use gpui_kit::{Context, Entity};
+use gpui_kit::{Context, Entity, Window};
 
 use crate::app::preview::PreviewDestination;
 use crate::features::MailView;
@@ -32,6 +32,26 @@ impl PreviewDestination {
 impl<P: AccountProvider + 'static> Workspace<P> {
     pub(crate) fn start_at_preview_destination(&mut self, destination: PreviewDestination) {
         self.preview_start = Some(PreviewStartStep::Navigate(destination));
+    }
+
+    /// Opens the Exchange Server form once the account restore leaves Accounts disconnected.
+    pub(crate) fn open_exchange_form_at_preview_start(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self._preview_exchange_form_observation = Some(cx.observe_in(
+            &self.account_view,
+            window,
+            |workspace, account_view, window, cx| {
+                let opened = account_view.update(cx, |view, cx| {
+                    view.open_exchange_form_for_preview(window, cx)
+                });
+                if opened {
+                    workspace._preview_exchange_form_observation = None;
+                }
+            },
+        ));
     }
 
     /// Runs on every account view update, so it waits until the account restore allows the
