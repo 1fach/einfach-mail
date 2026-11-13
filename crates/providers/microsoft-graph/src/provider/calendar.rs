@@ -12,8 +12,8 @@ use einfach_mail_application::{
     CalendarSyncStrategy,
 };
 use einfach_mail_domain::{
-    AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, VersionedCalendarEvent,
+    AccountId, CalendarCapabilities, CalendarEventCreation, CalendarEventUpdate,
+    CalendarOccurrence, CalendarViewReference, VersionedCalendarEvent,
 };
 use einfach_mail_provider_runtime as worker;
 
@@ -36,6 +36,13 @@ impl From<AccessTokenError> for CalendarOperationError {
 }
 
 impl CalendarProvider for MicrosoftGraphProvider {
+    fn calendar_capabilities(
+        &self,
+    ) -> impl Future<Output = Result<CalendarCapabilities, CalendarOperationError>> + Send + '_
+    {
+        ready(Ok(CalendarCapabilities::full_access()))
+    }
+
     fn calendar_sync_strategy(
         &self,
     ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_

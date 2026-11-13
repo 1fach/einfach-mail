@@ -3,8 +3,8 @@
 use std::future::Future;
 
 use einfach_mail_domain::{
-    CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation, CalendarEventUpdate,
-    CalendarOccurrence, CalendarViewReference, VersionedCalendarEvent,
+    CalendarCapabilities, CalendarDeltaLink, CalendarDeltaPage, CalendarEventCreation,
+    CalendarEventUpdate, CalendarOccurrence, CalendarViewReference, VersionedCalendarEvent,
 };
 use thiserror::Error;
 
@@ -165,6 +165,19 @@ pub enum CalendarDeltaResponse {
 
 /// Calendar operations required by the application.
 pub trait CalendarProvider: Send + Sync {
+    /// Returns the calendar actions supported by the selected account provider.
+    ///
+    /// Application workflows check this set before changing write-recovery state.
+    /// Provider methods must still reject unsupported writes before dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-safe provider error when no account provider is selected or
+    /// its capability state is unavailable.
+    fn calendar_capabilities(
+        &self,
+    ) -> impl Future<Output = Result<CalendarCapabilities, CalendarOperationError>> + Send + '_;
+
     /// Returns the synchronization protocol for the active account session.
     ///
     /// # Errors

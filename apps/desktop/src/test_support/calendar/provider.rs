@@ -11,10 +11,10 @@ use einfach_mail_application::{
     CalendarProvider, CalendarSyncStrategy,
 };
 use einfach_mail_domain::{
-    CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation,
-    CalendarEventUpdate, CalendarEventVersion, CalendarOccurrence, CalendarOccurrencePatch,
-    CalendarOccurrenceTime, CalendarOccurrenceTimePatch, CalendarViewReference, EventId,
-    VersionedCalendarEvent,
+    CalendarCapabilities, CalendarDeltaLink, CalendarDeltaPage, CalendarDeltaProgress,
+    CalendarEventCreation, CalendarEventUpdate, CalendarEventVersion, CalendarOccurrence,
+    CalendarOccurrencePatch, CalendarOccurrenceTime, CalendarOccurrenceTimePatch,
+    CalendarViewReference, EventId, VersionedCalendarEvent,
 };
 use tokio::sync::oneshot;
 
@@ -135,6 +135,13 @@ impl TestProvider {
 }
 
 impl CalendarProvider for TestProvider {
+    fn calendar_capabilities(
+        &self,
+    ) -> impl Future<Output = Result<CalendarCapabilities, CalendarOperationError>> + Send + '_
+    {
+        ready(Ok(CalendarCapabilities::full_access()))
+    }
+
     fn calendar_sync_strategy(
         &self,
     ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_

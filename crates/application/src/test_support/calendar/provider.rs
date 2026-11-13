@@ -5,6 +5,7 @@ struct CalendarWriteGate {
 
 #[derive(Clone, Default)]
 pub(super) struct FixtureProvider {
+    calendar_capabilities: Option<CalendarCapabilities>,
     pages: Arc<Mutex<VecDeque<Result<CalendarDeltaResponse, CalendarOperationError>>>>,
     pub(super) sync_strategy: Arc<Mutex<Option<CalendarSyncStrategy>>>,
     pub(super) snapshots:
@@ -27,10 +28,19 @@ pub(super) struct FixtureProvider {
 }
 
 impl FixtureProvider {
+    pub(super) fn with_calendar_capabilities(
+        mut self,
+        capabilities: CalendarCapabilities,
+    ) -> Self {
+        self.calendar_capabilities = Some(capabilities);
+        self
+    }
+
     pub(super) fn with_pages(
         pages: impl IntoIterator<Item = Result<CalendarDeltaResponse, CalendarOperationError>>,
     ) -> Self {
         Self {
+            calendar_capabilities: None,
             pages: Arc::new(Mutex::new(pages.into_iter().collect())),
             sync_strategy: Arc::new(Mutex::new(None)),
             snapshots: Arc::new(Mutex::new(VecDeque::new())),
@@ -187,6 +197,14 @@ impl FixtureProvider {
 }
 
 impl CalendarProvider for FixtureProvider {
+    fn calendar_capabilities(
+        &self,
+    ) -> impl Future<Output = Result<CalendarCapabilities, CalendarOperationError>> + Send + '_ {
+        ready(Ok(self
+            .calendar_capabilities
+            .unwrap_or_else(CalendarCapabilities::full_access)))
+    }
+
     fn calendar_sync_strategy(
         &self,
     ) -> impl Future<Output = Result<CalendarSyncStrategy, CalendarOperationError>> + Send + '_

@@ -5,8 +5,7 @@ use einfach_mail_application::{
     ExchangeEwsConnectionInput, MailOperationError,
 };
 use einfach_mail_domain::{
-    AccountCapabilities, AccountId, AccountProfile, CalendarCapabilities, MailAction,
-    MailCapabilities,
+    AccountCapabilities, AccountId, AccountProfile, MailAction, MailCapabilities,
 };
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
@@ -132,7 +131,7 @@ pub(super) fn profile_for(
         Some(mailbox_address.to_owned()),
         Some(mailbox_address.to_owned()),
         Some(settings.username().to_owned()),
-        AccountCapabilities::new(mail_capabilities, CalendarCapabilities::view_only()),
+        AccountCapabilities::new(mail_capabilities, super::calendar_capabilities()),
     )
     .map_err(|_| EwsError::InvalidConnectionDetails)
 }
