@@ -461,6 +461,12 @@ fn expired_cursor_replacement_preserves_snapshot_until_atomic_completion() {
                 .await
                 .expect("account replacement state is readable")
         );
+        assert_eq!(
+            cache
+                .account_has_active_replacement(&account_id("synthetic-other-account"))
+                .await,
+            Err(CalendarCacheError::AccountMismatch)
+        );
         assert_eq!(state.delta_link(), Some(&old_delta));
         assert_eq!(state.next_link(), Some(&reset_link));
         assert_eq!(state.last_synchronized_at(), Some(completed_at));

@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::shared::{
     CacheLifecycleError, schema,
     store::{
-        CacheFailure, CacheResult, SqliteAccountCache,
+        AccountScopeError, CacheFailure, CacheResult, SqliteAccountCache,
         time::{system_time_from_parts, system_time_parts},
     },
 };
@@ -88,8 +88,13 @@ impl From<async_sqlite::rusqlite::Error> for MailCacheFailure {
 }
 
 impl SqliteAccountCache {
+    fn check_mail_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
+        self.check_account_scope(account_id)
+            .map_err(|AccountScopeError::AccountMismatch| MailCacheError::AccountMismatch)
+    }
+
     fn check_folder(&self, folder: &FolderReference) -> Result<(), MailCacheError> {
-        self.check_account(folder.account_id())
+        self.check_mail_account(folder.account_id())
     }
 }
 
@@ -100,7 +105,7 @@ impl MailCache for SqliteAccountCache {
         folders: Vec<MailFolder>,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
         let validation = self
-            .check_account(account_id)
+            .check_mail_account(account_id)
             .and_then(|()| validate_folder_snapshot(account_id, &folders));
         let account_id = account_id.as_str().to_owned();
         let client = self.client.clone();
@@ -164,7 +169,7 @@ impl MailCache for SqliteAccountCache {
         initial_cutoff: SystemTime,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
         let validation = self
-            .check_account(account_id)
+            .check_mail_account(account_id)
             .and_then(|()| system_time_parts(initial_cutoff).map_err(CacheFailure::mail_public));
         let account_id = account_id.as_str().to_owned();
         let client = self.client.clone();
@@ -300,7 +305,7 @@ impl MailCache for SqliteAccountCache {
         &self,
         account_id: &AccountId,
     ) -> impl Future<Output = Result<Vec<MailFolder>, MailCacheError>> + Send + '_ {
-        let validation = self.check_account(account_id);
+        let validation = self.check_mail_account(account_id);
         let account_id = account_id.as_str().to_owned();
         let client = self.client.clone();
         async move {
@@ -624,7 +629,7 @@ impl MailCache for SqliteAccountCache {
         &self,
         account_id: &AccountId,
     ) -> impl Future<Output = Result<Option<PendingMailSend>, MailCacheError>> + Send + '_ {
-        let validation = self.check_account(account_id);
+        let validation = self.check_mail_account(account_id);
         let account_id = account_id.as_str().to_owned();
         let client = self.client.clone();
         async move {
@@ -642,9 +647,11 @@ impl MailCache for SqliteAccountCache {
         &self,
         pending: &PendingMailSend,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
-        let validation = self.check_account(pending.account_id()).and_then(|()| {
-            system_time_parts(pending.created_at()).map_err(CacheFailure::mail_public)
-        });
+        let validation = self
+            .check_mail_account(pending.account_id())
+            .and_then(|()| {
+                system_time_parts(pending.created_at()).map_err(CacheFailure::mail_public)
+            });
         let pending = pending.clone();
         let client = self.client.clone();
         let database_path = self.database_path.clone();
@@ -711,7 +718,7 @@ impl MailCache for SqliteAccountCache {
         account_id: &AccountId,
         operation_id: MailSendOperationId,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
-        let validation = self.check_account(account_id);
+        let validation = self.check_mail_account(account_id);
         let account_id = account_id.as_str().to_owned();
         let operation_id = operation_id.as_uuid().to_string();
         let client = self.client.clone();

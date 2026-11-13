@@ -24,6 +24,12 @@ pub(crate) mod time;
 pub(crate) type CacheResult<T> = Result<T, CacheFailure>;
 
 #[derive(Debug, Error)]
+pub(crate) enum AccountScopeError {
+    #[error("the account does not match the cache scope")]
+    AccountMismatch,
+}
+
+#[derive(Debug, Error)]
 pub(crate) enum CacheFailure {
     #[error("the database operation failed")]
     Unavailable,
@@ -248,11 +254,14 @@ impl SqliteAccountCache {
         TestHooks::set_message_move_failure(&self.client, enabled).await;
     }
 
-    pub(crate) fn check_account(&self, account_id: &AccountId) -> Result<(), MailCacheError> {
+    pub(crate) fn check_account_scope(
+        &self,
+        account_id: &AccountId,
+    ) -> Result<(), AccountScopeError> {
         if &self.account_id == account_id {
             Ok(())
         } else {
-            Err(MailCacheError::AccountMismatch)
+            Err(AccountScopeError::AccountMismatch)
         }
     }
 
@@ -260,8 +269,6 @@ impl SqliteAccountCache {
         &self,
         account_id: &AccountId,
     ) -> Result<bool, AccountCacheRemovalError> {
-        self.check_account(account_id)
-            .map_err(AccountCacheRemovalError::from)?;
         let account_id = account_id.as_str().to_owned();
         self.client
             .conn_and_then(move |connection| -> CacheResult<bool> {
@@ -331,12 +338,16 @@ impl AccountCache for SqliteAccountCache {
         &self,
         account_id: &AccountId,
     ) -> impl Future<Output = Result<(), AccountCacheRemovalError>> + Send + '_ {
-        let validation = self.check_account(account_id);
+        let validation =
+            self.check_account_scope(account_id)
+                .map_err(|AccountScopeError::AccountMismatch| {
+                    AccountCacheRemovalError::AccountMismatch
+                });
         let account_id = account_id.clone();
         let lifecycle_lock_path = self.lifecycle_lock_path.clone();
         let account_lock = Arc::clone(&self.account_lock);
         async move {
-            validation.map_err(AccountCacheRemovalError::from)?;
+            validation?;
             let removal_lock =
                 security::AccountRemovalLock::acquire(&lifecycle_lock_path, account_lock)
                     .map_err(CacheLifecycleError::into_account_removal_error)?;
