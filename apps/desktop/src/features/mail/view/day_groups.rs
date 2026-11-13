@@ -9,9 +9,6 @@ use jiff::civil;
 use super::MESSAGE_ROW_HEIGHT;
 use crate::components::{GROUP_HEADER_HEIGHT, LocalClock};
 
-/// Messages from the last six days show a weekday name instead of a date.
-const WEEKDAY_LABEL_DAYS: i32 = 6;
-
 /// The local day of one message and whether a day header sits above it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct MessageDay {
@@ -84,19 +81,9 @@ pub(super) fn day_label(date: civil::Date, today: civil::Date) -> String {
     }
 }
 
-/// The time shown on a message row: a 24-hour time today, a weekday name within the last six
-/// days, and an abbreviated date after that, with the year when it is not the current one.
-pub(super) fn time_label(received: civil::DateTime, today: civil::Date) -> String {
-    let days_ago = (today - received.date()).get_days();
-    if days_ago <= 0 {
-        received.strftime("%H:%M").to_string()
-    } else if days_ago <= WEEKDAY_LABEL_DAYS {
-        received.strftime("%A").to_string()
-    } else if received.year() == today.year() {
-        received.strftime("%b %-d").to_string()
-    } else {
-        received.strftime("%b %-d, %Y").to_string()
-    }
+/// The time shown on a message row. The day group header above the row carries the date.
+pub(super) fn time_label(received: civil::DateTime) -> String {
+    received.strftime("%H:%M").to_string()
 }
 
 #[cfg(test)]

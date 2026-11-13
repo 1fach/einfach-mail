@@ -240,6 +240,7 @@ pub(super) struct MessageRowSummary {
     sender_name: String,
     sender: String,
     subject: String,
+    day_label: String,
     time_label: String,
     unread: bool,
     flagged: bool,
@@ -248,11 +249,13 @@ pub(super) struct MessageRowSummary {
 impl MessageRowSummary {
     pub(super) fn new(message: &MailMessage, clock: &LocalClock) -> Self {
         let metadata = message.metadata();
+        let received = received_local(message, clock);
         Self {
             sender_name: message_sender_name(message),
             sender: message_sender(message),
             subject: metadata.subject().unwrap_or("(No subject)").to_owned(),
-            time_label: time_label(received_local(message, clock), clock.today()),
+            day_label: day_label(received.date(), clock.today()),
+            time_label: time_label(received),
             unread: metadata.read_state() == ReadState::Unread,
             flagged: metadata.follow_up_flag_status() == Some(FollowUpFlagStatus::Flagged),
         }
@@ -264,12 +267,14 @@ impl MessageRowSummary {
     }
 
     /// The option's description: whether it is unread, when it arrived, and whether it is flagged.
+    /// It names the day as well as the time, because the day header is not part of the option.
     pub(super) fn accessible_details(&self) -> String {
+        let received = format!("{}, {}", self.day_label, self.time_label);
         let mut details = Vec::new();
         if self.unread {
             details.push("Unread");
         }
-        details.push(&self.time_label);
+        details.push(&received);
         if self.flagged {
             details.push("Flagged");
         }

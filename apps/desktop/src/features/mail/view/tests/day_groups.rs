@@ -175,11 +175,11 @@ async fn day_headers_are_not_options_and_leave_the_option_descriptions_in_messag
     assert_eq!(
         descriptions,
         [
-            Some("Unread. 10:00"),
-            Some("08:30. Flagged"),
-            Some("Thursday"),
-            Some("Unread. Thursday. Flagged"),
-            Some("Oct 25"),
+            Some("Unread. Today, 10:00"),
+            Some("Today, 08:30. Flagged"),
+            Some("Yesterday, 20:00"),
+            Some("Unread. Yesterday, 09:00. Flagged"),
+            Some("Sunday, October 25, 2026, 09:00"),
         ]
     );
 }

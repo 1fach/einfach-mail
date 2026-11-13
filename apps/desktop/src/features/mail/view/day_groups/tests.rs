@@ -76,49 +76,23 @@ fn yesterday_follows_the_calendar_across_a_month_boundary() {
 }
 
 #[test]
-fn time_labels_follow_the_age_of_the_message() {
-    let at = |date: civil::Date| date.at(9, 14, 0, 0);
+fn time_labels_show_the_24_hour_time_for_every_day() {
     let cases = [
-        (at(today()), "09:14", "today shows a 24-hour time"),
+        (today().at(9, 14, 0, 0), "09:14", "today"),
         (
-            civil::date(2026, 11, 13).at(18, 5, 0, 0),
+            civil::date(2026, 11, 12).at(18, 5, 0, 0),
             "18:05",
-            "a time after noon uses the 24-hour clock",
+            "yesterday",
         ),
         (
-            at(civil::date(2026, 11, 14)),
-            "09:14",
-            "a message dated after today shows its time",
-        ),
-        (
-            at(civil::date(2026, 11, 12)),
-            "Thursday",
-            "yesterday shows its weekday",
-        ),
-        (
-            at(civil::date(2026, 11, 7)),
-            "Saturday",
-            "six days ago is the oldest weekday label",
-        ),
-        (
-            at(civil::date(2026, 11, 6)),
-            "Nov 6",
-            "seven days ago shows the date",
-        ),
-        (
-            at(civil::date(2026, 10, 25)),
-            "Oct 25",
-            "an older date in this year omits the year",
-        ),
-        (
-            at(civil::date(2025, 12, 31)),
-            "Dec 31, 2025",
-            "a date in another year adds the year",
+            civil::date(2025, 12, 31).at(0, 0, 0, 0),
+            "00:00",
+            "another year",
         ),
     ];
 
     for (received, expected, reason) in cases {
-        assert_eq!(time_label(received, today()), expected, "{reason}");
+        assert_eq!(time_label(received), expected, "{reason}");
     }
 }
 
