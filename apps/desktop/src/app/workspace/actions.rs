@@ -81,9 +81,6 @@ impl<P: einfach_mail_application::AccountProvider + 'static> Workspace<P> {
     }
 
     fn open_calendar(&mut self, cx: &mut Context<Self>) {
-        if !self.account_view.read(cx).calendar_is_available() {
-            return;
-        }
         self.open_account_content(OpeningContent::Calendar, cx);
     }
 
