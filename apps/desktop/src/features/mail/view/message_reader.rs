@@ -1,19 +1,74 @@
 use einfach_mail_application::{MailWorkflowError, OpenedMessage, WellKnownMailFolder};
-use einfach_mail_domain::{FolderReference, MailAction, MessageId};
+use einfach_mail_domain::{FolderReference, MailAction};
 use gpui_kit::component::{ColorTokens, StyledExt, button::Button};
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
-use gpui_kit::{AnyElement, Context, IntoElement, Role, div, prelude::*};
+use gpui_kit::{
+    AnyElement, Context, IntoElement, Pixels, Rems, Role, Window, div, prelude::*, rems,
+};
+
+use crate::components::{CommandBar, InfoBar, NAVIGATION_PANE_WIDTH};
 
 use super::super::body::render_message_body;
 use super::{
     MailView, MessageDetailState, empty_message_detail_copy, mail_error_message, message_sender,
 };
 
+/// The reader is narrower than this when the command bar folds its secondary commands into the
+/// More menu.
+const COMMAND_BAR_OVERFLOW_WIDTH: Rems = rems(40.);
+
+/// Where the reader sits, which decides how its command bar is laid out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ReaderLayout {
+    compact: bool,
+    overflow: bool,
+}
+
+impl ReaderLayout {
+    /// The layout for a window `window_width` wide.
+    ///
+    /// Beside the message list the reader gets what the navigation pane and the list leave. In
+    /// compact mode it gets what the navigation pane leaves.
+    pub(super) fn new(
+        window_width: Pixels,
+        rem_size: Pixels,
+        message_list_width: Pixels,
+        compact: bool,
+    ) -> Self {
+        let beside_navigation = window_width - NAVIGATION_PANE_WIDTH.to_pixels(rem_size);
+        let reader_width = if compact {
+            beside_navigation
+        } else {
+            beside_navigation - message_list_width
+        };
+        Self {
+            compact,
+            overflow: reader_width < COMMAND_BAR_OVERFLOW_WIDTH.to_pixels(rem_size),
+        }
+    }
+}
+
 impl MailView {
+    /// The layout of the reader in `window`.
+    pub(super) fn reader_layout(
+        &self,
+        window: &Window,
+        rem_size: Pixels,
+        compact: bool,
+    ) -> ReaderLayout {
+        ReaderLayout::new(
+            window.bounds().size.width,
+            rem_size,
+            self.pane_layout.message_list_width.0.to_pixels(rem_size),
+            compact,
+        )
+    }
+
     pub(super) fn render_message_detail(
         &self,
         colors: &ColorTokens,
+        layout: ReaderLayout,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let detail = match &self.message_detail_state {
@@ -23,7 +78,7 @@ impl MailView {
                 self.render_failed_message_detail(*error, cx)
             }
             MessageDetailState::Opened(opened) => {
-                self.render_opened_message_detail(opened, colors, cx)
+                self.render_opened_message_detail(opened, colors, layout, cx)
             }
             MessageDetailState::MoveCompleted {
                 destination_folder,
@@ -61,7 +116,9 @@ impl MailView {
             .gap_3()
             .text_color(colors.muted_foreground);
         if let Some(notice) = self.render_move_recovery_notice(cx) {
-            panel.child(notice).into_any_element()
+            panel
+                .child(div().w_full().max_w(rems(32.)).px_6().child(notice))
+                .into_any_element()
         } else {
             panel.child(empty_state).into_any_element()
         }
@@ -84,35 +141,51 @@ impl MailView {
         error: MailWorkflowError,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let detail_error = div()
+        div()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .p_6()
-            .id("mail-message-error")
-            .role(Role::Alert)
-            .aria_label(mail_error_message(error))
-            .child(mail_error_message(error))
-            .children(self.render_move_recovery_notice(cx));
-        #[cfg(test)]
-        let detail_error = detail_error.test_support();
-        detail_error.into_any_element()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                InfoBar::alert("mail-message-error", mail_error_message(error))
+                    .accessible_label(mail_error_message(error)),
+            )
+            .children(self.render_move_recovery_notice(cx))
+            .into_any_element()
     }
 
     fn render_opened_message_detail(
         &self,
         opened: &OpenedMessage,
         colors: &ColorTokens,
+        layout: ReaderLayout,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let body = render_message_body(opened.body(), *colors);
         let header = self.render_opened_message_header(opened, colors, cx);
+        let command_bar = if layout.compact {
+            None
+        } else {
+            self.message_command_bar(layout, cx).map(|bar| {
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(bar)
+            })
+        };
         div()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
+            .children(command_bar)
             .child(header)
             .child(body)
             .into_any_element()
@@ -125,15 +198,21 @@ impl MailView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let message_id = opened.message().id();
-        let controls = self.render_opened_message_controls(opened, message_id, cx);
+        let subject = opened
+            .message()
+            .metadata()
+            .subject()
+            .unwrap_or("(No subject)")
+            .to_owned();
         div()
             .flex()
             .flex_col()
             .gap_2()
-            .p_6()
+            .px_6()
+            .py_4()
             .border_b_1()
             .border_color(colors.border)
-            .child(controls)
+            .child(div().text_xl().font_semibold().child(subject))
             .child(
                 div()
                     .text_sm()
@@ -153,66 +232,51 @@ impl MailView {
             .into_any_element()
     }
 
-    fn render_opened_message_controls(
+    /// The commands the capabilities of the account allow on the open message, or `None` when the
+    /// reader has no message open or the account cannot change mail.
+    pub(super) fn message_command_bar(
         &self,
-        opened: &OpenedMessage,
-        message_id: &MessageId,
+        layout: ReaderLayout,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let subject = opened
-            .message()
-            .metadata()
-            .subject()
-            .unwrap_or("(No subject)")
-            .to_owned();
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .child(div().text_lg().font_bold().child(subject))
-            .child(self.render_message_action_buttons(message_id, cx))
-            .into_any_element()
-    }
-
-    fn render_message_action_buttons(
-        &self,
-        message_id: &MessageId,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<CommandBar> {
+        let MessageDetailState::Opened(opened) = &self.message_detail_state else {
+            return None;
+        };
         let mail = self.profile.capabilities().mail();
         if mail.is_read_only() {
-            return div().into_any_element();
+            return None;
         }
-        let mut actions = div().flex().items_center().gap_2();
-        if mail.supports(MailAction::SetReadState) {
-            actions = actions.child(self.render_read_state_action(message_id, cx));
-        }
-        if mail.supports(MailAction::SetFollowUpFlagStatus) {
-            actions = actions.child(self.render_follow_up_flag_action(message_id, cx));
+        let message_id = opened.message().id();
+        let mut commands = Vec::new();
+        if mail.supports(MailAction::Reply) {
+            commands.push(self.reply_command(message_id, cx));
         }
         if mail.supports(MailAction::Move) {
-            actions = actions
-                .child(self.render_well_known_folder_action(
-                    WellKnownMailFolder::Archive,
-                    message_id,
-                    cx,
-                ))
-                .child(self.render_move_action(message_id, cx));
-        }
-        if mail.supports(MailAction::Reply) {
-            actions = actions.child(self.render_reply_action(message_id, cx));
+            commands.push(self.well_known_folder_command(
+                WellKnownMailFolder::Archive,
+                message_id,
+                cx,
+            ));
+            commands.push(self.move_command(message_id, cx));
         }
         if mail.supports(MailAction::Delete) {
-            actions = actions.child(self.render_well_known_folder_action(
+            commands.push(self.well_known_folder_command(
                 WellKnownMailFolder::DeletedItems,
                 message_id,
                 cx,
             ));
         }
-        #[cfg(test)]
-        let actions = actions.id("message-actions").test_support();
-        actions.into_any_element()
+        if mail.supports(MailAction::SetReadState) {
+            commands.push(self.read_state_command(message_id, cx));
+        }
+        if mail.supports(MailAction::SetFollowUpFlagStatus) {
+            commands.push(self.follow_up_flag_command(message_id, cx));
+        }
+        (!commands.is_empty()).then(|| {
+            CommandBar::new("message-actions", "Message actions")
+                .overflow(layout.overflow)
+                .commands(commands)
+        })
     }
 
     fn render_move_completed_detail(
