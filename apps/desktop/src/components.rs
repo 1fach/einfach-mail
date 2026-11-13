@@ -1,3 +1,4 @@
+mod command_bar;
 mod icon;
 mod info_bar;
 mod list_navigation;
@@ -8,6 +9,7 @@ mod shell;
 mod sync_age;
 mod theme;
 
+pub(super) use command_bar::{Command, CommandBar};
 pub(super) use icon::{AppAssets, AppIcon};
 pub(super) use info_bar::InfoBar;
 pub(super) use list_navigation::ListNavigation;

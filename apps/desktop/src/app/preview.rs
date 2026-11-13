@@ -100,7 +100,7 @@ fn preview_account() -> ConnectedAccount {
         Some("preview@example.test".to_owned()),
         Some("preview@example.test".to_owned()),
         AccountCapabilities::new(
-            MailCapabilities::read_only(),
+            MailCapabilities::full_access(),
             CalendarCapabilities::view_only(),
         ),
     )
