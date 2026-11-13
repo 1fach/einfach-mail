@@ -48,7 +48,10 @@ pub(super) fn account_services(
         session,
     });
     AccountServices::new(
-        Arc::new(AccountWorkflow::new(PreviewAccountProvider { account })),
+        Arc::new(AccountWorkflow::new(PreviewAccountProvider {
+            account,
+            restores_account: scenario.restores_account(),
+        })),
         session_factory,
     )
 }
@@ -61,6 +64,10 @@ pub(super) enum PreviewScenario {
     /// Grants every mail action and calendar write so the commands that need them are visible.
     /// The synthetic provider still rejects each write, because nothing is stored.
     FullAccess,
+    /// Starts with no restored account, so Accounts shows the provider cards.
+    Disconnected,
+    /// Starts like `Disconnected` with the Exchange Server form open.
+    ExchangeForm,
 }
 
 impl PreviewScenario {
@@ -69,11 +76,22 @@ impl PreviewScenario {
             None => Ok(Self::Standard),
             Some("mail-sync-recovery") => Ok(Self::MailSyncRecovery),
             Some("full-access") => Ok(Self::FullAccess),
+            Some("disconnected") => Ok(Self::Disconnected),
+            Some("exchange-form") => Ok(Self::ExchangeForm),
             Some(value) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported UI preview scenario {value:?}"),
             )),
         }
+    }
+
+    fn restores_account(self) -> bool {
+        !matches!(self, Self::Disconnected | Self::ExchangeForm)
+    }
+
+    /// Whether the preview opens the Exchange Server form once Accounts allows it.
+    pub(super) fn opens_exchange_form(self) -> bool {
+        self == Self::ExchangeForm
     }
 }
 
@@ -115,7 +133,10 @@ fn preview_account(scenario: PreviewScenario) -> ConnectedAccount {
 fn preview_capabilities(scenario: PreviewScenario) -> AccountCapabilities {
     match scenario {
         PreviewScenario::FullAccess => AccountCapabilities::full_access(),
-        PreviewScenario::Standard | PreviewScenario::MailSyncRecovery => AccountCapabilities::new(
+        PreviewScenario::Standard
+        | PreviewScenario::MailSyncRecovery
+        | PreviewScenario::Disconnected
+        | PreviewScenario::ExchangeForm => AccountCapabilities::new(
             MailCapabilities::read_only(),
             CalendarCapabilities::view_only(),
         ),
@@ -125,17 +146,22 @@ fn preview_capabilities(scenario: PreviewScenario) -> AccountCapabilities {
 #[derive(Clone)]
 pub(super) struct PreviewAccountProvider {
     account: ConnectedAccount,
+    /// Without a restored account, startup finds nothing saved. Connecting still returns the
+    /// synthetic account.
+    restores_account: bool,
 }
 
 impl AccountProvider for PreviewAccountProvider {
     async fn restore_account(&self) -> Result<Option<ConnectedAccount>, AccountOperationError> {
-        Ok(Some(self.account.clone()))
+        Ok(self.restores_account.then(|| self.account.clone()))
     }
 
     async fn saved_credential_account_id(
         &self,
     ) -> Result<Option<AccountId>, AccountOperationError> {
-        Ok(Some(self.account.profile().id().clone()))
+        Ok(self
+            .restores_account
+            .then(|| self.account.profile().id().clone()))
     }
 
     async fn connect_account(

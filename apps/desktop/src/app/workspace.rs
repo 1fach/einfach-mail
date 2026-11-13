@@ -50,6 +50,8 @@ pub(crate) struct Workspace<P: AccountProvider + 'static> {
     preview_start: Option<preview_start::PreviewStartStep>,
     #[cfg(feature = "ui-preview")]
     _preview_message_observation: Option<Subscription>,
+    #[cfg(feature = "ui-preview")]
+    _preview_exchange_form_observation: Option<Subscription>,
 }
 
 impl<P: AccountProvider + 'static> Workspace<P> {
@@ -96,6 +98,8 @@ impl<P: AccountProvider + 'static> Workspace<P> {
             preview_start: None,
             #[cfg(feature = "ui-preview")]
             _preview_message_observation: None,
+            #[cfg(feature = "ui-preview")]
+            _preview_exchange_form_observation: None,
         }
     }
 }

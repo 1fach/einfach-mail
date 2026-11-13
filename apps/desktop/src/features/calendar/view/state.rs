@@ -28,10 +28,10 @@ impl CalendarStatus {
 pub(super) struct DisplayEvent<'a> {
     pub(super) event: &'a CalendarOccurrence,
     pub(super) sort_key: EventSortKey,
-    /// The full time range with its zone, for the compact agenda and the accessible name.
+    /// The time range without a zone, because the view names its zone once.
     pub(super) time_label: String,
-    /// The time range without a zone, for an event bar that has little width.
-    pub(super) bar_time_label: String,
+    /// The time range with its zone, for the accessible name.
+    pub(super) spoken_time_label: String,
 }
 
 #[derive(Clone, Eq, PartialEq)]

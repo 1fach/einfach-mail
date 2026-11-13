@@ -23,6 +23,27 @@ fn timed_events_that_cross_midnight_appear_on_each_occupied_day() {
     assert_eq!(first_day_events.len(), 1);
     assert_eq!(first_day_events[0].time_label, "Continues");
     assert_eq!(last_day_events.len(), 1);
-    assert_eq!(last_day_events[0].time_label, "Until 10:00 UTC");
+    assert_eq!(last_day_events[0].time_label, "Until 10:00");
+    assert_eq!(last_day_events[0].spoken_time_label, "Until 10:00 UTC");
     assert!(matches!(event.time(), CalendarOccurrenceTime::Timed { .. }));
+}
+
+#[test]
+fn shown_time_labels_leave_out_the_zone_and_spoken_labels_keep_it() {
+    let event = timed_event(
+        Date::from_calendar_date(2030, Month::January, 7)
+            .expect("synthetic date is valid")
+            .with_time(time::Time::from_hms(9, 0, 0).expect("synthetic time is valid"))
+            .assume_utc(),
+        Date::from_calendar_date(2030, Month::January, 7)
+            .expect("synthetic date is valid")
+            .with_time(time::Time::from_hms(9, 30, 0).expect("synthetic time is valid"))
+            .assume_utc(),
+    );
+    let day = civil::Date::new(2030, 1, 7).expect("synthetic date is valid");
+
+    let events = super::display_events(std::slice::from_ref(&event), day, &TimeZone::UTC);
+
+    assert_eq!(events[0].time_label, "09:00–09:30");
+    assert_eq!(events[0].spoken_time_label, "09:00 UTC–09:30 UTC");
 }

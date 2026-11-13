@@ -174,6 +174,8 @@ struct ApplicationSetup<P: AccountProvider + 'static> {
     preview_settings_directory: Option<Arc<TempDir>>,
     #[cfg(feature = "ui-preview")]
     preview_start: super::preview::PreviewStart,
+    #[cfg(feature = "ui-preview")]
+    preview_scenario: super::preview::PreviewScenario,
 }
 
 #[cfg(feature = "ui-preview")]
@@ -211,6 +213,7 @@ pub(crate) fn run_preview_application() -> io::Result<()> {
         navigation_surface_appearance: NavigationSurfaceAppearance::Opaque,
         preview_settings_directory: Some(directory),
         preview_start,
+        preview_scenario: scenario,
     })
 }
 
@@ -293,6 +296,8 @@ fn open_workspace_window<P: AccountProvider + 'static>(
     let navigation_surface_appearance = setup.navigation_surface_appearance;
     #[cfg(feature = "ui-preview")]
     let preview_start = setup.preview_start;
+    #[cfg(feature = "ui-preview")]
+    let preview_scenario = setup.preview_scenario;
     #[cfg_attr(not(feature = "ui-preview"), allow(unused_mut))]
     let mut options = window_options(navigation_surface_appearance, cx.theme().font_size);
     #[cfg(feature = "ui-preview")]
@@ -310,7 +315,12 @@ fn open_workspace_window<P: AccountProvider + 'static>(
                 Workspace::new_for_window(account_services, appearance_settings_store, window, cx)
                     .with_navigation_surface_appearance(navigation_surface_appearance);
             #[cfg(feature = "ui-preview")]
-            workspace.start_at_preview_destination(preview_start.destination);
+            {
+                workspace.start_at_preview_destination(preview_start.destination);
+                if preview_scenario.opens_exchange_form() {
+                    workspace.open_exchange_form_at_preview_start(window, cx);
+                }
+            }
             workspace
         })
     })

@@ -2,6 +2,7 @@ use super::super::{PreviewAccountProvider, PreviewScenario, account_services, pr
 use crate::app::workspace::{Workspace, WorkspaceTestSection};
 use crate::features::AppearanceSettingsStore;
 use crate::test_support::wait_for_ui_condition;
+use gpui_kit::test::TestQueryExt as _;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{Entity, Role, TestAppContext, VisualTestContext, px, size};
 
@@ -125,17 +126,8 @@ async fn open_preview_workspace(
     Entity<Workspace<PreviewAccountProvider>>,
     &mut VisualTestContext,
 ) {
-    cx.update(gpui_kit::init);
-    let settings_directory =
-        tempfile::tempdir().expect("temporary appearance settings directory is created");
-    let settings_store =
-        AppearanceSettingsStore::at_path(settings_directory.path().join("preferences.json"));
     let account_id = preview_account(scenario).profile().id().clone();
-    let services = account_services(scenario);
-    let (workspace, context) = cx.add_window_view(move |window, cx| {
-        Workspace::new_for_window(Ok(services), Ok(settings_store), window, cx)
-    });
-    context.simulate_resize(size(px(width), px(800.)));
+    let (workspace, context) = open_unrestored_preview_workspace(cx, scenario, width);
     wait_for_ui_condition(context, |_, app| {
         workspace
             .read(app)
@@ -143,4 +135,69 @@ async fn open_preview_workspace(
     })
     .await;
     (workspace, context)
+}
+
+fn open_unrestored_preview_workspace(
+    cx: &mut TestAppContext,
+    scenario: PreviewScenario,
+    width: f32,
+) -> (
+    Entity<Workspace<PreviewAccountProvider>>,
+    &mut VisualTestContext,
+) {
+    cx.update(gpui_kit::init);
+    let settings_directory =
+        tempfile::tempdir().expect("temporary appearance settings directory is created");
+    let settings_store =
+        AppearanceSettingsStore::at_path(settings_directory.path().join("preferences.json"));
+    let services = account_services(scenario);
+    let (workspace, context) = cx.add_window_view(move |window, cx| {
+        let mut workspace = Workspace::new_for_window(Ok(services), Ok(settings_store), window, cx);
+        if scenario.opens_exchange_form() {
+            workspace.open_exchange_form_at_preview_start(window, cx);
+        }
+        workspace
+    });
+    context.simulate_resize(size(px(width), px(800.)));
+    (workspace, context)
+}
+
+#[gpui_kit::test]
+async fn disconnected_preview_shows_the_provider_cards_without_a_restored_account(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, context) =
+        open_unrestored_preview_workspace(cx, PreviewScenario::Disconnected, 1280.);
+    wait_for_ui_condition(context, |_, app| {
+        workspace.read(app).test_status_is_disconnected(app)
+    })
+    .await;
+    context.run_until_parked();
+
+    assert!(context.debug_bounds("connect-account").is_some());
+    assert!(context.debug_bounds("connect-exchange-ews").is_some());
+    assert!(context.debug_bounds("ews-endpoint-input").is_none());
+    assert!(context.cx.update(|app| {
+        workspace.read(app).test_selected_section() == WorkspaceTestSection::Accounts
+    }));
+}
+
+#[gpui_kit::test]
+async fn exchange_form_preview_opens_the_exchange_server_form_while_disconnected(
+    cx: &mut TestAppContext,
+) {
+    let (workspace, context) =
+        open_unrestored_preview_workspace(cx, PreviewScenario::ExchangeForm, 1280.);
+    wait_for_ui_condition(context, |window, _| {
+        window.try_find_by_label("EWS endpoint").is_some()
+    })
+    .await;
+    context.run_until_parked();
+
+    assert!(context.debug_bounds("ews-endpoint-input").is_some());
+    assert!(context.debug_bounds("connect-exchange-ews").is_none());
+    assert!(context.cx.update(|app| {
+        workspace.read(app).test_status_is_disconnected(app)
+            && workspace.read(app).test_selected_section() == WorkspaceTestSection::Accounts
+    }));
 }

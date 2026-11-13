@@ -68,6 +68,11 @@ fn assert_compact_agenda_accessibility(context: &mut VisualTestContext) {
         "the agenda keeps one listbox focus stop"
     );
     assert_eq!(listboxes[0].label(), Some("Events this week"));
+    assert_eq!(
+        context.update(|window, _| window.find_all_by_label("Times in UTC").len()),
+        1,
+        "the agenda names its time zone once for the week"
+    );
     assert_eq!(options.len(), 2, "both cached events remain reachable");
     let labels = options
         .iter()
