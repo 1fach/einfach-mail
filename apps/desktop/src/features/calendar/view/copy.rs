@@ -57,11 +57,16 @@ pub(super) fn calendar_event_accessible_label(
         Some(location) => format!(
             "{}, {}, {}, {}",
             date_label(date),
-            event.time_label,
+            event.spoken_time_label,
             subject,
             location
         ),
-        None => format!("{}, {}, {}", date_label(date), event.time_label, subject),
+        None => format!(
+            "{}, {}, {}",
+            date_label(date),
+            event.spoken_time_label,
+            subject
+        ),
     }
 }
 

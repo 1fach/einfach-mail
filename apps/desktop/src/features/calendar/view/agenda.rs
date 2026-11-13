@@ -121,10 +121,10 @@ pub(super) fn display_events<'a>(
     display_events
 }
 
-/// How one event reads on one day: the full range and the range an event bar can show.
+/// How one event's time reads on one day: shown without a time zone, and spoken with one.
 struct EventTimeLabels {
-    full: String,
-    bar: String,
+    shown: String,
+    spoken: String,
 }
 
 fn display_event_for_day<'a>(
@@ -144,8 +144,8 @@ fn display_event_for_day<'a>(
     Some(DisplayEvent {
         event,
         sort_key,
-        time_label: labels.full,
-        bar_time_label: labels.bar,
+        time_label: labels.shown,
+        spoken_time_label: labels.spoken,
     })
 }
 
@@ -166,8 +166,8 @@ fn all_day_event_display(
             original_index,
         },
         EventTimeLabels {
-            full: "All day".to_owned(),
-            bar: "All day".to_owned(),
+            shown: "All day".to_owned(),
+            spoken: "All day".to_owned(),
         },
     ))
 }
@@ -187,8 +187,8 @@ fn timed_event_display(
             original_index,
         },
         EventTimeLabels {
-            full: timed_event_time_label(&display_range, "%H:%M %Z"),
-            bar: timed_event_time_label(&display_range, "%H:%M"),
+            shown: timed_event_time_label(&display_range, "%H:%M"),
+            spoken: timed_event_time_label(&display_range, "%H:%M %Z"),
         },
     ))
 }

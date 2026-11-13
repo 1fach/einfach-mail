@@ -133,20 +133,45 @@ where
         Some(caption.into_any_element())
     }
 
-    /// The sync state on its own line under the header, where the agenda layout has no room for
-    /// it beside the title.
+    /// The sync state and the time zone on one line under the header, where the agenda layout has
+    /// no room for the sync state beside the title. Event rows leave their zone out, so this
+    /// line names it once for the whole week.
     fn render_agenda_caption(&self, colors: ColorTokens) -> Option<AnyElement> {
         if self.layout != CalendarLayout::Agenda {
             return None;
         }
-        self.render_sync_caption(colors).map(|caption| {
+        Some(
             div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
                 .flex_shrink_0()
                 .px_4()
                 .pt_2()
-                .child(caption)
-                .into_any_element()
-        })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .children(self.render_sync_caption(colors)),
+                )
+                .child(self.render_time_zone_caption(colors))
+                .into_any_element(),
+        )
+    }
+
+    fn render_time_zone_caption(&self, colors: ColorTokens) -> AnyElement {
+        let label = format!("Times in {}", self.week.time_zone_label());
+        let caption = div()
+            .id("calendar-time-zone")
+            .aria_label(label.clone())
+            .flex_shrink_0()
+            .text_sm()
+            .text_color(colors.muted_foreground)
+            .child(label);
+        #[cfg(test)]
+        let caption = caption.test_support();
+        caption.into_any_element()
     }
 
     /// The notices about this week: a failed sync, unsynchronized writes and a missing time zone.
@@ -551,7 +576,7 @@ fn render_event_bar_content(
                 .text_xs()
                 .font_medium()
                 .text_color(accent)
-                .child(event.bar_time_label.clone()),
+                .child(event.time_label.clone()),
         )
         .child(
             div()
