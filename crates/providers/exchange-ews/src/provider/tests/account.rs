@@ -18,6 +18,20 @@ fn ews_account_profile_advertises_view_only_calendar_capabilities() {
 }
 
 #[test]
+fn ews_account_profile_rejects_endpoint_with_zero_port() {
+    let settings = ExchangeEwsAccountSettings::new(
+        "https://exchange.example.test:0/EWS/Exchange.asmx".to_owned(),
+        "ada@example.test".to_owned(),
+        "EXAMPLE\\ada".to_owned(),
+    );
+
+    assert!(matches!(
+        profile_for(&settings, None),
+        Err(EwsError::InvalidConnectionDetails)
+    ));
+}
+
+#[test]
 fn ews_profile_advertises_only_read_state_after_receipt_safe_version_evidence() {
     let settings = ExchangeEwsAccountSettings::new(
         "https://exchange.example.test/EWS/Exchange.asmx".to_owned(),
