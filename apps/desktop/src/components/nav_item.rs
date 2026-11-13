@@ -27,8 +27,9 @@ enum Presentation {
 
 /// A destination or folder in the navigation pane.
 ///
-/// The selected item gets a filled surface and a short accent pill. The pill is an overlay
-/// without listeners, so pointer events reach the button beneath it.
+/// The selected item gets a filled surface. A labeled item also gets a short accent pill, while
+/// an icon-only item shows selection with the fill alone. The pill is an overlay without
+/// listeners, so pointer events reach the button beneath it.
 #[derive(IntoElement)]
 pub(crate) struct NavItem {
     id: SharedString,
@@ -140,6 +141,10 @@ impl NavItem {
         }
     }
 
+    fn shows_pill(&self) -> bool {
+        matches!(self.presentation, Presentation::Labeled)
+    }
+
     fn render_pill(&self, cx: &App) -> impl IntoElement {
         let selector = format!("{}-pill", self.id);
         div()
@@ -176,7 +181,9 @@ impl RenderOnce for NavItem {
                 Presentation::IconOnly => wrapper.flex_1().min_w_0(),
             })
             .child(button)
-            .when(self.selected, |wrapper| wrapper.child(self.render_pill(cx)))
+            .when(self.selected && self.shows_pill(), |wrapper| {
+                wrapper.child(self.render_pill(cx))
+            })
     }
 }
 

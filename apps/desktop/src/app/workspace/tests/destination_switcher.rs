@@ -38,9 +38,7 @@ fn connect(view: &WorkspaceTestView, profile: AccountProfile, context: &mut Visu
 type WorkspaceTestView = gpui_kit::Entity<Workspace<TestProvider>>;
 
 #[gpui_kit::test]
-fn the_destination_switcher_names_each_destination_and_marks_the_current_one(
-    cx: &mut TestAppContext,
-) {
+fn the_destination_switcher_names_each_destination_and_shows_no_pill(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let workflow = Arc::new(AccountWorkflow::new(TestProvider::default()));
     let factory = unused_account_session_factory();
@@ -64,12 +62,10 @@ fn the_destination_switcher_names_each_destination_and_marks_the_current_one(
     });
 
     for (label, id, pill, bounds) in items {
-        let shows_pill = context.debug_bounds(pill).is_some();
         assert_eq!(context.debug_bounds(id), Some(bounds), "{label} keeps {id}");
-        assert_eq!(
-            shows_pill,
-            label == "Accounts",
-            "only the current destination shows the selection pill, got {label}: {shows_pill}"
+        assert!(
+            context.debug_bounds(pill).is_none(),
+            "{label} shows selection with its fill, not a pill"
         );
         assert!(bounds.top() >= switcher.top() && bounds.bottom() <= switcher.bottom());
         assert!(bounds.top() > identity.bottom());

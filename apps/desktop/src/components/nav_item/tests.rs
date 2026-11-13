@@ -75,30 +75,38 @@ fn open_harness(cx: &mut TestAppContext) -> (&mut VisualTestContext, Rc<Cell<usi
 }
 
 #[gpui_kit::test]
-fn the_selected_item_shows_a_centered_accent_pill(cx: &mut TestAppContext) {
+fn the_selected_labeled_item_shows_a_centered_accent_pill(cx: &mut TestAppContext) {
     let (context, _) = open_harness(cx);
     let rem_size = context.update(|window, _| window.rem_size());
+    let item = context
+        .debug_bounds("nav-selected")
+        .expect("the selected item is rendered");
+    let pill = context
+        .debug_bounds("nav-selected-pill")
+        .expect("the selected item shows a pill");
 
-    for (item, pill) in [
-        ("nav-selected", "nav-selected-pill"),
-        ("nav-icon-selected", "nav-icon-selected-pill"),
-    ] {
-        let item = context
-            .debug_bounds(item)
-            .expect("the selected item is rendered");
-        let pill = context
-            .debug_bounds(pill)
-            .expect("the selected item shows a pill");
+    assert_eq!(pill.size.width, PILL_WIDTH.to_pixels(rem_size));
+    assert_eq!(pill.size.height, PILL_HEIGHT.to_pixels(rem_size));
+    assert!(
+        (pill.center().y - item.center().y).abs() < px(0.5),
+        "pill {pill:?} is vertically centered on its item {item:?}"
+    );
+    assert!(pill.left() > item.left() && pill.right() < item.right());
+    assert!(pill.top() > item.top() && pill.bottom() < item.bottom());
+}
 
-        assert_eq!(pill.size.width, PILL_WIDTH.to_pixels(rem_size));
-        assert_eq!(pill.size.height, PILL_HEIGHT.to_pixels(rem_size));
-        assert!(
-            (pill.center().y - item.center().y).abs() < px(0.5),
-            "pill {pill:?} is vertically centered on its item {item:?}"
-        );
-        assert!(pill.left() > item.left() && pill.right() < item.right());
-        assert!(pill.top() > item.top() && pill.bottom() < item.bottom());
-    }
+#[gpui_kit::test]
+fn a_selected_icon_only_item_shows_selection_without_a_pill(cx: &mut TestAppContext) {
+    let (context, _) = open_harness(cx);
+
+    assert!(
+        context.debug_bounds("nav-icon-selected").is_some(),
+        "the selected icon-only item is rendered"
+    );
+    assert!(
+        context.debug_bounds("nav-icon-selected-pill").is_none(),
+        "an icon-only item has no pill"
+    );
 }
 
 #[gpui_kit::test]
