@@ -39,6 +39,8 @@ The owner can change these. Record any change here and in ADR 0066.
 | U7 Reader command bar | [#456](https://github.com/1fach/einfach-mail/issues/456) | #453 |
 | U8 Calendar alignment | [#457](https://github.com/1fach/einfach-mail/issues/457) | #455 |
 
+Data follow-ups, outside this restyle: preview line [#458](https://github.com/1fach/einfach-mail/issues/458), folder unread counts [#459](https://github.com/1fach/einfach-mail/issues/459), well-known folder kinds [#460](https://github.com/1fach/einfach-mail/issues/460), attachments [#461](https://github.com/1fach/einfach-mail/issues/461), and importance [#462](https://github.com/1fach/einfach-mail/issues/462).
+
 U4 and U5 can run in parallel, and so can U6 and U7. U4 and U5 both edit `app/workspace/render.rs` in different functions, so merge U4 first.
 
 ## Verification
