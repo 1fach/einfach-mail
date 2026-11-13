@@ -151,6 +151,12 @@ pub enum CalendarAction {
     DeleteEvent,
 }
 
+const CALENDAR_WRITE_ACTIONS: [CalendarAction; 3] = [
+    CalendarAction::CreateEvent,
+    CalendarAction::UpdateEvent,
+    CalendarAction::DeleteEvent,
+];
+
 /// The calendar operations supported by an account's provider.
 ///
 /// An empty set means calendar data is unavailable. Any write action also
@@ -178,13 +184,9 @@ impl CalendarCapabilities {
     #[must_use]
     pub fn from_actions(actions: impl IntoIterator<Item = CalendarAction>) -> Self {
         let mut actions: EnumSet<CalendarAction> = actions.into_iter().collect();
-        if [
-            CalendarAction::CreateEvent,
-            CalendarAction::UpdateEvent,
-            CalendarAction::DeleteEvent,
-        ]
-        .into_iter()
-        .any(|action| actions.contains(action))
+        if CALENDAR_WRITE_ACTIONS
+            .into_iter()
+            .any(|action| actions.contains(action))
         {
             actions.insert(CalendarAction::ViewEvents);
         }
@@ -212,13 +214,9 @@ impl CalendarCapabilities {
     #[must_use]
     pub fn is_read_only(self) -> bool {
         self.supports(CalendarAction::ViewEvents)
-            && ![
-                CalendarAction::CreateEvent,
-                CalendarAction::UpdateEvent,
-                CalendarAction::DeleteEvent,
-            ]
-            .into_iter()
-            .any(|action| self.supports(action))
+            && !CALENDAR_WRITE_ACTIONS
+                .into_iter()
+                .any(|action| self.supports(action))
     }
 }
 
