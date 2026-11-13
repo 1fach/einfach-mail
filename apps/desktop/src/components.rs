@@ -1,18 +1,26 @@
+mod group_header;
 mod icon;
 mod info_bar;
 mod list_navigation;
+mod list_option;
+mod local_time;
 mod nav_item;
 mod page;
+mod pane_header;
 mod settings_card;
 mod shell;
 mod sync_age;
 mod theme;
 
+pub(super) use group_header::{GROUP_HEADER_HEIGHT, GroupHeader};
 pub(super) use icon::{AppAssets, AppIcon};
 pub(super) use info_bar::InfoBar;
 pub(super) use list_navigation::ListNavigation;
+pub(super) use list_option::{SetPosition, list_option};
+pub(super) use local_time::LocalClock;
 pub(super) use nav_item::NavItem;
 pub(super) use page::Page;
+pub(super) use pane_header::PaneHeader;
 pub(super) use settings_card::SettingsCard;
 pub(super) use shell::NAVIGATION_PANE_WIDTH;
 pub(super) use sync_age::relative_age_label;

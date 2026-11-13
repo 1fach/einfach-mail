@@ -499,8 +499,11 @@ struct PreviewMessageSeed {
     subject: &'static str,
     hours_ago: u64,
     unread: bool,
+    flagged: bool,
 }
 
+/// Newest first, spread so the list shows today, yesterday, a weekday, a date in the current
+/// year, and a date in an earlier year.
 const PREVIEW_MESSAGE_SEEDS: &[PreviewMessageSeed] = &[
     PreviewMessageSeed {
         id: "preview-message-1",
@@ -509,38 +512,61 @@ const PREVIEW_MESSAGE_SEEDS: &[PreviewMessageSeed] = &[
         subject: "Welcome to the Einfach Mail preview",
         hours_ago: 1,
         unread: true,
+        flagged: false,
     },
     PreviewMessageSeed {
         id: "preview-message-2",
         sender_name: "Jonas Example",
         sender_address: "jonas@example.test",
         subject: "Calendar planning for this week",
-        hours_ago: 4,
+        hours_ago: 2,
         unread: false,
+        flagged: true,
     },
     PreviewMessageSeed {
         id: "preview-message-3",
         sender_name: "Ada Example",
         sender_address: "ada@example.test",
         subject: "Notes from the product review",
-        hours_ago: 22,
+        hours_ago: 26,
         unread: false,
+        flagged: false,
     },
     PreviewMessageSeed {
         id: "preview-message-4",
         sender_name: "Lea Example",
         sender_address: "lea@example.test",
         subject: "Synthetic invoice example",
-        hours_ago: 31,
-        unread: false,
+        hours_ago: 30,
+        unread: true,
+        flagged: true,
     },
     PreviewMessageSeed {
         id: "preview-message-5",
         sender_name: "Noah Example",
         sender_address: "noah@example.test",
         subject: "The message body is synthetic",
-        hours_ago: 48,
+        hours_ago: 72,
         unread: false,
+        flagged: false,
+    },
+    PreviewMessageSeed {
+        id: "preview-message-6",
+        sender_name: "Priya Example",
+        sender_address: "priya@example.test",
+        subject: "Planning notes for the next quarter",
+        hours_ago: 288,
+        unread: false,
+        flagged: false,
+    },
+    PreviewMessageSeed {
+        id: "preview-message-7",
+        sender_name: "Omar Example",
+        sender_address: "omar@example.test",
+        subject: "Summary of last year's synthetic archive",
+        hours_ago: 9_000,
+        unread: false,
+        flagged: false,
     },
 ];
 
@@ -573,7 +599,7 @@ fn preview_message(
         MessageOrigin::new(Some(sender), None),
         now - std::time::Duration::from_secs(seed.hours_ago * 60 * 60),
         read_state,
-        None,
+        seed.flagged.then_some(FollowUpFlagStatus::Flagged),
     );
     MailMessage::new(folder.clone(), message_id, metadata)
 }

@@ -10,7 +10,7 @@ use einfach_mail_application::{
     WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountProfile, FolderReference, MailAction, MailFolder, MailMessage, MailReplySource,
+    AccountProfile, FolderReference, MailAction, MailFolder, MailMessage, MailReplySource, Mailbox,
     MessageId, PendingMailSend,
 };
 use gpui_kit::base::VirtualListScrollHandle;
@@ -19,9 +19,10 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::resizable::ResizableState;
 use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, Pixels, Rems, ScrollStrategy, Subscription,
-    Task, Window, div, prelude::*, rems, size,
+    Task, Window, div, prelude::*, rems,
 };
 
+mod day_groups;
 mod follow_up_flag;
 mod message_actions;
 mod message_list;
@@ -32,6 +33,8 @@ mod message_write;
 mod read_state;
 mod synchronization;
 
+use crate::components::LocalClock;
+use day_groups::{MessageDay, message_days, row_sizes};
 use follow_up_flag::FollowUpFlagUpdateStatus;
 #[cfg(test)]
 use follow_up_flag::follow_up_flag_failure_message;
@@ -80,6 +83,8 @@ pub(crate) struct MailView {
     folders: Vec<MailFolder>,
     selected_folder: Option<FolderReference>,
     messages: Vec<MailMessage>,
+    message_days: Rc<[MessageDay]>,
+    clock: LocalClock,
     message_list_state: MessageListState,
     compact_pane: CompactMailPane,
     pane_layout: MailPaneLayout,
@@ -271,6 +276,8 @@ impl MailView {
             folders: Vec::new(),
             selected_folder: None,
             messages: Vec::new(),
+            message_days: Rc::from([]),
+            clock: LocalClock::system(),
             message_list_state: MessageListState::Loading,
             compact_pane: CompactMailPane::MessageList,
             pane_layout: MailPaneLayout::new(cx),
@@ -309,19 +316,30 @@ impl MailView {
     fn set_messages(&mut self, messages: Vec<MailMessage>) {
         self.message_list_scroll
             .scroll_to_item(0, ScrollStrategy::Top);
+        self.message_days = message_days(&messages, &self.clock);
         self.messages = messages;
+        // The row sizes depend on where the day groups start, so they must be rebuilt.
+        self.message_row_rem_size = None;
     }
 
     fn update_message_row_sizes(&mut self, rem_size: Pixels) {
-        if self.message_row_rem_size == Some(rem_size)
-            && self.message_row_sizes.len() == self.messages.len()
-        {
+        if self.message_row_rem_size == Some(rem_size) {
             return;
         }
 
-        let row_height = MESSAGE_ROW_HEIGHT.to_pixels(rem_size);
-        self.message_row_sizes = Rc::new(vec![size(Pixels::ZERO, row_height); self.messages.len()]);
+        self.message_row_sizes = row_sizes(&self.message_days, rem_size);
         self.message_row_rem_size = Some(rem_size);
+    }
+
+    fn selected_folder_name(&self) -> &str {
+        self.selected_folder
+            .as_ref()
+            .and_then(|selected| {
+                self.folders
+                    .iter()
+                    .find(|folder| folder.reference() == selected)
+            })
+            .map_or("Mail", MailFolder::display_name)
     }
 
     pub(crate) fn stop_pending_work(&mut self) {
@@ -332,7 +350,7 @@ impl MailView {
         self.selected_folder = None;
         self.sync_state = None;
         self.folders.clear();
-        self.messages.clear();
+        self.set_messages(Vec::new());
         self.message_list_state = MessageListState::Ready;
         self.message_detail_state = MessageDetailState::Empty;
         self.read_state_update = ReadStateUpdateStatus::Idle;
@@ -496,19 +514,33 @@ async fn load_folder_snapshot(
     })
 }
 
-fn message_sender(message: &MailMessage) -> String {
+fn sender_mailbox(message: &MailMessage) -> Option<&Mailbox> {
     message
         .metadata()
         .origin()
         .from_mailbox()
         .or_else(|| message.metadata().origin().sender())
-        .map_or_else(
-            || "Unknown sender".to_owned(),
-            |mailbox| match mailbox.display_name().unwrap_or_default().trim() {
-                "" => mailbox.address().to_owned(),
-                name => format!("{name} <{}>", mailbox.address()),
-            },
-        )
+}
+
+fn message_sender(message: &MailMessage) -> String {
+    sender_mailbox(message).map_or_else(
+        || "Unknown sender".to_owned(),
+        |mailbox| match mailbox.display_name().unwrap_or_default().trim() {
+            "" => mailbox.address().to_owned(),
+            name => format!("{name} <{}>", mailbox.address()),
+        },
+    )
+}
+
+/// The sender's display name, or their address when they have no name.
+fn message_sender_name(message: &MailMessage) -> String {
+    sender_mailbox(message).map_or_else(
+        || "Unknown sender".to_owned(),
+        |mailbox| match mailbox.display_name().unwrap_or_default().trim() {
+            "" => mailbox.address().to_owned(),
+            name => name.to_owned(),
+        },
+    )
 }
 
 fn mail_error_message(error: MailWorkflowError) -> &'static str {

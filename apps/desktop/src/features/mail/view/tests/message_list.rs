@@ -561,7 +561,11 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
     let scaled_row_estimate = context
         .cx
         .update(|cx| view.read(cx).message_row_sizes[0].height);
-    assert_eq!(scaled_row_estimate, px(108.));
+    assert_eq!(
+        scaled_row_estimate,
+        px(150.),
+        "the first item is a 108px row plus the 42px day header"
+    );
     let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
     assert_eq!(list_bounds.size.width, px(527.));
 

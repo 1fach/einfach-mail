@@ -1,23 +1,25 @@
 use std::rc::Rc;
 
 use einfach_mail_application::MailWorkflowError;
-use einfach_mail_domain::FolderReference;
+use einfach_mail_domain::{FolderReference, FollowUpFlagStatus, MailMessage, ReadState};
 use gpui_kit::base::v_virtual_list;
 use gpui_kit::component::{
-    ColorTokens, Disableable, StyledExt,
-    button::{Button, ButtonVariants},
-    resizable::ResizableState,
+    ActiveTheme as _, ColorTokens, Icon, Sizable as _, avatar::Avatar, h_flex,
+    resizable::ResizableState, v_flex,
 };
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, IntoElement, Role, WeakEntity, Window, div, prelude::*,
+    AnyElement, App, Context, Div, Entity, FontWeight, IntoElement, Role, WeakEntity, Window, div,
+    prelude::*, rems,
 };
 
+use super::day_groups::{day_label, received_local, time_label};
 use super::{
-    MESSAGE_LIST_CONTEXT, MESSAGE_ROW_HEIGHT, MailView, MessageListState, MessageListWidthChange,
-    mail_error_message, message_sender,
+    MESSAGE_LIST_CONTEXT, MESSAGE_ROW_HEIGHT, MailView, MessageListState, mail_error_message,
+    message_sender, message_sender_name,
 };
+use crate::components::{AppIcon, GroupHeader, LocalClock, SetPosition, list_option};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum MessageListLayout {
@@ -28,11 +30,9 @@ pub(super) enum MessageListLayout {
 impl MailView {
     pub(super) fn render_message_list(
         &self,
-        layout: MessageListLayout,
         colors: &ColorTokens,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let header = self.render_message_list_header(layout, cx);
         let content = self.render_message_list_content(colors, cx);
         let message_list = div()
             .id("mail-message-list")
@@ -47,59 +47,7 @@ impl MailView {
             .border_color(colors.border);
         #[cfg(test)]
         let message_list = message_list.test_support();
-        message_list
-            .child(header)
-            .child(div().flex_1().min_h_0().flex().flex_col().child(content))
-    }
-
-    fn render_message_list_header(
-        &self,
-        layout: MessageListLayout,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .id("mail-message-list-header")
-            .role(Role::Group)
-            .aria_label("Message list controls")
-            .w_full()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .child(div().text_sm().font_semibold().child("Messages"))
-            .when(layout == MessageListLayout::Split, |header| {
-                header.child(self.render_message_list_width_controls(cx))
-            })
-            .into_any_element()
-    }
-
-    fn render_message_list_width_controls(&self, cx: &mut Context<Self>) -> AnyElement {
-        let narrower = self.render_message_list_width_button(MessageListWidthChange::Narrower, cx);
-        let wider = self.render_message_list_width_button(MessageListWidthChange::Wider, cx);
-        div()
-            .tab_group()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(narrower)
-            .child(wider)
-            .into_any_element()
-    }
-
-    fn render_message_list_width_button(
-        &self,
-        change: MessageListWidthChange,
-        cx: &mut Context<Self>,
-    ) -> Button {
-        Button::new(change.button_id())
-            .ghost()
-            .label(change.button_label())
-            .disabled(self.pane_layout.message_list_width.is_disabled_for(change))
-            .on_click(cx.listener(move |view, _, window, cx| {
-                view.pane_layout.resize(change, window, cx);
-            }))
+        message_list.child(div().flex_1().min_h_0().flex().flex_col().child(content))
     }
 
     fn render_message_list_content(
@@ -211,67 +159,9 @@ impl MailView {
                     "cached-message-options",
                     sizes,
                     move |view, range, _, cx| {
-                        let list_size = view.messages.len();
                         range
                             .filter_map(|index| {
-                                let message = view.messages.get(index)?;
-                                let message_id = message.id().clone();
-                                let selected = view.selected_message_id() == Some(&message_id);
-                                let sender = message_sender(message);
-                                let subject = message
-                                    .metadata()
-                                    .subject()
-                                    .unwrap_or("(No subject)")
-                                    .to_owned();
-                                let accessible_label = format!("{sender}. {subject}");
-                                let expected_folder = folder_reference.clone();
-                                let option = div()
-                                    .id(format!("message-option-{}", message_id.as_str()))
-                                    .debug_selector(|| {
-                                        format!("message-row-{}", message_id.as_str())
-                                    })
-                                    .w_full()
-                                    .h(MESSAGE_ROW_HEIGHT)
-                                    .px_3()
-                                    .py_3()
-                                    .rounded_md()
-                                    .text_color(colors.foreground)
-                                    .role(Role::ListBoxOption)
-                                    .aria_label(if view.message_update_in_progress() {
-                                        format!("{accessible_label}, mail action pending")
-                                    } else {
-                                        accessible_label
-                                    })
-                                    .aria_position_in_set(index + 1)
-                                    .aria_size_of_set(list_size)
-                                    .aria_selected(selected)
-                                    .when(selected, |option| {
-                                        option
-                                            .aria_active_descendant()
-                                            .bg(colors.accent)
-                                            .text_color(colors.accent_foreground)
-                                    })
-                                    .hover(|option| {
-                                        option.bg(if selected {
-                                            colors.accent
-                                        } else {
-                                            colors.muted
-                                        })
-                                    })
-                                    .child(render_message_row_content(sender, subject))
-                                    .when(!view.message_update_in_progress(), |option| {
-                                        option.on_click(cx.listener(move |view, _, window, cx| {
-                                            view.select_message_from_option(
-                                                message_id.clone(),
-                                                &expected_folder,
-                                                window,
-                                                cx,
-                                            );
-                                        }))
-                                    });
-                                #[cfg(test)]
-                                let option = option.test_support();
-                                Some(option)
+                                view.render_message_item(index, &folder_reference, cx)
                             })
                             .collect()
                     },
@@ -283,14 +173,209 @@ impl MailView {
     }
 }
 
-fn render_message_row_content(sender: String, subject: String) -> AnyElement {
+impl MailView {
+    /// One virtual list item: the option for the message at `index`, under its day header when the
+    /// message starts a day group.
+    fn render_message_item(
+        &self,
+        index: usize,
+        folder: &FolderReference,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let message = self.messages.get(index)?;
+        let day = self.message_days.get(index)?;
+        let message_id = message.id().clone();
+        let id = message_id.as_str().to_owned();
+        let summary = MessageRowSummary::new(message, &self.clock);
+        let selected = self.selected_message_id() == Some(&message_id);
+        let update_in_progress = self.message_update_in_progress();
+        let accessible_label = if update_in_progress {
+            format!("{}, mail action pending", summary.accessible_label())
+        } else {
+            summary.accessible_label()
+        };
+        let expected_folder = folder.clone();
+        let unread_dot = summary.unread.then(|| render_unread_dot(&id, cx));
+        let option = list_option(
+            format!("message-option-{id}"),
+            SetPosition::new(index, self.messages.len()),
+            selected,
+            cx,
+        )
+        .debug_selector({
+            let id = id.clone();
+            move || format!("message-row-{id}")
+        })
+        .relative()
+        .h(MESSAGE_ROW_HEIGHT)
+        .px_4()
+        .aria_label(accessible_label)
+        .aria_description(summary.accessible_details())
+        .children(unread_dot)
+        .child(render_message_row_content(&summary, &id, cx))
+        .when(!update_in_progress, |option| {
+            option.on_click(cx.listener(move |view, _, window, cx| {
+                view.select_message_from_option(message_id.clone(), &expected_folder, window, cx);
+            }))
+        });
+        #[cfg(test)]
+        let option = option.test_support();
+        let header = day.starts_group().then(|| {
+            GroupHeader::new(
+                format!("message-day-header-{id}"),
+                day_label(day.date(), self.clock.today()),
+            )
+        });
+        Some(
+            v_flex()
+                .w_full()
+                .children(header)
+                .child(div().w_full().px_1().child(option)),
+        )
+    }
+}
+
+/// What a message row shows, derived from one cached message.
+pub(super) struct MessageRowSummary {
+    sender_name: String,
+    sender: String,
+    subject: String,
+    time_label: String,
+    unread: bool,
+    flagged: bool,
+}
+
+impl MessageRowSummary {
+    pub(super) fn new(message: &MailMessage, clock: &LocalClock) -> Self {
+        let metadata = message.metadata();
+        Self {
+            sender_name: message_sender_name(message),
+            sender: message_sender(message),
+            subject: metadata.subject().unwrap_or("(No subject)").to_owned(),
+            time_label: time_label(received_local(message, clock), clock.today()),
+            unread: metadata.read_state() == ReadState::Unread,
+            flagged: metadata.follow_up_flag_status() == Some(FollowUpFlagStatus::Flagged),
+        }
+    }
+
+    /// The option's name: the sender with the address, then the subject.
+    pub(super) fn accessible_label(&self) -> String {
+        format!("{}. {}", self.sender, self.subject)
+    }
+
+    /// The option's description: whether it is unread, when it arrived, and whether it is flagged.
+    pub(super) fn accessible_details(&self) -> String {
+        let mut details = Vec::new();
+        if self.unread {
+            details.push("Unread");
+        }
+        details.push(&self.time_label);
+        if self.flagged {
+            details.push("Flagged");
+        }
+        details.join(". ")
+    }
+
+    /// Unread rows are semibold, so they stand out without relying on color.
+    pub(super) fn text_weight(&self) -> FontWeight {
+        if self.unread {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::NORMAL
+        }
+    }
+}
+
+/// The accent dot that marks an unread row, in the row's leading padding.
+fn render_unread_dot(id: &str, cx: &App) -> Div {
+    let selector = format!("message-unread-dot-{id}");
     div()
-        .w_full()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(rems(0.25))
         .flex()
-        .flex_col()
-        .gap_1()
-        .child(div().w_full().text_sm().font_bold().child(sender))
-        .child(div().w_full().text_sm().child(subject))
+        .items_center()
+        .child(
+            div()
+                .debug_selector(move || selector)
+                .size(rems(0.5))
+                .rounded_full()
+                .bg(cx.theme().primary),
+        )
+}
+
+/// The row anatomy: an avatar, then the sender and time on the first line and the subject and
+/// the flag on the second. Both lines end at the same trailing edge.
+fn render_message_row_content(summary: &MessageRowSummary, id: &str, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let weight = summary.text_weight();
+    let avatar_selector = format!("message-avatar-{id}");
+    let time_selector = format!("message-time-{id}");
+    let flag_selector = format!("message-flag-{id}");
+    let time_color = if summary.unread {
+        theme.primary
+    } else {
+        theme.muted_foreground
+    };
+    let flag = summary.flagged.then(|| {
+        div()
+            .debug_selector(move || flag_selector)
+            .flex_shrink_0()
+            .child(Icon::new(AppIcon::Flag).size_4().text_color(theme.warning))
+    });
+    h_flex()
+        .size_full()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .debug_selector(move || avatar_selector)
+                .flex_shrink_0()
+                .child(Avatar::new().name(summary.sender_name.clone()).small()),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .font_weight(weight)
+                                .child(summary.sender_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(move || time_selector)
+                                .flex_shrink_0()
+                                .text_xs()
+                                .font_weight(weight)
+                                .text_color(time_color)
+                                .child(summary.time_label.clone()),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .font_weight(weight)
+                                .child(summary.subject.clone()),
+                        )
+                        .children(flag),
+                ),
+        )
         .into_any_element()
 }
 
