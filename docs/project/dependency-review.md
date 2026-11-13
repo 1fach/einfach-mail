@@ -78,6 +78,10 @@ The 2026-11-08 recheck found no GPUI Kit update that resolves these findings. Th
 
 I found no worthwhile app-owned dependency update. Each finding comes from a dependency whose package name or major API is set by GPUI or its Linux integrations. A local shim or fork would make Einfach Mail maintain compatibility code for its UI framework. The remaining findings need coordinated renderer, TLS, and zbus updates from their owners. The audit found no vulnerable or yanked versions, so no local patch or suppression is justified. No ADR is needed for the advisory review itself. Recheck the graph when GPUI Kit or its Linux integration dependencies publish compatible releases. [Issue #206](https://github.com/1fach/einfach-mail/issues/206) records this follow-up; [issue #128](https://github.com/1fach/einfach-mail/issues/128) tracked the initial review.
 
+### `ammonia` security update — 2026-11-13
+
+`cargo audit --deny yanked` failed on `main` because of [RUSTSEC-2026-0533](https://rustsec.org/advisories/RUSTSEC-2026-0533). `ammonia` 4.2.4 handled embedded SVG and MathML incorrectly, which allowed mutation XSS. `ammonia` sanitizes untrusted email HTML before display (ADR 0007), so this advisory affects a security boundary. `cargo update -p ammonia --precise 4.2.5` moved only `ammonia` from 4.2.4 to 4.2.5, its first patched 4.2 release. No other locked package changed. Issue [#464](https://github.com/1fach/einfach-mail/issues/464) tracks the update.
+
 ## Candidates
 
 ### Desktop appearance settings persistence — 2026-11-10
