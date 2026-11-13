@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-11-13
+Last updated: 2026-11-14
 
 ## Current milestone
 
@@ -104,7 +104,7 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 
 [ADR 0065](../decisions/0065-safe-ews-calendar-event-writes.md) accepts a planned M11 scope for one-off timed standalone EWS appointments in the primary calendar. It keeps EWS capabilities view-only until implementation review and live Exchange verification. Issue [#389](https://github.com/1fach/einfach-mail/issues/389) remains open for small fixture-backed implementation issues and separate live verification.
 
-Issue [#452](https://github.com/1fach/einfach-mail/issues/452) lays the foundation for the Fluent restyle in [ADR 0066](../decisions/0066-fluent-visual-language-and-navigation.md). It adds preview-only start variables and `scripts/preview-shots.sh`, and it moves the palette into one theme file that loads at startup. No view changed structure. Screenshots are under [`evidence/fluent-foundation-*.png`](evidence/). The units that restyle the shell, pages, lists, reader, and calendar follow in issues [#453](https://github.com/1fach/einfach-mail/issues/453)–[#457](https://github.com/1fach/einfach-mail/issues/457); see the [design](../design/fluent-workspace.md) for the order.
+The Fluent restyle in epic [#451](https://github.com/1fach/einfach-mail/issues/451) is merged: foundation (#463), navigation (#465), Accounts and Settings (#468), message list (#473), reader command bar (#472) and Calendar (#475). It follows [ADR 0066](../decisions/0066-fluent-visual-language-and-navigation.md) and the [design](../design/fluent-workspace.md), whose Review section records the accessibility and design checklists and the known gaps. Screenshots are under [`evidence/fluent-*.png`](evidence/). `scripts/preview-shots.sh` recaptures them, and `EINFACH_MAIL_UI_PREVIEW_SCENARIO=full-access` shows New mail, the reader command bar and New event. The restyle uses only data the app already has. The data follow-ups are [#458](https://github.com/1fach/einfach-mail/issues/458)–[#462](https://github.com/1fach/einfach-mail/issues/462), the calendar follow-ups are [#466](https://github.com/1fach/einfach-mail/issues/466) and [#467](https://github.com/1fach/einfach-mail/issues/467), and the inset research is [#469](https://github.com/1fach/einfach-mail/issues/469). Not verified: a live screen-reader pass, larger text, and the selected navigation state, which GPUI Kit `Button` does not expose.
 
 ## Active risks
 
