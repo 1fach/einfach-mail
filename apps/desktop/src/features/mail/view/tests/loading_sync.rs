@@ -1,6 +1,88 @@
 use super::*;
 
 #[gpui_kit::test]
+async fn mail_sync_retry_stays_visible_at_wide_width(cx: &mut TestAppContext) {
+    assert_mail_sync_retry_at_width(cx, 1280.).await;
+}
+
+#[gpui_kit::test]
+async fn mail_sync_retry_stays_visible_at_compact_width(cx: &mut TestAppContext) {
+    assert_mail_sync_retry_at_width(cx, 640.).await;
+}
+
+async fn assert_mail_sync_retry_at_width(cx: &mut TestAppContext, width: f32) {
+    cx.update(gpui_kit::init);
+    let account = synthetic_account_id();
+    let (profile, cache, _) = fixture(account);
+    let workflow = Arc::new(MailWorkflow::new(
+        profile.id().clone(),
+        ReadStateProvider::new(
+            ReadStateActionResponse::Confirm,
+            Arc::new(Mutex::new(Vec::new())),
+        )
+        .with_sync_failure_once(),
+        cache,
+    ));
+    let mut mail_view = None;
+    let (_, context) = cx.add_window_view(|window, cx| {
+        let (root, view) = test_mail_workspace(profile, workflow, window, cx);
+        mail_view = Some(view);
+        root
+    });
+    let mail_view = mail_view.expect("mail view is attached to folder navigation");
+    context.simulate_resize(size(px(width), px(800.)));
+
+    wait_for_mail_sync_to_finish(context, &mail_view).await;
+    assert_mail_sync_failure_is_accessible(context, &mail_view, width);
+
+    context.update(|window, cx| window.click("sync-mail", cx));
+    wait_for_mail_sync_to_finish(context, &mail_view).await;
+    assert_mail_sync_success_is_accessible(context);
+}
+
+fn assert_mail_sync_failure_is_accessible(
+    context: &mut VisualTestContext,
+    mail_view: &Entity<MailView>,
+    width: f32,
+) {
+    let failed_status = context
+        .cx
+        .update(|app| mail_view.read(app).sync_status_label());
+    let (failure_role, failure_label, failure_visible, retry_visible) =
+        context.update(|window, _| {
+            let failure = window.find("mail-sync-status");
+            let retry = window.find("sync-mail");
+            (
+                failure.role(),
+                failure.label().map(str::to_owned),
+                failure.visible(),
+                retry.visible(),
+            )
+        });
+    assert_eq!(failure_role, Some(gpui_kit::Role::Alert));
+    assert_eq!(failure_label.as_deref(), Some(failed_status.as_str()));
+    assert!(failure_visible, "Mail sync failure must remain visible");
+    assert!(
+        retry_visible,
+        "Sync action must remain visible at {width}px"
+    );
+}
+
+fn assert_mail_sync_success_is_accessible(context: &mut VisualTestContext) {
+    let (success_role, success_label) = context.update(|window, _| {
+        let status = window.find("mail-sync-status");
+        (status.role(), status.label().map(str::to_owned))
+    });
+    assert_eq!(success_role, Some(gpui_kit::Role::Status));
+    assert!(
+        success_label
+            .as_deref()
+            .is_some_and(|label| label.starts_with("Up to date")),
+        "successful retry reports an updated mail state: {success_label:?}"
+    );
+}
+
+#[gpui_kit::test]
 async fn message_body_failure_keeps_the_cached_list_and_selection(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let account = synthetic_account_id();
