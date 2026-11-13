@@ -125,7 +125,7 @@ PR [#377](https://github.com/1fach/einfach-mail/pull/377) completes the persiste
 
 ## Next actions
 
-1. Build the synthetic Linux native-window preview tracked by [issue #441](https://github.com/1fach/einfach-mail/issues/441), then complete the integrated M10 review in [issue #296](https://github.com/1fach/einfach-mail/issues/296). Keep #274's named-compositor check separate.
+1. Complete the integrated M10 review in [issue #296](https://github.com/1fach/einfach-mail/issues/296) with the synthetic preview from [issue #441](https://github.com/1fach/einfach-mail/issues/441). Repeat the review in an unlocked Fedora 44 Wayland session under Hyprland, then record the visible findings. Keep #274's named-compositor check separate.
 2. Keep issues #257, #258, and #266 open until a real Exchange Server or sanitized live-response recording verifies the EWS mail, Autodiscover, and calendar flows.
 3. Replace the remaining SQLCipher Git pin under issue [#264](https://github.com/1fach/einfach-mail/issues/264) when released async and migration crates support rusqlite 0.42.
 4. Remove the narrow RSA advisory exception when a maintained SSPI release resolves to a fixed stable RSA version, as tracked in issue #259.
