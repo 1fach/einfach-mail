@@ -18,7 +18,7 @@ use thiserror::Error;
 use time::{Date, OffsetDateTime, PrimitiveDateTime};
 
 use crate::shared::store::{
-    CacheFailure, CacheResult, SqliteAccountCache,
+    AccountScopeError, CacheFailure, CacheResult, SqliteAccountCache,
     time::{system_time_from_parts, system_time_parts},
 };
 
@@ -199,6 +199,11 @@ impl CalendarScope {
 }
 
 impl SqliteAccountCache {
+    fn check_calendar_account(&self, account_id: &AccountId) -> Result<(), CalendarCacheError> {
+        self.check_account_scope(account_id)
+            .map_err(|AccountScopeError::AccountMismatch| CalendarCacheError::AccountMismatch)
+    }
+
     fn check_calendar_view(
         &self,
         view: &CalendarViewReference,
@@ -274,9 +279,7 @@ impl CalendarCache for SqliteAccountCache {
         &self,
         account_id: &AccountId,
     ) -> impl Future<Output = Result<bool, CalendarCacheError>> + Send + '_ {
-        let validation = self
-            .check_account(account_id)
-            .map_err(|_| CalendarCacheError::AccountMismatch);
+        let validation = self.check_calendar_account(account_id);
         let account_id = account_id.as_str().to_owned();
         let client = self.client.clone();
         async move {
@@ -315,9 +318,7 @@ impl CalendarCache for SqliteAccountCache {
         &self,
         account_id: &AccountId,
     ) -> impl Future<Output = Result<bool, CalendarCacheError>> + Send + '_ {
-        let validation = self
-            .check_account(account_id)
-            .map_err(|_| CalendarCacheError::AccountMismatch);
+        let validation = self.check_calendar_account(account_id);
         let account_id = account_id.as_str().to_owned();
         let client = self.client.clone();
         async move {
@@ -335,9 +336,7 @@ impl CalendarCache for SqliteAccountCache {
         &self,
         account_id: &AccountId,
     ) -> impl Future<Output = Result<(), CalendarCacheError>> + Send + '_ {
-        let validation = self
-            .check_account(account_id)
-            .map_err(|_| CalendarCacheError::AccountMismatch);
+        let validation = self.check_calendar_account(account_id);
         let account_id = account_id.as_str().to_owned();
         let client = self.client.clone();
         async move {

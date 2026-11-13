@@ -495,6 +495,17 @@ fn account_scope_and_folder_snapshot_are_enforced() {
             cache.replace_folders(&other_account, folders).await,
             Err(MailCacheError::AccountMismatch)
         );
+        assert_eq!(
+            AccountCache::remove_account(&cache, &other_account).await,
+            Err(AccountCacheRemovalError::AccountMismatch)
+        );
+        assert_eq!(
+            cache
+                .list_folders(&account)
+                .await
+                .expect("cache remains available after a mismatched removal"),
+            vec![folder(&account, "folder-inbox")]
+        );
         cache.close_for_tests().await;
     });
 }

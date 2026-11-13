@@ -5,10 +5,23 @@ fn event_write_recovery_markers_survive_restart_and_clear_per_completed_view() {
     smol::block_on(async {
         let directory = TempDir::new().expect("temporary directory is created");
         let account = account_id("synthetic-account");
+        let other_account = account_id("synthetic-other-account");
         let source_view = week(7);
         let other_view = week(14);
         let completed_at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let cache = open_cache(&directory, account.clone()).await;
+        assert_eq!(
+            cache
+                .account_has_calendar_write_sync_required(&other_account)
+                .await,
+            Err(CalendarCacheError::AccountMismatch)
+        );
+        assert_eq!(
+            cache
+                .clear_calendar_write_sync_required(&other_account)
+                .await,
+            Err(CalendarCacheError::AccountMismatch)
+        );
         for (view, cursor) in [
             (&source_view, link("synthetic-source")),
             (&other_view, link("synthetic-other")),
