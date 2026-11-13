@@ -49,6 +49,7 @@ mod body_rendering;
 mod composer;
 mod follow_up_flag;
 mod helpers;
+mod layout;
 mod loading_sync;
 mod message_actions;
 mod message_list;

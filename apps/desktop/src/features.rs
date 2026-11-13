@@ -15,7 +15,7 @@ pub(super) use calendar::{
     CalendarView, CalendarViewEvent, bind_calendar_event_navigation_keys, bind_event_composer_keys,
 };
 pub(super) use mail::{
-    MailFolderNavigation, MailPermissionRequester, MailView, MailViewEvent,
+    MAIL_MINIMUM_WIDTH, MailFolderNavigation, MailPermissionRequester, MailView, MailViewEvent,
     bind_mail_composer_keys, bind_message_navigation_keys,
 };
 pub(crate) use settings::{

@@ -1,4 +1,5 @@
 use super::*;
+use crate::components::NAVIGATION_PANE_WIDTH;
 
 #[gpui_kit::test]
 fn workspace_navigation_stays_visible_and_supports_keyboard_switching(cx: &mut TestAppContext) {
@@ -46,9 +47,13 @@ fn mail_workspace_places_folders_before_the_message_list_and_reader(cx: &mut Tes
         .expect("the loading message list is rendered");
     let identity = context.update(|window, _| window.find_by_label("Active account: Ada Example"));
 
+    let rem_size = context.update(|window, _| window.rem_size());
+
     assert_eq!(identity.role(), Some(gpui_kit::Role::Group));
-    assert!(navigation.size.width >= px(224.));
-    assert!(navigation.size.width <= px(320.));
+    assert_eq!(
+        navigation.size.width,
+        NAVIGATION_PANE_WIDTH.to_pixels(rem_size)
+    );
     assert!(folders.left() >= navigation.left());
     assert!(folders.right() <= navigation.right());
     assert!(message_list.left() >= navigation.right());

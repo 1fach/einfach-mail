@@ -17,9 +17,9 @@ async fn read_only_account_hides_mail_mutations_and_rejects_composer_entry(
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
-        mail_view = Some(view.clone());
-        gpui_kit::base::Root::new(view, window, cx)
+        let (root, view) = test_mail_workspace(profile, workflow, window, cx);
+        mail_view = Some(view);
+        root
     });
     let view = mail_view.expect("read-only mail view is created with the test window");
 
@@ -87,9 +87,9 @@ async fn partial_mail_capabilities_render_and_allow_only_supported_actions(
     ));
     let mut mail_view = None;
     let (_, context) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
-        mail_view = Some(view.clone());
-        gpui_kit::base::Root::new(view, window, cx)
+        let (root, view) = test_mail_workspace(profile, workflow, window, cx);
+        mail_view = Some(view);
+        root
     });
     let view = mail_view.expect("partial-capability mail view is created with the test window");
 

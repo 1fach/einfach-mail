@@ -103,7 +103,23 @@ pub(super) fn test_mail_workspace(
     window: &mut gpui_kit::Window,
     cx: &mut gpui_kit::Context<gpui_kit::base::Root>,
 ) -> (gpui_kit::base::Root, Entity<MailView>) {
-    let view = cx.new(|cx| test_mail_view(profile, workflow, cx));
+    test_mail_workspace_with_requester(
+        profile,
+        workflow,
+        unexpected_permission_requester(),
+        window,
+        cx,
+    )
+}
+
+pub(super) fn test_mail_workspace_with_requester(
+    profile: AccountProfile,
+    workflow: Arc<dyn MailSession>,
+    requester: Arc<dyn MailPermissionRequester>,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::Context<gpui_kit::base::Root>,
+) -> (gpui_kit::base::Root, Entity<MailView>) {
+    let view = cx.new(|cx| MailView::new(profile, workflow, requester, cx));
     let navigation = cx.new(|cx| MailFolderNavigation::new(view.clone(), cx));
     let workspace = cx.new(|_| TestMailWorkspace {
         folder_navigation: navigation,

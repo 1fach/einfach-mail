@@ -23,6 +23,7 @@ use crate::test_support::account::*;
 use super::{NavigationSurfaceAppearance, Workspace, WorkspaceTestContent, WorkspaceTestSection};
 
 mod appearance;
+mod destination_switcher;
 mod navigation;
 #[cfg(feature = "ui-preview")]
 mod preview_start;
