@@ -525,9 +525,9 @@ fn sender_mailbox(message: &MailMessage) -> Option<&Mailbox> {
 fn message_sender(message: &MailMessage) -> String {
     sender_mailbox(message).map_or_else(
         || "Unknown sender".to_owned(),
-        |mailbox| match mailbox.display_name().unwrap_or_default().trim() {
-            "" => mailbox.address().to_owned(),
-            name => format!("{name} <{}>", mailbox.address()),
+        |mailbox| match mailbox_display_name(mailbox) {
+            Some(name) => format!("{name} <{}>", mailbox.address()),
+            None => mailbox.address().to_owned(),
         },
     )
 }
@@ -536,11 +536,19 @@ fn message_sender(message: &MailMessage) -> String {
 fn message_sender_name(message: &MailMessage) -> String {
     sender_mailbox(message).map_or_else(
         || "Unknown sender".to_owned(),
-        |mailbox| match mailbox.display_name().unwrap_or_default().trim() {
-            "" => mailbox.address().to_owned(),
-            name => name.to_owned(),
+        |mailbox| {
+            mailbox_display_name(mailbox)
+                .unwrap_or_else(|| mailbox.address())
+                .to_owned()
         },
     )
+}
+
+fn mailbox_display_name(mailbox: &Mailbox) -> Option<&str> {
+    mailbox
+        .display_name()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
 }
 
 fn mail_error_message(error: MailWorkflowError) -> &'static str {
