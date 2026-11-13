@@ -123,6 +123,7 @@ pub(crate) struct ReadStateProvider {
     updates: Arc<Mutex<Vec<(MessageId, ReadState)>>>,
     flag_updates: Arc<Mutex<Vec<(MessageId, FollowUpFlagStatus)>>>,
     sync_failure: bool,
+    sync_failure_once: AtomicBool,
     folders: Option<Vec<MailFolder>>,
     sync_gate: Mutex<Option<SyncGate>>,
     offline: OfflineProvider,
@@ -143,6 +144,7 @@ impl ReadStateProvider {
             updates,
             flag_updates: Arc::new(Mutex::new(Vec::new())),
             sync_failure: false,
+            sync_failure_once: AtomicBool::new(false),
             folders: None,
             sync_gate: Mutex::new(None),
             offline: OfflineProvider {
@@ -177,6 +179,15 @@ impl ReadStateProvider {
         self.sync_failure = true;
         self
     }
+
+    pub(crate) fn with_sync_failure_once(self) -> Self {
+        self.sync_failure_once.store(true, Ordering::Relaxed);
+        self
+    }
+
+    fn sync_fails(&self) -> bool {
+        self.sync_failure || self.sync_failure_once.swap(false, Ordering::Relaxed)
+    }
 }
 
 impl MailProvider for ReadStateProvider {
@@ -185,7 +196,7 @@ impl MailProvider for ReadStateProvider {
         account_id: &AccountId,
     ) -> impl Future<Output = Result<Vec<MailFolder>, MailOperationError>> + Send + '_ {
         let account_id = account_id.clone();
-        let sync_failure = self.sync_failure;
+        let sync_failure = self.sync_fails();
         let folders = self.folders.clone();
         let sync_gate = self
             .sync_gate
@@ -225,7 +236,7 @@ impl MailProvider for ReadStateProvider {
         _: &FolderReference,
         _: MessageDeltaRequest,
     ) -> impl Future<Output = Result<MessageDeltaResponse, MailOperationError>> + Send + '_ {
-        let sync_failure = self.sync_failure;
+        let sync_failure = self.sync_fails();
         async move {
             if sync_failure {
                 return Err(MailOperationError::ServiceUnavailable);

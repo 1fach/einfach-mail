@@ -31,6 +31,9 @@ impl MailView {
             .id("mail-sync-status")
             .text_sm()
             .text_color(colors.muted_foreground)
+            .min_w_0()
+            .flex_1()
+            .truncate()
             .role(status_role)
             .aria_label(status.clone())
             .child(status);
@@ -39,7 +42,7 @@ impl MailView {
             .debug_selector(|| "mail-sync-status".to_owned())
             .test_support();
 
-        let mut header_actions = div().flex().items_center().gap_2();
+        let mut header_actions = div().flex().items_center().gap_2().flex_shrink_0();
         if self
             .profile
             .capabilities()
@@ -62,6 +65,15 @@ impl MailView {
             );
         }
 
+        let sync_button = Button::new("sync-mail")
+            .ghost()
+            .label("Sync")
+            .loading(self.sync_status.is_sync_active())
+            .disabled(self.sync_status.is_sync_active() || self.message_update_in_progress())
+            .on_click(cx.listener(|view, _, _, cx| view.refresh(cx)));
+        #[cfg(test)]
+        let sync_button = sync_button.debug_selector(|| "sync-mail".to_owned());
+
         div()
             .w_full()
             .h(MAIL_HEADER_HEIGHT)
@@ -77,6 +89,8 @@ impl MailView {
                     .flex()
                     .items_center()
                     .gap_4()
+                    .min_w_0()
+                    .flex_1()
                     .child(div().text_lg().font_bold().child("Mail"));
                 if self.profile.capabilities().mail().is_read_only() {
                     title = title.child(
@@ -88,18 +102,7 @@ impl MailView {
                 }
                 title.child(sync_status)
             })
-            .child(
-                header_actions.child(
-                    Button::new("sync-mail")
-                        .ghost()
-                        .label("Sync")
-                        .loading(self.sync_status.is_sync_active())
-                        .disabled(
-                            self.sync_status.is_sync_active() || self.message_update_in_progress(),
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| view.refresh(cx))),
-                ),
-            )
+            .child(header_actions.child(sync_button))
     }
 
     fn render_resizable_message_panes(
