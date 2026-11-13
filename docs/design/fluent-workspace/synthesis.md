@@ -44,3 +44,7 @@ Defaults chosen for A's open questions (reported to the user; easy to change):
 | U9 | Status/roadmap update with before/after screenshots, design + accessibility checklist | docs/project/status.md, roadmap.md | all |
 
 Follow-up data issues (not implemented now): preview snippet, unread counts, folder kind, attachments, importance. A's table lists the layers each one touches.
+
+## Changes after review
+
+- 2026-11-13, message rows (#455): every row shows a 24-hour time. The day group header above carries the date, so the row no longer repeats it as a weekday or short date, which matches Wino. The option's accessible description names the day and the time, for example "Yesterday, 20:00", because the header is not part of the option. This overrides candidate A's row time rule.

@@ -1,27 +1,28 @@
 use gpui_kit::component::{
-    ActiveTheme, ColorTokens, Disableable, Icon, StyledExt,
+    ActiveTheme, ColorTokens, Disableable, Icon,
     button::{Button, ButtonVariants},
     resizable::{h_resizable, resizable_panel},
 };
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
-use gpui_kit::{
-    AnyElement, Context, IntoElement, Pixels, Rems, Render, Role, Window, div, prelude::*, rems,
-};
+use gpui_kit::{AnyElement, Context, IntoElement, Pixels, Render, Role, Window, div, prelude::*};
 
-use crate::components::{AppIcon, NAVIGATION_PANE_WIDTH};
+use crate::components::{AppIcon, NAVIGATION_PANE_WIDTH, PaneHeader};
 
 use super::message_list::{MessageListLayout, record_resized_message_list_width};
 use super::message_reader::ReaderLayout;
 use super::{
     CompactMailPane, MAIL_SPLIT_HANDLE_RESERVE, MESSAGE_LIST_MAX_WIDTH, MESSAGE_LIST_MIN_WIDTH,
-    MESSAGE_READER_CONTEXT, MESSAGE_READER_MIN_WIDTH, MailView, SyncStatus,
+    MESSAGE_READER_CONTEXT, MESSAGE_READER_MIN_WIDTH, MailView, MessageListWidthChange, SyncStatus,
 };
 
-const MAIL_HEADER_HEIGHT: Rems = rems(3.625);
-
 impl MailView {
-    fn render_header(&self, colors: ColorTokens, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(
+        &self,
+        layout: MessageListLayout,
+        colors: ColorTokens,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let status = self.sync_status_label();
         let status_role = if matches!(self.sync_status, SyncStatus::Failed(_)) {
             Role::Alert
@@ -32,8 +33,6 @@ impl MailView {
             .id("mail-sync-status")
             .text_sm()
             .text_color(colors.muted_foreground)
-            .min_w_0()
-            .flex_1()
             .truncate()
             .role(status_role)
             .aria_label(status.clone())
@@ -45,49 +44,51 @@ impl MailView {
 
         let sync_button = Button::new("sync-mail")
             .ghost()
-            .label("Sync")
+            .icon(Icon::new(AppIcon::Sync))
+            .accessibility_label("Sync")
+            .tooltip("Sync")
             .loading(self.sync_status.is_sync_active())
             .disabled(self.sync_status.is_sync_active() || self.message_update_in_progress())
             .on_click(cx.listener(|view, _, _, cx| view.refresh(cx)));
         #[cfg(test)]
         let sync_button = sync_button.debug_selector(|| "sync-mail".to_owned());
 
-        div()
-            .w_full()
-            .h(MAIL_HEADER_HEIGHT)
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_4()
-            .px_4()
-            .border_b_1()
-            .border_color(colors.border)
-            .child({
-                let mut title = div()
-                    .flex()
-                    .items_center()
-                    .gap_4()
-                    .min_w_0()
-                    .flex_1()
-                    .child(div().text_lg().font_bold().child("Mail"));
-                if self.profile.capabilities().mail().is_read_only() {
-                    title = title.child(
-                        div()
-                            .text_sm()
-                            .text_color(colors.muted_foreground)
-                            .child("Read-only"),
-                    );
-                }
-                title.child(sync_status)
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .flex_shrink_0()
-                    .child(sync_button),
+        PaneHeader::new("mail-folder-title", self.selected_folder_name().to_owned())
+            .when(
+                self.profile.capabilities().mail().is_read_only(),
+                |header| header.tag("Read-only"),
             )
+            .status(sync_status)
+            .action(sync_button)
+            .when(layout == MessageListLayout::Split, |header| {
+                header
+                    .action(
+                        self.render_message_list_width_button(MessageListWidthChange::Narrower, cx),
+                    )
+                    .action(
+                        self.render_message_list_width_button(MessageListWidthChange::Wider, cx),
+                    )
+            })
+    }
+
+    fn render_message_list_width_button(
+        &self,
+        change: MessageListWidthChange,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        let icon = match change {
+            MessageListWidthChange::Narrower => AppIcon::NarrowList,
+            MessageListWidthChange::Wider => AppIcon::WidenList,
+        };
+        Button::new(change.button_id())
+            .ghost()
+            .icon(Icon::new(icon))
+            .accessibility_label(change.button_label())
+            .tooltip(change.button_label())
+            .disabled(self.pane_layout.message_list_width.is_disabled_for(change))
+            .on_click(cx.listener(move |view, _, window, cx| {
+                view.pane_layout.resize(change, window, cx);
+            }))
     }
 
     fn render_resizable_message_panes(
@@ -112,7 +113,7 @@ impl MailView {
                             ..MESSAGE_LIST_MAX_WIDTH.to_pixels(rem_size),
                     )
                     .fixed()
-                    .child(self.render_message_list(MessageListLayout::Split, &colors, cx)),
+                    .child(self.render_message_list(&colors, cx)),
             )
             .child(
                 resizable_panel()
@@ -124,20 +125,20 @@ impl MailView {
 
     fn render_message_panes(
         &mut self,
-        window: &mut Window,
+        layout: MessageListLayout,
+        reader: ReaderLayout,
+        rem_size: Pixels,
         colors: ColorTokens,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rem_size = window.rem_size();
         self.pane_layout.sync_rem_size(rem_size, cx);
         self.update_message_row_sizes(rem_size);
 
-        let compact = self.uses_compact_mail_layout(window, rem_size);
-        let reader = self.reader_layout(window, rem_size, compact);
-        if compact {
-            self.render_compact_message_pane(reader, colors, cx)
-        } else {
-            self.render_resizable_message_panes(rem_size, reader, colors, cx)
+        match layout {
+            MessageListLayout::Compact => self.render_compact_message_pane(reader, colors, cx),
+            MessageListLayout::Split => {
+                self.render_resizable_message_panes(rem_size, reader, colors, cx)
+            }
         }
     }
 
@@ -155,11 +156,19 @@ impl MailView {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .child(self.render_message_list(MessageListLayout::Compact, &colors, cx))
+                .child(self.render_message_list(&colors, cx))
                 .into_any_element(),
             CompactMailPane::MessageReader => {
                 self.render_compact_message_reader(reader, colors, cx)
             }
+        }
+    }
+
+    fn message_list_layout(&self, window: &Window, rem_size: Pixels) -> MessageListLayout {
+        if self.uses_compact_mail_layout(window, rem_size) {
+            MessageListLayout::Compact
+        } else {
+            MessageListLayout::Split
         }
     }
 
@@ -231,14 +240,21 @@ impl MailView {
 impl Render for MailView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().semantic_tokens().colors;
-        let panes = self.render_message_panes(window, colors, cx);
+        let rem_size = window.rem_size();
+        let layout = self.message_list_layout(window, rem_size);
+        let reader = self.reader_layout(
+            window,
+            rem_size,
+            matches!(layout, MessageListLayout::Compact),
+        );
+        let panes = self.render_message_panes(layout, reader, rem_size, colors, cx);
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(colors.background)
             .text_color(colors.foreground)
-            .child(self.render_header(colors, cx))
+            .child(self.render_header(layout, colors, cx))
             .child(div().flex_1().min_h_0().min_w_0().child(panes))
     }
 }
