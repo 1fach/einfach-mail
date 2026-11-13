@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Capture the synthetic UI preview in each view and appearance on Hyprland.
 #
-# Usage: scripts/preview-shots.sh [-o OUTPUT_DIR] [-p NAME_PREFIX] [-a "light dark"] [-s WxH] [destination ...]
+# Usage: scripts/preview-shots.sh [-o OUTPUT_DIR] [-p NAME_PREFIX] [-a "light dark"] [-s WxH] [-e SCENARIO] [destination ...]
 #
 # Destinations: accounts mail mail-reader calendar settings (default: all of them).
+# -e sets EINFACH_MAIL_UI_PREVIEW_SCENARIO, for example full-access.
 # Each shot opens a real window on the active workspace, so leave the display alone
-# while the script runs. Needs hyprctl, grim, jq, and a ui-preview build.
+# while the script runs. The script parks the pointer in the bottom-right corner of the
+# first monitor, so no hover state reaches a shot. Needs hyprctl, grim, jq, and a
+# ui-preview build.
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,16 +18,18 @@ output_dir="$repo_root/target/preview-shots"
 name_prefix="preview"
 appearances="light dark"
 window_size="1280x800"
+scenario=""
 window_timeout_seconds=40
 settle_seconds=4
 
-while getopts "o:p:a:s:h" option; do
+while getopts "o:p:a:s:e:h" option; do
     case "$option" in
         o) output_dir="$OPTARG" ;;
         p) name_prefix="$OPTARG" ;;
         a) appearances="$OPTARG" ;;
         s) window_size="$OPTARG" ;;
-        *) sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+        e) scenario="$OPTARG" ;;
+        *) sed -n '2,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
@@ -98,11 +103,20 @@ place_window() {
     hyprctl eval "hl.dispatch(hl.dsp.window.move({ x = 40, y = 60, window = \"$window\" }))" >/dev/null
 }
 
+# Moves the pointer to the bottom-right corner of the first monitor, away from the window.
+park_pointer() {
+    local corner
+    corner="$(hyprctl monitors -j | jq -r '.[0] | "\(.x + .width - 1) \(.y + .height - 1)"')"
+    hyprctl eval "hl.dispatch(hl.dsp.cursor.move({ x = ${corner% *}, y = ${corner#* } }))" >/dev/null
+}
+
 capture() {
     local destination="$1" appearance="$2"
     local shot="$output_dir/$name_prefix-$destination-$appearance.png"
 
-    EINFACH_MAIL_UI_PREVIEW_DESTINATION="$destination" \
+    park_pointer
+    env ${scenario:+EINFACH_MAIL_UI_PREVIEW_SCENARIO="$scenario"} \
+        EINFACH_MAIL_UI_PREVIEW_DESTINATION="$destination" \
         EINFACH_MAIL_UI_PREVIEW_APPEARANCE="$appearance" \
         EINFACH_MAIL_UI_PREVIEW_WINDOW_SIZE="$window_size" \
         "$preview_binary" &
@@ -111,6 +125,7 @@ capture() {
     wait_for_window
     # The window has no class or title, so the process ID is the only reliable match.
     place_window "$preview_pid"
+    park_pointer
     sleep "$settle_seconds"
 
     local region

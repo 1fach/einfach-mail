@@ -77,6 +77,14 @@ EINFACH_MAIL_UI_PREVIEW_SCENARIO=mail-sync-recovery cargo run --locked --package
 
 Open Mail to show a synthetic service error during its first Inbox sync. Select **Sync** to retry; the next request succeeds.
 
+The standard preview account is read-only, so New mail, the reader command bar, and New event do not appear. To review them, run the `full-access` scenario:
+
+```sh
+EINFACH_MAIL_UI_PREVIEW_SCENARIO=full-access cargo run --locked --package einfach-mail-desktop --features ui-preview --bin einfach-mail
+```
+
+The scenario gives the synthetic account every mail action and calendar create, update, and delete, so the controls that need them are drawn. The synthetic providers store nothing, so each write still reports that it is unsupported. Use it for layout and accessibility review, not for write behavior.
+
 To open the preview on a chosen view, appearance, and window size, set these developer-only variables. They exist only in `ui-preview` builds, and the preview exits with an error for any other value:
 
 | Variable | Values | Effect |
@@ -90,7 +98,10 @@ On Hyprland, `scripts/preview-shots.sh` captures every view in light and dark wi
 ```sh
 scripts/preview-shots.sh -o docs/project/evidence -p my-change
 scripts/preview-shots.sh -a dark -s 900x700 mail mail-reader
+scripts/preview-shots.sh -e full-access -p my-change-full-access mail-reader calendar
 ```
+
+`-e` passes the scenario to the preview. The script also moves the pointer to the bottom-right corner of the first monitor, so no hover state reaches a capture.
 
 The script sets `OPENSSL_NO_VENDOR=1` unless you set it, because the vendored OpenSSL build needs Perl `FindBin`. Use synthetic preview data only, and do not commit captures that contain anything else. Run the preview-only headless tests with `cargo test --locked --package einfach-mail-desktop --features ui-preview`.
 

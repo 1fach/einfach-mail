@@ -120,17 +120,17 @@ where
             },
             CalendarStatus::Failed(_) => return None,
         };
-        Some(
-            div()
-                .id("calendar-sync-status")
-                .role(Role::Status)
-                .aria_label(label.clone())
-                .text_sm()
-                .text_color(colors.muted_foreground)
-                .truncate()
-                .child(label)
-                .into_any_element(),
-        )
+        let caption = div()
+            .id("calendar-sync-status")
+            .role(Role::Status)
+            .aria_label(label.clone())
+            .text_sm()
+            .text_color(colors.muted_foreground)
+            .truncate()
+            .child(label);
+        #[cfg(test)]
+        let caption = caption.test_support();
+        Some(caption.into_any_element())
     }
 
     /// The sync state on its own line under the header, where the agenda layout has no room for

@@ -497,3 +497,61 @@ async fn new_event_sits_in_the_navigation_pane_and_follows_capabilities(cx: &mut
         "the mini month sits with it"
     );
 }
+
+#[gpui_kit::test]
+async fn mini_month_weekday_headers_are_named_with_full_weekday_names(cx: &mut TestAppContext) {
+    let (_, context) = open_week_calendar(cx, profile(), 1280.).await;
+
+    let headers = context.update(|window, _| {
+        window
+            .find_all_by_role(Role::ColumnHeader)
+            .iter()
+            .filter_map(|header| header.label().map(str::to_owned))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        headers,
+        [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday"
+        ],
+        "the two-letter initials read as full weekday names"
+    );
+}
+
+#[gpui_kit::test]
+async fn calendar_caption_is_a_status_and_the_write_notice_is_an_alert(cx: &mut TestAppContext) {
+    let (view, context) = open_week_calendar(cx, profile(), 1280.).await;
+    assert_eq!(
+        context.update(|window, _| window.find("calendar-sync-status").role()),
+        Some(Role::Status),
+        "the sync caption in the header is announced politely"
+    );
+    assert!(
+        context.debug_bounds("calendar-write-notice").is_none(),
+        "a ready calendar shows no write notice"
+    );
+
+    context.cx.update(|app| {
+        view.update(app, |view, cx| {
+            view.write_readiness = CalendarWriteReadiness::ViewSyncRequired;
+            cx.notify();
+        });
+    });
+    draw_calendar_view(context);
+
+    assert!(
+        context.debug_bounds("calendar-write-notice").is_some(),
+        "an unsynchronized week shows the write notice"
+    );
+    assert_eq!(
+        context.update(|window, _| window.find("calendar-write-notice").role()),
+        Some(Role::Alert),
+        "the write notice interrupts, because it blocks New event and Edit"
+    );
+}

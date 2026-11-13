@@ -1,9 +1,9 @@
-use super::super::{PreviewScenario, account_services, preview_account};
+use super::super::{PreviewAccountProvider, PreviewScenario, account_services, preview_account};
 use crate::app::workspace::{Workspace, WorkspaceTestSection};
 use crate::features::AppearanceSettingsStore;
 use crate::test_support::wait_for_ui_condition;
 use gpui_kit::test::TestWindowExt as _;
-use gpui_kit::{Role, TestAppContext, px, size};
+use gpui_kit::{Entity, Role, TestAppContext, VisualTestContext, px, size};
 
 #[gpui_kit::test]
 async fn mail_sync_recovery_preview_retries_at_wide_width(cx: &mut TestAppContext) {
@@ -16,25 +16,8 @@ async fn mail_sync_recovery_preview_retries_at_compact_width(cx: &mut TestAppCon
 }
 
 async fn assert_recovery_retry_at_width(cx: &mut TestAppContext, width: f32) {
-    cx.update(gpui_kit::init);
-    let settings_directory =
-        tempfile::tempdir().expect("temporary appearance settings directory is created");
-    let settings_store =
-        AppearanceSettingsStore::at_path(settings_directory.path().join("preferences.json"));
-    let account_id = preview_account().profile().id().clone();
-    let services = account_services(PreviewScenario::MailSyncRecovery);
-    let (workspace, context) = cx.add_window_view(move |window, cx| {
-        Workspace::new_for_window(Ok(services), Ok(settings_store), window, cx)
-    });
-    context.simulate_resize(size(px(width), px(800.)));
-
-    wait_for_ui_condition(context, |_, app| {
-        workspace
-            .read(app)
-            .test_status_is_connected_to(&account_id, app)
-    })
-    .await;
-
+    let (workspace, context) =
+        open_preview_workspace(cx, PreviewScenario::MailSyncRecovery, width).await;
     context.update(|window, cx| window.click("nav-mail", cx));
     context.run_until_parked();
 
@@ -95,4 +78,69 @@ async fn assert_recovery_retry_at_width(cx: &mut TestAppContext, width: f32) {
             .debug_bounds("message-row-preview-message-1")
             .is_some()
     );
+}
+
+#[gpui_kit::test]
+async fn full_access_preview_shows_write_commands_and_the_standard_preview_does_not(
+    cx: &mut TestAppContext,
+) {
+    let (_, context) = open_preview_workspace(cx, PreviewScenario::Standard, 1280.).await;
+    assert_write_commands(context, false);
+
+    let (_, context) = open_preview_workspace(cx, PreviewScenario::FullAccess, 1280.).await;
+    assert_write_commands(context, true);
+}
+
+fn assert_write_commands(context: &mut VisualTestContext, expected: bool) {
+    context.update(|window, cx| window.click("nav-mail", cx));
+    context.run_until_parked();
+    assert_eq!(
+        context.debug_bounds("new-mail-message").is_some(),
+        expected,
+        "New mail follows the account's send capability"
+    );
+
+    context.update(|window, cx| window.click("message-option-preview-message-1", cx));
+    context.run_until_parked();
+    assert_eq!(
+        context.debug_bounds("message-reply").is_some(),
+        expected,
+        "the reader command bar follows the account's mail capabilities"
+    );
+
+    context.update(|window, cx| window.click("nav-calendar", cx));
+    context.run_until_parked();
+    assert_eq!(
+        context.debug_bounds("calendar-new-event").is_some(),
+        expected,
+        "New event follows the account's calendar create capability"
+    );
+}
+
+async fn open_preview_workspace(
+    cx: &mut TestAppContext,
+    scenario: PreviewScenario,
+    width: f32,
+) -> (
+    Entity<Workspace<PreviewAccountProvider>>,
+    &mut VisualTestContext,
+) {
+    cx.update(gpui_kit::init);
+    let settings_directory =
+        tempfile::tempdir().expect("temporary appearance settings directory is created");
+    let settings_store =
+        AppearanceSettingsStore::at_path(settings_directory.path().join("preferences.json"));
+    let account_id = preview_account(scenario).profile().id().clone();
+    let services = account_services(scenario);
+    let (workspace, context) = cx.add_window_view(move |window, cx| {
+        Workspace::new_for_window(Ok(services), Ok(settings_store), window, cx)
+    });
+    context.simulate_resize(size(px(width), px(800.)));
+    wait_for_ui_condition(context, |_, app| {
+        workspace
+            .read(app)
+            .test_status_is_connected_to(&account_id, app)
+    })
+    .await;
+    (workspace, context)
 }
