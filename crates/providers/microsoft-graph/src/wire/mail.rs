@@ -118,7 +118,7 @@ impl GraphApi {
             let folder = serde_json::from_slice::<WireFolderId>(&response)
                 .map_err(|_| GraphError::InvalidResponse)?;
             let folder_id = FolderId::try_from(folder.id).map_err(|_| GraphError::InvalidRecord)?;
-            // A folder that an earlier alias named keeps that kind, so this assignment is skipped.
+            // `assign` keeps the earlier kind when an earlier alias already named this folder.
             kinds.assign(kind, folder_id);
         }
         Ok(kinds)
