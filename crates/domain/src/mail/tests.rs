@@ -3,8 +3,9 @@ use std::time::{Duration, SystemTime};
 use crate::{AccountId, FolderId, FolderReference, Mailbox};
 
 use super::{
-    FolderParentError, FollowUpFlagStatus, MailFolder, MessageBody, MessageBodyType,
-    MessageMetadata, MessageMetadataPatch, MessageOrigin, ReadState,
+    FolderParentError, FollowUpFlagStatus, MailFolder, MailFolderKind, MessageBody,
+    MessageBodyType, MessageMetadata, MessageMetadataPatch, MessageOrigin, MessagePreview,
+    ReadState, UnreadCount,
 };
 
 fn folder_reference(account_id: &str, folder_id: &str) -> FolderReference {
@@ -192,6 +193,151 @@ fn mail_debug_output_redacts_nested_account_and_message_values() {
     assert!(debug.contains("Read"));
     assert!(debug.contains("Flagged"));
     assert!(debug.contains("<redacted>"));
+}
+
+fn synthetic_preview(text: &str) -> MessagePreview {
+    MessagePreview::from_untrusted(text).expect("synthetic preview has printable text")
+}
+
+#[test]
+fn mail_folder_starts_without_a_kind_or_unread_count() {
+    let folder = MailFolder::new(
+        folder_reference("account-1", "folder-1"),
+        None,
+        "Folder".to_owned(),
+    )
+    .expect("synthetic folder is valid");
+
+    assert_eq!(folder.kind(), None);
+    assert_eq!(folder.unread_count(), None);
+}
+
+#[test]
+fn mail_folder_builders_set_and_clear_the_kind_and_unread_count() {
+    let folder = MailFolder::new(
+        folder_reference("account-1", "folder-1"),
+        None,
+        "Folder".to_owned(),
+    )
+    .expect("synthetic folder is valid")
+    .with_kind(Some(MailFolderKind::Inbox))
+    .with_unread_count(Some(UnreadCount::new(12)));
+
+    assert_eq!(folder.kind(), Some(MailFolderKind::Inbox));
+    assert_eq!(folder.unread_count().map(UnreadCount::get), Some(12));
+
+    let cleared = folder.with_kind(None).with_unread_count(None);
+
+    assert_eq!(cleared.kind(), None);
+    assert_eq!(cleared.unread_count(), None);
+}
+
+#[test]
+fn message_metadata_starts_without_a_preview() {
+    assert_eq!(synthetic_metadata().preview(), None);
+}
+
+#[test]
+fn message_metadata_with_preview_sets_and_clears_the_preview() {
+    let preview = synthetic_preview("Synthetic opening line");
+
+    let metadata = synthetic_metadata().with_preview(Some(preview.clone()));
+
+    assert_eq!(metadata.preview(), Some(&preview));
+    assert_eq!(metadata.with_preview(None).preview(), None);
+}
+
+#[test]
+fn unchanged_preview_patch_keeps_the_preview() {
+    let preview = synthetic_preview("Synthetic opening line");
+    let mut metadata = synthetic_metadata().with_preview(Some(preview.clone()));
+
+    metadata.apply_patch(MessageMetadataPatch::new());
+
+    assert_eq!(metadata.preview(), Some(&preview));
+}
+
+#[test]
+fn preview_patch_set_none_clears_the_preview() {
+    let mut metadata = synthetic_metadata().with_preview(Some(synthetic_preview("Synthetic")));
+    let mut patch = MessageMetadataPatch::new();
+    patch.set_preview(None);
+
+    metadata.apply_patch(patch);
+
+    assert_eq!(metadata.preview(), None);
+}
+
+#[test]
+fn preview_patch_set_some_replaces_the_preview() {
+    let replacement = synthetic_preview("Replacement opening line");
+    let mut metadata = synthetic_metadata().with_preview(Some(synthetic_preview("Synthetic")));
+    let mut patch = MessageMetadataPatch::new();
+    patch.set_preview(Some(replacement.clone()));
+
+    metadata.apply_patch(patch);
+
+    assert_eq!(metadata.preview(), Some(&replacement));
+}
+
+#[test]
+fn complete_patch_without_a_preview_update_creates_a_message_without_one() {
+    let message = complete_patch()
+        .into_complete_message(folder_reference("account-1", "folder-1"), message_id())
+        .expect("all selected fields are present");
+
+    assert_eq!(message.metadata().preview(), None);
+}
+
+#[test]
+fn complete_patch_with_a_preview_creates_a_message_with_it() {
+    let preview = synthetic_preview("Synthetic opening line");
+    let mut patch = complete_patch();
+    patch.set_preview(Some(preview.clone()));
+
+    let message = patch
+        .into_complete_message(folder_reference("account-1", "folder-1"), message_id())
+        .expect("all selected fields are present");
+
+    assert_eq!(message.metadata().preview(), Some(&preview));
+}
+
+#[test]
+fn complete_patch_with_a_cleared_preview_creates_a_message_without_one() {
+    let mut patch = complete_patch();
+    patch.set_preview(None);
+
+    let message = patch
+        .into_complete_message(folder_reference("account-1", "folder-1"), message_id())
+        .expect("all selected fields are present");
+
+    assert_eq!(message.metadata().preview(), None);
+}
+
+#[test]
+fn preview_text_stays_out_of_debug_output() {
+    let metadata = synthetic_metadata().with_preview(Some(synthetic_preview("preview-marker")));
+    let mut patch = MessageMetadataPatch::new();
+    patch.set_preview(Some(synthetic_preview("patch-preview-marker")));
+
+    let debug = format!("{metadata:?}{patch:?}");
+
+    assert!(!debug.contains("preview-marker"));
+    assert!(debug.contains("MessagePreview(<redacted>)"));
+}
+
+fn message_id() -> crate::MessageId {
+    crate::MessageId::try_from("message-1".to_owned()).expect("synthetic message ID is non-empty")
+}
+
+fn complete_patch() -> MessageMetadataPatch {
+    let mut patch = MessageMetadataPatch::new();
+    patch.set_subject(None);
+    patch.set_from(None);
+    patch.set_sender(None);
+    patch.set_received_at(SystemTime::UNIX_EPOCH);
+    patch.set_read_state(ReadState::Read);
+    patch
 }
 
 fn synthetic_metadata() -> MessageMetadata {

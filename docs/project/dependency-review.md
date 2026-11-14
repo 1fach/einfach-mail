@@ -1,6 +1,6 @@
 # Rust dependency review
 
-Last reviewed: 2026-11-13. These notes record dependency evidence and adopted choices. Recheck versions and project fit before adding or upgrading a crate.
+Last reviewed: 2026-11-14. These notes record dependency evidence and adopted choices. Recheck versions and project fit before adding or upgrading a crate.
 
 ## Review rules
 
@@ -135,6 +135,17 @@ The Linux local gate's offline `cargo audit --deny yanked` run loaded 1,490 Rust
 | `derive_more` 2.1.1 | [Package metadata and manifest](https://docs.rs/crate/derive_more/2.1.1), [Debug derive documentation](https://docs.rs/derive_more/2.1.1/derive_more/derive.Debug.html), and [upstream changelog](https://docs.rs/crate/derive_more/2.1.1/source/CHANGELOG.md). MIT licensed, Rust 1.81 MSRV, portable procedural macro, and version already present through GPUI. The latest release listed in its changelog is dated 2025-12-22. Its `debug` feature enables `unicode-xid` 0.2.6 through `derive_more-impl`, adding a new package to the lockfile. The local RustSec audit found no advisory for the existing `derive_more` package. | Reject as a direct dependency for this fixed formatting policy: enabling it adds an unnecessary package for a capability already provided by `std::fmt`. |
 | `std::fmt::Debug` | The standard library supports custom structured formatting, and the code already uses it for message bodies and calendar records. It adds no package or platform-specific behavior. | Use small, explicit implementations for sensitive domain types and the identifier macro. Redaction stays at each type boundary, while nested outer values inherit it. |
 | `redactable` 0.14.0 and `sensitive-fmt` 0.3.0 | [`redactable`](https://docs.rs/crate/redactable/0.14.0) requires Rust 1.97, above the workspace's Rust 1.95 MSRV. [`sensitive-fmt`](https://docs.rs/crate/sensitive-fmt/0.3.0) is a newer project whose maintenance and security history are not established. | Reject: neither improves fit enough to justify its MSRV incompatibility or added project risk. |
+
+### Message preview character rule — 2026-11-14
+
+`MessagePreview::from_untrusted` ([ADR 0067](../decisions/0067-message-previews-folder-unread-counts-and-kinds.md)) classifies each character of provider plain text and builds a bounded string. Cc characters and whitespace become one space, 12 bidirectional controls and 6 invisible padding characters are dropped, whitespace runs collapse, and output stops at 256 characters. The rule parses no markup and decodes no entities, so an HTML sanitizer does not apply. The domain crate uses only `std::char::is_control` and `is_whitespace` plus two fixed lists, and adds no dependency.
+
+| Candidate | Evidence | Decision |
+| --- | --- | --- |
+| `zero-width-strip` 0.1.0 | [Package](https://docs.rs/crate/zero-width-strip/0.1.0) and [source](https://docs.rs/crate/zero-width-strip/0.1.0/source/src/lib.rs). MIT OR Apache-2.0, Rust 1.74, no dependencies. The crates.io record shows one release on 2026-05-16 and 24 downloads. It strips U+200B to U+200F, U+202A to U+202E, U+2060 to U+2064, U+2066 to U+2069, U+180E, and U+FEFF. It does not drop U+061C, U+00AD, or U+034F. It drops U+200D, which joins emoji sequences, and the rule keeps it. It does not map control characters or whitespace, collapse runs, trim, or cap length. | Reject: it covers a different set, so the app would still need the classification, spacing, and cap, and the crate has no maintenance history. |
+| `martensite-sanitize` 0.22.0 | [Package](https://docs.rs/crate/martensite-sanitize/0.22.0). MIT OR Apache-2.0, Rust 1.89, depends on `unicode-normalization`. The crates.io record shows a first release on 2026-10-08 and 83 downloads. It is an input-sanitization engine for editable GUI widgets, with normalization and confusable folding. | Reject: it targets text entry, normalizes text the rule must leave as sent, and adds a dependency and a young project's risk for a fixed 18-character list. |
+| `unicode-normalization`, `unicode-bidi`, `unicode-segmentation`, and `normy` | Each handles normalization, the bidirectional algorithm, grapheme boundaries, or NLP text normalization. None removes bidirectional control characters or padding from a string. | Reject: none answers this need. |
+| `char::is_control`, `char::is_whitespace`, and a fixed character list | The standard library supplies the Cc and Unicode White_Space classes. The 18 listed characters are enumerated in the rule and its tests. | Use. The rule has one bounded loop and needs no table that must follow a Unicode version. |
 
 ### Native message move — 2026-11-01
 
