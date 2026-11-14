@@ -1,4 +1,3 @@
-use super::super::message_columns_sql;
 use super::*;
 
 const MESSAGE: &str = "message-1";
@@ -30,21 +29,33 @@ fn patch_with_preview(text: &str) -> MessageMetadataPatch {
     patch
 }
 
-/// Returns the name of each metadata column that is NULL in the one cached message.
-async fn null_metadata_columns(cache: &SqliteAccountCache) -> Vec<String> {
-    let name_when_null =
-        message_columns_sql(|name| format!("CASE WHEN {name} IS NULL THEN '{name}' END"));
+/// Returns the name of each `mail_messages` column that is NULL in the one cached message.
+///
+/// The column names come from the schema, so a column that a migration adds and the store
+/// statement leaves out appears here.
+async fn null_message_columns(cache: &SqliteAccountCache) -> Vec<String> {
     cache
         .client
-        .conn_and_then(move |connection| {
-            let mut statement =
-                connection.prepare(&format!("SELECT {name_when_null} FROM mail_messages"))?;
-            let column_count = statement.column_count();
-            let null_columns = statement.query_row([], |row| {
-                (0..column_count)
-                    .map(|index| row.get::<_, Option<String>>(index))
-                    .collect::<Result<Vec<_>, _>>()
-            })?;
+        .conn_and_then(|connection| {
+            let mut columns =
+                connection.prepare("SELECT name FROM pragma_table_info('mail_messages')")?;
+            let names = columns
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let name_when_null = names
+                .iter()
+                .map(|name| format!("CASE WHEN {name} IS NULL THEN '{name}' END"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let null_columns = connection.query_row(
+                &format!("SELECT {name_when_null} FROM mail_messages"),
+                [],
+                |row| {
+                    (0..names.len())
+                        .map(|index| row.get::<_, Option<String>>(index))
+                        .collect::<Result<Vec<_>, _>>()
+                },
+            )?;
             Ok::<_, CacheFailure>(null_columns.into_iter().flatten().collect())
         })
         .await
@@ -86,9 +97,9 @@ fn every_metadata_field_survives_store_list_read_and_move() {
             .expect("synthetic body is cached");
 
         assert_eq!(
-            null_metadata_columns(&cache).await,
-            Vec::<String>::new(),
-            "the synthetic message must set every metadata column"
+            null_message_columns(&cache).await,
+            ["full_sync_generation"],
+            "the synthetic message must set every stored column"
         );
         assert_eq!(cache.list_messages(&inbox).await, Ok(vec![stored.clone()]));
         assert_eq!(
