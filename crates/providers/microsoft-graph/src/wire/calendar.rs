@@ -73,7 +73,9 @@ impl GraphApi {
                     response_bytes,
                 )))
             }
-            GraphResponse::MessageDeltaReset(_) => Err(GraphError::InvalidResponse),
+            GraphResponse::FolderNotFound | GraphResponse::MessageDeltaReset(_) => {
+                Err(GraphError::InvalidResponse)
+            }
         }
     }
 

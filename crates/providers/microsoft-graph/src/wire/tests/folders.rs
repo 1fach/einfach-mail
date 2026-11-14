@@ -11,11 +11,12 @@ async fn folder_listing_follows_pages_and_traverses_children() {
         .mock_async(|when, then| {
             when.method(GET)
                 .path("/v1.0/me/mailFolders")
+                .query_param("$select", "id,displayName,isHidden,unreadItemCount")
                 .query_param_missing("$skiptoken");
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(json!({
-                    "value": [{"id": "root-inbox", "displayName": "Inbox"}],
+                    "value": [{"id": "root-inbox", "displayName": "Inbox", "unreadItemCount": 3}],
                     "@odata.nextLink": page_two_link,
                 }));
         })
@@ -35,11 +36,12 @@ async fn folder_listing_follows_pages_and_traverses_children() {
     let inbox_children = server
         .mock_async(|when, then| {
             when.method(GET)
-                .path("/v1.0/me/mailFolders/root-inbox/childFolders");
+                .path("/v1.0/me/mailFolders/root-inbox/childFolders")
+                .query_param("$select", "id,displayName,isHidden,unreadItemCount");
             then.status(200)
                 .header("content-type", "application/json")
                 .json_body(json!({
-                    "value": [{"id": "inbox-projects", "displayName": "Projects"}]
+                    "value": [{"id": "inbox-projects", "displayName": "Projects", "unreadItemCount": 0}]
                 }));
         })
         .await;
@@ -84,6 +86,13 @@ async fn folder_listing_follows_pages_and_traverses_children() {
             .folder_id()
             .as_str(),
         "root-inbox"
+    );
+    assert_eq!(
+        folders
+            .iter()
+            .map(|folder| folder.unread_count().map(UnreadCount::get))
+            .collect::<Vec<_>>(),
+        [Some(3), None, Some(0)]
     );
     root_page_one.assert_async().await;
     root_page_two.assert_async().await;
@@ -197,6 +206,7 @@ fn maps_folder_payload_to_account_scoped_domain_values() {
         id: "folder-1".to_owned(),
         display_name: "Inbox".to_owned(),
         is_hidden: false,
+        unread_item_count: None,
     }
     .into_domain(&account_id, None)
     .expect("synthetic folder maps to the domain")
@@ -213,6 +223,7 @@ fn rejects_empty_folder_ids() {
             id: String::new(),
             display_name: "Inbox".to_owned(),
             is_hidden: false,
+            unread_item_count: None,
         }
         .into_domain(&account_id, None)
         .is_err()
@@ -229,6 +240,7 @@ fn rejects_folder_metadata_that_lists_itself_as_parent() {
         id: "folder-1".to_owned(),
         display_name: "Child".to_owned(),
         is_hidden: false,
+        unread_item_count: None,
     }
     .into_domain(&account_id, Some(parent_id));
 
@@ -243,9 +255,45 @@ fn excludes_hidden_folders_from_the_browsable_tree() {
         id: "folder-hidden".to_owned(),
         display_name: "Hidden".to_owned(),
         is_hidden: true,
+        unread_item_count: None,
     }
     .into_domain(&account_id, None)
     .expect("hidden folder metadata is valid");
 
     assert!(folder.is_none());
+}
+
+#[test]
+fn folder_unread_counts_outside_the_u32_range_are_unknown_and_keep_the_folder() {
+    let account_id = AccountId::try_from("synthetic-account".to_owned())
+        .expect("synthetic account ID is non-empty");
+
+    for (unread_item_count, expected) in [
+        (None, None),
+        (Some("null"), None),
+        (Some("0"), Some(0)),
+        (Some("12"), Some(12)),
+        (Some("4294967295"), Some(u32::MAX)),
+        (Some("4294967296"), None),
+        (Some("-1"), None),
+        (Some("100000000000000000000000"), None),
+        (Some("2.5"), None),
+        (Some(r#""12""#), None),
+    ] {
+        let count_field = unread_item_count
+            .map(|count| format!(r#","unreadItemCount":{count}"#))
+            .unwrap_or_default();
+        let payload = format!(r#"{{"id":"folder-1","displayName":"Inbox"{count_field}}}"#);
+        let folder = serde_json::from_str::<WireFolder>(&payload)
+            .expect("a folder with any unread count value deserializes")
+            .into_domain(&account_id, None)
+            .expect("a folder with any unread count value maps to the domain")
+            .expect("synthetic folder is visible");
+
+        assert_eq!(
+            folder.unread_count().map(UnreadCount::get),
+            expected,
+            "unreadItemCount {unread_item_count:?}"
+        );
+    }
 }

@@ -218,27 +218,27 @@ fn well_known_paths_use_locale_independent_folder_names() {
     for (folder, expected) in [
         (
             MailFolderKind::Inbox,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
         (
             MailFolderKind::SentItems,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/sentitems?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/sentitems?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
         (
             MailFolderKind::Drafts,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/drafts?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/drafts?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
         (
             MailFolderKind::Archive,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/archive?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/archive?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
         (
             MailFolderKind::DeletedItems,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/deleteditems?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/deleteditems?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
         (
             MailFolderKind::JunkEmail,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/junkemail?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/junkemail?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
     ] {
         assert_eq!(
@@ -317,4 +317,25 @@ fn accepts_only_reset_links_for_the_requested_folder_delta_path() {
             Some(GraphError::UnsafeLink)
         );
     }
+}
+
+#[test]
+fn message_reset_links_must_request_the_body_preview() {
+    let authority = authority();
+    let without_preview = "https://graph.microsoft.com/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=&$select=id,subject,from,sender,receivedDateTime,isRead,flag";
+    let with_preview = "https://graph.microsoft.com/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=&$select=id,subject,from,sender,receivedDateTime,isRead,flag,bodyPreview";
+
+    assert_eq!(
+        authority
+            .message_delta_reset_link("folder", without_preview)
+            .err(),
+        Some(GraphError::UnsafeLink)
+    );
+    assert_eq!(
+        authority
+            .message_delta_reset_link("folder", with_preview)
+            .expect("a reset link with the preview select is accepted")
+            .as_str(),
+        with_preview
+    );
 }

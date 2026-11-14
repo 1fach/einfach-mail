@@ -40,6 +40,7 @@ use self::{
 pub(super) enum GraphReadOperation {
     Profile,
     Folders,
+    FolderKind,
     MessageBody,
     CalendarEventRead,
 }
@@ -84,6 +85,7 @@ impl GraphRequestOperation {
             Self::Get(
                 GraphReadOperation::Profile
                 | GraphReadOperation::Folders
+                | GraphReadOperation::FolderKind
                 | GraphReadOperation::MessageBody
                 | GraphReadOperation::CalendarEventRead,
             )
@@ -97,7 +99,11 @@ impl GraphRequestOperation {
 
     fn uses_immutable_ids(&self) -> bool {
         match self {
-            Self::Get(GraphReadOperation::Profile | GraphReadOperation::Folders)
+            Self::Get(
+                GraphReadOperation::Profile
+                | GraphReadOperation::Folders
+                | GraphReadOperation::FolderKind,
+            )
             | Self::SendMail(_) => false,
             Self::Get(GraphReadOperation::MessageBody | GraphReadOperation::CalendarEventRead)
             | Self::MessageDelta
@@ -171,6 +177,7 @@ struct GraphCommand {
 #[derive(Eq, PartialEq)]
 pub(super) enum GraphResponse {
     Body(Vec<u8>),
+    FolderNotFound,
     MessageDeltaReset(Option<String>),
     CalendarViewDeltaReset {
         location: Option<String>,
@@ -182,6 +189,7 @@ impl std::fmt::Debug for GraphResponse {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Body(_) => formatter.write_str("Body(<redacted>)"),
+            Self::FolderNotFound => formatter.write_str("FolderNotFound"),
             Self::MessageDeltaReset(_) => formatter.write_str("MessageDeltaReset(<redacted>)"),
             Self::CalendarViewDeltaReset { .. } => {
                 formatter.write_str("CalendarViewDeltaReset(<redacted>)")
@@ -194,9 +202,9 @@ impl GraphResponse {
     fn into_body(self) -> Result<Vec<u8>, GraphError> {
         match self {
             Self::Body(body) => Ok(body),
-            Self::MessageDeltaReset(_) | Self::CalendarViewDeltaReset { .. } => {
-                Err(GraphError::InvalidResponse)
-            }
+            Self::FolderNotFound
+            | Self::MessageDeltaReset(_)
+            | Self::CalendarViewDeltaReset { .. } => Err(GraphError::InvalidResponse),
         }
     }
 }
@@ -216,6 +224,28 @@ impl GraphTransportHandle {
         self.request(GraphRequestOperation::Get(operation), url, token)
             .await?
             .into_body()
+    }
+
+    /// Reads the folder behind a well-known folder alias.
+    ///
+    /// Returns `None` when Graph answers `404 Not Found`, which means the mailbox has no
+    /// folder for that alias.
+    pub(super) async fn get_folder_kind(
+        &self,
+        url: GraphUrl,
+        token: Arc<AccessToken>,
+    ) -> Result<Option<Vec<u8>>, GraphError> {
+        match self
+            .request(
+                GraphRequestOperation::Get(GraphReadOperation::FolderKind),
+                url,
+                token,
+            )
+            .await?
+        {
+            GraphResponse::FolderNotFound => Ok(None),
+            response => response.into_body().map(Some),
+        }
     }
 
     pub(super) async fn post_mail(

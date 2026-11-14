@@ -8,8 +8,8 @@ use crate::error::GraphError;
 use einfach_mail_domain::{CalendarViewRange, MailFolderKind};
 
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
-const FOLDER_SELECT: &str = "id,displayName,isHidden";
-const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead,flag";
+const FOLDER_SELECT: &str = "id,displayName,isHidden,unreadItemCount";
+const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead,flag,bodyPreview";
 pub const CALENDAR_EVENT_EDIT_SELECT: &str = "id,subject,location,start,end,isAllDay,originalStartTimeZone,originalEndTimeZone,type,isOrganizer,attendees,isOnlineMeeting,changeKey";
 pub const MAX_GRAPH_CALENDAR_DELTA_URL_BYTES: usize = 16 * 1024;
 
@@ -52,6 +52,18 @@ impl GraphAuthority {
     }
 
     pub fn well_known_folder_path(&self, folder: MailFolderKind) -> Result<GraphUrl, GraphError> {
+        let mut url = self.folder_alias_url(folder)?;
+        url.query_pairs_mut().append_pair("$select", FOLDER_SELECT);
+        self.validated_url(url)
+    }
+
+    pub fn folder_kind_path(&self, kind: MailFolderKind) -> Result<GraphUrl, GraphError> {
+        let mut url = self.folder_alias_url(kind)?;
+        url.query_pairs_mut().append_pair("$select", "id");
+        self.validated_url(url)
+    }
+
+    fn folder_alias_url(&self, folder: MailFolderKind) -> Result<Url, GraphError> {
         let folder_name = match folder {
             MailFolderKind::Inbox => "inbox",
             MailFolderKind::SentItems => "sentitems",
@@ -65,8 +77,7 @@ impl GraphAuthority {
             .map_err(|()| GraphError::UnsafeLink)?
             .pop_if_empty()
             .extend(["me", "mailFolders", folder_name]);
-        url.query_pairs_mut().append_pair("$select", FOLDER_SELECT);
-        self.validated_url(url)
+        Ok(url)
     }
 
     pub fn child_folders_path(&self, folder_id: &str) -> Result<GraphUrl, GraphError> {

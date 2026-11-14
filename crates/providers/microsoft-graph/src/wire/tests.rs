@@ -19,9 +19,9 @@ use einfach_mail_domain::{
     CalendarDeltaProgress, CalendarEventCreation, CalendarEventDraft, CalendarEventUpdate,
     CalendarEventUpdateDraft, CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId,
     CalendarViewRange, CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus,
-    MailCapabilities, MailDraft, MailFolderKind, MailRecipient, MailReplyDraft, MailReplySource,
-    MailSubject, MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, ReadState,
-    VersionedCalendarEvent,
+    MailCapabilities, MailDraft, MailFolderKind, MailFolderKinds, MailRecipient, MailReplyDraft,
+    MailReplySource, MailSubject, MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin,
+    MessagePreview, ReadState, UnreadCount, VersionedCalendarEvent,
 };
 
 use super::{

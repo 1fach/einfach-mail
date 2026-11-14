@@ -17,9 +17,9 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MailFolderKind, MailReplyDraft, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
-    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
-    ReadState,
+    MailFolderKind, MailFolderKinds, MailReplyDraft, Mailbox, MessageBody, MessageBodyType,
+    MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+    MessageMetadataPatch, MessagePreview, ReadState, UnreadCount,
 };
 
 use super::{
@@ -27,6 +27,20 @@ use super::{
     pagination::{GraphDeltaPage, PageTraversal},
     shared::{WireField, WireRemoved},
 };
+
+/// The kinds that [`GraphApi::folder_kinds`] resolves, in request order.
+///
+/// When two aliases name the same folder, the kind listed first keeps it. Archive comes last
+/// because the user chooses its folder, so it is the alias most likely to name a folder that
+/// already has another kind.
+const FOLDER_KIND_PRECEDENCE: [MailFolderKind; 6] = [
+    MailFolderKind::Inbox,
+    MailFolderKind::SentItems,
+    MailFolderKind::Drafts,
+    MailFolderKind::DeletedItems,
+    MailFolderKind::JunkEmail,
+    MailFolderKind::Archive,
+];
 
 impl GraphApi {
     pub(crate) async fn list_folders(
@@ -83,6 +97,33 @@ impl GraphApi {
             .ok_or(GraphError::InvalidResponse)
     }
 
+    /// Resolves each folder kind through its well-known Graph alias, one request per kind.
+    ///
+    /// A kind whose alias answers `404 Not Found` is absent from the result. Any other failure
+    /// stops the resolution and returns the error.
+    pub(crate) async fn folder_kinds(
+        &self,
+        token: Arc<AccessToken>,
+    ) -> Result<MailFolderKinds, GraphError> {
+        let mut kinds = MailFolderKinds::new();
+        for kind in FOLDER_KIND_PRECEDENCE {
+            let url = self.authority.folder_kind_path(kind)?;
+            let Some(response) = self
+                .transport
+                .get_folder_kind(url, Arc::clone(&token))
+                .await?
+            else {
+                continue;
+            };
+            let folder = serde_json::from_slice::<WireFolderId>(&response)
+                .map_err(|_| GraphError::InvalidResponse)?;
+            let folder_id = FolderId::try_from(folder.id).map_err(|_| GraphError::InvalidRecord)?;
+            // `assign` keeps the earlier kind when an earlier alias already named this folder.
+            kinds.assign(kind, folder_id);
+        }
+        Ok(kinds)
+    }
+
     pub(crate) async fn message_delta_page(
         &self,
         folder: &FolderReference,
@@ -106,8 +147,9 @@ impl GraphApi {
                     reset_link.as_str().to_owned(),
                 )));
             }
-            GraphResponse::MessageDeltaReset(None) => return Err(GraphError::InvalidResponse),
-            GraphResponse::CalendarViewDeltaReset { .. } => {
+            GraphResponse::MessageDeltaReset(None)
+            | GraphResponse::FolderNotFound
+            | GraphResponse::CalendarViewDeltaReset { .. } => {
                 return Err(GraphError::InvalidResponse);
             }
         };
@@ -358,6 +400,8 @@ pub(super) struct WireFolder {
     pub(super) display_name: String,
     #[serde(default)]
     pub(super) is_hidden: bool,
+    #[serde(default, deserialize_with = "unread_count_or_unknown")]
+    pub(super) unread_item_count: Option<UnreadCount>,
 }
 
 impl WireFolder {
@@ -373,9 +417,29 @@ impl WireFolder {
         let reference = FolderReference::new(account_id.clone(), folder_id);
         let parent = parent_id.map(|folder_id| FolderReference::new(account_id.clone(), folder_id));
         MailFolder::new(reference, parent, self.display_name)
-            .map(Some)
+            .map(|folder| Some(folder.with_unread_count(self.unread_item_count)))
             .map_err(|_| GraphError::InvalidRecord)
     }
+}
+
+#[derive(Deserialize)]
+struct WireFolderId {
+    id: String,
+}
+
+/// Reads `unreadItemCount` as a count, or as unknown when Graph sends anything other than an
+/// integer from 0 to `u32::MAX`.
+///
+/// A count only labels a folder, so a malformed one must not reject the folder listing.
+fn unread_count_or_unknown<'de, D>(deserializer: D) -> Result<Option<UnreadCount>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_u64()
+        .and_then(|count| u32::try_from(count).ok())
+        .map(UnreadCount::new))
 }
 
 #[derive(Deserialize)]
@@ -428,6 +492,8 @@ pub(super) struct WireMessageMetadata {
     is_read: WireField<bool>,
     #[serde(default)]
     flag: WireField<WireFollowUpFlag>,
+    #[serde(default)]
+    body_preview: WireField<String>,
 }
 
 #[derive(Deserialize)]
@@ -475,6 +541,7 @@ impl TryFrom<WireMessageChange> for MessageDeltaChange {
             &mut patch,
         )?;
         apply_follow_up_flag_field(change.metadata.flag, &mut patch);
+        apply_preview_field(change.metadata.body_preview, &mut patch);
         Ok(Self::Upsert { id, patch })
     }
 }
@@ -534,6 +601,14 @@ fn apply_follow_up_flag_field(flag: WireField<WireFollowUpFlag>, patch: &mut Mes
         WireField::Value(flag) => {
             patch.set_follow_up_flag_status(flag.flag_status.map(Into::into));
         }
+    }
+}
+
+fn apply_preview_field(body_preview: WireField<String>, patch: &mut MessageMetadataPatch) {
+    match body_preview {
+        WireField::Missing => {}
+        WireField::Null => patch.set_preview(None),
+        WireField::Value(text) => patch.set_preview(MessagePreview::from_untrusted(&text)),
     }
 }
 
