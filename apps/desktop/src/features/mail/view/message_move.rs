@@ -147,7 +147,9 @@ impl MailView {
                     request.destination,
                 )
                 .await;
+            let folders = workflow.list_cached_folders().await.ok();
             let _ = this.update(cx, |view, cx| {
+                view.apply_refreshed_folders(folders);
                 view.finish_well_known_folder_action(request, action_result);
                 cx.notify();
             });
@@ -191,7 +193,9 @@ impl MailView {
                     &request.destination_folder,
                 )
                 .await;
+            let folders = workflow.list_cached_folders().await.ok();
             let _ = this.update(cx, |view, cx| {
+                view.apply_refreshed_folders(folders);
                 view.finish_message_move(request, move_result);
                 cx.notify();
             });

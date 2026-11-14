@@ -22,6 +22,7 @@ use gpui_kit::{
 };
 
 mod day_groups;
+mod folder_kind;
 mod follow_up_flag;
 mod message_actions;
 mod message_list;
@@ -48,7 +49,7 @@ use read_state::ReadStateUpdateStatus;
 use read_state::read_state_failure_message;
 use synchronization::SyncStatus;
 
-const MESSAGE_ROW_HEIGHT: Rems = rems(4.5);
+const MESSAGE_ROW_HEIGHT: Rems = rems(5.5);
 const MESSAGE_LIST_DEFAULT_WIDTH: Rems = rems(22.);
 const MESSAGE_LIST_MIN_WIDTH: Rems = rems(18.);
 const MESSAGE_LIST_MAX_WIDTH: Rems = rems(30.);

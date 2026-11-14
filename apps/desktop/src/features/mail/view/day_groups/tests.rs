@@ -175,5 +175,5 @@ fn only_a_group_start_adds_the_header_height_to_its_row() {
         .map(|size| size.height)
         .collect();
 
-    assert_eq!(heights, [px(100.), px(72.), px(100.)]);
+    assert_eq!(heights, [px(116.), px(88.), px(116.)]);
 }

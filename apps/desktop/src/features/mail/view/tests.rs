@@ -47,6 +47,7 @@ use crate::test_support::{test_element_is_visible, wait_for_ui_condition};
 mod body_rendering;
 mod composer;
 mod day_groups;
+mod folder_navigation;
 mod follow_up_flag;
 mod helpers;
 mod layout;
@@ -54,6 +55,7 @@ mod loading_sync;
 mod message_actions;
 mod message_list;
 mod message_move;
+mod message_preview;
 #[cfg(feature = "ui-preview")]
 mod preview_start;
 mod read_state;

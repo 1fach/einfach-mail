@@ -49,7 +49,9 @@ impl MailView {
                 .folder_write_sync_required(&request.folder)
                 .await
                 .unwrap_or(true);
+            let folders = workflow.list_cached_folders().await.ok();
             let _ = this.update(cx, |view, cx| {
+                view.apply_refreshed_folders(folders);
                 view.finish_read_state_update(request, update_outcome, write_sync_required);
                 cx.notify();
             });

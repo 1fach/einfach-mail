@@ -6,7 +6,7 @@ use gpui_kit::{
     VisualTestContext, Window, div, prelude::*, px,
 };
 
-use super::{AppIcon, NavItem, PILL_HEIGHT, PILL_WIDTH};
+use super::{AppIcon, NavItem, PILL_HEIGHT, PILL_WIDTH, unread_count_text};
 use crate::components::NAVIGATION_PANE_WIDTH;
 
 const UNAVAILABLE_REASON: &str = "Wait for the current update to finish.";
@@ -40,6 +40,9 @@ impl Render for NavItemHarness {
                     .unavailable(Some(UNAVAILABLE_REASON))
                     .on_click(count_activation(&self.activations)),
             )
+            .child(NavItem::new("nav-unread", "Sent Items", AppIcon::Folder).unread_count(Some(12)))
+            .child(NavItem::new("nav-huge", "Junk Email", AppIcon::Folder).unread_count(Some(1000)))
+            .child(NavItem::new("nav-zero", "Deleted Items", AppIcon::Folder).unread_count(Some(0)))
             .child(
                 div()
                     .flex()
@@ -52,7 +55,11 @@ impl Render for NavItemHarness {
                         "nav-icon-idle",
                         "Calendar",
                         AppIcon::Calendar,
-                    )),
+                    ))
+                    .child(
+                        NavItem::icon_only("nav-icon-counted", "Accounts", AppIcon::Accounts)
+                            .unread_count(Some(3)),
+                    ),
             )
     }
 }
@@ -160,4 +167,69 @@ fn an_unavailable_item_is_disabled_and_explains_why(cx: &mut TestAppContext) {
         assert_eq!(item.description(), Some(UNAVAILABLE_REASON));
     });
     assert_eq!(activations.get(), 0);
+}
+
+#[gpui_kit::test]
+fn an_unread_count_trails_the_label_and_joins_the_accessible_name(cx: &mut TestAppContext) {
+    let (context, _) = open_harness(cx);
+    let item = context
+        .debug_bounds("nav-unread")
+        .expect("the counted item is rendered");
+    let count = context
+        .debug_bounds("nav-unread-unread")
+        .expect("an unread count above zero is rendered");
+
+    assert!(
+        count.left() > item.center().x && count.right() < item.right(),
+        "the count {count:?} sits in the trailing half of its item {item:?}"
+    );
+    context.update(|window, _| {
+        let counted = window.find_by_label("Sent Items, 12 unread");
+        assert_eq!(counted.role(), Some(Role::Button));
+        assert!(window.try_find_by_label("Sent Items").is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn an_unread_count_above_the_cap_keeps_the_exact_number_in_the_accessible_name(
+    cx: &mut TestAppContext,
+) {
+    let (context, _) = open_harness(cx);
+
+    assert!(context.debug_bounds("nav-huge-unread").is_some());
+    context.update(|window, _| {
+        assert!(
+            window
+                .try_find_by_label("Junk Email, 1000 unread")
+                .is_some()
+        );
+    });
+}
+
+#[test]
+fn an_unread_count_shows_in_full_up_to_999_and_as_999_plus_above() {
+    assert_eq!(unread_count_text(1), "1");
+    assert_eq!(unread_count_text(999), "999");
+    assert_eq!(unread_count_text(1000), "999+");
+    assert_eq!(unread_count_text(u32::MAX), "999+");
+}
+
+#[gpui_kit::test]
+fn a_zero_count_and_an_icon_only_item_show_no_count_and_keep_their_name(cx: &mut TestAppContext) {
+    let (context, _) = open_harness(cx);
+
+    for selector in [
+        "nav-zero-unread",
+        "nav-icon-counted-unread",
+        "nav-idle-unread",
+    ] {
+        assert!(
+            context.debug_bounds(selector).is_none(),
+            "{selector} is absent"
+        );
+    }
+    context.update(|window, _| {
+        assert!(window.try_find_by_label("Deleted Items").is_some());
+        assert!(window.try_find_by_label("Accounts").is_some());
+    });
 }

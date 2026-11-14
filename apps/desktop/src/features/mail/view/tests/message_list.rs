@@ -544,7 +544,7 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
     let first_row = context
         .debug_bounds("message-row-message-1")
         .expect("the first cached message is visible");
-    assert_eq!(first_row.size.height, px(72.));
+    assert_eq!(first_row.size.height, px(88.));
     let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
     assert_eq!(list_bounds.size.width, px(351.));
 
@@ -557,14 +557,14 @@ async fn cached_message_list_rescales_rows_and_virtual_scroll_with_rem(cx: &mut 
     let scaled_row = context
         .debug_bounds("message-row-message-1")
         .expect("the first cached message remains visible after zoom");
-    assert_eq!(scaled_row.size.height, px(108.));
+    assert_eq!(scaled_row.size.height, px(132.));
     let scaled_row_estimate = context
         .cx
         .update(|cx| view.read(cx).message_row_sizes[0].height);
     assert_eq!(
         scaled_row_estimate,
-        px(150.),
-        "the first item is a 108px row plus the 42px day header"
+        px(174.),
+        "the first item is a 132px row plus the 42px day header"
     );
     let list_bounds = context.update(|window, _| window.find("cached-message-list").bounds());
     assert_eq!(list_bounds.size.width, px(527.));
