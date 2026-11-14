@@ -49,3 +49,7 @@ Add and verify Windows shell launch, authentication and credential storage, acce
 ## M6: macOS and broader release targets
 
 Add and verify macOS support. Evaluate other account types and release policies after the core workflow is reliable.
+
+## Planned: feature gaps
+
+The mail and calendar features that Einfach Mail lacks compared with Thunderbird's EWS client and Wino Mail are tracked in [issue #490](https://github.com/1fach/einfach-mail/issues/490). See [the feature gap research](../research/feature-gaps-2026-11.md).
