@@ -10,7 +10,7 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountId, FolderReference, FollowUpFlagStatus, MailFolder, MailFolderKinds, MailMessage,
     MailSendOperationId, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
-    MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
+    MessageId, MessageMetadataPatch, PendingMailSend, ReadState, UnreadCount,
 };
 
 #[cfg(test)]
@@ -41,6 +41,25 @@ pub(crate) struct FixtureData {
     pub(crate) fail_next_pending_send_stage: bool,
     pub(crate) fail_next_pending_send_clear: bool,
     pub(crate) move_error: Option<MailCacheError>,
+}
+
+/// Moves the unread count of `folder` by `delta`, the way the persistence cache derives it from
+/// its unread rows. A folder with no count keeps none.
+fn adjust_unread_count(folders: &mut [MailFolder], folder: &FolderReference, delta: i64) {
+    let Some(entry) = folders
+        .iter_mut()
+        .find(|candidate| candidate.reference() == folder)
+    else {
+        return;
+    };
+    let Some(count) = entry.unread_count() else {
+        return;
+    };
+    let adjusted = u32::try_from((i64::from(count.get()) + delta).max(0))
+        .expect("a fixture unread count stays within u32");
+    *entry = entry
+        .clone()
+        .with_unread_count(Some(UnreadCount::new(adjusted)));
 }
 
 struct FolderListGate {
@@ -335,9 +354,18 @@ impl MailCache for FixtureCache {
             else {
                 return Err(MailCacheError::MessageNotCached);
             };
+            let previous = message.metadata().read_state();
             let mut patch = MessageMetadataPatch::new();
             patch.set_read_state(read_state);
             message.apply_patch(patch);
+            if previous != read_state {
+                let delta = if read_state == ReadState::Unread {
+                    1
+                } else {
+                    -1
+                };
+                adjust_unread_count(&mut data.folders, &folder, delta);
+            }
             data.folder_write_sync_required = false;
             Ok(())
         }
@@ -438,6 +466,10 @@ impl MailCache for FixtureCache {
             return ready(Err(MailCacheError::MessageNotCached));
         };
         let source = data.messages.remove(index);
+        if source.metadata().read_state() == ReadState::Unread {
+            adjust_unread_count(&mut data.folders, source_folder, -1);
+            adjust_unread_count(&mut data.folders, destination_folder, 1);
+        }
         data.messages.push(MailMessage::new(
             destination_folder.clone(),
             source.id().clone(),

@@ -22,6 +22,7 @@ use gpui_kit::{
 };
 
 mod day_groups;
+mod folder_kind;
 mod follow_up_flag;
 mod message_actions;
 mod message_list;

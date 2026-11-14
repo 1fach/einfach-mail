@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use einfach_mail_domain::{FolderReference, MailAction, MailFolder};
+use einfach_mail_domain::{FolderReference, MailAction, MailFolder, UnreadCount};
 use gpui_kit::component::{
     ActiveTheme, ColorTokens, Disableable, Icon, StyledExt,
     button::{Button, ButtonVariants},
@@ -15,6 +15,7 @@ use gpui_kit::{
 
 use crate::components::{AppIcon, NavItem};
 
+use super::folder_kind::{folder_icon, navigation_order};
 use super::{
     CompactMailPane, FollowUpFlagUpdateStatus, MailView, MessageDetailState, MessageListState,
     MessageMoveStatus, ReadStateUpdateStatus, SyncStatus, WellKnownFolderActionStatus,
@@ -84,6 +85,16 @@ impl MailView {
     }
 }
 
+impl MailView {
+    /// Shows the folders a cache read returned after a write, so the unread counts follow the
+    /// rows. `None` means the read failed, and the folders on screen stay.
+    pub(super) fn apply_refreshed_folders(&mut self, folders: Option<Vec<MailFolder>>) {
+        if let Some(folders) = folders {
+            self.folders = folders;
+        }
+    }
+}
+
 impl Render for MailFolderNavigation {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.folder_navigation_state(cx);
@@ -111,7 +122,7 @@ impl MailFolderNavigation {
     fn folder_navigation_state(&self, cx: &mut Context<Self>) -> FolderNavigationState {
         self.mail_view
             .read_with(cx, |mail_view, _| FolderNavigationState {
-                folders: mail_view.folders.clone(),
+                folders: navigation_order(mail_view.folders.clone()),
                 selected_folder: mail_view.selected_folder.clone(),
                 folder_actions_disabled: mail_view.message_update_in_progress(),
                 empty_state_label: match &mail_view.sync_status {
@@ -193,20 +204,25 @@ impl MailFolderNavigation {
         let selector = format!("folder:{}", reference.folder_id().as_str());
         let selected = state.selected_folder.as_ref() == Some(&reference);
         let mail_view = self.mail_view.downgrade();
-        NavItem::new(selector, folder.display_name().to_owned(), AppIcon::Folder)
-            .selected(selected)
-            .unavailable(
-                state
-                    .folder_actions_disabled
-                    .then_some("Wait for the current mail update to finish."),
-            )
-            .on_click(move |_, _, cx| {
-                if let Some(mail_view) = mail_view.upgrade() {
-                    mail_view.update(cx, |view, cx| {
-                        view.select_folder(reference.clone(), cx);
-                    });
-                }
-            })
+        NavItem::new(
+            selector,
+            folder.display_name().to_owned(),
+            folder_icon(folder.kind()),
+        )
+        .selected(selected)
+        .unread_count(folder.unread_count().map(UnreadCount::get))
+        .unavailable(
+            state
+                .folder_actions_disabled
+                .then_some("Wait for the current mail update to finish."),
+        )
+        .on_click(move |_, _, cx| {
+            if let Some(mail_view) = mail_view.upgrade() {
+                mail_view.update(cx, |view, cx| {
+                    view.select_folder(reference.clone(), cx);
+                });
+            }
+        })
     }
 
     fn render_folder_navigation(

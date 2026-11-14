@@ -4,7 +4,7 @@ mod fixtures;
 #[cfg(test)]
 mod providers;
 
-#[cfg(feature = "ui-preview")]
+#[cfg(any(test, feature = "ui-preview"))]
 pub(crate) use cache::FixtureCache;
 #[cfg(test)]
 pub(crate) use cache::fixture;
