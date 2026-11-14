@@ -266,6 +266,32 @@ fn failed_shared_lock_restore_keeps_lifecycle_gate_held() {
 }
 
 #[test]
+fn dropped_locks_release_while_a_child_process_shares_their_descriptor() {
+    let directory = tempfile::tempdir().expect("synthetic cache root is created");
+    let lock_path = directory.path().join("account/mail-cache.lock");
+
+    for acquire in [
+        lock_account_directory_shared,
+        lock_account_directory_exclusive,
+    ] {
+        let lock = acquire(&lock_path).expect("synthetic lock is acquired");
+        let inherited_descriptor = inherit_descriptor(&lock);
+        drop(lock);
+
+        let competing_lock = lock_account_directory_exclusive(&lock_path)
+            .expect("an exclusive lock succeeds after the holder drops its lock");
+        drop(competing_lock);
+        drop(inherited_descriptor);
+    }
+}
+
+/// Duplicates a lock descriptor as a spawned child holds it between `fork` and `exec`.
+fn inherit_descriptor(lock: &fs::File) -> fs::File {
+    lock.try_clone()
+        .expect("synthetic inherited lock descriptor is duplicated")
+}
+
+#[test]
 fn cache_initialization_requires_its_exclusive_lock() {
     smol::block_on(async {
         let directory = tempfile::tempdir().expect("synthetic cache root is created");
@@ -353,49 +379,4 @@ fn failed_sidecar_removal_keeps_the_encrypted_database_reopenable_for_retry() {
             assert!(!with_suffix(&database, "-shm").exists());
         }
     });
-}
-
-fn amplify(spawn_children: bool) -> (usize, usize) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let spawner_stop = Arc::clone(&stop);
-    let spawner = std::thread::spawn(move || {
-        let mut spawned = 0_usize;
-        while spawn_children && !spawner_stop.load(Ordering::Relaxed) {
-            std::process::Command::new("/bin/true").status().expect("child runs");
-            spawned += 1;
-        }
-        spawned
-    });
-    let mut failures = 0;
-    for _ in 0..200 {
-        smol::block_on(async {
-            let directory = tempfile::tempdir().expect("root");
-            let database_path = directory.path().join("account/mail.sqlite3");
-            let first = open_test_database(&database_path, 7).await.expect("first opens");
-            match open_test_database(&database_path, 7).await {
-                Ok(second) => {
-                    second.client.close().await.expect("close");
-                }
-                Err(error) => {
-                    eprintln!("second open failed: {error:?}");
-                    failures += 1;
-                }
-            }
-            first.client.close().await.expect("close");
-        });
-    }
-    stop.store(true, Ordering::Relaxed);
-    (failures, spawner.join().expect("spawner joins"))
-}
-
-#[test]
-fn amplify_with_concurrent_child_spawns() {
-    let (failures, spawned) = amplify(true);
-    eprintln!("WITH SPAWNS: {failures}/200 second opens failed; {spawned} children spawned");
-}
-
-#[test]
-fn amplify_without_child_spawns() {
-    let (failures, _) = amplify(false);
-    eprintln!("NO SPAWNS: {failures}/200 second opens failed");
 }
