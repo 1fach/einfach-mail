@@ -20,7 +20,7 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0008](0008-identity-token-boundary.md) | Keep identity tokens inside the Microsoft provider | Accepted |
 | [0009](0009-account-scoped-domain-identifiers.md) | Use account-scoped opaque domain identifiers | Accepted |
 | [0010](0010-linux-first-development.md) | Focus current development on Linux | Accepted |
-| [0011](0011-initial-mail-sync-scope.md) | Define the initial read-only mail synchronization scope | Accepted |
+| [0011](0011-initial-mail-sync-scope.md) | Define the initial read-only mail synchronization scope | Accepted; message-list and folder metadata amended by ADR 0067 |
 | [0012](0012-application-owned-mail-sessions.md) | Keep mail sessions behind application workflows | Superseded by ADR 0043 |
 | [0013](0013-graph-account-identity.md) | Use the Graph profile for initial account identity | Accepted for Linux; live Entra verification open |
 | [0014](0014-linux-read-only-calendar-workflow.md) | Implement a cached Linux read-only primary calendar | Accepted for Linux; live Graph and manual UI verification remain open |
@@ -71,3 +71,4 @@ Copy [the ADR template](TEMPLATE.md) for each decision. Name new files `NNNN-sho
 | [0064](0064-calendar-capabilities-by-operation.md) | Model calendar capabilities by operation | Accepted; migration tracked in issue #390 |
 | [0065](0065-safe-ews-calendar-event-writes.md) | Define safe EWS calendar event writes | Accepted; implementation decomposition tracked in issue #389 |
 | [0066](0066-fluent-visual-language-and-navigation.md) | Use a Fluent visual language and a destination switcher | Accepted; amends ADR 0059; implementation tracked in issues #452–#457 |
+| [0067](0067-message-previews-folder-unread-counts-and-kinds.md) | Show message previews, folder unread counts, and folder kinds | Accepted; amends ADR 0011; implementation tracked in issues #458–#460 |
