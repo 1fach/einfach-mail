@@ -7,7 +7,7 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, MailAction, MailFolder, MailFolderKind, Mailbox,
     MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
-    MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState, UnreadCount,
+    MessageDeltaProgress, MessageId, MessageMetadataPatch, MessagePreview, ReadState, UnreadCount,
 };
 use einfach_mail_provider_runtime as worker;
 use ews::{
@@ -88,17 +88,9 @@ where
                         cursor.sync_state
                     }
                 };
-                let operation = SyncFolderItems {
-                    item_shape: message_metadata_shape(),
-                    sync_folder_id: BaseFolderId::new_folder(folder.folder_id().as_str()),
-                    sync_state: request_state,
-                    ignore: None,
-                    max_changes_returned: EWS_PAGE_SIZE,
-                    sync_scope: Some(SyncScope::NormalItems),
-                };
                 let (response, response_bytes) = session
                     .transport
-                    .execute_with_size(operation)
+                    .execute_with_size(message_sync_request(folder.folder_id(), request_state))
                     .await
                     .map_err(MailOperationError::from)?;
                 map_sync_responses(
@@ -438,7 +430,21 @@ fn map_folder(account_id: &AccountId, folder: Folder) -> Result<Option<MailFolde
     Ok(Some(folder))
 }
 
-pub(super) fn message_metadata_shape() -> ItemShape {
+pub(super) fn message_sync_request(
+    folder_id: &FolderId,
+    sync_state: Option<String>,
+) -> SyncFolderItems {
+    SyncFolderItems {
+        item_shape: message_metadata_shape(),
+        sync_folder_id: BaseFolderId::new_folder(folder_id.as_str()),
+        sync_state,
+        ignore: None,
+        max_changes_returned: EWS_PAGE_SIZE,
+        sync_scope: Some(SyncScope::NormalItems),
+    }
+}
+
+fn message_metadata_shape() -> ItemShape {
     ItemShape {
         base_shape: BaseShape::IdOnly,
         include_mime_content: Some(false),
@@ -447,6 +453,7 @@ pub(super) fn message_metadata_shape() -> ItemShape {
                 "item:ItemClass",
                 "item:Subject",
                 "item:DateTimeReceived",
+                "item:Preview",
                 "message:From",
                 "message:Sender",
                 "message:IsRead",
@@ -552,6 +559,12 @@ fn map_message(item: ews::RealItem) -> Result<Option<MessageDeltaChange>, EwsErr
     patch.set_from(map_recipient(message.from));
     patch.set_sender(map_recipient(message.sender));
     patch.set_received_at(SystemTime::from(received_at));
+    patch.set_preview(
+        message
+            .preview
+            .as_deref()
+            .and_then(MessagePreview::from_untrusted),
+    );
     patch.set_read_state(if is_read {
         ReadState::Read
     } else {
