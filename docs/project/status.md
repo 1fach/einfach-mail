@@ -136,6 +136,7 @@ The Fluent restyle in epic [#451](https://github.com/1fach/einfach-mail/issues/4
 7. Revisit the DatePicker accessible names in issue #176 when GPUI Kit exposes a suitable API or a smaller maintained solution is available.
 8. Recheck the transitive RustSec warnings when GPUI Kit or its Linux renderer, HTTP, or zbus dependencies publish compatible updates.
 9. Keep EWS write capabilities disabled until the separate live Exchange verification issues [#406](https://github.com/1fach/einfach-mail/issues/406)–[#408](https://github.com/1fach/einfach-mail/issues/408) pass. No Exchange test host is available yet.
+10. Improve Linux EWS account setup under [issue #471](https://github.com/1fach/einfach-mail/issues/471): accept a known Exchange homepage as an Autodiscover seed and use one username field while preserving ADR 0054's credential boundary.
 
 ## Update rule
 
