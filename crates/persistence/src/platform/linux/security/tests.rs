@@ -9,9 +9,9 @@ use std::{
 };
 
 use super::{
-    CacheLifecycleError, KeyLookup, classify_key_lookup, lock_account_directory_exclusive,
-    lock_account_directory_shared, open_test_database, remove_database_files,
-    take_lifecycle_lock_if_restore_failed, with_suffix,
+    CacheLifecycleError, FileLock, KeyLookup, classify_key_lookup,
+    lock_account_directory_exclusive, lock_account_directory_shared, open_test_database,
+    remove_database_files, take_lifecycle_lock_if_restore_failed, with_suffix,
 };
 use keyring::Error as KeyringError;
 
@@ -263,6 +263,33 @@ fn failed_shared_lock_restore_keeps_lifecycle_gate_held() {
     let shared_lock = lock_account_directory_shared(&lifecycle_lock_path)
         .expect("a cache open can proceed after the retained lock is released");
     drop(shared_lock);
+}
+
+#[test]
+fn dropped_locks_release_while_a_child_process_shares_their_descriptor() {
+    let directory = tempfile::tempdir().expect("synthetic cache root is created");
+    let lock_path = directory.path().join("account/mail-cache.lock");
+
+    for acquire in [
+        lock_account_directory_shared,
+        lock_account_directory_exclusive,
+    ] {
+        let lock = acquire(&lock_path).expect("synthetic lock is acquired");
+        let inherited_descriptor = inherit_descriptor(&lock);
+        drop(lock);
+
+        let competing_lock = lock_account_directory_exclusive(&lock_path)
+            .expect("an exclusive lock succeeds after the holder drops its lock");
+        drop(competing_lock);
+        drop(inherited_descriptor);
+    }
+}
+
+/// Duplicates a lock descriptor as a spawned child holds it between `fork` and `exec`.
+fn inherit_descriptor(lock: &FileLock) -> fs::File {
+    lock.0
+        .try_clone()
+        .expect("synthetic inherited lock descriptor is duplicated")
 }
 
 #[test]
