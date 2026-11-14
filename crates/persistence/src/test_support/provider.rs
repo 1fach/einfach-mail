@@ -15,7 +15,7 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountId, CalendarCapabilities, CalendarEventCreation, CalendarEventUpdate,
     CalendarOccurrence, CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus,
-    MailDraft, MailFolder, MailFolderKind, MessageBody, MessageId, ReadState,
+    MailDraft, MailFolder, MailFolderKind, MailFolderKinds, MessageBody, MessageId, ReadState,
     VersionedCalendarEvent,
 };
 
@@ -62,6 +62,8 @@ pub(crate) struct FixtureProvider {
     pub(crate) deleted_items_folder_id: FolderId,
     pub(crate) well_known_folder_calls: Arc<AtomicUsize>,
     pub(crate) well_known_folder_gate: ProviderGate,
+    pub(crate) folder_kinds_result: Arc<Mutex<Result<MailFolderKinds, MailOperationError>>>,
+    pub(crate) folder_kinds_calls: Arc<AtomicUsize>,
     pub(crate) send_gate: ProviderGate,
     pub(crate) calendar_gate: Option<CalendarSyncGate>,
     pub(crate) calendar_pages: Arc<Mutex<CalendarPageQueue>>,
@@ -124,6 +126,10 @@ impl FixtureProvider {
                 .expect("synthetic Deleted Items ID is valid"),
             well_known_folder_calls: Arc::new(AtomicUsize::new(0)),
             well_known_folder_gate: Arc::new(Mutex::new(None)),
+            folder_kinds_result: Arc::new(Mutex::new(Err(
+                MailOperationError::UnsupportedOperation,
+            ))),
+            folder_kinds_calls: Arc::new(AtomicUsize::new(0)),
             send_gate: Arc::new(Mutex::new(None)),
             calendar_gate: None,
             calendar_pages: Arc::new(Mutex::new(VecDeque::new())),
@@ -470,6 +476,25 @@ impl MailProvider for FixtureProvider {
                     .map_err(|_| MailOperationError::ServiceUnavailable)?;
             }
             folder_reference.ok_or(MailOperationError::UnsupportedOperation)
+        }
+    }
+
+    fn folder_kinds(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<MailFolderKinds, MailOperationError>> + Send + '_ {
+        let account_matches = account_id == &self.account_id;
+        let calls = Arc::clone(&self.folder_kinds_calls);
+        let result = Arc::clone(&self.folder_kinds_result);
+        async move {
+            if !account_matches {
+                return Err(MailOperationError::AccountMismatch);
+            }
+            calls.fetch_add(1, Ordering::Relaxed);
+            result
+                .lock()
+                .expect("synthetic folder-kind result mutex is not poisoned")
+                .clone()
         }
     }
 

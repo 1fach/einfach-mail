@@ -1,6 +1,8 @@
 use async_sqlite::rusqlite::{Connection, params};
 
-use super::{apply_parallel_schema_compatibility, migrations};
+use super::{MESSAGE_QUERY_VERSION, apply_parallel_schema_compatibility, migrations};
+
+mod mail_metadata;
 
 #[test]
 fn bundled_sqlcipher_source_matches_reviewed_versions() {
@@ -58,7 +60,20 @@ fn assert_flag_transition_preserves_cached_mail(connection: &Connection) {
         )
         .expect("cached message remains readable");
 
-    assert_eq!(sync, (2, 10, 123, None, None, None, None, 0, false));
+    assert_eq!(
+        sync,
+        (
+            MESSAGE_QUERY_VERSION,
+            10,
+            123,
+            None,
+            None,
+            None,
+            None,
+            0,
+            false
+        )
+    );
     assert_eq!(
         message,
         (
@@ -135,7 +150,11 @@ fn replacement_generation_migration_preserves_an_existing_snapshot() {
         )
         .expect("existing message and body remain readable");
 
-    assert_eq!(sync_state, (0, 0, 0));
+    assert_eq!(
+        sync_state,
+        (0, 0, 1),
+        "the mail metadata migration advances the checkpoint revision once"
+    );
     assert_eq!(
         message,
         (
@@ -181,6 +200,15 @@ fn flag_migration_preserves_cached_mail_and_resets_message_checkpoints() {
         .to_latest(&mut connection)
         .expect("follow-up flag and recovery-marker migrations apply");
     assert_flag_transition_preserves_cached_mail(&connection);
+}
+
+fn mail_metadata_columns_exist(connection: &Connection) -> bool {
+    connection
+        .prepare("SELECT preview FROM mail_messages")
+        .and_then(|_| {
+            connection.prepare("SELECT kind, unread_reported, unread_uncached FROM mail_folders")
+        })
+        .is_ok()
 }
 
 #[test]
@@ -363,6 +391,7 @@ fn reply_aware_parallel_schema_keeps_unresolved_reply_marker() {
         )
     );
     assert!(folder_write_table_exists);
+    assert!(mail_metadata_columns_exist(&connection));
 }
 
 #[test]
@@ -477,6 +506,7 @@ fn parallel_send_v5_schema_receives_the_missing_flag_migration() {
         )
         .expect("pending-send table remains available");
     assert!(pending_send_exists);
+    assert!(mail_metadata_columns_exist(&connection));
 }
 
 #[test]

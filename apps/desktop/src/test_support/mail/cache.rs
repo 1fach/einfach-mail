@@ -8,9 +8,9 @@ use einfach_mail_application::{
     AccountCache, AccountCacheRemovalError, MailCache, MailCacheError, MailSyncState,
 };
 use einfach_mail_domain::{
-    AccountId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, MailSendOperationId,
-    MessageBody, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
-    MessageMetadataPatch, PendingMailSend, ReadState,
+    AccountId, FolderReference, FollowUpFlagStatus, MailFolder, MailFolderKinds, MailMessage,
+    MailSendOperationId, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
+    MessageId, MessageMetadataPatch, PendingMailSend, ReadState,
 };
 
 #[cfg(test)]
@@ -89,6 +89,21 @@ impl MailCache for FixtureCache {
             data.folders = folders;
             Ok(())
         }
+    }
+
+    fn has_unresolved_folder_kinds(
+        &self,
+        _: &AccountId,
+    ) -> impl Future<Output = Result<bool, MailCacheError>> + Send + '_ {
+        ready(Ok(false))
+    }
+
+    fn store_folder_kinds(
+        &self,
+        _: &AccountId,
+        _: MailFolderKinds,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        ready(Ok(()))
     }
 
     fn ensure_account_sync_scope(

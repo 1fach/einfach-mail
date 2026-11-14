@@ -70,6 +70,20 @@ fn assigning_the_same_pair_twice_is_refused_without_a_change() {
 }
 
 #[test]
+fn assignments_lists_each_accepted_pair_once() {
+    let mut kinds = MailFolderKinds::new();
+    kinds.assign(MailFolderKind::Inbox, folder("folder-1"));
+    kinds.assign(MailFolderKind::Archive, folder("folder-2"));
+    kinds.assign(MailFolderKind::Inbox, folder("folder-3"));
+
+    let pairs: Vec<_> = kinds.assignments().collect();
+
+    assert_eq!(pairs.len(), 2);
+    assert!(pairs.contains(&(MailFolderKind::Inbox, &folder("folder-1"))));
+    assert!(pairs.contains(&(MailFolderKind::Archive, &folder("folder-2"))));
+}
+
+#[test]
 fn every_kind_can_name_its_own_folder() {
     let all = [
         MailFolderKind::Inbox,

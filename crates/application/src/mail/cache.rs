@@ -3,8 +3,8 @@
 use std::{future::Future, time::SystemTime};
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, MailSendOperationId,
-    MessageBody, MessageDeltaLink, MessageId, PendingMailSend, ReadState,
+    AccountId, FolderReference, FollowUpFlagStatus, MailFolder, MailFolderKinds, MailMessage,
+    MailSendOperationId, MessageBody, MessageDeltaLink, MessageId, PendingMailSend, ReadState,
 };
 use thiserror::Error;
 
@@ -164,6 +164,15 @@ impl MailSyncState {
 pub trait MailCache: Send + Sync {
     /// Replaces one account's visible folder tree and preserves matching cached records.
     ///
+    /// Each folder's [`MailFolder::unread_count`] is the count that the provider reported, and
+    /// `None` clears it. Storing it does not change the count that
+    /// [`list_folders`](Self::list_folders) returns. That count follows the provider's count
+    /// only when [`commit_delta_page`](Self::commit_delta_page) completes a round.
+    ///
+    /// Each folder's [`MailFolder::kind`] is ignored. A folder that is already cached keeps
+    /// its stored kind, and a new folder has no resolved kind until
+    /// [`store_folder_kinds`](Self::store_folder_kinds) runs.
+    ///
     /// # Errors
     ///
     /// Returns [`MailCacheError::AccountMismatch`] for a different cache account,
@@ -173,6 +182,33 @@ pub trait MailCache: Send + Sync {
         &self,
         account_id: &AccountId,
         folders: Vec<MailFolder>,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
+
+    /// Returns whether a cached folder of `account_id` has no resolved kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for a different cache account or
+    /// [`MailCacheError::Unavailable`] when the cache cannot be read.
+    fn has_unresolved_folder_kinds(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<bool, MailCacheError>> + Send + '_;
+
+    /// Stores a provider's kind resolution for every cached folder of `account_id`.
+    ///
+    /// A cached folder that `kinds` names gets that kind. Every other cached folder becomes
+    /// resolved as an ordinary folder, which replaces a kind that it had before. A folder
+    /// that `kinds` names and the cache does not hold is ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailCacheError::AccountMismatch`] for a different cache account or
+    /// [`MailCacheError::Unavailable`] when the transaction fails.
+    fn store_folder_kinds(
+        &self,
+        account_id: &AccountId,
+        kinds: MailFolderKinds,
     ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_;
 
     /// Stores the account's initial cutoff once, including when it has no visible folders.
@@ -220,6 +256,9 @@ pub trait MailCache: Send + Sync {
     /// delta link and records the completion time. Each accepted page advances
     /// the checkpoint revision atomically with its changes.
     ///
+    /// An accepted `Complete` page also sets the folder's unread count to the count that the
+    /// provider last reported, in the same transaction. A rejected page changes no count.
+    ///
     /// # Errors
     ///
     /// Returns [`MailCacheError::AccountMismatch`] for a different cache account,
@@ -254,6 +293,15 @@ pub trait MailCache: Send + Sync {
     ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_;
 
     /// Returns all visible folders saved for `account_id`.
+    ///
+    /// Each folder's [`MailFolder::unread_count`] is the count to show. It starts from the
+    /// provider's count at the folder's last completed round and then follows the read state
+    /// of the cached messages, so a cached message that is marked read, moved, or removed
+    /// changes it at once. It is `None` until a round completes for the folder, and when the
+    /// provider reported no count.
+    ///
+    /// Each folder's [`MailFolder::kind`] is its stored kind. It is `None` for an ordinary
+    /// folder and for a folder whose kind is not resolved yet.
     ///
     /// # Errors
     ///
