@@ -12,7 +12,7 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountId, CalendarCapabilities, CalendarEventCreation, CalendarEventUpdate,
     CalendarOccurrence, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft,
-    MailFolder, MailFolderKind, MailReplyDraft, MessageBody, MessageId, ReadState,
+    MailFolder, MailFolderKind, MailFolderKinds, MailReplyDraft, MessageBody, MessageId, ReadState,
     VersionedCalendarEvent,
 };
 use einfach_mail_exchange_ews::ExchangeEwsProvider;
@@ -343,6 +343,22 @@ where
         }
     }
 
+    fn folder_kinds(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<MailFolderKinds, MailOperationError>> + Send + '_ {
+        let account_id = account_id.clone();
+        async move {
+            match require_selected_provider(
+                self.selected_provider().await,
+                MailOperationError::SignInRequired,
+            )? {
+                ProviderKind::MicrosoftGraph => self.graph.folder_kinds(&account_id).await,
+                ProviderKind::ExchangeEws => self.ews.folder_kinds(&account_id).await,
+            }
+        }
+    }
+
     fn send_mail(
         &self,
         account_id: &AccountId,
@@ -529,8 +545,9 @@ mod tests {
         AccountConnectionRequest, AccountOperationCancellation, AccountOperationError,
         AccountProvider, CalendarOperationError, CalendarProvider, CalendarSyncStrategy,
         ExchangeEwsAccountSettings, ExchangeEwsAccountSettingsStore, ExchangeEwsSettingsError,
+        MailOperationError, MailProvider,
     };
-    use einfach_mail_domain::CalendarCapabilities;
+    use einfach_mail_domain::{AccountId, CalendarCapabilities};
     use einfach_mail_exchange_ews::ExchangeEwsProvider;
     use einfach_mail_microsoft_graph::MicrosoftGraphProvider;
 
@@ -584,6 +601,22 @@ mod tests {
         assert_eq!(
             legacy_result,
             Err(AccountOperationError::AccountAlreadyConnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn folder_kind_resolution_requires_a_selected_provider() {
+        let router = AccountProviderRouter::new(
+            MicrosoftGraphProvider::new_unconfigured(),
+            ExchangeEwsProvider::new(EmptySettingsStore),
+            false,
+        );
+        let account_id = AccountId::try_from("synthetic-account".to_owned())
+            .expect("synthetic account ID is valid");
+
+        assert_eq!(
+            router.folder_kinds(&account_id).await,
+            Err(MailOperationError::SignInRequired)
         );
     }
 

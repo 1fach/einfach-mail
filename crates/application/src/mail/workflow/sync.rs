@@ -9,7 +9,7 @@ use crate::shared::reservations::OperationReservation;
 use crate::shared::sync_budget::{
     MAX_DELTA_PAGES_PER_ATTEMPT, MAX_DELTA_RESETS_PER_ATTEMPT, response_bytes_after,
 };
-use crate::{MailCache, MailProvider, MessageDeltaResponse};
+use crate::{MailCache, MailCacheError, MailProvider, MessageDeltaResponse};
 
 use super::{MailSyncProgress, MailSyncReport, MailWorkflow, MailWorkflowError};
 
@@ -20,8 +20,12 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     ///
     /// `sync_started_at` supplies a deterministic clock value for the initial
     /// 90-day cutoff. Existing folder scopes retain their stored cutoff.
-    /// One reservation covers folder enumeration, folder replacement, and every delta request.
+    /// One reservation covers folder enumeration, folder replacement, folder kind resolution,
+    /// and every delta request.
     /// The handler receives `Rebuilding` after a replacement checkpoint is saved.
+    ///
+    /// When a cached folder has no resolved kind, the provider resolves the folder kinds
+    /// once. A provider failure in that step does not fail the synchronization.
     ///
     /// # Panics
     ///
@@ -55,6 +59,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         self.cache
             .replace_folders(&self.account_id, folders.clone())
             .await?;
+        self.resolve_folder_kinds().await?;
         let page_count = self
             .sync_folders(&folders, initial_cutoff, progress_handler)
             .await?;
@@ -63,6 +68,27 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
             folder_count: folders.len(),
             page_count,
         })
+    }
+
+    /// Stores the provider's folder kinds when a cached folder has no resolved kind.
+    ///
+    /// A kind only selects a folder's icon and position. When the provider cannot resolve
+    /// the kinds, the cached folders therefore stay unresolved and the next synchronization
+    /// asks again. Only a cache failure is returned.
+    async fn resolve_folder_kinds(&self) -> Result<(), MailCacheError> {
+        if !self
+            .cache
+            .has_unresolved_folder_kinds(&self.account_id)
+            .await?
+        {
+            return Ok(());
+        }
+        if let Ok(kinds) = self.provider.folder_kinds(&self.account_id).await {
+            self.cache
+                .store_folder_kinds(&self.account_id, kinds)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn sync_folders(

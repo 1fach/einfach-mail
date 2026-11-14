@@ -1,5 +1,7 @@
+use std::sync::Mutex;
+
 use einfach_mail_application::ReadStateUpdateOutcome;
-use einfach_mail_domain::UnreadCount;
+use einfach_mail_domain::{MailFolder, MailFolderKinds, UnreadCount};
 
 use super::*;
 
@@ -118,6 +120,170 @@ fn a_confirmed_read_state_that_misses_the_cache_keeps_the_folder_unread_count() 
             })
         );
         assert_eq!(inbox_unread_count(&workflow).await, Some(40));
+
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+/// Returns one empty final page for each folder that the synchronizations visit.
+fn empty_final_pages(
+    count: usize,
+) -> impl Iterator<Item = Result<MessageDeltaResponse, MailOperationError>> {
+    (0..count).map(|index| {
+        Ok(page_response(completed_message_delta_page(
+            &format!("empty-{index}"),
+            Vec::new(),
+        )))
+    })
+}
+
+fn kinds(assignments: &[(MailFolderKind, &MailFolder)]) -> MailFolderKinds {
+    let mut kinds = MailFolderKinds::new();
+    for (kind, folder) in assignments {
+        assert!(
+            kinds.assign(*kind, folder.reference().folder_id().clone()),
+            "synthetic assignments are one-to-one"
+        );
+    }
+    kinds
+}
+
+fn set_folder_kinds_result(
+    result: &Mutex<Result<MailFolderKinds, MailOperationError>>,
+    next: Result<MailFolderKinds, MailOperationError>,
+) {
+    *result
+        .lock()
+        .expect("synthetic folder-kind result mutex is not poisoned") = next;
+}
+
+async fn cached_kind(workflow: &FixtureWorkflow, folder: &MailFolder) -> Option<MailFolderKind> {
+    workflow
+        .list_cached_folders()
+        .await
+        .expect("cached folders are readable")
+        .into_iter()
+        .find(|cached| cached.reference() == folder.reference())
+        .expect("synthetic folder is cached")
+        .kind()
+}
+
+#[test]
+fn folder_kinds_resolve_once_and_again_only_when_a_new_folder_appears() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let archive = archive_folder(&account);
+        let deleted_items = deleted_items_folder(&account);
+        let added = MailFolder::new(
+            FolderReference::new(
+                account.clone(),
+                FolderId::try_from("folder-added".to_owned())
+                    .expect("synthetic folder ID is valid"),
+            ),
+            None,
+            "Synthetic added folder".to_owned(),
+        )
+        .expect("synthetic added folder is valid");
+        let first_listing = vec![inbox.clone(), archive.clone(), deleted_items.clone()];
+        let later_listing = [first_listing.clone(), vec![added.clone()]].concat();
+        let provider = FixtureProvider::new(
+            account.clone(),
+            later_listing,
+            empty_final_pages(10),
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        provider
+            .folder_snapshots
+            .lock()
+            .expect("synthetic folder snapshot mutex is not poisoned")
+            .extend([first_listing.clone(), first_listing]);
+        set_folder_kinds_result(
+            &provider.folder_kinds_result,
+            Ok(kinds(&[
+                (MailFolderKind::Inbox, &inbox),
+                (MailFolderKind::Archive, &archive),
+            ])),
+        );
+        let resolutions = Arc::clone(&provider.folder_kinds_calls);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(account, provider, cache.clone());
+
+        workflow
+            .synchronize_account(started_at(), &ignore_sync_progress)
+            .await
+            .expect("first synchronization completes");
+        assert_eq!(resolutions.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            cached_kind(&workflow, &inbox).await,
+            Some(MailFolderKind::Inbox)
+        );
+        assert_eq!(
+            cached_kind(&workflow, &archive).await,
+            Some(MailFolderKind::Archive)
+        );
+        assert_eq!(cached_kind(&workflow, &deleted_items).await, None);
+
+        workflow
+            .synchronize_account(started_at(), &ignore_sync_progress)
+            .await
+            .expect("second synchronization completes");
+        assert_eq!(resolutions.load(Ordering::Relaxed), 1);
+
+        workflow
+            .synchronize_account(started_at(), &ignore_sync_progress)
+            .await
+            .expect("third synchronization completes");
+        assert_eq!(resolutions.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            cached_kind(&workflow, &inbox).await,
+            Some(MailFolderKind::Inbox)
+        );
+        assert_eq!(cached_kind(&workflow, &added).await, None);
+
+        drop(workflow);
+        cache.close_for_tests().await;
+    });
+}
+
+#[test]
+fn a_failed_folder_kind_resolution_does_not_fail_the_sync_and_runs_again() {
+    smol::block_on(async {
+        let directory = TempDir::new().expect("temporary directory is created");
+        let account = account_id();
+        let inbox = folder(&account);
+        let provider = FixtureProvider::new(
+            account.clone(),
+            vec![inbox.clone()],
+            empty_final_pages(2),
+            Err(MailOperationError::ServiceUnavailable),
+        );
+        let kinds_result = Arc::clone(&provider.folder_kinds_result);
+        set_folder_kinds_result(&kinds_result, Err(MailOperationError::ServiceUnavailable));
+        let resolutions = Arc::clone(&provider.folder_kinds_calls);
+        let cache = open_cache(&directory, account.clone()).await;
+        let workflow = MailWorkflow::new(account, provider, cache.clone());
+
+        let report = workflow
+            .synchronize_account(started_at(), &ignore_sync_progress)
+            .await
+            .expect("synchronization completes without folder kinds");
+        assert_eq!((report.folder_count(), report.page_count()), (1, 1));
+        assert_eq!(resolutions.load(Ordering::Relaxed), 1);
+        assert_eq!(cached_kind(&workflow, &inbox).await, None);
+
+        set_folder_kinds_result(&kinds_result, Ok(kinds(&[(MailFolderKind::Inbox, &inbox)])));
+        workflow
+            .synchronize_account(started_at(), &ignore_sync_progress)
+            .await
+            .expect("next synchronization completes");
+        assert_eq!(resolutions.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            cached_kind(&workflow, &inbox).await,
+            Some(MailFolderKind::Inbox)
+        );
 
         drop(workflow);
         cache.close_for_tests().await;

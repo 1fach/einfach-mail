@@ -1,10 +1,14 @@
 //! Mail provider operations and errors used by application workflows.
 
-use std::{future::Future, time::Duration};
+use std::{
+    future::{Future, ready},
+    time::Duration,
+};
 
 use einfach_mail_domain::{
     AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailFolderKind,
-    MailReplyDraft, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId, ReadState,
+    MailFolderKinds, MailReplyDraft, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId,
+    ReadState,
 };
 use thiserror::Error;
 
@@ -273,6 +277,28 @@ pub trait MailProvider: Send + Sync {
         account_id: &AccountId,
         folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_;
+
+    /// Resolves which folder the mailbox of `account_id` uses for each [`MailFolderKind`].
+    ///
+    /// The result holds a kind only when the mailbox has a folder of that kind. A missing
+    /// kind is not an error. Implementations use the provider's locale-independent folder
+    /// identity and reject an account that does not match the active session.
+    ///
+    /// The default implementation resolves nothing and returns
+    /// [`MailOperationError::UnsupportedOperation`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailOperationError::UnsupportedOperation`] when the provider cannot resolve
+    /// folder kinds, [`MailOperationError::AccountMismatch`] when `account_id` is not the
+    /// signed-in account, or another provider error when the resolution fails as a whole.
+    fn folder_kinds(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<MailFolderKinds, MailOperationError>> + Send + '_ {
+        let _ = account_id;
+        ready(Err(MailOperationError::UnsupportedOperation))
+    }
 
     /// Sends one plain-text message as the signed-in account.
     ///

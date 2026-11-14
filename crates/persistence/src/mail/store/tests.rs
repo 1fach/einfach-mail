@@ -2,9 +2,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use einfach_mail_application::{MailCache, MailCacheError, MailSyncState};
 use einfach_mail_domain::{
-    FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, Mailbox, MessageBody,
-    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
-    MessageId, MessageMetadataPatch, MessagePreview, ReadState, UnreadCount,
+    AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailFolder, MailFolderKind,
+    MailFolderKinds, MailMessage, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
+    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
+    MessagePreview, ReadState, UnreadCount,
 };
 use tempfile::TempDir;
 
@@ -14,6 +15,7 @@ use crate::test_support::{
     account_id, archive_folder, complete_patch, completed_message_delta_page, folder, open_cache,
 };
 
+mod folder_kinds;
 mod message_metadata;
 mod unread_counts;
 

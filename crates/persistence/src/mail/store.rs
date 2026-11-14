@@ -6,11 +6,11 @@ use async_sqlite::rusqlite::{
 };
 use einfach_mail_application::{MailCache, MailCacheError, MailSyncState};
 use einfach_mail_domain::{
-    AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage,
-    MailRecipient, MailReplySource, MailSendOperationId, MailSendTarget, MailSubject, Mailbox,
-    MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
-    MessageDeltaProgress, MessageId, MessageMetadata, MessageOrigin, MessagePreview,
-    PendingMailSend, ReadState, UnreadCount,
+    AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailFolder, MailFolderKind,
+    MailFolderKinds, MailMessage, MailRecipient, MailReplySource, MailSendOperationId,
+    MailSendTarget, MailSubject, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
+    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadata,
+    MessageOrigin, MessagePreview, PendingMailSend, ReadState, UnreadCount,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -36,8 +36,8 @@ mod writes;
 
 use self::{
     folders::{
-        folder_exists, read_folders, rebaseline_uncached_unread, replace_folder_rows,
-        validate_folder_snapshot,
+        folder_exists, has_unresolved_folder_kinds, read_folders, rebaseline_uncached_unread,
+        replace_folder_rows, store_folder_kind_rows, validate_folder_snapshot,
     },
     messages::{
         READ_MESSAGE_METADATA_SQL, decode_message, follow_up_flag_status_name, message_columns_sql,
@@ -123,6 +123,46 @@ impl MailCache for SqliteAccountCache {
                 .conn_mut_and_then(move |connection| {
                     let transaction = connection.transaction()?;
                     replace_folder_rows(&transaction, &account_id, folders)?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .map_err(CacheFailure::mail_public)
+        }
+    }
+
+    fn has_unresolved_folder_kinds(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<bool, MailCacheError>> + Send + '_ {
+        let validation = self.check_mail_account(account_id);
+        let account_id = account_id.as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_and_then(move |connection| {
+                    has_unresolved_folder_kinds(connection, &account_id)
+                })
+                .await
+                .map_err(CacheFailure::mail_public)
+        }
+    }
+
+    fn store_folder_kinds(
+        &self,
+        account_id: &AccountId,
+        kinds: MailFolderKinds,
+    ) -> impl Future<Output = Result<(), MailCacheError>> + Send + '_ {
+        let validation = self.check_mail_account(account_id);
+        let account_id = account_id.as_str().to_owned();
+        let client = self.client.clone();
+        async move {
+            validation?;
+            client
+                .conn_mut_and_then(move |connection| {
+                    let transaction = connection.transaction()?;
+                    store_folder_kind_rows(&transaction, &account_id, &kinds)?;
                     transaction.commit()?;
                     Ok(())
                 })

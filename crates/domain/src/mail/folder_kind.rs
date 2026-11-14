@@ -64,6 +64,13 @@ impl MailFolderKinds {
             .iter()
             .find_map(|(assigned_kind, folder)| (*assigned_kind == kind).then_some(folder))
     }
+
+    /// Returns each assigned kind with its folder.
+    pub fn assignments(&self) -> impl Iterator<Item = (MailFolderKind, &FolderId)> {
+        self.assignments
+            .iter()
+            .map(|(kind, folder)| (*kind, folder))
+    }
 }
 
 #[cfg(test)]
