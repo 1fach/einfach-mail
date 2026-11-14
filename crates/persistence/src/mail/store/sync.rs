@@ -381,6 +381,9 @@ pub(super) fn update_sync_progress(
             if let Some(generation) = active_full_sync_generation(transaction, folder)? {
                 reconcile_full_sync(transaction, folder, generation)?;
             }
+            // The reconcile deletes cached messages, so the re-baseline counts unread
+            // messages only after it.
+            rebaseline_uncached_unread(transaction, folder)?;
             transaction.execute(
                 "UPDATE mail_sync_state
                  SET delta_link = ?3, next_link = NULL,

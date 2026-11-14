@@ -2,6 +2,7 @@ use super::*;
 
 mod delete_recovery;
 mod folder_actions;
+mod folder_metadata;
 mod moves;
 mod rebuild;
 mod send_reply;

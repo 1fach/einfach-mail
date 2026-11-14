@@ -54,12 +54,20 @@ fn insert_folder(
     let folder_id = folder.reference().folder_id().as_str();
     let parent_id = folder.parent().map(|parent| parent.folder_id().as_str());
     transaction.execute(
-        "INSERT INTO mail_folders (account_id, folder_id, parent_folder_id, display_name)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO mail_folders (
+            account_id, folder_id, parent_folder_id, display_name, unread_reported
+         ) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT (account_id, folder_id) DO UPDATE SET
             parent_folder_id = excluded.parent_folder_id,
-            display_name = excluded.display_name",
-        params![account_id, folder_id, parent_id, folder.display_name()],
+            display_name = excluded.display_name,
+            unread_reported = excluded.unread_reported",
+        params![
+            account_id,
+            folder_id,
+            parent_id,
+            folder.display_name(),
+            folder.unread_count().map(UnreadCount::get)
+        ],
     )?;
     transaction.execute(
         "INSERT INTO seen_mail_folders (folder_id) VALUES (?1)",
@@ -68,40 +76,97 @@ fn insert_folder(
     Ok(())
 }
 
+/// Counts the cached unread messages of the `mail_folders` row that a statement names `f`.
+///
+/// [`READ_FOLDERS_SQL`] adds this count and [`REBASELINE_UNREAD_SQL`] subtracts it. The two
+/// statements must count the same rows, or the unread count that a folder shows drifts from
+/// the provider's count.
+const CACHED_UNREAD_SQL: &str = "(
+    SELECT COUNT(*) FROM mail_messages m
+    WHERE m.account_id = f.account_id AND m.folder_id = f.folder_id AND m.is_read = 0
+)";
+
+/// Selects an account's folders and the unread count to show for each.
+///
+/// The count is `unread_uncached` plus the cached unread messages. It is NULL while
+/// `unread_uncached` is NULL.
+static READ_FOLDERS_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT f.folder_id, f.parent_folder_id, f.display_name,
+                f.unread_uncached + {CACHED_UNREAD_SQL} AS unread_count
+         FROM mail_folders f
+         WHERE f.account_id = ?1
+         ORDER BY f.display_name, f.folder_id"
+    )
+});
+
+/// Sets `unread_uncached` to the provider's count minus the cached unread messages.
+///
+/// The result is NULL when the provider reported no count, and 0 when the cache holds more
+/// unread messages than the provider reported.
+static REBASELINE_UNREAD_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "UPDATE mail_folders AS f
+         SET unread_uncached = MAX(0, f.unread_reported - {CACHED_UNREAD_SQL})
+         WHERE f.account_id = ?1 AND f.folder_id = ?2"
+    )
+});
+
+pub(super) fn rebaseline_uncached_unread(
+    transaction: &Transaction<'_>,
+    folder: &FolderReference,
+) -> CacheResult<()> {
+    transaction.execute(
+        &REBASELINE_UNREAD_SQL,
+        params![folder.account_id().as_str(), folder.folder_id().as_str()],
+    )?;
+    Ok(())
+}
+
+struct RawFolder {
+    folder_id: String,
+    parent_folder_id: Option<String>,
+    display_name: String,
+    unread_count: Option<i64>,
+}
+
 pub(super) fn read_folders(
     connection: &Connection,
     account_id: &str,
 ) -> CacheResult<Vec<MailFolder>> {
-    let mut statement = connection.prepare(
-        "SELECT folder_id, parent_folder_id, display_name
-         FROM mail_folders WHERE account_id = ?1 ORDER BY display_name, folder_id",
-    )?;
-    let rows = statement.query_map([account_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-    let values = rows.collect::<Result<Vec<_>, _>>()?;
-    values
-        .into_iter()
-        .map(|(folder_id, parent_id, display_name)| {
-            let reference = FolderReference::new(
-                AccountId::try_from(account_id.to_owned())
-                    .map_err(|_| CacheFailure::InvalidData)?,
-                FolderId::try_from(folder_id).map_err(|_| CacheFailure::InvalidData)?,
-            );
-            let parent = parent_id
-                .map(|parent| {
-                    FolderId::try_from(parent)
-                        .map(|id| FolderReference::new(reference.account_id().clone(), id))
-                        .map_err(|_| CacheFailure::InvalidData)
-                })
-                .transpose()?;
-            MailFolder::new(reference, parent, display_name).map_err(|_| CacheFailure::InvalidData)
+    let account_id =
+        AccountId::try_from(account_id.to_owned()).map_err(|_| CacheFailure::InvalidData)?;
+    let mut statement = connection.prepare(&READ_FOLDERS_SQL)?;
+    let rows = statement.query_map([account_id.as_str()], |row| {
+        Ok(RawFolder {
+            folder_id: row.get("folder_id")?,
+            parent_folder_id: row.get("parent_folder_id")?,
+            display_name: row.get("display_name")?,
+            unread_count: row.get("unread_count")?,
         })
-        .collect()
+    })?;
+    rows.map(|row| decode_folder(&account_id, row?)).collect()
+}
+
+fn decode_folder(account_id: &AccountId, raw: RawFolder) -> CacheResult<MailFolder> {
+    let reference = folder_reference(account_id, raw.folder_id)?;
+    let parent = raw
+        .parent_folder_id
+        .map(|parent_id| folder_reference(account_id, parent_id))
+        .transpose()?;
+    let unread_count = raw
+        .unread_count
+        .map(|count| u32::try_from(count).map(UnreadCount::new))
+        .transpose()
+        .map_err(|_| CacheFailure::InvalidData)?;
+    let folder = MailFolder::new(reference, parent, raw.display_name)
+        .map_err(|_| CacheFailure::InvalidData)?;
+    Ok(folder.with_unread_count(unread_count))
+}
+
+fn folder_reference(account_id: &AccountId, folder_id: String) -> CacheResult<FolderReference> {
+    let folder_id = FolderId::try_from(folder_id).map_err(|_| CacheFailure::InvalidData)?;
+    Ok(FolderReference::new(account_id.clone(), folder_id))
 }
 
 pub(super) fn folder_exists(

@@ -10,7 +10,7 @@ use einfach_mail_domain::{
     MailRecipient, MailReplySource, MailSendOperationId, MailSendTarget, MailSubject, Mailbox,
     MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
     MessageDeltaProgress, MessageId, MessageMetadata, MessageOrigin, MessagePreview,
-    PendingMailSend, ReadState,
+    PendingMailSend, ReadState, UnreadCount,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -35,7 +35,10 @@ mod tests;
 mod writes;
 
 use self::{
-    folders::{folder_exists, read_folders, replace_folder_rows, validate_folder_snapshot},
+    folders::{
+        folder_exists, read_folders, rebaseline_uncached_unread, replace_folder_rows,
+        validate_folder_snapshot,
+    },
     messages::{
         READ_MESSAGE_METADATA_SQL, decode_message, follow_up_flag_status_name, message_columns_sql,
         nullable_message_columns_sql, raw_message_from_row, read_cached_message, read_messages,

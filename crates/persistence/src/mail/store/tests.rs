@@ -1,10 +1,10 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use einfach_mail_application::{MailCache, MailSyncState};
+use einfach_mail_application::{MailCache, MailCacheError, MailSyncState};
 use einfach_mail_domain::{
     FolderReference, FollowUpFlagStatus, MailFolder, MailMessage, Mailbox, MessageBody,
-    MessageBodyType, MessageDeltaChange, MessageId, MessageMetadataPatch, MessagePreview,
-    ReadState,
+    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
+    MessageId, MessageMetadataPatch, MessagePreview, ReadState, UnreadCount,
 };
 use tempfile::TempDir;
 
@@ -15,6 +15,7 @@ use crate::test_support::{
 };
 
 mod message_metadata;
+mod unread_counts;
 
 fn received_at() -> SystemTime {
     UNIX_EPOCH + Duration::new(1_800_000_000, 123_456_789)
@@ -46,6 +47,23 @@ async fn sync_state(cache: &SqliteAccountCache, folder: &FolderReference) -> Mai
         .ensure_sync_state(folder, received_at() - Duration::from_secs(60))
         .await
         .expect("synthetic checkpoint is readable")
+}
+
+/// Commits `changes` as a page that leaves the delta round of `folder` unfinished.
+async fn commit_unfinished_page(
+    cache: &SqliteAccountCache,
+    folder: &FolderReference,
+    changes: Vec<MessageDeltaChange>,
+) {
+    let state = sync_state(cache, folder).await;
+    let next_link = MessageDeltaLink::from_opaque(format!(
+        "https://graph.microsoft.com/v1.0/messages?$skiptoken=synthetic-{}",
+        state.checkpoint_revision()
+    ));
+    let page = MessageDeltaPage::new(changes, MessageDeltaProgress::Next(next_link));
+    MailCache::commit_delta_page(cache, folder, &state, page, received_at())
+        .await
+        .expect("synthetic unfinished page commits");
 }
 
 /// Commits `changes` as the final page of a delta round for `folder`.

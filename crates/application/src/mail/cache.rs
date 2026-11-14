@@ -164,6 +164,11 @@ impl MailSyncState {
 pub trait MailCache: Send + Sync {
     /// Replaces one account's visible folder tree and preserves matching cached records.
     ///
+    /// Each folder's [`MailFolder::unread_count`] is the count that the provider reported, and
+    /// `None` clears it. Storing it does not change the count that
+    /// [`list_folders`](Self::list_folders) returns. That count follows the provider's count
+    /// only when [`commit_delta_page`](Self::commit_delta_page) completes a round.
+    ///
     /// # Errors
     ///
     /// Returns [`MailCacheError::AccountMismatch`] for a different cache account,
@@ -220,6 +225,9 @@ pub trait MailCache: Send + Sync {
     /// delta link and records the completion time. Each accepted page advances
     /// the checkpoint revision atomically with its changes.
     ///
+    /// An accepted `Complete` page also sets the folder's unread count to the count that the
+    /// provider last reported, in the same transaction. A rejected page changes no count.
+    ///
     /// # Errors
     ///
     /// Returns [`MailCacheError::AccountMismatch`] for a different cache account,
@@ -254,6 +262,12 @@ pub trait MailCache: Send + Sync {
     ) -> impl Future<Output = Result<MailSyncState, MailCacheError>> + Send + '_;
 
     /// Returns all visible folders saved for `account_id`.
+    ///
+    /// Each folder's [`MailFolder::unread_count`] is the count to show. It starts from the
+    /// provider's count at the folder's last completed round and then follows the read state
+    /// of the cached messages, so a cached message that is marked read, moved, or removed
+    /// changes it at once. It is `None` until a round completes for the folder, and when the
+    /// provider reported no count.
     ///
     /// # Errors
     ///
