@@ -83,9 +83,7 @@ impl MailView {
         }));
         cx.notify();
     }
-}
 
-impl MailView {
     /// Shows the folders a cache read returned after a write, so the unread counts follow the
     /// rows. `None` means the read failed, and the folders on screen stay.
     pub(super) fn apply_refreshed_folders(&mut self, folders: Option<Vec<MailFolder>>) {

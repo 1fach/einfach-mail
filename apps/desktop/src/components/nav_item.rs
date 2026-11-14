@@ -164,13 +164,21 @@ impl NavItem {
             )
     }
 
+    /// The count is muted, except on the selected item, where the light theme's muted text falls
+    /// under 4.5:1 against the selection fill.
     fn render_count(&self, count: u32, cx: &App) -> impl IntoElement {
         let selector = format!("{}-unread", self.id);
+        let theme = cx.theme();
+        let color = if self.selected {
+            theme.foreground
+        } else {
+            theme.muted_foreground
+        };
         div()
             .debug_selector(move || selector)
             .flex_shrink_0()
             .text_xs()
-            .text_color(cx.theme().muted_foreground)
+            .text_color(color)
             .child(unread_count_text(count))
     }
 
