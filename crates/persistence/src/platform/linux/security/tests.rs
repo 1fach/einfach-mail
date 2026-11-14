@@ -9,9 +9,9 @@ use std::{
 };
 
 use super::{
-    CacheLifecycleError, KeyLookup, classify_key_lookup, lock_account_directory_exclusive,
-    lock_account_directory_shared, open_test_database, remove_database_files,
-    take_lifecycle_lock_if_restore_failed, with_suffix,
+    CacheLifecycleError, FileLock, KeyLookup, classify_key_lookup,
+    lock_account_directory_exclusive, lock_account_directory_shared, open_test_database,
+    remove_database_files, take_lifecycle_lock_if_restore_failed, with_suffix,
 };
 use keyring::Error as KeyringError;
 
@@ -286,8 +286,9 @@ fn dropped_locks_release_while_a_child_process_shares_their_descriptor() {
 }
 
 /// Duplicates a lock descriptor as a spawned child holds it between `fork` and `exec`.
-fn inherit_descriptor(lock: &fs::File) -> fs::File {
-    lock.try_clone()
+fn inherit_descriptor(lock: &FileLock) -> fs::File {
+    lock.0
+        .try_clone()
         .expect("synthetic inherited lock descriptor is duplicated")
 }
 

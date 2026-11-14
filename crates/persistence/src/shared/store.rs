@@ -112,7 +112,7 @@ pub struct SqliteAccountCache {
     pub(crate) database_identity: security::DatabaseIdentity,
     credential_account: String,
     lifecycle_lock_path: std::path::PathBuf,
-    account_lock: Arc<std::fs::File>,
+    account_lock: Arc<security::FileLock>,
     #[cfg(test)]
     pub(crate) test_hooks: Arc<TestHooks>,
 }

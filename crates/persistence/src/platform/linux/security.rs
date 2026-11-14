@@ -26,7 +26,7 @@ pub(crate) struct OpenDatabase {
     pub(crate) database_identity: DatabaseIdentity,
     pub(crate) lifecycle_lock_path: PathBuf,
     pub(crate) credential_account: String,
-    pub(crate) account_lock: Arc<File>,
+    pub(crate) account_lock: Arc<FileLock>,
 }
 
 struct CachePaths {
@@ -37,14 +37,25 @@ struct CachePaths {
 }
 
 struct CacheOpenLocks {
-    account_lock: Arc<File>,
-    _initialization_lock: File,
+    account_lock: Arc<FileLock>,
+    _initialization_lock: FileLock,
+}
+
+/// Holds an advisory `flock` on a cache lock file and releases it on drop.
+pub(crate) struct FileLock(File);
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Closing the file releases the lock only after every duplicate descriptor closes,
+        // including the copy a concurrently spawned child holds until `exec`.
+        let _ = self.0.unlock();
+    }
 }
 
 /// Holds the lifecycle gate while an open cache attempts account removal.
 pub(crate) struct AccountRemovalLock {
-    account_lock: Arc<File>,
-    lifecycle_lock: Option<File>,
+    account_lock: Arc<FileLock>,
+    lifecycle_lock: Option<FileLock>,
     restore_shared_on_drop: bool,
 }
 
@@ -58,7 +69,7 @@ impl AccountRemovalLock {
     /// Returns [`CacheLifecycleError::Unavailable`] when lock state cannot be restored.
     pub(crate) fn acquire(
         lifecycle_lock_path: &Path,
-        account_lock: Arc<File>,
+        account_lock: Arc<FileLock>,
     ) -> Result<Self, CacheLifecycleError> {
         let lifecycle_lock = lock_account_directory_exclusive(lifecycle_lock_path)?;
         let mut removal_lock = Self {
@@ -66,7 +77,7 @@ impl AccountRemovalLock {
             lifecycle_lock: Some(lifecycle_lock),
             restore_shared_on_drop: true,
         };
-        if let Err(error) = removal_lock.account_lock.try_lock() {
+        if let Err(error) = removal_lock.account_lock.0.try_lock() {
             restore_shared_account_lock(&removal_lock.account_lock)?;
             removal_lock.restore_shared_on_drop = false;
             return Err(lock_error(error));
@@ -108,8 +119,8 @@ impl Drop for AccountRemovalLock {
 
 fn take_lifecycle_lock_if_restore_failed(
     restore_result: Result<(), CacheLifecycleError>,
-    lifecycle_lock: &mut Option<File>,
-) -> Option<File> {
+    lifecycle_lock: &mut Option<FileLock>,
+) -> Option<FileLock> {
     restore_result.err()?;
     lifecycle_lock.take()
 }
@@ -199,7 +210,7 @@ fn acquire_cache_open_locks(paths: &CachePaths) -> Result<CacheOpenLocks, CacheL
 
 async fn open_locked_database(
     paths: CachePaths,
-    account_lock: Arc<File>,
+    account_lock: Arc<FileLock>,
 ) -> Result<OpenDatabase, CacheLifecycleError> {
     let credential = credential_entry(&paths.credential_account)?;
     let key = load_or_create_key(&credential, encrypted_data_exists(&paths.database)?)?;
@@ -209,7 +220,7 @@ async fn open_locked_database(
 async fn open_database_with_key(
     paths: CachePaths,
     key: DatabaseKey,
-    account_lock: Arc<File>,
+    account_lock: Arc<FileLock>,
 ) -> Result<OpenDatabase, CacheLifecycleError> {
     secure_database_file(&paths.database)?;
     let client = open_encrypted_client(&paths.database, &key).await?;
@@ -415,10 +426,11 @@ fn remove_unopened_account_cache(
     remove_credential()
 }
 
-fn restore_shared_account_lock(file: &File) -> Result<(), CacheLifecycleError> {
-    file.unlock()
+fn restore_shared_account_lock(lock: &FileLock) -> Result<(), CacheLifecycleError> {
+    lock.0
+        .unlock()
         .map_err(|_| CacheLifecycleError::Unavailable)?;
-    file.try_lock_shared().map_err(lock_error)
+    lock.0.try_lock_shared().map_err(lock_error)
 }
 
 /// Allows multiple cache sessions to share the account lock while excluding removal.
@@ -427,16 +439,16 @@ fn restore_shared_account_lock(file: &File) -> Result<(), CacheLifecycleError> {
 ///
 /// Returns [`CacheLifecycleError::InUse`] when an account removal owns the lock.
 /// Returns [`CacheLifecycleError::Unavailable`] when the lock file cannot be opened or locked.
-fn lock_account_directory_shared(path: &Path) -> Result<File, CacheLifecycleError> {
+fn lock_account_directory_shared(path: &Path) -> Result<FileLock, CacheLifecycleError> {
     let file = open_account_lock_file(path)?;
     file.try_lock_shared().map_err(lock_error)?;
-    Ok(file)
+    Ok(FileLock(file))
 }
 
-fn lock_account_directory_exclusive(path: &Path) -> Result<File, CacheLifecycleError> {
+fn lock_account_directory_exclusive(path: &Path) -> Result<FileLock, CacheLifecycleError> {
     let file = open_account_lock_file(path)?;
     file.try_lock().map_err(lock_error)?;
-    Ok(file)
+    Ok(FileLock(file))
 }
 
 fn open_account_lock_file(path: &Path) -> Result<File, CacheLifecycleError> {
