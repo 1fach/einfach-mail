@@ -1,4 +1,4 @@
-use super::super::messages::MESSAGE_COLUMNS;
+use super::super::message_columns_sql;
 use super::*;
 
 const MESSAGE: &str = "message-1";
@@ -30,29 +30,25 @@ fn patch_with_preview(text: &str) -> MessageMetadataPatch {
     patch
 }
 
-/// Returns the metadata columns that are NULL in at least one cached message.
-async fn null_metadata_columns(cache: &SqliteAccountCache) -> Vec<&'static str> {
+/// Returns the name of each metadata column that is NULL in the one cached message.
+async fn null_metadata_columns(cache: &SqliteAccountCache) -> Vec<String> {
+    let name_when_null =
+        message_columns_sql(|name| format!("CASE WHEN {name} IS NULL THEN '{name}' END"));
     cache
         .client
-        .conn_and_then(|connection| {
-            let mut null_columns = Vec::new();
-            for column in &MESSAGE_COLUMNS {
-                let has_null: bool = connection.query_row(
-                    &format!(
-                        "SELECT EXISTS (SELECT 1 FROM mail_messages WHERE {} IS NULL)",
-                        column.name()
-                    ),
-                    [],
-                    |row| row.get(0),
-                )?;
-                if has_null {
-                    null_columns.push(column.name());
-                }
-            }
-            Ok::<_, CacheFailure>(null_columns)
+        .conn_and_then(move |connection| {
+            let mut statement =
+                connection.prepare(&format!("SELECT {name_when_null} FROM mail_messages"))?;
+            let column_count = statement.column_count();
+            let null_columns = statement.query_row([], |row| {
+                (0..column_count)
+                    .map(|index| row.get::<_, Option<String>>(index))
+                    .collect::<Result<Vec<_>, _>>()
+            })?;
+            Ok::<_, CacheFailure>(null_columns.into_iter().flatten().collect())
         })
         .await
-        .expect("synthetic message rows are readable")
+        .expect("synthetic message row is readable")
 }
 
 async fn stored_preview(cache: &SqliteAccountCache, folder: &FolderReference) -> Option<String> {
@@ -91,7 +87,7 @@ fn every_metadata_field_survives_store_list_read_and_move() {
 
         assert_eq!(
             null_metadata_columns(&cache).await,
-            Vec::<&str>::new(),
+            Vec::<String>::new(),
             "the synthetic message must set every metadata column"
         );
         assert_eq!(cache.list_messages(&inbox).await, Ok(vec![stored.clone()]));

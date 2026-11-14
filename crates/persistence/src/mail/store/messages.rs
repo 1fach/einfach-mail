@@ -1,7 +1,7 @@
 use super::*;
 
 /// A `mail_messages` column that stores one field of [`MessageMetadata`].
-pub(super) struct MessageColumn {
+struct MessageColumn {
     name: &'static str,
     nullable: bool,
 }
@@ -20,11 +20,6 @@ impl MessageColumn {
             nullable: true,
         }
     }
-
-    #[cfg(test)]
-    pub(super) fn name(&self) -> &'static str {
-        self.name
-    }
 }
 
 /// The metadata columns of `mail_messages`.
@@ -32,7 +27,7 @@ impl MessageColumn {
 /// Every statement that reads, stores, or moves message metadata takes its column list from
 /// this array. [`raw_message_from_row`] reads each column by name, and the store statement
 /// binds each column by name, so the order of this array carries no meaning.
-pub(super) const MESSAGE_COLUMNS: [MessageColumn; 10] = [
+const MESSAGE_COLUMNS: [MessageColumn; 10] = [
     MessageColumn::nullable("subject"),
     MessageColumn::nullable("from_display_name"),
     MessageColumn::nullable("from_address"),
@@ -68,7 +63,6 @@ fn join_columns<'a>(
         .join(", ")
 }
 
-/// Selects the identifier and metadata of one cached message.
 pub(super) static READ_MESSAGE_METADATA_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "SELECT message_id, {columns}
