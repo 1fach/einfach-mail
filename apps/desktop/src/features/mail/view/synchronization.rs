@@ -4,7 +4,9 @@ use crate::components::relative_age_label;
 use einfach_mail_application::{
     MailCacheError, MailSession, MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflowError,
 };
-use einfach_mail_domain::{FolderReference, MailFolder, MailMessage, MessageId, PendingMailSend};
+use einfach_mail_domain::{
+    FolderReference, MailFolder, MailFolderKind, MailMessage, MessageId, PendingMailSend,
+};
 use gpui_kit::{AsyncApp, Context};
 
 use super::{
@@ -270,7 +272,12 @@ async fn load_snapshot(
 fn preferred_folder(folders: &[MailFolder]) -> Option<FolderReference> {
     folders
         .iter()
-        .find(|folder| folder.display_name().eq_ignore_ascii_case("inbox"))
+        .find(|folder| folder.kind() == Some(MailFolderKind::Inbox))
+        .or_else(|| {
+            folders
+                .iter()
+                .find(|folder| folder.display_name().eq_ignore_ascii_case("inbox"))
+        })
         .or_else(|| folders.first())
         .map(|folder| folder.reference().clone())
 }
@@ -308,3 +315,6 @@ async fn synchronize_with_progress(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
