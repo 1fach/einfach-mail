@@ -12,7 +12,7 @@ mod tests;
 use compatibility::apply_parallel_schema_compatibility;
 use migrations::migrations;
 
-pub(crate) const MESSAGE_QUERY_VERSION: i64 = 2;
+pub(crate) const MESSAGE_QUERY_VERSION: i64 = 3;
 
 pub(crate) async fn apply(client: &Client) -> CacheResult<()> {
     client

@@ -479,5 +479,40 @@ pub(super) fn migrations() -> Migrations<'static> {
                 ) ON DELETE CASCADE
             );",
         ),
+        M::up(
+            "ALTER TABLE mail_messages ADD COLUMN preview TEXT
+                CHECK (preview IS NULL OR length(preview) BETWEEN 1 AND 256);
+
+            ALTER TABLE mail_folders ADD COLUMN kind TEXT
+                CHECK (kind IS NULL OR kind IN (
+                    'inbox', 'sent_items', 'drafts', 'archive', 'deleted_items', 'junk_email',
+                    'other'
+                ));
+
+            ALTER TABLE mail_folders ADD COLUMN unread_reported INTEGER
+                CHECK (unread_reported IS NULL OR unread_reported >= 0);
+
+            ALTER TABLE mail_folders ADD COLUMN unread_uncached INTEGER
+                CHECK (unread_uncached IS NULL OR unread_uncached >= 0);
+
+            CREATE UNIQUE INDEX mail_folders_one_per_kind ON mail_folders (account_id, kind)
+                WHERE kind IS NOT NULL AND kind <> 'other';
+
+            CREATE INDEX mail_messages_unread ON mail_messages (account_id, folder_id)
+                WHERE is_read = 0;
+
+            UPDATE mail_account_sync_scope SET query_version = 3;
+
+            UPDATE mail_sync_state
+            SET delta_link = NULL,
+                next_link = NULL,
+                last_sync_seconds = NULL,
+                last_sync_nanoseconds = NULL,
+                full_sync_generation = 0,
+                full_sync_active = 0,
+                checkpoint_revision = checkpoint_revision + 1;
+
+            UPDATE mail_messages SET full_sync_generation = NULL;",
+        ),
     ])
 }
