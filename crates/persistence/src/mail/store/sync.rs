@@ -177,11 +177,7 @@ fn read_cached_metadata(
 ) -> CacheResult<Option<MailMessage>> {
     let raw = connection
         .query_row(
-            "SELECT message_id, subject, from_display_name, from_address,
-                    sender_display_name, sender_address, received_seconds,
-                    received_nanoseconds, is_read, flag_status
-             FROM mail_messages
-             WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+            &READ_MESSAGE_METADATA_SQL,
             params![
                 folder.account_id().as_str(),
                 folder.folder_id().as_str(),
@@ -193,6 +189,23 @@ fn read_cached_metadata(
     raw.map(|raw| decode_message(folder, raw)).transpose()
 }
 
+/// Inserts a message or replaces its metadata, and clears its cached body.
+static STORE_MESSAGE_METADATA_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "INSERT INTO mail_messages (
+            account_id, folder_id, message_id, {columns}, full_sync_generation
+         ) VALUES (:account_id, :folder_id, :message_id, {values}, :full_sync_generation)
+         ON CONFLICT (account_id, folder_id, message_id) DO UPDATE SET
+            {replacements},
+            full_sync_generation = excluded.full_sync_generation,
+            body_type = NULL,
+            body_content = NULL",
+        columns = message_columns_sql(str::to_owned),
+        values = message_columns_sql(|name| format!(":{name}")),
+        replacements = message_columns_sql(|name| format!("{name} = excluded.{name}")),
+    )
+});
+
 fn store_message_metadata(
     connection: &Connection,
     message: &MailMessage,
@@ -203,42 +216,25 @@ fn store_message_metadata(
     let (sender_name, sender_address) = mailbox_fields(metadata.origin().sender());
     let (received_seconds, received_nanoseconds) = system_time_parts(*metadata.received_at())?;
     connection.execute(
-        "INSERT INTO mail_messages (
-            account_id, folder_id, message_id, subject,
-            from_display_name, from_address, sender_display_name, sender_address,
-            received_seconds, received_nanoseconds, is_read, flag_status,
-            full_sync_generation
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-         ON CONFLICT (account_id, folder_id, message_id) DO UPDATE SET
-            subject = excluded.subject,
-            from_display_name = excluded.from_display_name,
-            from_address = excluded.from_address,
-            sender_display_name = excluded.sender_display_name,
-            sender_address = excluded.sender_address,
-            received_seconds = excluded.received_seconds,
-            received_nanoseconds = excluded.received_nanoseconds,
-            is_read = excluded.is_read,
-            flag_status = excluded.flag_status,
-            full_sync_generation = excluded.full_sync_generation,
-            body_type = NULL,
-            body_content = NULL",
-        params![
-            message.folder().account_id().as_str(),
-            message.folder().folder_id().as_str(),
-            message.id().as_str(),
-            metadata.subject(),
-            from_name,
-            from_address,
-            sender_name,
-            sender_address,
-            received_seconds,
-            received_nanoseconds,
-            matches!(metadata.read_state(), ReadState::Read),
-            metadata
+        &STORE_MESSAGE_METADATA_SQL,
+        named_params! {
+            ":account_id": message.folder().account_id().as_str(),
+            ":folder_id": message.folder().folder_id().as_str(),
+            ":message_id": message.id().as_str(),
+            ":subject": metadata.subject(),
+            ":from_display_name": from_name,
+            ":from_address": from_address,
+            ":sender_display_name": sender_name,
+            ":sender_address": sender_address,
+            ":received_seconds": received_seconds,
+            ":received_nanoseconds": received_nanoseconds,
+            ":is_read": matches!(metadata.read_state(), ReadState::Read),
+            ":flag_status": metadata
                 .follow_up_flag_status()
                 .map(follow_up_flag_status_name),
-            full_sync_generation
-        ],
+            ":preview": metadata.preview().map(MessagePreview::as_str),
+            ":full_sync_generation": full_sync_generation,
+        },
     )?;
     Ok(())
 }

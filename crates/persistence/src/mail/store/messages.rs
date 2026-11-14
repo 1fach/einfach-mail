@@ -1,5 +1,102 @@
 use super::*;
 
+/// A `mail_messages` column that stores one field of [`MessageMetadata`].
+pub(super) struct MessageColumn {
+    name: &'static str,
+    nullable: bool,
+}
+
+impl MessageColumn {
+    const fn required(name: &'static str) -> Self {
+        Self {
+            name,
+            nullable: false,
+        }
+    }
+
+    const fn nullable(name: &'static str) -> Self {
+        Self {
+            name,
+            nullable: true,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// The metadata columns of `mail_messages`.
+///
+/// Every statement that reads, stores, or moves message metadata takes its column list from
+/// this array. [`raw_message_from_row`] reads each column by name, and the store statement
+/// binds each column by name, so the order of this array carries no meaning.
+pub(super) const MESSAGE_COLUMNS: [MessageColumn; 10] = [
+    MessageColumn::nullable("subject"),
+    MessageColumn::nullable("from_display_name"),
+    MessageColumn::nullable("from_address"),
+    MessageColumn::nullable("sender_display_name"),
+    MessageColumn::nullable("sender_address"),
+    MessageColumn::required("received_seconds"),
+    MessageColumn::required("received_nanoseconds"),
+    MessageColumn::required("is_read"),
+    MessageColumn::nullable("flag_status"),
+    MessageColumn::nullable("preview"),
+];
+
+/// Returns `render(name)` for every metadata column, separated by commas.
+pub(super) fn message_columns_sql(render: impl Fn(&str) -> String) -> String {
+    join_columns(MESSAGE_COLUMNS.iter(), render)
+}
+
+/// Returns `render(name)` for every metadata column that can be NULL, separated by commas.
+pub(super) fn nullable_message_columns_sql(render: impl Fn(&str) -> String) -> String {
+    join_columns(
+        MESSAGE_COLUMNS.iter().filter(|column| column.nullable),
+        render,
+    )
+}
+
+fn join_columns<'a>(
+    columns: impl Iterator<Item = &'a MessageColumn>,
+    render: impl Fn(&str) -> String,
+) -> String {
+    columns
+        .map(|column| render(column.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Selects the identifier and metadata of one cached message.
+pub(super) static READ_MESSAGE_METADATA_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT message_id, {columns}
+         FROM mail_messages
+         WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+        columns = message_columns_sql(str::to_owned),
+    )
+});
+
+static LIST_MESSAGES_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT message_id, {columns}
+         FROM mail_messages
+         WHERE account_id = ?1 AND folder_id = ?2
+         ORDER BY received_seconds DESC, received_nanoseconds DESC, message_id ASC",
+        columns = message_columns_sql(str::to_owned),
+    )
+});
+
+static READ_MESSAGE_WITH_BODY_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT message_id, {columns}, body_type, body_content
+         FROM mail_messages
+         WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+        columns = message_columns_sql(str::to_owned),
+    )
+});
+
 pub(super) fn read_messages(
     connection: &Connection,
     folder: &FolderReference,
@@ -7,14 +104,7 @@ pub(super) fn read_messages(
     if !folder_exists(connection, folder)? {
         return Err(CacheFailure::InvalidData);
     }
-    let mut statement = connection.prepare(
-        "SELECT message_id, subject, from_display_name, from_address,
-                sender_display_name, sender_address, received_seconds,
-                received_nanoseconds, is_read, flag_status
-         FROM mail_messages
-         WHERE account_id = ?1 AND folder_id = ?2
-         ORDER BY received_seconds DESC, received_nanoseconds DESC, message_id ASC",
-    )?;
+    let mut statement = connection.prepare(&LIST_MESSAGES_SQL)?;
     let rows = statement.query_map(
         params![folder.account_id().as_str(), folder.folder_id().as_str()],
         raw_message_from_row,
@@ -33,11 +123,7 @@ pub(super) fn read_cached_message(
 ) -> CacheResult<Option<(MailMessage, Option<MessageBody>)>> {
     let raw = connection
         .query_row(
-            "SELECT message_id, subject, from_display_name, from_address,
-                    sender_display_name, sender_address, received_seconds,
-                    received_nanoseconds, is_read, flag_status, body_type, body_content
-             FROM mail_messages
-             WHERE account_id = ?1 AND folder_id = ?2 AND message_id = ?3",
+            &READ_MESSAGE_WITH_BODY_SQL,
             params![
                 folder.account_id().as_str(),
                 folder.folder_id().as_str(),
@@ -46,8 +132,8 @@ pub(super) fn read_cached_message(
             |row| {
                 Ok((
                     raw_message_from_row(row)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>("body_type")?,
+                    row.get::<_, Option<String>>("body_content")?,
                 ))
             },
         )
@@ -63,16 +149,17 @@ pub(super) fn read_cached_message(
 
 pub(super) fn raw_message_from_row(row: &async_sqlite::rusqlite::Row<'_>) -> SqlResult<RawMessage> {
     Ok(RawMessage {
-        message_id: row.get(0)?,
-        subject: row.get(1)?,
-        from_display_name: row.get(2)?,
-        from_address: row.get(3)?,
-        sender_display_name: row.get(4)?,
-        sender_address: row.get(5)?,
-        received_seconds: row.get(6)?,
-        received_nanoseconds: row.get(7)?,
-        is_read: row.get(8)?,
-        flag_status: row.get(9)?,
+        message_id: row.get("message_id")?,
+        subject: row.get("subject")?,
+        from_display_name: row.get("from_display_name")?,
+        from_address: row.get("from_address")?,
+        sender_display_name: row.get("sender_display_name")?,
+        sender_address: row.get("sender_address")?,
+        received_seconds: row.get("received_seconds")?,
+        received_nanoseconds: row.get("received_nanoseconds")?,
+        is_read: row.get("is_read")?,
+        flag_status: row.get("flag_status")?,
+        preview: row.get("preview")?,
     })
 }
 
@@ -87,6 +174,7 @@ pub(super) struct RawMessage {
     received_nanoseconds: i64,
     is_read: bool,
     flag_status: Option<String>,
+    preview: Option<String>,
 }
 
 pub(super) fn decode_message(
@@ -111,6 +199,11 @@ pub(super) fn decode_message(
             .as_deref()
             .map(follow_up_flag_status_from_name)
             .transpose()?,
+    )
+    .with_preview(
+        raw.preview
+            .as_deref()
+            .and_then(MessagePreview::from_untrusted),
     );
     Ok(MailMessage::new(folder.clone(), id, metadata))
 }

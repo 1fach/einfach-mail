@@ -1,14 +1,16 @@
-use std::{collections::HashSet, future::Future, time::SystemTime};
+use std::{collections::HashSet, future::Future, sync::LazyLock, time::SystemTime};
 
 use async_sqlite::rusqlite::{
-    Connection, OptionalExtension, Result as SqlResult, Transaction, TransactionBehavior, params,
+    Connection, OptionalExtension, Result as SqlResult, Transaction, TransactionBehavior,
+    named_params, params,
 };
 use einfach_mail_application::{MailCache, MailCacheError, MailSyncState};
 use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailFolder, MailMessage,
     MailRecipient, MailReplySource, MailSendOperationId, MailSendTarget, MailSubject, Mailbox,
     MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
-    MessageDeltaProgress, MessageId, MessageMetadata, MessageOrigin, PendingMailSend, ReadState,
+    MessageDeltaProgress, MessageId, MessageMetadata, MessageOrigin, MessagePreview,
+    PendingMailSend, ReadState,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -28,13 +30,16 @@ mod folders;
 mod messages;
 mod pending_send;
 mod sync;
+#[cfg(test)]
+mod tests;
 mod writes;
 
 use self::{
     folders::{folder_exists, read_folders, replace_folder_rows, validate_folder_snapshot},
     messages::{
-        decode_message, follow_up_flag_status_name, raw_message_from_row, read_cached_message,
-        read_messages, read_state_from_bool,
+        READ_MESSAGE_METADATA_SQL, decode_message, follow_up_flag_status_name, message_columns_sql,
+        nullable_message_columns_sql, raw_message_from_row, read_cached_message, read_messages,
+        read_state_from_bool,
     },
     pending_send::read_pending_send,
     sync::{
