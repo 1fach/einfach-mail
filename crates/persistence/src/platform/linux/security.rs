@@ -47,7 +47,8 @@ pub(crate) struct FileLock(File);
 impl Drop for FileLock {
     fn drop(&mut self) {
         // Closing the file releases the lock only after every duplicate descriptor closes,
-        // including the copy a concurrently spawned child holds until `exec`.
+        // including the copy a concurrently spawned child holds until `exec`. If unlocking
+        // fails, the close still releases the lock once those descriptors close.
         let _ = self.0.unlock();
     }
 }
