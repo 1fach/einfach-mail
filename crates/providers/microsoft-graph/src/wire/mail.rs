@@ -19,7 +19,7 @@ use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
     MailFolderKind, MailReplyDraft, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
     MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
-    ReadState,
+    MessagePreview, ReadState,
 };
 
 use super::{
@@ -428,6 +428,8 @@ pub(super) struct WireMessageMetadata {
     is_read: WireField<bool>,
     #[serde(default)]
     flag: WireField<WireFollowUpFlag>,
+    #[serde(default)]
+    body_preview: WireField<String>,
 }
 
 #[derive(Deserialize)]
@@ -475,6 +477,7 @@ impl TryFrom<WireMessageChange> for MessageDeltaChange {
             &mut patch,
         )?;
         apply_follow_up_flag_field(change.metadata.flag, &mut patch);
+        apply_preview_field(change.metadata.body_preview, &mut patch);
         Ok(Self::Upsert { id, patch })
     }
 }
@@ -534,6 +537,14 @@ fn apply_follow_up_flag_field(flag: WireField<WireFollowUpFlag>, patch: &mut Mes
         WireField::Value(flag) => {
             patch.set_follow_up_flag_status(flag.flag_status.map(Into::into));
         }
+    }
+}
+
+fn apply_preview_field(body_preview: WireField<String>, patch: &mut MessageMetadataPatch) {
+    match body_preview {
+        WireField::Missing => {}
+        WireField::Null => patch.set_preview(None),
+        WireField::Value(text) => patch.set_preview(MessagePreview::from_untrusted(&text)),
     }
 }
 

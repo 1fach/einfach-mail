@@ -37,6 +37,10 @@ async fn message_delta_page_maps_sparse_updates_and_removals() {
         .mock_async(|when, then| {
             when.method(GET)
                 .path("/v1.0/me/mailFolders/inbox/messages/delta")
+                .query_param(
+                    "$select",
+                    "id,subject,from,sender,receivedDateTime,isRead,flag,bodyPreview",
+                )
                 .header("content-type", "application/json");
             then.status(200)
                 .header("content-type", "application/json")
@@ -341,6 +345,48 @@ fn follow_up_flag_patch_is_minimal_and_requires_matching_confirmation() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn delta_preview_updates_keep_an_omitted_preview_and_sanitize_sent_text() {
+    let mut metadata = MessageMetadata::new(
+        None,
+        MessageOrigin::new(None, None),
+        SystemTime::UNIX_EPOCH,
+        ReadState::Unread,
+        None,
+    )
+    .with_preview(MessagePreview::from_untrusted("Earlier synthetic preview"));
+    let expected_cut = "x".repeat(MessagePreview::MAX_CHARS);
+
+    for (body_preview, expected) in [
+        (None, Some("Earlier synthetic preview")),
+        (
+            Some(json!("  Synthetic\r\n\tpreview   text  ")),
+            Some("Synthetic preview text"),
+        ),
+        (Some(json!(null)), None),
+        (
+            Some(json!("\u{202E}Synthetic\u{2066} reversed\u{200F} text")),
+            Some("Synthetic reversed text"),
+        ),
+        (Some(json!(" \n\t\u{00A0}\u{2028} ")), None),
+        (Some(json!("x".repeat(300))), Some(expected_cut.as_str())),
+    ] {
+        let mut payload = json!({"id": "synthetic-message"});
+        if let Some(body_preview) = body_preview {
+            payload["bodyPreview"] = body_preview;
+        }
+        let wire = serde_json::from_value::<WireMessageChange>(payload)
+            .expect("synthetic message delta is valid");
+        let MessageDeltaChange::Upsert { patch, .. } =
+            MessageDeltaChange::try_from(wire).expect("message delta maps to domain values")
+        else {
+            panic!("synthetic metadata change is an upsert");
+        };
+        metadata.apply_patch(patch);
+        assert_eq!(metadata.preview().map(MessagePreview::as_str), expected);
+    }
 }
 
 #[test]

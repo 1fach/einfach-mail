@@ -20,8 +20,8 @@ use einfach_mail_domain::{
     CalendarEventUpdateDraft, CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId,
     CalendarViewRange, CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus,
     MailCapabilities, MailDraft, MailFolderKind, MailRecipient, MailReplyDraft, MailReplySource,
-    MailSubject, MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, ReadState,
-    VersionedCalendarEvent,
+    MailSubject, MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, MessagePreview,
+    ReadState, VersionedCalendarEvent,
 };
 
 use super::{

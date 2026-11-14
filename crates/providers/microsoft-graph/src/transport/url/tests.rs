@@ -318,3 +318,24 @@ fn accepts_only_reset_links_for_the_requested_folder_delta_path() {
         );
     }
 }
+
+#[test]
+fn message_reset_links_must_request_the_body_preview() {
+    let authority = authority();
+    let without_preview = "https://graph.microsoft.com/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=&$select=id,subject,from,sender,receivedDateTime,isRead,flag";
+    let with_preview = "https://graph.microsoft.com/v1.0/me/mailFolders/folder/messages/delta?$deltatoken=&$select=id,subject,from,sender,receivedDateTime,isRead,flag,bodyPreview";
+
+    assert_eq!(
+        authority
+            .message_delta_reset_link("folder", without_preview)
+            .err(),
+        Some(GraphError::UnsafeLink)
+    );
+    assert_eq!(
+        authority
+            .message_delta_reset_link("folder", with_preview)
+            .expect("a reset link with the preview select is accepted")
+            .as_str(),
+        with_preview
+    );
+}

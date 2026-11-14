@@ -9,7 +9,7 @@ use einfach_mail_domain::{CalendarViewRange, MailFolderKind};
 
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
 const FOLDER_SELECT: &str = "id,displayName,isHidden";
-const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead,flag";
+const MESSAGE_SELECT: &str = "id,subject,from,sender,receivedDateTime,isRead,flag,bodyPreview";
 pub const CALENDAR_EVENT_EDIT_SELECT: &str = "id,subject,location,start,end,isAllDay,originalStartTimeZone,originalEndTimeZone,type,isOrganizer,attendees,isOnlineMeeting,changeKey";
 pub const MAX_GRAPH_CALENDAR_DELTA_URL_BYTES: usize = 16 * 1024;
 
