@@ -32,6 +32,37 @@ async fn ews_read_state_rejects_accounts_without_capability_before_network_acces
     );
 }
 
+#[tokio::test]
+async fn ews_folder_kinds_require_the_signed_in_account_before_network_access() {
+    let provider = ExchangeEwsProvider::new(EmptySettingsStore);
+    let other_account = AccountId::try_from("synthetic-other-account".to_owned())
+        .expect("synthetic account ID is valid");
+    assert_eq!(
+        provider.folder_kinds(&other_account).await,
+        Err(MailOperationError::SignInRequired)
+    );
+
+    let settings = ExchangeEwsAccountSettings::new(
+        "https://exchange.example.test/EWS/Exchange.asmx".to_owned(),
+        "ada@example.test".to_owned(),
+        "EXAMPLE\\ada".to_owned(),
+    );
+    let profile = profile_for(&settings, None).expect("synthetic EWS profile is valid");
+    let transport = EwsTransport::new(
+        settings.endpoint(),
+        settings.username().to_owned(),
+        SecretString::from("synthetic-only"),
+    )
+    .expect("synthetic EWS transport starts without connecting");
+    *provider.session.write().await =
+        Some(std::sync::Arc::new(EwsSession { profile, transport }));
+
+    assert_eq!(
+        provider.folder_kinds(&other_account).await,
+        Err(MailOperationError::AccountMismatch)
+    );
+}
+
 #[test]
 fn cursor_is_scoped_to_one_folder_and_rejects_unknown_versions() {
     let cursor = encode_cursor("folder-1", Some("server-state".to_owned()))

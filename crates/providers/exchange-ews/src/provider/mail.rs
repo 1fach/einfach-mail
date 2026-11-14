@@ -5,8 +5,8 @@ use einfach_mail_application::{
     MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, FolderId, FolderReference, MailAction, MailFolder, MailFolderKind, Mailbox,
-    MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+    AccountId, FolderId, FolderReference, MailAction, MailFolder, MailFolderKind, MailFolderKinds,
+    Mailbox, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
     MessageDeltaProgress, MessageId, MessageMetadataPatch, MessagePreview, ReadState, UnreadCount,
 };
 use einfach_mail_provider_runtime as worker;
@@ -21,6 +21,7 @@ use ews::{
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use self::folder_kinds::{folder_kinds_request, map_folder_kinds};
 use super::{
     ExchangeEwsProvider, map_access_denied_response_code,
     session::{EwsSession, session_for_mail},
@@ -44,6 +45,7 @@ const MAX_HIERARCHY_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_MESSAGE_BODY_BYTES: usize = 2 * 1024 * 1024;
 const EWS_PAGE_SIZE: u16 = 512;
 
+mod folder_kinds;
 pub(crate) mod read_state;
 
 impl<S> MailProvider for ExchangeEwsProvider<S>
@@ -211,6 +213,22 @@ where
         _folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         std::future::ready(Err(MailOperationError::UnsupportedOperation))
+    }
+
+    fn folder_kinds(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<MailFolderKinds, MailOperationError>> + Send + '_ {
+        let account_id = account_id.clone();
+        let session_store = Arc::clone(&self.session);
+        async move {
+            let session = session_for_mail(&session_store, &account_id).await?;
+            worker::run(move |_cancellation: CancellationToken| async move {
+                let response = session.transport.execute(folder_kinds_request()).await?;
+                map_folder_kinds(response.messages).map_err(MailOperationError::from)
+            })
+            .await
+        }
     }
 
     fn send_mail(
