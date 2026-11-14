@@ -55,6 +55,7 @@ mod loading_sync;
 mod message_actions;
 mod message_list;
 mod message_move;
+mod message_preview;
 #[cfg(feature = "ui-preview")]
 mod preview_start;
 mod read_state;

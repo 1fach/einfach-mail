@@ -244,6 +244,7 @@ pub(super) struct MessageRowSummary {
     time_label: String,
     unread: bool,
     flagged: bool,
+    preview: Option<String>,
 }
 
 impl MessageRowSummary {
@@ -258,6 +259,9 @@ impl MessageRowSummary {
             time_label: time_label(received),
             unread: metadata.read_state() == ReadState::Unread,
             flagged: metadata.follow_up_flag_status() == Some(FollowUpFlagStatus::Flagged),
+            preview: metadata
+                .preview()
+                .map(|preview| preview.as_str().to_owned()),
         }
     }
 
@@ -266,8 +270,9 @@ impl MessageRowSummary {
         format!("{}. {}", self.sender, self.subject)
     }
 
-    /// The option's description: whether it is unread, when it arrived, and whether it is flagged.
-    /// It names the day as well as the time, because the day header is not part of the option.
+    /// The option's description: whether it is unread, when it arrived, whether it is flagged,
+    /// and the preview. It names the day as well as the time, because the day header is not part
+    /// of the option.
     pub(super) fn accessible_details(&self) -> String {
         let received = format!("{}, {}", self.day_label, self.time_label);
         let mut details = Vec::new();
@@ -277,6 +282,9 @@ impl MessageRowSummary {
         details.push(&received);
         if self.flagged {
             details.push("Flagged");
+        }
+        if let Some(preview) = &self.preview {
+            details.push(preview);
         }
         details.join(". ")
     }
@@ -310,8 +318,23 @@ fn render_unread_dot(id: &str, cx: &App) -> Div {
         )
 }
 
-/// The row anatomy: an avatar, then the sender and time on the first line and the subject and
-/// the flag on the second. Both lines end at the same trailing edge.
+/// The third line: the preview in small muted text, cut to one line. The line stays when there is
+/// no preview, so every row keeps the same height.
+fn render_message_preview(summary: &MessageRowSummary, id: &str, cx: &App) -> Div {
+    let selector = format!("message-preview-{id}");
+    div()
+        .debug_selector(move || selector)
+        .min_w_0()
+        .h(rems(1.))
+        .truncate()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .children(summary.preview.clone())
+}
+
+/// The row anatomy: an avatar, then the sender and time on the first line, the subject and the
+/// flag on the second, and the preview on the third. The first two lines end at the same
+/// trailing edge.
 fn render_message_row_content(summary: &MessageRowSummary, id: &str, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let weight = summary.text_weight();
@@ -379,7 +402,8 @@ fn render_message_row_content(summary: &MessageRowSummary, id: &str, cx: &App) -
                                 .child(summary.subject.clone()),
                         )
                         .children(flag),
-                ),
+                )
+                .child(render_message_preview(summary, id, cx)),
         )
         .into_any_element()
 }
