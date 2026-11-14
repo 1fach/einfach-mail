@@ -43,6 +43,12 @@ When a need comes up, first look for a maintained Rust library that fits it. For
 - `repos/wino-mail/` contains a pinned snapshot of [Wino Mail](https://github.com/bkaankose/Wino-Mail). It is GPL-3.0 licensed and exists for source inspection only.
 - `repos/msgraph-sdk-go/` contains the pinned [Microsoft Graph Go SDK](https://github.com/microsoftgraph/msgraph-sdk-go) snapshot.
 - `repos/io-msgraph/` contains the pinned [io-msgraph Rust client](https://github.com/pimalaya/io-msgraph) snapshot.
+- When Exchange behavior is unclear, such as a Microsoft Graph or EWS request shape, an error code, a well-known folder, a sync edge case, or an undocumented server quirk, compare how the reference clients handle it before deciding:
+  - EWS: Thunderbird's `repos/thunderbird/rust/ews_xpcom/` and `repos/thunderbird/rust/protocol_shared/`.
+  - Microsoft Graph: Thunderbird's `repos/thunderbird/rust/graph_xpcom/` and `repos/thunderbird/rust/ms_graph_tb/`, and Wino Mail's `repos/wino-mail/src/Wino.Core/Synchronizers/OutlookSynchronizer.cs` and `repos/wino-mail/src/Wino.Core/Extensions/OutlookIntegratorExtensions.cs`.
+  - Microsoft documentation stays authoritative. The reference clients show what works against real servers, not what is required.
+  - Decide with your own judgment for this app's constraints, such as untrusted input, the 90-day cache, and per-operation capabilities. Copy their behavior only when it fits, and never copy their code.
+  - Record the decision with the reference file and line, for example `sync_folder_hierarchy.rs:335`, in the PR description, and in the ADR or design log when the choice is lasting. Say when the clients disagree and which one you followed and why.
 - Treat all four trees as read-only references. Do not build against them or copy their source code into Einfach Mail. Check each upstream file's license and notices before using other material. Keep the product brief, architecture, security requirements, Microsoft documentation, and GPUI decisions authoritative.
 - Thunderbird has no root license file, and GitHub does not identify one SPDX license for the repository. Preserve its nested license files and notices.
 - Refresh a snapshot only after reviewing upstream changes. Keep the subtree merge history and use `--squash`:
