@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+            xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+  <s:Header/>
+  <s:Body>
+    <m:GetFolderResponse>
+      <m:ResponseMessages>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders>
+            <t:Folder>
+              <t:FolderId Id="synthetic-inbox-id" ChangeKey="synthetic-change-key"/>
+            </t:Folder>
+          </m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders>
+            <t:Folder>
+              <t:FolderId Id="synthetic-deleted-items-id" ChangeKey="synthetic-change-key"/>
+            </t:Folder>
+          </m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders>
+            <t:Folder>
+              <t:FolderId Id="synthetic-drafts-id" ChangeKey="synthetic-change-key"/>
+            </t:Folder>
+          </m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders>
+            <t:Folder>
+              <t:FolderId Id="synthetic-sent-items-id" ChangeKey="synthetic-change-key"/>
+            </t:Folder>
+          </m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders>
+            <t:Folder>
+              <t:FolderId Id="synthetic-junk-email-id" ChangeKey="synthetic-change-key"/>
+            </t:Folder>
+          </m:Folders>
+        </m:GetFolderResponseMessage>
+        <m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:Folders>
+            <t:Folder>
+              <t:FolderId Id="synthetic-archive-id" ChangeKey="synthetic-change-key"/>
+            </t:Folder>
+          </m:Folders>
+        </m:GetFolderResponseMessage>
+      </m:ResponseMessages>
+    </m:GetFolderResponse>
+  </s:Body>
+</s:Envelope>

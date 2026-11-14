@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+            xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+  <s:Header/>
+  <s:Body>
+    <m:SyncFolderItemsResponse>
+      <m:ResponseMessages>
+        <m:SyncFolderItemsResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:SyncState>synthetic-preview-cursor</m:SyncState>
+          <m:IncludesLastItemInRange>true</m:IncludesLastItemInRange>
+          <m:Changes>
+            <t:Create>
+              <t:Message>
+                <t:ItemId Id="synthetic-created-id" ChangeKey="synthetic-change-key"/>
+                <t:ItemClass>IPM.Note</t:ItemClass>
+                <t:Subject>Synthetic created message</t:Subject>
+                <t:DateTimeReceived>2026-11-01T12:34:56Z</t:DateTimeReceived>
+                <t:Preview>  Synthetic&#x9;created&#x202E;   preview&#x200B; </t:Preview>
+                <t:IsRead>false</t:IsRead>
+              </t:Message>
+            </t:Create>
+            <t:Update>
+              <t:Message>
+                <t:ItemId Id="synthetic-updated-id" ChangeKey="synthetic-change-key"/>
+                <t:ItemClass>IPM.Note</t:ItemClass>
+                <t:Subject>Synthetic updated message</t:Subject>
+                <t:DateTimeReceived>2026-11-02T12:34:56Z</t:DateTimeReceived>
+                <t:Preview>Synthetic updated preview</t:Preview>
+                <t:IsRead>true</t:IsRead>
+              </t:Message>
+            </t:Update>
+            <t:ReadFlagChange>
+              <t:ItemId Id="synthetic-flagged-id" ChangeKey="synthetic-change-key"/>
+              <t:IsRead>true</t:IsRead>
+            </t:ReadFlagChange>
+            <t:Update>
+              <t:Message>
+                <t:ItemId Id="synthetic-emptied-id" ChangeKey="synthetic-change-key"/>
+                <t:ItemClass>IPM.Note</t:ItemClass>
+                <t:Subject>Synthetic emptied message</t:Subject>
+                <t:DateTimeReceived>2026-11-03T12:34:56Z</t:DateTimeReceived>
+                <t:IsRead>false</t:IsRead>
+              </t:Message>
+            </t:Update>
+          </m:Changes>
+        </m:SyncFolderItemsResponseMessage>
+      </m:ResponseMessages>
+    </m:SyncFolderItemsResponse>
+  </s:Body>
+</s:Envelope>
