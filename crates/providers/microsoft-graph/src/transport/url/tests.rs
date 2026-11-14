@@ -218,27 +218,27 @@ fn well_known_paths_use_locale_independent_folder_names() {
     for (folder, expected) in [
         (
             MailFolderKind::Inbox,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
         (
             MailFolderKind::SentItems,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/sentitems?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/sentitems?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
         (
             MailFolderKind::Drafts,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/drafts?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/drafts?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
         (
             MailFolderKind::Archive,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/archive?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/archive?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
         (
             MailFolderKind::DeletedItems,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/deleteditems?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/deleteditems?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
         (
             MailFolderKind::JunkEmail,
-            "https://graph.microsoft.com/v1.0/me/mailFolders/junkemail?%24select=id%2CdisplayName%2CisHidden",
+            "https://graph.microsoft.com/v1.0/me/mailFolders/junkemail?%24select=id%2CdisplayName%2CisHidden%2CunreadItemCount",
         ),
     ] {
         assert_eq!(

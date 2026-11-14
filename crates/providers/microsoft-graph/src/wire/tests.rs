@@ -21,7 +21,7 @@ use einfach_mail_domain::{
     CalendarViewRange, CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus,
     MailCapabilities, MailDraft, MailFolderKind, MailRecipient, MailReplyDraft, MailReplySource,
     MailSubject, MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, MessagePreview,
-    ReadState, VersionedCalendarEvent,
+    ReadState, UnreadCount, VersionedCalendarEvent,
 };
 
 use super::{

@@ -19,7 +19,7 @@ use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
     MailFolderKind, MailReplyDraft, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
     MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
-    MessagePreview, ReadState,
+    MessagePreview, ReadState, UnreadCount,
 };
 
 use super::{
@@ -358,6 +358,8 @@ pub(super) struct WireFolder {
     pub(super) display_name: String,
     #[serde(default)]
     pub(super) is_hidden: bool,
+    #[serde(default, deserialize_with = "unread_count_or_unknown")]
+    pub(super) unread_item_count: Option<UnreadCount>,
 }
 
 impl WireFolder {
@@ -373,9 +375,24 @@ impl WireFolder {
         let reference = FolderReference::new(account_id.clone(), folder_id);
         let parent = parent_id.map(|folder_id| FolderReference::new(account_id.clone(), folder_id));
         MailFolder::new(reference, parent, self.display_name)
-            .map(Some)
+            .map(|folder| Some(folder.with_unread_count(self.unread_item_count)))
             .map_err(|_| GraphError::InvalidRecord)
     }
+}
+
+/// Reads `unreadItemCount` as a count, or as unknown when Graph sends anything other than an
+/// integer from 0 to `u32::MAX`.
+///
+/// A count only labels a folder, so a malformed one must not reject the folder listing.
+fn unread_count_or_unknown<'de, D>(deserializer: D) -> Result<Option<UnreadCount>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_u64()
+        .and_then(|count| u32::try_from(count).ok())
+        .map(UnreadCount::new))
 }
 
 #[derive(Deserialize)]

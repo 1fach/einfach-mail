@@ -166,7 +166,7 @@ async fn well_known_folder_lookup_is_account_scoped() {
         .mock_async(|when, then| {
             when.method(GET)
                 .path("/v1.0/me/mailFolders/deleteditems")
-                .query_param("$select", "id,displayName,isHidden")
+                .query_param("$select", "id,displayName,isHidden,unreadItemCount")
                 .header("authorization", "Bearer synthetic-deleted-access");
             then.status(200)
                 .header("content-type", "application/json")

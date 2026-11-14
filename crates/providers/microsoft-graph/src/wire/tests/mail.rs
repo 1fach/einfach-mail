@@ -201,7 +201,7 @@ async fn resolves_archive_and_deleted_items_from_well_known_names() {
         .mock_async(|when, then| {
             when.method(GET)
                 .path("/v1.0/me/mailFolders/archive")
-                .query_param("$select", "id,displayName,isHidden");
+                .query_param("$select", "id,displayName,isHidden,unreadItemCount");
             then.status(200)
                 .header("content-type", "application/json")
                 .body(
@@ -213,7 +213,7 @@ async fn resolves_archive_and_deleted_items_from_well_known_names() {
         .mock_async(|when, then| {
             when.method(GET)
                 .path("/v1.0/me/mailFolders/deleteditems")
-                .query_param("$select", "id,displayName,isHidden");
+                .query_param("$select", "id,displayName,isHidden,unreadItemCount");
             then.status(200)
                 .header("content-type", "application/json")
                 .body(r#"{"id":"synthetic-deleted-folder","displayName":"Gelöschte Elemente","isHidden":false}"#);
