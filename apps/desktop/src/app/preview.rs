@@ -30,7 +30,7 @@ use einfach_mail_domain::{
     CalendarViewReference, EventId, FolderId, FolderReference, FollowUpFlagStatus,
     MailCapabilities, MailFolder, MailFolderKind, MailMessage, Mailbox, MessageBody,
     MessageBodyType, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
-    MessageMetadata, MessageOrigin, ReadState, VersionedCalendarEvent,
+    MessageMetadata, MessageOrigin, MessagePreview, ReadState, UnreadCount, VersionedCalendarEvent,
 };
 
 pub(crate) use start::{
@@ -475,23 +475,81 @@ impl CalendarProvider for PreviewCalendarProvider {
     }
 }
 
+/// A preview folder: its kind and its reported unread count.
+struct PreviewFolderSeed {
+    id: &'static str,
+    name: &'static str,
+    kind: Option<MailFolderKind>,
+    unread: u32,
+}
+
+/// In cache order, which is not the pinned order, so the preview shows the pinning. Counts cover a
+/// folder without unread mail, a typical count, and one past the "999+" cap.
+const PREVIEW_FOLDER_SEEDS: &[PreviewFolderSeed] = &[
+    PreviewFolderSeed {
+        id: "inbox",
+        name: "Inbox",
+        kind: Some(MailFolderKind::Inbox),
+        unread: 12,
+    },
+    PreviewFolderSeed {
+        id: "projects",
+        name: "Projects",
+        kind: None,
+        unread: 1_204,
+    },
+    PreviewFolderSeed {
+        id: "archive",
+        name: "Archive",
+        kind: Some(MailFolderKind::Archive),
+        unread: 0,
+    },
+    PreviewFolderSeed {
+        id: "junk-email",
+        name: "Junk Email",
+        kind: Some(MailFolderKind::JunkEmail),
+        unread: 4,
+    },
+    PreviewFolderSeed {
+        id: "sent-items",
+        name: "Sent Items",
+        kind: Some(MailFolderKind::SentItems),
+        unread: 0,
+    },
+    PreviewFolderSeed {
+        id: "drafts",
+        name: "Drafts",
+        kind: Some(MailFolderKind::Drafts),
+        unread: 3,
+    },
+    PreviewFolderSeed {
+        id: "deleted-items",
+        name: "Deleted Items",
+        kind: Some(MailFolderKind::DeletedItems),
+        unread: 0,
+    },
+    PreviewFolderSeed {
+        id: "receipts",
+        name: "Receipts",
+        kind: None,
+        unread: 7,
+    },
+];
+
 fn preview_mail_folders(account_id: &AccountId) -> Vec<MailFolder> {
-    [
-        ("inbox", "Inbox"),
-        ("archive", "Archive"),
-        ("sent", "Sent Items"),
-        ("drafts", "Drafts"),
-    ]
-    .into_iter()
-    .map(|(folder_id, name)| {
-        MailFolder::new(
-            folder_reference(account_id, folder_id),
-            None,
-            name.to_owned(),
-        )
-        .expect("synthetic mail folder is valid")
-    })
-    .collect()
+    PREVIEW_FOLDER_SEEDS
+        .iter()
+        .map(|seed| {
+            MailFolder::new(
+                folder_reference(account_id, seed.id),
+                None,
+                seed.name.to_owned(),
+            )
+            .expect("synthetic mail folder is valid")
+            .with_kind(seed.kind)
+            .with_unread_count(Some(UnreadCount::new(seed.unread)))
+        })
+        .collect()
 }
 
 fn folder_reference(account_id: &AccountId, folder_id: &str) -> FolderReference {
@@ -505,7 +563,8 @@ fn seed_mail_cache(account_id: AccountId) -> FixtureCache {
     let cache = FixtureCache::default();
     let folders = preview_mail_folders(&account_id);
     let inbox = folders
-        .first()
+        .iter()
+        .find(|folder| folder.kind() == Some(MailFolderKind::Inbox))
         .expect("the preview account has an Inbox folder")
         .reference()
         .clone();
@@ -542,19 +601,24 @@ struct PreviewMessageSeed {
     sender_name: &'static str,
     sender_address: &'static str,
     subject: &'static str,
+    preview: Option<&'static str>,
     hours_ago: u64,
     unread: bool,
     flagged: bool,
 }
 
 /// Newest first, spread so the list shows today, yesterday, a weekday, a date in the current
-/// year, and a date in an earlier year.
+/// year, and a date in an earlier year. The previews include one long enough to be cut and one
+/// message without a preview.
 const PREVIEW_MESSAGE_SEEDS: &[PreviewMessageSeed] = &[
     PreviewMessageSeed {
         id: "preview-message-1",
         sender_name: "Mira Example",
         sender_address: "mira@example.test",
         subject: "Welcome to the Einfach Mail preview",
+        preview: Some(
+            "This synthetic message shows the sender, the subject, and a preview line, all read from the encrypted cache.",
+        ),
         hours_ago: 1,
         unread: true,
         flagged: false,
@@ -564,6 +628,9 @@ const PREVIEW_MESSAGE_SEEDS: &[PreviewMessageSeed] = &[
         sender_name: "Jonas Example",
         sender_address: "jonas@example.test",
         subject: "Calendar planning for this week",
+        preview: Some(
+            "Can we move the planning call to Thursday morning? I will send an updated invite.",
+        ),
         hours_ago: 2,
         unread: false,
         flagged: true,
@@ -573,6 +640,7 @@ const PREVIEW_MESSAGE_SEEDS: &[PreviewMessageSeed] = &[
         sender_name: "Ada Example",
         sender_address: "ada@example.test",
         subject: "Notes from the product review",
+        preview: None,
         hours_ago: 26,
         unread: false,
         flagged: false,
@@ -582,6 +650,9 @@ const PREVIEW_MESSAGE_SEEDS: &[PreviewMessageSeed] = &[
         sender_name: "Lea Example",
         sender_address: "lea@example.test",
         subject: "Synthetic invoice example",
+        preview: Some(
+            "Invoice 2026-0412 for the synthetic design retainer is attached. Please review the amounts and reply with any corrections before the end of the month.",
+        ),
         hours_ago: 30,
         unread: true,
         flagged: true,
@@ -591,6 +662,9 @@ const PREVIEW_MESSAGE_SEEDS: &[PreviewMessageSeed] = &[
         sender_name: "Noah Example",
         sender_address: "noah@example.test",
         subject: "The message body is synthetic",
+        preview: Some(
+            "This is a deliberately long synthetic preview. It keeps going well past the width of the message list so the row has to cut it to a single line, and the cut should end in an ellipsis instead of wrapping onto a second line or growing the row taller than the others in the list.",
+        ),
         hours_ago: 72,
         unread: false,
         flagged: false,
@@ -600,6 +674,7 @@ const PREVIEW_MESSAGE_SEEDS: &[PreviewMessageSeed] = &[
         sender_name: "Priya Example",
         sender_address: "priya@example.test",
         subject: "Planning notes for the next quarter",
+        preview: Some("Thanks, see you then."),
         hours_ago: 288,
         unread: false,
         flagged: false,
@@ -609,6 +684,9 @@ const PREVIEW_MESSAGE_SEEDS: &[PreviewMessageSeed] = &[
         sender_name: "Omar Example",
         sender_address: "omar@example.test",
         subject: "Summary of last year's synthetic archive",
+        preview: Some(
+            "A short recap of what the synthetic archive held and which folders were merged.",
+        ),
         hours_ago: 9_000,
         unread: false,
         flagged: false,
@@ -645,7 +723,8 @@ fn preview_message(
         now - std::time::Duration::from_secs(seed.hours_ago * 60 * 60),
         read_state,
         seed.flagged.then_some(FollowUpFlagStatus::Flagged),
-    );
+    )
+    .with_preview(seed.preview.and_then(MessagePreview::from_untrusted));
     MailMessage::new(folder.clone(), message_id, metadata)
 }
 
