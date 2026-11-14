@@ -61,7 +61,7 @@ No writer adjusts a count. Every `is_read` writer changes rows, and the count fo
 
 Mail that arrives between the folder listing and the folder's completed round is under-reported until the next sync. The clamp at 0 keeps the count valid. Read-state changes made by other clients to mail outside the cache window also wait for the next completed round.
 
-The Graph wire count is `unreadItemCount` in `FOLDER_SELECT`. EWS reads `UnreadCount` from the `Folder` variant of the existing `SyncFolderHierarchy` listing, and other folder variants have no count. A malformed or out-of-range count means no count and never fails a sync. Neither provider sends an extra request for counts.
+The Graph wire count is `unreadItemCount` in `FOLDER_SELECT`. EWS reads `UnreadCount` from the `Folder` variant of the existing `SyncFolderHierarchy` listing, and other folder variants have no count. A malformed or out-of-range count means no count and never fails a sync. EWS is the exception: the `ews` crate parses `UnreadCount` with the rest of the listing, so a malformed EWS count fails the listing, as it did before this decision. Neither provider sends an extra request for counts.
 
 ### 3. Replace `WellKnownMailFolder` with domain `MailFolderKind`
 

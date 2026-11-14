@@ -32,6 +32,37 @@ async fn ews_read_state_rejects_accounts_without_capability_before_network_acces
     );
 }
 
+#[tokio::test]
+async fn ews_folder_kinds_require_the_signed_in_account_before_network_access() {
+    let provider = ExchangeEwsProvider::new(EmptySettingsStore);
+    let other_account = AccountId::try_from("synthetic-other-account".to_owned())
+        .expect("synthetic account ID is valid");
+    assert_eq!(
+        provider.folder_kinds(&other_account).await,
+        Err(MailOperationError::SignInRequired)
+    );
+
+    let settings = ExchangeEwsAccountSettings::new(
+        "https://exchange.example.test/EWS/Exchange.asmx".to_owned(),
+        "ada@example.test".to_owned(),
+        "EXAMPLE\\ada".to_owned(),
+    );
+    let profile = profile_for(&settings, None).expect("synthetic EWS profile is valid");
+    let transport = EwsTransport::new(
+        settings.endpoint(),
+        settings.username().to_owned(),
+        SecretString::from("synthetic-only"),
+    )
+    .expect("synthetic EWS transport starts without connecting");
+    *provider.session.write().await =
+        Some(std::sync::Arc::new(EwsSession { profile, transport }));
+
+    assert_eq!(
+        provider.folder_kinds(&other_account).await,
+        Err(MailOperationError::AccountMismatch)
+    );
+}
+
 #[test]
 fn cursor_is_scoped_to_one_folder_and_rejects_unknown_versions() {
     let cursor = encode_cursor("folder-1", Some("server-state".to_owned()))
@@ -53,7 +84,7 @@ fn cursor_is_scoped_to_one_folder_and_rejects_unknown_versions() {
 }
 
 #[test]
-fn initial_cursor_has_no_sync_state_and_metadata_shape_omits_bodies() {
+fn initial_cursor_has_no_sync_state_and_message_requests_omit_bodies() {
     let cursor = encode_cursor("folder-1", None).expect("initial cursor is encoded");
     assert_eq!(
         decode_cursor(cursor.as_str())
@@ -61,10 +92,31 @@ fn initial_cursor_has_no_sync_state_and_metadata_shape_omits_bodies() {
             .sync_state,
         None
     );
-    let shape = message_metadata_shape();
-    assert!(matches!(shape.base_shape, ews::BaseShape::IdOnly));
-    assert_eq!(shape.include_mime_content, Some(false));
-    assert_eq!(shape.additional_properties.as_ref().map(Vec::len), Some(6));
+    let folder_id = FolderId::try_from("synthetic-folder".to_owned())
+        .expect("synthetic folder ID is valid");
+    let document = serialize_soap_request(message_sync_request(&folder_id, None))
+        .expect("synthetic SyncFolderItems request serializes");
+    let xml = String::from_utf8(document).expect("SOAP request is UTF-8");
+
+    assert!(xml.contains("<t:BaseShape>IdOnly</t:BaseShape>"), "{xml}");
+    assert!(
+        xml.contains("<t:IncludeMimeContent>false</t:IncludeMimeContent>"),
+        "{xml}"
+    );
+    let fields = [
+        "item:ItemClass",
+        "item:Subject",
+        "item:DateTimeReceived",
+        "item:Preview",
+        "message:From",
+        "message:Sender",
+        "message:IsRead",
+    ];
+    for field in fields {
+        assert!(xml.contains(&format!("FieldURI=\"{field}\"")), "{xml}");
+    }
+    assert_eq!(xml.matches("FieldURI=").count(), fields.len(), "{xml}");
+    assert!(!xml.contains("SyncState"), "{xml}");
 }
 
 #[test]
@@ -118,6 +170,7 @@ fn maps_a_synthetic_message_page_and_preserves_its_continuation_cursor() {
         .expect("fixture includes complete metadata");
     assert_eq!(message.metadata().subject(), Some("Synthetic EWS fixture"));
     assert_eq!(message.metadata().read_state(), ReadState::Unread);
+    assert_eq!(message.metadata().preview(), None);
     assert_eq!(
         message
             .metadata()
@@ -169,4 +222,100 @@ fn maps_access_denied_codes_and_preserves_other_mail_response_errors() {
             Err(expected_error)
         );
     }
+}
+
+#[test]
+fn message_changes_set_a_sanitized_preview_and_read_flag_changes_keep_it() {
+    let responses = parse_soap_response::<SyncFolderItems>(SYNC_FOLDER_ITEMS_PREVIEWS)
+        .expect("synthetic EWS preview page parses");
+    let response = map_sync_responses(
+        responses.messages,
+        "synthetic-folder",
+        SYNC_FOLDER_ITEMS_PREVIEWS.len(),
+    )
+    .expect("synthetic EWS preview page maps");
+    let MessageDeltaResponse::Page(response) = response else {
+        panic!("successful EWS page maps to a message page");
+    };
+    let (page, _) = response.into_parts();
+    let (changes, _) = page.into_parts();
+
+    let mut previews = Vec::new();
+    for change in changes {
+        let MessageDeltaChange::Upsert { id, patch } = change else {
+            panic!("fixture holds only message upserts");
+        };
+        let mut cached = MessageMetadata::new(
+            None,
+            MessageOrigin::new(None, None),
+            SystemTime::UNIX_EPOCH,
+            ReadState::Unread,
+            None,
+        )
+        .with_preview(MessagePreview::from_untrusted("Synthetic cached preview"));
+        cached.apply_patch(patch);
+        previews.push((
+            id.as_str().to_owned(),
+            cached.preview().map(|preview| preview.as_str().to_owned()),
+            cached.read_state(),
+        ));
+    }
+
+    let preview = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        previews,
+        [
+            (
+                "synthetic-created-id".to_owned(),
+                preview("Synthetic created preview"),
+                ReadState::Unread,
+            ),
+            (
+                "synthetic-updated-id".to_owned(),
+                preview("Synthetic updated preview"),
+                ReadState::Read,
+            ),
+            (
+                "synthetic-flagged-id".to_owned(),
+                preview("Synthetic cached preview"),
+                ReadState::Read,
+            ),
+            ("synthetic-emptied-id".to_owned(), None, ReadState::Unread),
+        ]
+    );
+}
+
+#[test]
+fn hierarchy_listing_reports_unread_counts_only_for_plain_mail_folders() {
+    let response = parse_soap_response::<SyncFolderHierarchy>(SYNC_FOLDER_HIERARCHY_UNREAD_COUNTS)
+        .expect("synthetic EWS hierarchy fixture parses");
+    let mut messages = response.messages;
+    assert_eq!(messages.len(), 1);
+    let Some(ews::ResponseClass::Success(page)) = messages.pop() else {
+        panic!("synthetic hierarchy has a successful response class");
+    };
+    let account_id = AccountId::try_from("synthetic-account".to_owned())
+        .expect("synthetic account ID is valid");
+
+    let mut counts = Vec::new();
+    for change in page.changes.inner {
+        if let Some(folder) =
+            map_folder_change(&account_id, change).expect("synthetic folder change maps")
+        {
+            counts.push((
+                folder.reference().folder_id().as_str().to_owned(),
+                folder.unread_count().map(UnreadCount::get),
+            ));
+        }
+    }
+
+    assert_eq!(
+        counts,
+        [
+            ("synthetic-inbox-id".to_owned(), Some(12)),
+            ("synthetic-uncounted-id".to_owned(), None),
+            ("synthetic-search-id".to_owned(), None),
+            ("synthetic-read-id".to_owned(), Some(0)),
+        ]
+    );
 }

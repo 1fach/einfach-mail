@@ -5,9 +5,9 @@ use einfach_mail_application::{
     MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, FolderId, FolderReference, MailAction, MailFolder, MailFolderKind, Mailbox,
-    MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
-    MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
+    AccountId, FolderId, FolderReference, MailAction, MailFolder, MailFolderKind, MailFolderKinds,
+    Mailbox, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+    MessageDeltaProgress, MessageId, MessageMetadataPatch, MessagePreview, ReadState, UnreadCount,
 };
 use einfach_mail_provider_runtime as worker;
 use ews::{
@@ -21,6 +21,7 @@ use ews::{
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use self::folder_kinds::{folder_kinds_request, map_folder_kinds};
 use super::{
     ExchangeEwsProvider, map_access_denied_response_code,
     session::{EwsSession, session_for_mail},
@@ -44,6 +45,7 @@ const MAX_HIERARCHY_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_MESSAGE_BODY_BYTES: usize = 2 * 1024 * 1024;
 const EWS_PAGE_SIZE: u16 = 512;
 
+mod folder_kinds;
 pub(crate) mod read_state;
 
 impl<S> MailProvider for ExchangeEwsProvider<S>
@@ -88,17 +90,9 @@ where
                         cursor.sync_state
                     }
                 };
-                let operation = SyncFolderItems {
-                    item_shape: message_metadata_shape(),
-                    sync_folder_id: BaseFolderId::new_folder(folder.folder_id().as_str()),
-                    sync_state: request_state,
-                    ignore: None,
-                    max_changes_returned: EWS_PAGE_SIZE,
-                    sync_scope: Some(SyncScope::NormalItems),
-                };
                 let (response, response_bytes) = session
                     .transport
-                    .execute_with_size(operation)
+                    .execute_with_size(message_sync_request(folder.folder_id(), request_state))
                     .await
                     .map_err(MailOperationError::from)?;
                 map_sync_responses(
@@ -221,6 +215,22 @@ where
         std::future::ready(Err(MailOperationError::UnsupportedOperation))
     }
 
+    fn folder_kinds(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<MailFolderKinds, MailOperationError>> + Send + '_ {
+        let account_id = account_id.clone();
+        let session_store = Arc::clone(&self.session);
+        async move {
+            let session = session_for_mail(&session_store, &account_id).await?;
+            worker::run(move |_cancellation: CancellationToken| async move {
+                let response = session.transport.execute(folder_kinds_request()).await?;
+                map_folder_kinds(response.messages).map_err(MailOperationError::from)
+            })
+            .await
+        }
+    }
+
     fn send_mail(
         &self,
         _account_id: &AccountId,
@@ -333,9 +343,7 @@ pub(super) async fn collect_folders(session: &EwsSession) -> Result<EwsFolderCol
             return Err(EwsError::InvalidResponse);
         }
         for change in response.changes.inner {
-            if let FolderChange::Create { folder } | FolderChange::Update { folder } = change
-                && let Some(folder) = map_folder(session.profile.id(), folder)?
-            {
+            if let Some(folder) = map_folder_change(session.profile.id(), change)? {
                 folders.push(folder);
                 if folders.len() > MAX_FOLDERS {
                     return Err(EwsError::ResourceLimitExceeded);
@@ -353,16 +361,35 @@ pub(super) async fn collect_folders(session: &EwsSession) -> Result<EwsFolderCol
     Err(EwsError::ResourceLimitExceeded)
 }
 
+pub(super) fn map_folder_change(
+    account_id: &AccountId,
+    change: FolderChange,
+) -> Result<Option<MailFolder>, EwsError> {
+    match change {
+        FolderChange::Create { folder } | FolderChange::Update { folder } => {
+            map_folder(account_id, folder)
+        }
+        FolderChange::Delete { .. } => Ok(None),
+    }
+}
+
 fn map_folder(account_id: &AccountId, folder: Folder) -> Result<Option<MailFolder>, EwsError> {
-    let (folder_id, parent_id, folder_class, display_name) = match folder {
+    let (folder_id, parent_id, folder_class, display_name, unread_count) = match folder {
         Folder::Folder {
             folder_id,
             parent_folder_id,
             folder_class,
             display_name,
+            unread_count,
             ..
-        }
-        | Folder::CalendarFolder {
+        } => (
+            folder_id,
+            parent_folder_id,
+            folder_class,
+            display_name,
+            unread_count.map(UnreadCount::new),
+        ),
+        Folder::CalendarFolder {
             folder_id,
             parent_folder_id,
             folder_class,
@@ -389,7 +416,13 @@ fn map_folder(account_id: &AccountId, folder: Folder) -> Result<Option<MailFolde
             folder_class,
             display_name,
             ..
-        } => (folder_id, parent_folder_id, folder_class, display_name),
+        } => (
+            folder_id,
+            parent_folder_id,
+            folder_class,
+            display_name,
+            None,
+        ),
     };
     if !folder_class
         .as_deref()
@@ -410,11 +443,26 @@ fn map_folder(account_id: &AccountId, folder: Folder) -> Result<Option<MailFolde
         })
         .transpose()?;
     let folder = MailFolder::new(reference, parent, display_name.unwrap_or_default())
-        .map_err(|_| EwsError::InvalidResponse)?;
+        .map_err(|_| EwsError::InvalidResponse)?
+        .with_unread_count(unread_count);
     Ok(Some(folder))
 }
 
-pub(super) fn message_metadata_shape() -> ItemShape {
+pub(super) fn message_sync_request(
+    folder_id: &FolderId,
+    sync_state: Option<String>,
+) -> SyncFolderItems {
+    SyncFolderItems {
+        item_shape: message_metadata_shape(),
+        sync_folder_id: BaseFolderId::new_folder(folder_id.as_str()),
+        sync_state,
+        ignore: None,
+        max_changes_returned: EWS_PAGE_SIZE,
+        sync_scope: Some(SyncScope::NormalItems),
+    }
+}
+
+fn message_metadata_shape() -> ItemShape {
     ItemShape {
         base_shape: BaseShape::IdOnly,
         include_mime_content: Some(false),
@@ -423,6 +471,7 @@ pub(super) fn message_metadata_shape() -> ItemShape {
                 "item:ItemClass",
                 "item:Subject",
                 "item:DateTimeReceived",
+                "item:Preview",
                 "message:From",
                 "message:Sender",
                 "message:IsRead",
@@ -528,6 +577,12 @@ fn map_message(item: ews::RealItem) -> Result<Option<MessageDeltaChange>, EwsErr
     patch.set_from(map_recipient(message.from));
     patch.set_sender(map_recipient(message.sender));
     patch.set_received_at(SystemTime::from(received_at));
+    patch.set_preview(
+        message
+            .preview
+            .as_deref()
+            .and_then(MessagePreview::from_untrusted),
+    );
     patch.set_read_state(if is_read {
         ReadState::Read
     } else {
