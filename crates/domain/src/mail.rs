@@ -1,7 +1,10 @@
 //! Provider-independent mail concepts used by cached browsing and synchronization.
 
+mod folder_kind;
 pub(super) mod mailbox;
+mod preview;
 mod send;
+mod unread_count;
 
 use std::{fmt, time::SystemTime};
 
@@ -10,10 +13,13 @@ use thiserror::Error;
 use self::mailbox::Mailbox;
 use crate::{AccountId, FolderId, MessageId};
 
+pub use folder_kind::{MailFolderKind, MailFolderKinds};
+pub use preview::MessagePreview;
 pub use send::{
     InvalidMailRecipient, InvalidMailSubject, MailDraft, MailRecipient, MailReplyDraft,
     MailReplySource, MailSendOperationId, MailSendTarget, MailSubject, PendingMailSend,
 };
+pub use unread_count::UnreadCount;
 
 /// A body returned by a provider for storage and later display-time sanitization.
 ///
@@ -208,6 +214,8 @@ pub struct MailFolder {
     reference: FolderReference,
     parent: Option<FolderReference>,
     display_name: String,
+    kind: Option<MailFolderKind>,
+    unread_count: Option<UnreadCount>,
 }
 
 impl fmt::Debug for MailFolder {
@@ -217,6 +225,8 @@ impl fmt::Debug for MailFolder {
             .field("reference", &self.reference)
             .field("parent", &self.parent)
             .field("display_name", &"<redacted>")
+            .field("kind", &self.kind)
+            .field("unread_count", &self.unread_count)
             .finish()
     }
 }
@@ -245,7 +255,23 @@ impl MailFolder {
             reference,
             parent,
             display_name,
+            kind: None,
+            unread_count: None,
         })
+    }
+
+    /// Sets the role the mailbox gives this folder, or clears it with `None`.
+    #[must_use]
+    pub fn with_kind(mut self, kind: Option<MailFolderKind>) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Sets the number of unread messages, or clears it with `None`.
+    #[must_use]
+    pub fn with_unread_count(mut self, unread_count: Option<UnreadCount>) -> Self {
+        self.unread_count = unread_count;
+        self
     }
 
     /// Returns this folder's account-scoped reference.
@@ -264,6 +290,22 @@ impl MailFolder {
     #[must_use]
     pub fn display_name(&self) -> &str {
         &self.display_name
+    }
+
+    /// Returns the role the mailbox gives this folder.
+    ///
+    /// `None` means the kind is unknown or the folder is an ordinary folder.
+    #[must_use]
+    pub fn kind(&self) -> Option<MailFolderKind> {
+        self.kind
+    }
+
+    /// Returns the number of unread messages in this folder.
+    ///
+    /// `None` means no count is known.
+    #[must_use]
+    pub fn unread_count(&self) -> Option<UnreadCount> {
+        self.unread_count
     }
 }
 
@@ -322,6 +364,7 @@ pub struct MessageMetadata {
     received_at: SystemTime,
     read_state: ReadState,
     follow_up_flag_status: Option<FollowUpFlagStatus>,
+    preview: Option<MessagePreview>,
 }
 
 impl fmt::Debug for MessageMetadata {
@@ -333,6 +376,7 @@ impl fmt::Debug for MessageMetadata {
             .field("received_at", &"<redacted>")
             .field("read_state", &self.read_state)
             .field("follow_up_flag_status", &self.follow_up_flag_status)
+            .field("preview", &self.preview)
             .finish()
     }
 }
@@ -353,7 +397,15 @@ impl MessageMetadata {
             received_at,
             read_state,
             follow_up_flag_status,
+            preview: None,
         }
+    }
+
+    /// Sets the preview of the message body, or clears it with `None`.
+    #[must_use]
+    pub fn with_preview(mut self, preview: Option<MessagePreview>) -> Self {
+        self.preview = preview;
+        self
     }
 
     /// Returns the subject, when one is available.
@@ -388,6 +440,14 @@ impl MessageMetadata {
         self.follow_up_flag_status
     }
 
+    /// Returns the plain-text opening of the message body.
+    ///
+    /// `None` means the message has no preview.
+    #[must_use]
+    pub fn preview(&self) -> Option<&MessagePreview> {
+        self.preview.as_ref()
+    }
+
     /// Applies the changed fields in a message metadata patch.
     pub fn apply_patch(&mut self, patch: MessageMetadataPatch) {
         patch.subject.apply_to(&mut self.subject);
@@ -398,6 +458,7 @@ impl MessageMetadata {
         patch
             .follow_up_flag_status
             .apply_to(&mut self.follow_up_flag_status);
+        patch.preview.apply_to(&mut self.preview);
     }
 }
 
@@ -410,6 +471,7 @@ pub struct MessageMetadataPatch {
     received_at: FieldUpdate<SystemTime>,
     read_state: FieldUpdate<ReadState>,
     follow_up_flag_status: FieldUpdate<Option<FollowUpFlagStatus>>,
+    preview: FieldUpdate<Option<MessagePreview>>,
 }
 
 impl MessageMetadataPatch {
@@ -449,6 +511,11 @@ impl MessageMetadataPatch {
         self.follow_up_flag_status = FieldUpdate::Set(status);
     }
 
+    /// Replaces or clears the message preview when the patch is applied.
+    pub fn set_preview(&mut self, preview: Option<MessagePreview>) {
+        self.preview = FieldUpdate::Set(preview);
+    }
+
     /// Builds a new message when this patch includes every selected metadata field.
     #[must_use]
     pub fn into_complete_message(
@@ -465,13 +532,18 @@ impl MessageMetadataPatch {
             FieldUpdate::Unchanged => None,
             FieldUpdate::Set(status) => status,
         };
+        let preview = match self.preview {
+            FieldUpdate::Unchanged => None,
+            FieldUpdate::Set(preview) => preview,
+        };
         let metadata = MessageMetadata::new(
             subject,
             MessageOrigin::new(from, sender),
             received_at,
             read_state,
             follow_up_flag_status,
-        );
+        )
+        .with_preview(preview);
         Some(MailMessage::new(folder, id, metadata))
     }
 }

@@ -3,21 +3,12 @@
 use std::{future::Future, time::Duration};
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailReplyDraft,
-    MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId, ReadState,
+    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailFolderKind,
+    MailReplyDraft, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageId, ReadState,
 };
 use thiserror::Error;
 
 use crate::AccountOperationError;
-
-/// Selects a well-known folder that has a native message action.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WellKnownMailFolder {
-    /// The default folder used by Outlook's One_Click Archive action.
-    Archive,
-    /// The folder that holds messages deleted from ordinary folders.
-    DeletedItems,
-}
 
 /// A user-safe category for a mail operation failure.
 #[non_exhaustive]
@@ -280,7 +271,7 @@ pub trait MailProvider: Send + Sync {
     fn well_known_folder(
         &self,
         account_id: &AccountId,
-        folder: WellKnownMailFolder,
+        folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_;
 
     /// Sends one plain-text message as the signed-in account.

@@ -21,16 +21,16 @@ use einfach_mail_application::{
     CalendarDeltaResponse, CalendarOperationError, CalendarProvider, CalendarSession,
     CalendarSyncStrategy, CalendarWorkflow, ConnectedAccount, MailOperationError, MailProvider,
     MailSendProviderError, MailSession, MailSyncState, MailWorkflow, MessageDeltaPageResponse,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, CalendarCapabilities, CalendarDeltaLink,
     CalendarDeltaPage, CalendarDeltaProgress, CalendarEventCreation, CalendarEventUpdate,
     CalendarOccurrence, CalendarOccurrencePatch, CalendarOccurrenceTimePatch,
     CalendarViewReference, EventId, FolderId, FolderReference, FollowUpFlagStatus,
-    MailCapabilities, MailFolder, MailMessage, Mailbox, MessageBody, MessageBodyType,
-    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadata,
-    MessageOrigin, ReadState, VersionedCalendarEvent,
+    MailCapabilities, MailFolder, MailFolderKind, MailMessage, Mailbox, MessageBody,
+    MessageBodyType, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+    MessageMetadata, MessageOrigin, ReadState, VersionedCalendarEvent,
 };
 
 pub(crate) use start::{
@@ -346,7 +346,7 @@ impl MailProvider for PreviewMailProvider {
     fn well_known_folder(
         &self,
         account_id: &AccountId,
-        folder: WellKnownMailFolder,
+        folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         let requested_account_id = account_id.clone();
         async move {
@@ -354,8 +354,12 @@ impl MailProvider for PreviewMailProvider {
                 return Err(MailOperationError::AccountMismatch);
             }
             let folder_id = match folder {
-                WellKnownMailFolder::Archive => "archive",
-                WellKnownMailFolder::DeletedItems => "deleted-items",
+                MailFolderKind::Inbox => "inbox",
+                MailFolderKind::SentItems => "sent-items",
+                MailFolderKind::Drafts => "drafts",
+                MailFolderKind::Archive => "archive",
+                MailFolderKind::DeletedItems => "deleted-items",
+                MailFolderKind::JunkEmail => "junk-email",
             };
             Ok(FolderReference::new(
                 self.account_id.clone(),

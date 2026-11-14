@@ -11,12 +11,12 @@ use einfach_mail_application::{
     CalendarOperationError, CalendarWorkflowError, MailCache, MailCacheError, MailOperationError,
     MailSendOutcome, MailSendProviderError, MailSendResolutionError, MailSendWorkflowError,
     MailWorkflow, MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailReplyDraft, MailReplySource,
-    MailSendOperationId, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink,
-    MessageDeltaPage, MessageDeltaProgress, MessageId, ReadState,
+    AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailFolderKind, MailReplyDraft,
+    MailReplySource, MailSendOperationId, MessageBody, MessageBodyType, MessageDeltaChange,
+    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, ReadState,
 };
 use tempfile::TempDir;
 

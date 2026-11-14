@@ -10,7 +10,7 @@ pub use email_html::{
 };
 pub use provider::{
     MailOperationError, MailProvider, MailSendProviderError, MessageDeltaPageResponse,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    MessageDeltaRequest, MessageDeltaResponse,
 };
 pub use workflow::{
     FollowUpFlagUpdateOutcome, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError,

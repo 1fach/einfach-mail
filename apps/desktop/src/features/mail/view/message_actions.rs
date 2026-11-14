@@ -1,6 +1,7 @@
-use einfach_mail_application::{MailWorkflowError, WellKnownMailFolder};
+use einfach_mail_application::MailWorkflowError;
 use einfach_mail_domain::{
-    FolderReference, FollowUpFlagStatus, MailAction, MailFolder, MessageId, ReadState,
+    FolderReference, FollowUpFlagStatus, MailAction, MailFolder, MailFolderKind, MessageId,
+    ReadState,
 };
 use gpui_kit::component::{
     Disableable,
@@ -61,18 +62,19 @@ impl MailView {
 
     pub(super) fn well_known_folder_command(
         &self,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
         message_id: &MessageId,
         cx: &mut Context<Self>,
     ) -> Command {
         let pending = self.well_known_folder_action_in_progress_for(message_id, destination);
         let (command_id, label, pending_label, icon) = match destination {
-            WellKnownMailFolder::Archive => {
+            MailFolderKind::Archive => {
                 ("message-archive", "Archive", "Archiving…", AppIcon::Archive)
             }
-            WellKnownMailFolder::DeletedItems => {
+            MailFolderKind::DeletedItems => {
                 ("message-delete", "Delete", "Deleting…", AppIcon::Delete)
             }
+            _ => ("message-move", "Move", "Moving…", AppIcon::Move),
         };
         let action = well_known_folder_mail_action(destination);
         Command::invoke(
@@ -161,10 +163,11 @@ impl MailView {
         }
     }
 
-    fn render_well_known_folder_action_pending(destination: WellKnownMailFolder) -> AnyElement {
+    fn render_well_known_folder_action_pending(destination: MailFolderKind) -> AnyElement {
         let pending_id = match destination {
-            WellKnownMailFolder::Archive => "message-archive-pending",
-            WellKnownMailFolder::DeletedItems => "message-delete-pending",
+            MailFolderKind::Archive => "message-archive-pending",
+            MailFolderKind::DeletedItems => "message-delete-pending",
+            _ => "message-move-pending",
         };
         render_message_pending_feedback(
             pending_id,
@@ -174,17 +177,16 @@ impl MailView {
 
     fn render_well_known_folder_action_error(
         &self,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
         error: MailWorkflowError,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (error_id, permission_button_id) = match destination {
-            WellKnownMailFolder::Archive => {
-                ("message-archive-error", "review-permissions-from-archive")
-            }
-            WellKnownMailFolder::DeletedItems => {
+            MailFolderKind::Archive => ("message-archive-error", "review-permissions-from-archive"),
+            MailFolderKind::DeletedItems => {
                 ("message-delete-error", "review-permissions-from-delete")
             }
+            _ => ("message-move-error", "review-permissions-from-move"),
         };
         self.render_message_action_error(error_id, permission_button_id, error, cx)
     }
@@ -463,9 +465,10 @@ fn render_message_pending_feedback(id: &'static str, message: String) -> AnyElem
     InfoBar::status(id, message).into_any_element()
 }
 
-fn well_known_folder_progress_message(folder: WellKnownMailFolder) -> &'static str {
+fn well_known_folder_progress_message(folder: MailFolderKind) -> &'static str {
     match folder {
-        WellKnownMailFolder::Archive => "Moving message to Archive…",
-        WellKnownMailFolder::DeletedItems => "Moving message to Deleted Items…",
+        MailFolderKind::Archive => "Moving message to Archive…",
+        MailFolderKind::DeletedItems => "Moving message to Deleted Items…",
+        _ => "Moving message…",
     }
 }

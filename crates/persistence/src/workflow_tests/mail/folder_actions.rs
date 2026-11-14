@@ -21,7 +21,7 @@ fn delete_message_requires_a_current_sync_before_resolving_deleted_items() {
                 .move_message_to_well_known_folder(
                     &source,
                     &message_id(),
-                    WellKnownMailFolder::DeletedItems
+                    MailFolderKind::DeletedItems
                 )
                 .await,
             Err(MailWorkflowError::AccountSyncRequired)
@@ -82,7 +82,7 @@ fn delete_message_uses_visible_deleted_items_id_and_preserves_cached_body() {
                 .move_message_to_well_known_folder(
                     &inbox_reference,
                     &message_id(),
-                    WellKnownMailFolder::DeletedItems,
+                    MailFolderKind::DeletedItems,
                 )
                 .await
                 .map(|outcome| outcome.cache_outcome()),
@@ -189,7 +189,7 @@ fn archive_action_resolves_visible_archive_and_preserves_cached_body() {
             .move_message_to_well_known_folder(
                 &inbox_reference,
                 &message_id(),
-                WellKnownMailFolder::Archive,
+                MailFolderKind::Archive,
             )
             .await
             .expect("Archive action resolves and confirms the visible well-known folder");
@@ -269,11 +269,11 @@ fn archive_action_rejects_a_message_already_in_archive() {
                 .move_message_to_well_known_folder(
                     &archive_reference,
                     &message_id(),
-                    WellKnownMailFolder::Archive,
+                    MailFolderKind::Archive,
                 )
                 .await,
             Err(MailWorkflowError::AlreadyInWellKnownFolder(
-                WellKnownMailFolder::Archive
+                MailFolderKind::Archive
             ))
         );
         assert_eq!(folder_calls.load(Ordering::Relaxed), 1);
@@ -290,10 +290,7 @@ fn archive_action_rejects_a_message_already_in_archive() {
 #[test]
 fn well_known_folder_rejects_a_resolved_folder_outside_the_visible_tree() {
     smol::block_on(async {
-        for destination in [
-            WellKnownMailFolder::Archive,
-            WellKnownMailFolder::DeletedItems,
-        ] {
+        for destination in [MailFolderKind::Archive, MailFolderKind::DeletedItems] {
             let directory = TempDir::new().expect("temporary directory is created");
             let account = account_id();
             let inbox = folder(&account);
@@ -329,8 +326,9 @@ fn well_known_folder_rejects_a_resolved_folder_outside_the_visible_tree() {
             let not_visible =
                 FolderId::try_from("not-visible".to_owned()).expect("synthetic folder ID is valid");
             match destination {
-                WellKnownMailFolder::Archive => provider.archive_folder_id = not_visible,
-                WellKnownMailFolder::DeletedItems => provider.deleted_items_folder_id = not_visible,
+                MailFolderKind::Archive => provider.archive_folder_id = not_visible,
+                MailFolderKind::DeletedItems => provider.deleted_items_folder_id = not_visible,
+                _ => unreachable!("the test iterates only the destinations that moves offer"),
             }
             let folder_calls = Arc::clone(&provider.well_known_folder_calls);
             let move_calls = Arc::clone(&provider.message_moves);
@@ -405,11 +403,11 @@ fn delete_message_rejects_a_message_already_in_deleted_items() {
                 .move_message_to_well_known_folder(
                     &deleted_reference,
                     &message_id(),
-                    WellKnownMailFolder::DeletedItems,
+                    MailFolderKind::DeletedItems,
                 )
                 .await,
             Err(MailWorkflowError::AlreadyInWellKnownFolder(
-                WellKnownMailFolder::DeletedItems
+                MailFolderKind::DeletedItems
             ))
         );
         assert_eq!(folder_calls.load(Ordering::Relaxed), 1);

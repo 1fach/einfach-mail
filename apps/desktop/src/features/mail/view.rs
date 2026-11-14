@@ -7,11 +7,10 @@ use super::composer::{
 use einfach_mail_application::MailSyncProgress;
 use einfach_mail_application::{
     MailCacheError, MailSession, MailSyncState, MailWorkflowError, OpenedMessage,
-    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
-    AccountProfile, FolderReference, MailAction, MailFolder, MailMessage, MailReplySource, Mailbox,
-    MessageId, PendingMailSend,
+    AccountProfile, FolderReference, MailAction, MailFolder, MailFolderKind, MailMessage,
+    MailReplySource, Mailbox, MessageId, PendingMailSend,
 };
 use gpui_kit::base::VirtualListScrollHandle;
 use gpui_kit::component::StyledExt;
@@ -586,17 +585,21 @@ fn mail_error_message(error: MailWorkflowError) -> &'static str {
             "The destination folder is unavailable. Sync mail and try again."
         }
         MailWorkflowError::AccountSyncRequired => ACCOUNT_SYNC_REQUIRED_MESSAGE,
-        MailWorkflowError::AlreadyInWellKnownFolder(WellKnownMailFolder::Archive) => {
+        MailWorkflowError::AlreadyInWellKnownFolder(MailFolderKind::Archive) => {
             "This message is already in Archive."
         }
-        MailWorkflowError::AlreadyInWellKnownFolder(WellKnownMailFolder::DeletedItems) => {
+        MailWorkflowError::AlreadyInWellKnownFolder(MailFolderKind::DeletedItems) => {
             "This message is already in Deleted Items. Move it to another folder instead."
         }
-        MailWorkflowError::WellKnownFolderUnavailable(WellKnownMailFolder::Archive) => {
+        MailWorkflowError::AlreadyInWellKnownFolder(_) => "This message is already in that folder.",
+        MailWorkflowError::WellKnownFolderUnavailable(MailFolderKind::Archive) => {
             "Archive is not available in the visible folder list. Sync mail and try again."
         }
-        MailWorkflowError::WellKnownFolderUnavailable(WellKnownMailFolder::DeletedItems) => {
+        MailWorkflowError::WellKnownFolderUnavailable(MailFolderKind::DeletedItems) => {
             "Deleted Items is not available in the visible folder list. Sync mail and try again."
+        }
+        MailWorkflowError::WellKnownFolderUnavailable(_) => {
+            "That folder is not available in the visible folder list. Sync mail and try again."
         }
         MailWorkflowError::FolderSyncRequired => {
             "Sync this folder before archiving, moving, or deleting messages."

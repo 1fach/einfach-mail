@@ -35,9 +35,10 @@ pub use calendar_edit::{
 pub use identifiers::{AccountId, EmptyIdentifier, EventId, FolderId, MessageId};
 pub use mail::{
     FolderParentError, FolderReference, FollowUpFlagStatus, InvalidMailRecipient,
-    InvalidMailSubject, MailDraft, MailFolder, MailMessage, MailRecipient, MailReplyDraft,
-    MailReplySource, MailSendOperationId, MailSendTarget, MailSubject, MessageBody,
-    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
-    MessageMetadata, MessageMetadataPatch, MessageOrigin, PendingMailSend, ReadState,
+    InvalidMailSubject, MailDraft, MailFolder, MailFolderKind, MailFolderKinds, MailMessage,
+    MailRecipient, MailReplyDraft, MailReplySource, MailSendOperationId, MailSendTarget,
+    MailSubject, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink,
+    MessageDeltaPage, MessageDeltaProgress, MessageMetadata, MessageMetadataPatch, MessageOrigin,
+    MessagePreview, PendingMailSend, ReadState, UnreadCount,
 };
 pub use mailbox::{EmptyMailboxAddress, Mailbox};

@@ -31,7 +31,7 @@ pub use mail::{
     MailSendWorkflowError, MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflow,
     MailWorkflowError, MessageBodyForDisplay, MessageDeltaPageResponse, MessageDeltaRequest,
     MessageDeltaResponse, MessageMoveOutcome, OpenedMessage, ReadStateUpdateOutcome,
-    SanitizedEmailHtml, WellKnownFolderMoveOutcome, WellKnownMailFolder,
-    allowed_external_message_url, prepare_message_body_for_display,
+    SanitizedEmailHtml, WellKnownFolderMoveOutcome, allowed_external_message_url,
+    prepare_message_body_for_display,
 };
 pub use shared::recovery::CalendarWriteReadiness;

@@ -2,7 +2,7 @@ use einfach_mail_domain::CalendarViewRange;
 use time::{Date, Month};
 use url::Url;
 
-use super::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority, MESSAGE_SELECT, WellKnownMailFolder};
+use super::{CALENDAR_EVENT_EDIT_SELECT, GraphAuthority, MESSAGE_SELECT, MailFolderKind};
 use crate::error::GraphError;
 
 fn authority() -> GraphAuthority {
@@ -217,12 +217,28 @@ fn folder_delta_ids_are_encoded_as_single_path_segments() {
 fn well_known_paths_use_locale_independent_folder_names() {
     for (folder, expected) in [
         (
-            WellKnownMailFolder::Archive,
+            MailFolderKind::Inbox,
+            "https://graph.microsoft.com/v1.0/me/mailFolders/inbox?%24select=id%2CdisplayName%2CisHidden",
+        ),
+        (
+            MailFolderKind::SentItems,
+            "https://graph.microsoft.com/v1.0/me/mailFolders/sentitems?%24select=id%2CdisplayName%2CisHidden",
+        ),
+        (
+            MailFolderKind::Drafts,
+            "https://graph.microsoft.com/v1.0/me/mailFolders/drafts?%24select=id%2CdisplayName%2CisHidden",
+        ),
+        (
+            MailFolderKind::Archive,
             "https://graph.microsoft.com/v1.0/me/mailFolders/archive?%24select=id%2CdisplayName%2CisHidden",
         ),
         (
-            WellKnownMailFolder::DeletedItems,
+            MailFolderKind::DeletedItems,
             "https://graph.microsoft.com/v1.0/me/mailFolders/deleteditems?%24select=id%2CdisplayName%2CisHidden",
+        ),
+        (
+            MailFolderKind::JunkEmail,
+            "https://graph.microsoft.com/v1.0/me/mailFolders/junkemail?%24select=id%2CdisplayName%2CisHidden",
         ),
     ] {
         assert_eq!(

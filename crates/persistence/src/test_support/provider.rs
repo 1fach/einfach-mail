@@ -10,12 +10,13 @@ use std::{
 use einfach_mail_application::{
     CalendarDeltaRequest, CalendarDeltaResponse, CalendarOperationError, CalendarProvider,
     CalendarSyncStrategy, MailOperationError, MailProvider, MailSendProviderError,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
     AccountId, CalendarCapabilities, CalendarEventCreation, CalendarEventUpdate,
     CalendarOccurrence, CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus,
-    MailDraft, MailFolder, MessageBody, MessageId, ReadState, VersionedCalendarEvent,
+    MailDraft, MailFolder, MailFolderKind, MessageBody, MessageId, ReadState,
+    VersionedCalendarEvent,
 };
 
 pub(crate) type PageQueue = VecDeque<Result<MessageDeltaResponse, MailOperationError>>;
@@ -437,14 +438,16 @@ impl MailProvider for FixtureProvider {
     fn well_known_folder(
         &self,
         account_id: &AccountId,
-        folder: WellKnownMailFolder,
+        folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         let account_matches = account_id == &self.account_id;
         let folder_id = match folder {
-            WellKnownMailFolder::Archive => self.archive_folder_id.clone(),
-            WellKnownMailFolder::DeletedItems => self.deleted_items_folder_id.clone(),
+            MailFolderKind::Archive => Some(self.archive_folder_id.clone()),
+            MailFolderKind::DeletedItems => Some(self.deleted_items_folder_id.clone()),
+            _ => None,
         };
-        let folder_reference = FolderReference::new(account_id.clone(), folder_id);
+        let folder_reference =
+            folder_id.map(|folder_id| FolderReference::new(account_id.clone(), folder_id));
         let calls = Arc::clone(&self.well_known_folder_calls);
         let gate = Arc::clone(&self.well_known_folder_gate);
         async move {
@@ -466,7 +469,7 @@ impl MailProvider for FixtureProvider {
                     .await
                     .map_err(|_| MailOperationError::ServiceUnavailable)?;
             }
-            Ok(folder_reference)
+            folder_reference.ok_or(MailOperationError::UnsupportedOperation)
         }
     }
 

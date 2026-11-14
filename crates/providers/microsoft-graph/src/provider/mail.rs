@@ -6,11 +6,11 @@ use tokio_util::sync::CancellationToken;
 use crate::error::GraphError;
 use einfach_mail_application::{
     MailOperationError, MailProvider, MailSendProviderError, MessageDeltaRequest,
-    MessageDeltaResponse, WellKnownMailFolder,
+    MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailReplyDraft,
-    MessageBody, MessageId, ReadState,
+    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailFolderKind,
+    MailReplyDraft, MessageBody, MessageId, ReadState,
 };
 use einfach_mail_provider_runtime as worker;
 
@@ -64,7 +64,7 @@ impl MailProvider for MicrosoftGraphProvider {
     fn well_known_folder(
         &self,
         account_id: &AccountId,
-        folder: WellKnownMailFolder,
+        folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         let config = Arc::clone(&self.config);
         let account_id = account_id.clone();

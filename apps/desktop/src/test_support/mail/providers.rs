@@ -8,12 +8,12 @@ use std::{
 
 use einfach_mail_application::{
     MailOperationError, MailProvider, MailSendProviderError, MessageDeltaPageResponse,
-    MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MailReplyDraft, MessageBody, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
-    MessageId, ReadState,
+    MailFolderKind, MailReplyDraft, MessageBody, MessageDeltaLink, MessageDeltaPage,
+    MessageDeltaProgress, MessageId, ReadState,
 };
 
 use super::super::synthetic_account_id;
@@ -79,11 +79,15 @@ impl MailProvider for OfflineProvider {
     fn well_known_folder(
         &self,
         account_id: &AccountId,
-        folder: WellKnownMailFolder,
+        folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         let folder_id = match folder {
-            WellKnownMailFolder::Archive => "archive",
-            WellKnownMailFolder::DeletedItems => "deleted-items",
+            MailFolderKind::Inbox => "inbox",
+            MailFolderKind::SentItems => "sent-items",
+            MailFolderKind::Drafts => "drafts",
+            MailFolderKind::Archive => "archive",
+            MailFolderKind::DeletedItems => "deleted-items",
+            MailFolderKind::JunkEmail => "junk-email",
         };
         ready(Ok(FolderReference::new(
             account_id.clone(),
@@ -329,7 +333,7 @@ impl MailProvider for ReadStateProvider {
     fn well_known_folder(
         &self,
         account_id: &AccountId,
-        folder: WellKnownMailFolder,
+        folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         self.offline.well_known_folder(account_id, folder)
     }
@@ -459,11 +463,15 @@ impl MailProvider for MessageMoveProvider {
     fn well_known_folder(
         &self,
         account_id: &AccountId,
-        folder: WellKnownMailFolder,
+        folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         let folder_id = match folder {
-            WellKnownMailFolder::Archive => "archive",
-            WellKnownMailFolder::DeletedItems => "deleted-items",
+            MailFolderKind::Inbox => "inbox",
+            MailFolderKind::SentItems => "sent-items",
+            MailFolderKind::Drafts => "drafts",
+            MailFolderKind::Archive => "archive",
+            MailFolderKind::DeletedItems => "deleted-items",
+            MailFolderKind::JunkEmail => "junk-email",
         };
         if account_id == &self.account_id {
             ready(Ok(FolderReference::new(
@@ -585,7 +593,7 @@ impl MailProvider for PermissionProvider {
     fn well_known_folder(
         &self,
         account_id: &AccountId,
-        folder: WellKnownMailFolder,
+        folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         self.offline.well_known_folder(account_id, folder)
     }

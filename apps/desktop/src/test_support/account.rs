@@ -22,14 +22,14 @@ use einfach_mail_application::{
     ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult, FollowUpFlagUpdateOutcome,
     MailCacheError, MailSendOutcome, MailSendResolutionError, MailSendWorkflowError, MailSession,
     MailSyncProgress, MailSyncReport, MailSyncState, MailWorkflowError, MessageMoveOutcome,
-    ReadStateUpdateOutcome, WellKnownFolderMoveOutcome, WellKnownMailFolder,
+    ReadStateUpdateOutcome, WellKnownFolderMoveOutcome,
 };
 use einfach_mail_domain::{
     AccountCapabilities, AccountId, AccountProfile, CalendarCapabilities, CalendarEventCreation,
     CalendarEventUpdate, CalendarOccurrence, CalendarViewReference, FolderReference,
-    FollowUpFlagStatus, MailAction, MailCapabilities, MailDraft, MailFolder, MailMessage,
-    MailReplyDraft, MailSendOperationId, MessageId, MissingAccountLabel, PendingMailSend,
-    ReadState, VersionedCalendarEvent,
+    FollowUpFlagStatus, MailAction, MailCapabilities, MailDraft, MailFolder, MailFolderKind,
+    MailMessage, MailReplyDraft, MailSendOperationId, MessageId, MissingAccountLabel,
+    PendingMailSend, ReadState, VersionedCalendarEvent,
 };
 
 pub(crate) fn mail_only_profile() -> AccountProfile {
@@ -185,7 +185,7 @@ impl MailSession for TestMailSession {
         &'a self,
         _: &'a FolderReference,
         _: &'a MessageId,
-        _: WellKnownMailFolder,
+        _: MailFolderKind,
     ) -> AccountSessionFuture<'a, Result<WellKnownFolderMoveOutcome, MailWorkflowError>> {
         pending_mail_call()
     }

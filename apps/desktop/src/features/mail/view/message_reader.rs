@@ -1,5 +1,5 @@
-use einfach_mail_application::{MailWorkflowError, OpenedMessage, WellKnownMailFolder};
-use einfach_mail_domain::{FolderReference, MailAction};
+use einfach_mail_application::{MailWorkflowError, OpenedMessage};
+use einfach_mail_domain::{FolderReference, MailAction, MailFolderKind};
 use gpui_kit::component::{ColorTokens, StyledExt, button::Button};
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt as _;
@@ -255,16 +255,12 @@ impl MailView {
             commands.push(self.reply_command(message_id, cx));
         }
         if mail.supports(MailAction::Move) {
-            commands.push(self.well_known_folder_command(
-                WellKnownMailFolder::Archive,
-                message_id,
-                cx,
-            ));
+            commands.push(self.well_known_folder_command(MailFolderKind::Archive, message_id, cx));
             commands.push(self.move_command(message_id, cx));
         }
         if mail.supports(MailAction::Delete) {
             commands.push(self.well_known_folder_command(
-                WellKnownMailFolder::DeletedItems,
+                MailFolderKind::DeletedItems,
                 message_id,
                 cx,
             ));

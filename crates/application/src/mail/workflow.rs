@@ -8,15 +8,15 @@ mod sync;
 use std::sync::Arc;
 
 use einfach_mail_domain::{
-    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailMessage, MailReplyDraft,
-    PendingMailSend, ReadState,
+    AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolderKind, MailMessage,
+    MailReplyDraft, PendingMailSend, ReadState,
 };
 use thiserror::Error;
 
 use crate::shared::recovery::AccountWorkflowRecovery;
 use crate::{
     MailCache, MailCacheError, MailOperationError, MailProvider, MailSendProviderError,
-    MessageBodyForDisplay, WellKnownMailFolder,
+    MessageBodyForDisplay,
     shared::reservations::{AccountReservationError, OperationReservation, OperationReservations},
 };
 
@@ -40,10 +40,10 @@ pub enum MailWorkflowError {
     AccountSyncRequired,
     /// The message already belongs to the requested well-known folder.
     #[error("the message is already in the requested folder")]
-    AlreadyInWellKnownFolder(WellKnownMailFolder),
+    AlreadyInWellKnownFolder(MailFolderKind),
     /// The requested well-known folder is not visible in the account's folder list.
     #[error("the requested well-known folder is unavailable")]
-    WellKnownFolderUnavailable(WellKnownMailFolder),
+    WellKnownFolderUnavailable(MailFolderKind),
     /// Another mail operation already owns this account or folder.
     #[error("a mail operation is already active for this account or folder")]
     OperationInProgress,

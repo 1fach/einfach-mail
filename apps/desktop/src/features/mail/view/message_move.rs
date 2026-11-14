@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use einfach_mail_application::{
     MailOperationError, MailWorkflowError, MessageMoveOutcome, WellKnownFolderMoveOutcome,
-    WellKnownMailFolder,
 };
-use einfach_mail_domain::{FolderReference, MailAction, MessageId};
+use einfach_mail_domain::{FolderReference, MailAction, MailFolderKind, MessageId};
 use gpui_kit::{AsyncApp, Context};
 
 use super::{MailView, MessageDetailState, SyncStatus};
@@ -25,11 +24,11 @@ pub(super) enum WellKnownFolderActionStatus {
     Idle,
     Pending {
         message_id: MessageId,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
     },
     Failed {
         message_id: MessageId,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
         error: MailWorkflowError,
     },
 }
@@ -51,7 +50,7 @@ pub(super) struct MessageMoveRequest {
 pub(super) struct WellKnownFolderActionRequest {
     source_folder: FolderReference,
     message_id: MessageId,
-    destination: WellKnownMailFolder,
+    destination: MailFolderKind,
 }
 
 #[derive(Clone)]
@@ -61,10 +60,14 @@ pub(super) struct MessageMoveMenuAction {
     pub(super) destination_label: String,
 }
 
-pub(super) fn well_known_folder_mail_action(destination: WellKnownMailFolder) -> MailAction {
+pub(super) fn well_known_folder_mail_action(destination: MailFolderKind) -> MailAction {
     match destination {
-        WellKnownMailFolder::Archive => MailAction::Move,
-        WellKnownMailFolder::DeletedItems => MailAction::Delete,
+        MailFolderKind::DeletedItems => MailAction::Delete,
+        MailFolderKind::Inbox
+        | MailFolderKind::SentItems
+        | MailFolderKind::Drafts
+        | MailFolderKind::Archive
+        | MailFolderKind::JunkEmail => MailAction::Move,
     }
 }
 
@@ -117,7 +120,7 @@ impl MailView {
 
     pub(super) fn start_well_known_folder_action(
         &mut self,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
         cx: &mut Context<Self>,
     ) {
         let Some(request) = self.prepare_well_known_folder_action(destination) else {
@@ -154,7 +157,7 @@ impl MailView {
 
     pub(super) fn prepare_well_known_folder_action(
         &self,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
     ) -> Option<WellKnownFolderActionRequest> {
         if !self.message_move_allowed(well_known_folder_mail_action(destination)) {
             return None;
@@ -303,21 +306,26 @@ impl MailView {
         self.remove_confirmed_message(&request.message_id);
         self.well_known_folder_action_status = WellKnownFolderActionStatus::Idle;
         match request.destination {
-            WellKnownMailFolder::Archive => self.show_message_move_completion(
+            MailFolderKind::Archive => self.show_message_move_completion(
                 destination_folder,
                 "Archive".to_owned(),
                 "Open Archive",
             ),
-            WellKnownMailFolder::DeletedItems => {
+            MailFolderKind::DeletedItems => {
                 self.message_detail_state = MessageDetailState::DeleteCompleted;
             }
+            _ => self.show_message_move_completion(
+                destination_folder,
+                "that folder".to_owned(),
+                "Open folder",
+            ),
         }
     }
 
     fn finish_failed_well_known_folder_action(
         &mut self,
         message_id: MessageId,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
         error: &MailWorkflowError,
     ) {
         if message_move_outcome_is_unknown(error) {
@@ -354,7 +362,7 @@ impl MailView {
     pub(super) fn well_known_folder_action_in_progress_for(
         &self,
         message_id: &MessageId,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
     ) -> bool {
         matches!(
             &self.well_known_folder_action_status,
