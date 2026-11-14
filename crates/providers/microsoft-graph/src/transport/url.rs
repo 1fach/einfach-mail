@@ -52,6 +52,18 @@ impl GraphAuthority {
     }
 
     pub fn well_known_folder_path(&self, folder: MailFolderKind) -> Result<GraphUrl, GraphError> {
+        let mut url = self.folder_alias_url(folder)?;
+        url.query_pairs_mut().append_pair("$select", FOLDER_SELECT);
+        self.validated_url(url)
+    }
+
+    pub fn folder_kind_path(&self, kind: MailFolderKind) -> Result<GraphUrl, GraphError> {
+        let mut url = self.folder_alias_url(kind)?;
+        url.query_pairs_mut().append_pair("$select", "id");
+        self.validated_url(url)
+    }
+
+    fn folder_alias_url(&self, folder: MailFolderKind) -> Result<Url, GraphError> {
         let folder_name = match folder {
             MailFolderKind::Inbox => "inbox",
             MailFolderKind::SentItems => "sentitems",
@@ -65,8 +77,7 @@ impl GraphAuthority {
             .map_err(|()| GraphError::UnsafeLink)?
             .pop_if_empty()
             .extend(["me", "mailFolders", folder_name]);
-        url.query_pairs_mut().append_pair("$select", FOLDER_SELECT);
-        self.validated_url(url)
+        Ok(url)
     }
 
     pub fn child_folders_path(&self, folder_id: &str) -> Result<GraphUrl, GraphError> {

@@ -56,9 +56,15 @@ pub(super) async fn response_result(
         {
             Some(Err(GraphError::CalendarEventChanged))
         }
+        GraphRequestOperation::Get(GraphReadOperation::FolderKind)
+            if response.status() == StatusCode::NOT_FOUND =>
+        {
+            Some(Ok(GraphResponse::FolderNotFound))
+        }
         GraphRequestOperation::Get(
             GraphReadOperation::Profile
             | GraphReadOperation::Folders
+            | GraphReadOperation::FolderKind
             | GraphReadOperation::MessageBody
             | GraphReadOperation::CalendarEventRead,
         )

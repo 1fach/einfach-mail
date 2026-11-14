@@ -254,6 +254,122 @@ async fn resolves_archive_and_deleted_items_from_well_known_names() {
     drop(transport);
 }
 
+const FOLDER_KIND_ALIASES: [(&str, MailFolderKind); 6] = [
+    ("inbox", MailFolderKind::Inbox),
+    ("sentitems", MailFolderKind::SentItems),
+    ("drafts", MailFolderKind::Drafts),
+    ("archive", MailFolderKind::Archive),
+    ("deleteditems", MailFolderKind::DeletedItems),
+    ("junkemail", MailFolderKind::JunkEmail),
+];
+
+/// Resolves folder kinds against aliases that answer with a folder ID or an error status.
+///
+/// Returns the resolution and the number of alias requests Graph received.
+async fn resolve_folder_kinds_with(
+    alias_response: impl Fn(&str) -> Result<String, u16>,
+) -> (Result<MailFolderKinds, GraphError>, usize) {
+    let server = MockServer::start_async().await;
+    let mut lookups = Vec::new();
+    for (alias, _) in FOLDER_KIND_ALIASES {
+        let response = alias_response(alias);
+        let lookup = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path(format!("/v1.0/me/mailFolders/{alias}"))
+                    .query_param("$select", "id")
+                    .header_missing("prefer");
+                match response {
+                    Ok(id) => then
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .json_body(json!({"id": id})),
+                    Err(status) => then
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .json_body(json!({"error": {"code": "SyntheticFolderError"}})),
+                };
+            })
+            .await;
+        lookups.push(lookup);
+    }
+    let (api, transport) = synthetic_graph_api(&server);
+    let kinds = api.folder_kinds(synthetic_access_token()).await;
+    let mut requests = 0;
+    for lookup in &lookups {
+        requests += lookup.calls_async().await;
+    }
+    drop(transport);
+    (kinds, requests)
+}
+
+fn resolved_folder(kinds: &MailFolderKinds, kind: MailFolderKind) -> Option<&str> {
+    kinds.folder_of(kind).map(FolderId::as_str)
+}
+
+#[tokio::test]
+async fn folder_kinds_resolve_every_alias_with_one_id_request_each() {
+    let (kinds, requests) =
+        resolve_folder_kinds_with(|alias| Ok(format!("synthetic-{alias}-folder"))).await;
+    let kinds = kinds.expect("every synthetic alias resolves");
+
+    for (alias, kind) in FOLDER_KIND_ALIASES {
+        assert_eq!(
+            resolved_folder(&kinds, kind),
+            Some(format!("synthetic-{alias}-folder").as_str())
+        );
+    }
+    assert_eq!(requests, 6);
+}
+
+#[tokio::test]
+async fn folder_kinds_leave_out_an_alias_that_answers_not_found() {
+    let (kinds, requests) = resolve_folder_kinds_with(|alias| match alias {
+        "archive" => Err(404),
+        _ => Ok(format!("synthetic-{alias}-folder")),
+    })
+    .await;
+    let kinds = kinds.expect("a missing Archive folder is not an error");
+
+    assert_eq!(resolved_folder(&kinds, MailFolderKind::Archive), None);
+    assert_eq!(
+        resolved_folder(&kinds, MailFolderKind::JunkEmail),
+        Some("synthetic-junkemail-folder")
+    );
+    assert_eq!(kinds.assignments().count(), 5);
+    assert_eq!(requests, 6);
+}
+
+#[tokio::test]
+async fn folder_kinds_fail_when_an_alias_answers_another_error() {
+    for status in [400, 403, 500, 503] {
+        let (kinds, _) = resolve_folder_kinds_with(|alias| match alias {
+            "drafts" => Err(status),
+            _ => Ok(format!("synthetic-{alias}-folder")),
+        })
+        .await;
+
+        assert!(kinds.is_err(), "status {status} fails the resolution");
+    }
+}
+
+#[tokio::test]
+async fn folder_kinds_keep_the_first_kind_when_two_aliases_name_one_folder() {
+    let (kinds, requests) = resolve_folder_kinds_with(|alias| match alias {
+        "archive" => Ok("synthetic-inbox-folder".to_owned()),
+        _ => Ok(format!("synthetic-{alias}-folder")),
+    })
+    .await;
+    let kinds = kinds.expect("a repeated folder ID is not an error");
+    let inbox = FolderId::try_from("synthetic-inbox-folder".to_owned())
+        .expect("synthetic folder ID is valid");
+
+    assert_eq!(kinds.kind_of(&inbox), Some(MailFolderKind::Inbox));
+    assert_eq!(resolved_folder(&kinds, MailFolderKind::Archive), None);
+    assert_eq!(kinds.assignments().count(), 5);
+    assert_eq!(requests, 6);
+}
+
 #[test]
 fn message_move_confirmation_requires_matching_message_and_folder() {
     let message_id =

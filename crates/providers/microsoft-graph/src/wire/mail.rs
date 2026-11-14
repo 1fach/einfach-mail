@@ -17,9 +17,9 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MailFolderKind, MailReplyDraft, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
-    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
-    MessagePreview, ReadState, UnreadCount,
+    MailFolderKind, MailFolderKinds, MailReplyDraft, Mailbox, MessageBody, MessageBodyType,
+    MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId,
+    MessageMetadataPatch, MessagePreview, ReadState, UnreadCount,
 };
 
 use super::{
@@ -27,6 +27,20 @@ use super::{
     pagination::{GraphDeltaPage, PageTraversal},
     shared::{WireField, WireRemoved},
 };
+
+/// The kinds that [`GraphApi::folder_kinds`] resolves, in request order.
+///
+/// When two aliases name the same folder, the kind listed first keeps it. Archive comes last
+/// because the user chooses its folder, so it is the alias most likely to name a folder that
+/// already has another kind.
+const FOLDER_KIND_PRECEDENCE: [MailFolderKind; 6] = [
+    MailFolderKind::Inbox,
+    MailFolderKind::SentItems,
+    MailFolderKind::Drafts,
+    MailFolderKind::DeletedItems,
+    MailFolderKind::JunkEmail,
+    MailFolderKind::Archive,
+];
 
 impl GraphApi {
     pub(crate) async fn list_folders(
@@ -83,6 +97,33 @@ impl GraphApi {
             .ok_or(GraphError::InvalidResponse)
     }
 
+    /// Resolves each folder kind through its well-known Graph alias, one request per kind.
+    ///
+    /// A kind whose alias answers `404 Not Found` is absent from the result. Any other failure
+    /// stops the resolution and returns the error.
+    pub(crate) async fn folder_kinds(
+        &self,
+        token: Arc<AccessToken>,
+    ) -> Result<MailFolderKinds, GraphError> {
+        let mut kinds = MailFolderKinds::new();
+        for kind in FOLDER_KIND_PRECEDENCE {
+            let url = self.authority.folder_kind_path(kind)?;
+            let Some(response) = self
+                .transport
+                .get_folder_kind(url, Arc::clone(&token))
+                .await?
+            else {
+                continue;
+            };
+            let folder = serde_json::from_slice::<WireFolderId>(&response)
+                .map_err(|_| GraphError::InvalidResponse)?;
+            let folder_id = FolderId::try_from(folder.id).map_err(|_| GraphError::InvalidRecord)?;
+            // A folder that an earlier alias named keeps that kind, so this assignment is skipped.
+            kinds.assign(kind, folder_id);
+        }
+        Ok(kinds)
+    }
+
     pub(crate) async fn message_delta_page(
         &self,
         folder: &FolderReference,
@@ -106,8 +147,9 @@ impl GraphApi {
                     reset_link.as_str().to_owned(),
                 )));
             }
-            GraphResponse::MessageDeltaReset(None) => return Err(GraphError::InvalidResponse),
-            GraphResponse::CalendarViewDeltaReset { .. } => {
+            GraphResponse::MessageDeltaReset(None)
+            | GraphResponse::FolderNotFound
+            | GraphResponse::CalendarViewDeltaReset { .. } => {
                 return Err(GraphError::InvalidResponse);
             }
         };
@@ -378,6 +420,11 @@ impl WireFolder {
             .map(|folder| Some(folder.with_unread_count(self.unread_item_count)))
             .map_err(|_| GraphError::InvalidRecord)
     }
+}
+
+#[derive(Deserialize)]
+struct WireFolderId {
+    id: String,
 }
 
 /// Reads `unreadItemCount` as a count, or as unknown when Graph sends anything other than an

@@ -10,7 +10,7 @@ use einfach_mail_application::{
 };
 use einfach_mail_domain::{
     AccountId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailFolderKind,
-    MailReplyDraft, MessageBody, MessageId, ReadState,
+    MailFolderKinds, MailReplyDraft, MessageBody, MessageId, ReadState,
 };
 use einfach_mail_provider_runtime as worker;
 
@@ -75,6 +75,20 @@ impl MailProvider for MicrosoftGraphProvider {
                 .well_known_folder(&account_id, folder, Arc::clone(&token))
                 .await;
             map_mail_result(&config, &account_id, &token, folder_result).await
+        })
+    }
+
+    fn folder_kinds(
+        &self,
+        account_id: &AccountId,
+    ) -> impl Future<Output = Result<MailFolderKinds, MailOperationError>> + Send + '_ {
+        let config = Arc::clone(&self.config);
+        let account_id = account_id.clone();
+        worker::run(move |_cancellation: CancellationToken| async move {
+            let token = ensure_access_token(&config, &account_id).await?;
+            let graph_api = config.graph_api().map_err(map_graph_error)?;
+            let kinds = graph_api.folder_kinds(Arc::clone(&token)).await;
+            map_mail_result(&config, &account_id, &token, kinds).await
         })
     }
 

@@ -205,6 +205,125 @@ async fn well_known_folder_lookup_is_account_scoped() {
 }
 
 #[tokio::test]
+async fn only_folder_kind_resolution_requests_the_folder_aliases() {
+    let server = MockServer::start_async().await;
+    let mut alias_lookups = Vec::new();
+    for alias in [
+        "inbox",
+        "sentitems",
+        "drafts",
+        "archive",
+        "deleteditems",
+        "junkemail",
+    ] {
+        let lookup = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path(format!("/v1.0/me/mailFolders/{alias}"))
+                    .query_param("$select", "id")
+                    .header("authorization", "Bearer synthetic-kinds-access");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .json_body(serde_json::json!({"id": format!("folder-{alias}")}));
+            })
+            .await;
+        alias_lookups.push(lookup);
+    }
+    let root_folders = server
+        .mock_async(|when, then| {
+            when.method(GET).path("/v1.0/me/mailFolders");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"value":[{"id":"folder-inbox","displayName":"Inbox"}]}"#);
+        })
+        .await;
+    let child_folders = server
+        .mock_async(|when, then| {
+            when.method(GET)
+                .path("/v1.0/me/mailFolders/folder-inbox/childFolders");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"value":[]}"#);
+        })
+        .await;
+    let delta_link = format!(
+        "{}/v1.0/me/mailFolders/folder-inbox/messages/delta?$deltatoken=opaque-final",
+        http_base_url(&server)
+    );
+    let message_delta = server
+        .mock_async(|when, then| {
+            when.method(GET)
+                .path("/v1.0/me/mailFolders/folder-inbox/messages/delta");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(serde_json::json!({"value": [], "@odata.deltaLink": delta_link}));
+        })
+        .await;
+    let (browser_sender, _browser_receiver) = mpsc::unbounded_channel();
+    let provider = synthetic_provider(
+        &server,
+        browser_sender,
+        Arc::new(MemoryRefreshTokenStore::new(None)),
+    );
+    let account =
+        AccountId::try_from("account-123".to_owned()).expect("synthetic account ID is valid");
+    *provider.config.session.lock().await = Some(ProviderSession {
+        account_id: account.clone(),
+        access_token: Some(access_token("synthetic-kinds-access")),
+    });
+    let inbox = FolderReference::new(
+        account.clone(),
+        FolderId::try_from("folder-inbox".to_owned()).expect("synthetic folder ID is valid"),
+    );
+    let alias_requests = || async {
+        let mut requests = 0;
+        for lookup in &alias_lookups {
+            requests += lookup.calls_async().await;
+        }
+        requests
+    };
+
+    provider
+        .list_folders(&account)
+        .await
+        .expect("first sync lists the synthetic folders");
+    let kinds = provider
+        .folder_kinds(&account)
+        .await
+        .expect("first sync resolves the unresolved folder kinds");
+    provider
+        .message_delta_page(&inbox, MessageDeltaRequest::Initial)
+        .await
+        .expect("first sync reads the synthetic folder");
+    assert_eq!(
+        kinds.kind_of(inbox.folder_id()),
+        Some(MailFolderKind::Inbox)
+    );
+    assert_eq!(alias_requests().await, 6);
+
+    provider
+        .list_folders(&account)
+        .await
+        .expect("a sync with stored kinds lists the synthetic folders");
+    provider
+        .message_delta_page(&inbox, MessageDeltaRequest::Initial)
+        .await
+        .expect("a sync with stored kinds reads the synthetic folder");
+    assert_eq!(alias_requests().await, 6);
+
+    let other_account =
+        AccountId::try_from("other-account".to_owned()).expect("synthetic account ID is valid");
+    assert_eq!(
+        provider.folder_kinds(&other_account).await,
+        Err(MailOperationError::AccountMismatch)
+    );
+    assert_eq!(alias_requests().await, 6);
+    root_folders.assert_calls_async(2).await;
+    child_folders.assert_calls_async(2).await;
+    message_delta.assert_calls_async(2).await;
+}
+
+#[tokio::test]
 async fn mail_provider_reads_scoped_folders_delta_and_body() {
     let server = MockServer::start_async().await;
     let token_refresh = server
