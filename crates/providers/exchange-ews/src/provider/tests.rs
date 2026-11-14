@@ -10,9 +10,11 @@ use einfach_mail_domain::{
     CalendarEventDraft, CalendarEventUpdate, CalendarEventUpdateDraft, CalendarEventVersion,
     CalendarOccurrencePatch, CalendarOccurrenceTimePatch, CalendarTimeZoneId, CalendarViewRange,
     CalendarViewReference, EventId, FolderId, FolderReference, MailAction, MailCapabilities,
-    MessageDeltaChange, MessageDeltaProgress, MessageId, ReadState, VersionedCalendarEvent,
+    MessageDeltaChange, MessageDeltaProgress, MessageId, ReadState, UnreadCount,
+    VersionedCalendarEvent,
 };
 use ews::server_version::ServerVersionInfo;
+use ews::sync_folder_hierarchy::SyncFolderHierarchy;
 use ews::sync_folder_items::{Change, SyncFolderItems};
 use secrecy::SecretString;
 use time::{Date, Month, PrimitiveDateTime, Time};
@@ -24,7 +26,8 @@ use crate::wire::ExchangeProductVersion;
 use super::{
     ExchangeEwsProvider,
     mail::{
-        decode_cursor, encode_cursor, map_item_change, map_sync_responses, message_metadata_shape,
+        decode_cursor, encode_cursor, map_folder_change, map_item_change, map_sync_responses,
+        message_metadata_shape,
     },
     session::{EwsSession, profile_for},
 };
@@ -32,6 +35,8 @@ use crate::auth::decode_password;
 
 const SYNC_FOLDER_ITEMS_PAGE: &[u8] = include_bytes!("..//fixtures/sync-folder-items-page.xml");
 const SYNC_STATE_EXPIRED: &[u8] = include_bytes!("..//fixtures/sync-state-expired.xml");
+const SYNC_FOLDER_HIERARCHY_UNREAD_COUNTS: &[u8] =
+    include_bytes!("..//fixtures/sync-folder-hierarchy-unread-counts.xml");
 
 struct EmptySettingsStore;
 

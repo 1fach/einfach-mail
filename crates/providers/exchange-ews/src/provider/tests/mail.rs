@@ -170,3 +170,38 @@ fn maps_access_denied_codes_and_preserves_other_mail_response_errors() {
         );
     }
 }
+
+#[test]
+fn hierarchy_listing_reports_unread_counts_only_for_plain_mail_folders() {
+    let response = parse_soap_response::<SyncFolderHierarchy>(SYNC_FOLDER_HIERARCHY_UNREAD_COUNTS)
+        .expect("synthetic EWS hierarchy fixture parses");
+    let mut messages = response.messages;
+    assert_eq!(messages.len(), 1);
+    let Some(ews::ResponseClass::Success(page)) = messages.pop() else {
+        panic!("synthetic hierarchy has a successful response class");
+    };
+    let account_id = AccountId::try_from("synthetic-account".to_owned())
+        .expect("synthetic account ID is valid");
+
+    let mut counts = Vec::new();
+    for change in page.changes.inner {
+        if let Some(folder) =
+            map_folder_change(&account_id, change).expect("synthetic folder change maps")
+        {
+            counts.push((
+                folder.reference().folder_id().as_str().to_owned(),
+                folder.unread_count().map(UnreadCount::get),
+            ));
+        }
+    }
+
+    assert_eq!(
+        counts,
+        [
+            ("synthetic-inbox-id".to_owned(), Some(12)),
+            ("synthetic-uncounted-id".to_owned(), None),
+            ("synthetic-search-id".to_owned(), None),
+            ("synthetic-read-id".to_owned(), Some(0)),
+        ]
+    );
+}

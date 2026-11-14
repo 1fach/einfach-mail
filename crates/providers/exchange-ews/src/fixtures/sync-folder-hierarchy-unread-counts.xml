@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+            xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+  <s:Header/>
+  <s:Body>
+    <m:SyncFolderHierarchyResponse>
+      <m:ResponseMessages>
+        <m:SyncFolderHierarchyResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode>
+          <m:SyncState>synthetic-hierarchy-state</m:SyncState>
+          <m:IncludesLastFolderInRange>true</m:IncludesLastFolderInRange>
+          <m:Changes>
+            <t:Create>
+              <t:Folder>
+                <t:FolderId Id="synthetic-inbox-id" ChangeKey="synthetic-change-key"/>
+                <t:ParentFolderId Id="synthetic-root-id" ChangeKey="synthetic-change-key"/>
+                <t:FolderClass>IPF.Note</t:FolderClass>
+                <t:DisplayName>Synthetic inbox</t:DisplayName>
+                <t:TotalCount>40</t:TotalCount>
+                <t:ChildFolderCount>0</t:ChildFolderCount>
+                <t:UnreadCount>12</t:UnreadCount>
+              </t:Folder>
+            </t:Create>
+            <t:Create>
+              <t:Folder>
+                <t:FolderId Id="synthetic-uncounted-id" ChangeKey="synthetic-change-key"/>
+                <t:ParentFolderId Id="synthetic-root-id" ChangeKey="synthetic-change-key"/>
+                <t:FolderClass>IPF.Note</t:FolderClass>
+                <t:DisplayName>Synthetic uncounted folder</t:DisplayName>
+              </t:Folder>
+            </t:Create>
+            <t:Create>
+              <t:CalendarFolder>
+                <t:FolderId Id="synthetic-calendar-id" ChangeKey="synthetic-change-key"/>
+                <t:ParentFolderId Id="synthetic-root-id" ChangeKey="synthetic-change-key"/>
+                <t:FolderClass>IPF.Appointment</t:FolderClass>
+                <t:DisplayName>Synthetic calendar</t:DisplayName>
+              </t:CalendarFolder>
+            </t:Create>
+            <t:Create>
+              <t:SearchFolder>
+                <t:FolderId Id="synthetic-search-id" ChangeKey="synthetic-change-key"/>
+                <t:ParentFolderId Id="synthetic-root-id" ChangeKey="synthetic-change-key"/>
+                <t:FolderClass>IPF.Note</t:FolderClass>
+                <t:DisplayName>Synthetic search folder</t:DisplayName>
+                <t:UnreadCount>3</t:UnreadCount>
+              </t:SearchFolder>
+            </t:Create>
+            <t:Update>
+              <t:Folder>
+                <t:FolderId Id="synthetic-read-id" ChangeKey="synthetic-change-key"/>
+                <t:ParentFolderId Id="synthetic-root-id" ChangeKey="synthetic-change-key"/>
+                <t:FolderClass>IPF.Note</t:FolderClass>
+                <t:DisplayName>Synthetic read folder</t:DisplayName>
+                <t:UnreadCount>0</t:UnreadCount>
+              </t:Folder>
+            </t:Update>
+            <t:Delete>
+              <t:FolderId Id="synthetic-deleted-id" ChangeKey="synthetic-change-key"/>
+            </t:Delete>
+          </m:Changes>
+        </m:SyncFolderHierarchyResponseMessage>
+      </m:ResponseMessages>
+    </m:SyncFolderHierarchyResponse>
+  </s:Body>
+</s:Envelope>

@@ -7,7 +7,7 @@ use einfach_mail_application::{
 use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, MailAction, MailFolder, MailFolderKind, Mailbox,
     MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
-    MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
+    MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState, UnreadCount,
 };
 use einfach_mail_provider_runtime as worker;
 use ews::{
@@ -333,9 +333,7 @@ pub(super) async fn collect_folders(session: &EwsSession) -> Result<EwsFolderCol
             return Err(EwsError::InvalidResponse);
         }
         for change in response.changes.inner {
-            if let FolderChange::Create { folder } | FolderChange::Update { folder } = change
-                && let Some(folder) = map_folder(session.profile.id(), folder)?
-            {
+            if let Some(folder) = map_folder_change(session.profile.id(), change)? {
                 folders.push(folder);
                 if folders.len() > MAX_FOLDERS {
                     return Err(EwsError::ResourceLimitExceeded);
@@ -353,16 +351,35 @@ pub(super) async fn collect_folders(session: &EwsSession) -> Result<EwsFolderCol
     Err(EwsError::ResourceLimitExceeded)
 }
 
+pub(super) fn map_folder_change(
+    account_id: &AccountId,
+    change: FolderChange,
+) -> Result<Option<MailFolder>, EwsError> {
+    match change {
+        FolderChange::Create { folder } | FolderChange::Update { folder } => {
+            map_folder(account_id, folder)
+        }
+        FolderChange::Delete { .. } => Ok(None),
+    }
+}
+
 fn map_folder(account_id: &AccountId, folder: Folder) -> Result<Option<MailFolder>, EwsError> {
-    let (folder_id, parent_id, folder_class, display_name) = match folder {
+    let (folder_id, parent_id, folder_class, display_name, unread_count) = match folder {
         Folder::Folder {
             folder_id,
             parent_folder_id,
             folder_class,
             display_name,
+            unread_count,
             ..
-        }
-        | Folder::CalendarFolder {
+        } => (
+            folder_id,
+            parent_folder_id,
+            folder_class,
+            display_name,
+            unread_count.map(UnreadCount::new),
+        ),
+        Folder::CalendarFolder {
             folder_id,
             parent_folder_id,
             folder_class,
@@ -389,7 +406,13 @@ fn map_folder(account_id: &AccountId, folder: Folder) -> Result<Option<MailFolde
             folder_class,
             display_name,
             ..
-        } => (folder_id, parent_folder_id, folder_class, display_name),
+        } => (
+            folder_id,
+            parent_folder_id,
+            folder_class,
+            display_name,
+            None,
+        ),
     };
     if !folder_class
         .as_deref()
@@ -410,7 +433,8 @@ fn map_folder(account_id: &AccountId, folder: Folder) -> Result<Option<MailFolde
         })
         .transpose()?;
     let folder = MailFolder::new(reference, parent, display_name.unwrap_or_default())
-        .map_err(|_| EwsError::InvalidResponse)?;
+        .map_err(|_| EwsError::InvalidResponse)?
+        .with_unread_count(unread_count);
     Ok(Some(folder))
 }
 
