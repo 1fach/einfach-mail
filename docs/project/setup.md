@@ -42,10 +42,10 @@ sudo dnf install gcc gcc-c++ clang pkgconf-pkg-config \
   fontconfig-devel freetype-devel wayland-devel wayland-protocols-devel \
   libxkbcommon-x11-devel libX11-devel libxcb-devel openssl-devel \
   libzstd-devel vulkan-loader-devel vulkan-validation-layers make \
-  perl-FindBin perl-Text-Template
+  perl perl-Text-Template
 ```
 
-The persistence crate builds SQLCipher with vendored OpenSSL. Fedora packages Perl's `FindBin` and `Text::Template` modules separately, so install both packages before building or testing the workspace.
+The persistence crate builds SQLCipher with vendored OpenSSL. Install Fedora's `perl` metapackage for the core Perl modules used by OpenSSL's Configure script, including `FindBin`, `IPC::Cmd`, and `File::Compare`. Fedora packages `Text::Template` separately, so also install `perl-Text-Template`.
 
 The package list follows GPUI Kit's Linux build requirements. It omits GTK and WebKitGTK because the desktop app does not include the optional email WebView.
 
