@@ -53,7 +53,7 @@ fn unknown_delete_outcome_requires_sync_before_another_move_request() {
                 .move_message_to_well_known_folder(
                     &inbox_reference,
                     &message_id(),
-                    WellKnownMailFolder::DeletedItems
+                    MailFolderKind::DeletedItems
                 )
                 .await,
             Err(MailWorkflowError::Provider(
@@ -72,7 +72,7 @@ fn unknown_delete_outcome_requires_sync_before_another_move_request() {
                 .move_message_to_well_known_folder(
                     &inbox_reference,
                     &message_id(),
-                    WellKnownMailFolder::DeletedItems
+                    MailFolderKind::DeletedItems
                 )
                 .await,
             Err(MailWorkflowError::AccountSyncRequired)
@@ -98,7 +98,7 @@ fn unknown_delete_outcome_requires_sync_before_another_move_request() {
                 .move_message_to_well_known_folder(
                     &inbox_reference,
                     &message_id(),
-                    WellKnownMailFolder::DeletedItems,
+                    MailFolderKind::DeletedItems,
                 )
                 .await
                 .map(|outcome| outcome.cache_outcome()),
@@ -159,7 +159,7 @@ fn canceled_delete_request_requires_sync_before_another_move_request() {
                     .move_message_to_well_known_folder(
                         &inbox_reference,
                         &message_id(),
-                        WellKnownMailFolder::DeletedItems,
+                        MailFolderKind::DeletedItems,
                     )
                     .await;
             },
@@ -177,7 +177,7 @@ fn canceled_delete_request_requires_sync_before_another_move_request() {
                 .move_message_to_well_known_folder(
                     &inbox_reference,
                     &message_id(),
-                    WellKnownMailFolder::DeletedItems
+                    MailFolderKind::DeletedItems
                 )
                 .await,
             Err(MailWorkflowError::AccountSyncRequired)
@@ -252,7 +252,7 @@ fn delete_message_keeps_the_source_reservation_while_resolving_deleted_items() {
                     .move_message_to_well_known_folder(
                         &delete_source,
                         &message_id(),
-                        WellKnownMailFolder::DeletedItems,
+                        MailFolderKind::DeletedItems,
                     )
                     .await
             });
@@ -338,7 +338,7 @@ fn confirmed_delete_with_cache_failure_requires_sync_before_retry() {
                 .move_message_to_well_known_folder(
                     &inbox_reference,
                     &message_id(),
-                    WellKnownMailFolder::DeletedItems,
+                    MailFolderKind::DeletedItems,
                 )
                 .await
                 .map(|outcome| outcome.cache_outcome()),
@@ -349,7 +349,7 @@ fn confirmed_delete_with_cache_failure_requires_sync_before_retry() {
                 .move_message_to_well_known_folder(
                     &inbox_reference,
                     &message_id(),
-                    WellKnownMailFolder::DeletedItems
+                    MailFolderKind::DeletedItems
                 )
                 .await,
             Err(MailWorkflowError::AccountSyncRequired)

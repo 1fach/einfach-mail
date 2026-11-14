@@ -11,12 +11,11 @@ use std::{
 use einfach_mail_application::{
     AccountOperationError, MailCache, MailCacheError, MailOperationError, MailSendProviderError,
     MailSession, MailSyncState, MailWorkflow, MailWorkflowError, MessageBodyForDisplay,
-    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, FolderId, FolderReference, FollowUpFlagStatus, MailAction,
-    MailCapabilities, MailMessage, Mailbox, MessageBody, MessageBodyType, MessageDeltaLink,
-    MessageId, ReadState,
+    MailCapabilities, MailFolderKind, MailMessage, Mailbox, MessageBody, MessageBodyType,
+    MessageDeltaLink, MessageId, ReadState,
 };
 use gpui_kit::base::TextSelection;
 use gpui_kit::component::WindowExt as _;

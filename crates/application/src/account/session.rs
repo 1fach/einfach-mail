@@ -10,9 +10,9 @@ use std::{
 
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventUpdate, CalendarOccurrence,
-    CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder, MailMessage,
-    MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend, ReadState,
-    VersionedCalendarEvent,
+    CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
+    MailFolderKind, MailMessage, MailReplyDraft, MailSendOperationId, MessageId, PendingMailSend,
+    ReadState, VersionedCalendarEvent,
 };
 
 use crate::shared::recovery::AccountWorkflowRecovery;
@@ -24,7 +24,7 @@ use crate::{
     CalendarWorkflowError, FollowUpFlagUpdateOutcome, MailCache, MailCacheError, MailProvider,
     MailSendOutcome, MailSendResolutionError, MailSendWorkflowError, MailSyncProgress,
     MailSyncReport, MailSyncState, MailWorkflow, MailWorkflowError, MessageMoveOutcome,
-    OpenedMessage, ReadStateUpdateOutcome, WellKnownFolderMoveOutcome, WellKnownMailFolder,
+    OpenedMessage, ReadStateUpdateOutcome, WellKnownFolderMoveOutcome,
 };
 
 /// A boxed future returned by an account-scoped application session.
@@ -170,7 +170,7 @@ pub trait MailSession: Send + Sync {
         &'a self,
         source_folder: &'a FolderReference,
         message_id: &'a MessageId,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
     ) -> AccountSessionFuture<'a, Result<WellKnownFolderMoveOutcome, MailWorkflowError>>;
 
     /// Sends a plain-text message and saves a body-free marker before dispatch.
@@ -632,7 +632,7 @@ where
         &'a self,
         source_folder: &'a FolderReference,
         message_id: &'a MessageId,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
     ) -> AccountSessionFuture<'a, Result<WellKnownFolderMoveOutcome, MailWorkflowError>> {
         Box::pin(MailWorkflow::move_message_to_well_known_folder(
             self,

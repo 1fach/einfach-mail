@@ -324,7 +324,7 @@ fn account_session_rejects_foreign_references_without_provider_access() {
                 .move_message_to_well_known_folder(
                     &foreign_folder,
                     &message_id(),
-                    WellKnownMailFolder::Archive,
+                    MailFolderKind::Archive,
                 )
                 .await,
             Err(MailWorkflowError::AccountMismatch)

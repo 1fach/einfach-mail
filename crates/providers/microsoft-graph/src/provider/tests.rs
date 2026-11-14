@@ -33,13 +33,12 @@ use einfach_mail_application::{
     AccountOperationCancellation, AccountOperationError, AccountPermissionRequest, AccountProvider,
     AccountProviderKind, AccountWorkflow, CalendarProvider, ConnectedAccount, MailOperationError,
     MailProvider, MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse,
-    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, CalendarEventCreation, CalendarEventDraft, CalendarOccurrenceTime,
-    CalendarViewRange, CalendarViewReference, FolderId, FolderReference, MailReplyDraft,
-    MailReplySource, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaProgress,
-    MessageId,
+    CalendarViewRange, CalendarViewReference, FolderId, FolderReference, MailFolderKind,
+    MailReplyDraft, MailReplySource, MessageBodyType, MessageDeltaChange, MessageDeltaLink,
+    MessageDeltaProgress, MessageId,
 };
 use time::{Date, Month, PrimitiveDateTime, Time};
 

@@ -5,8 +5,7 @@ use time::format_description::well_known::Rfc3339;
 use url::Url;
 
 use crate::error::GraphError;
-use einfach_mail_application::WellKnownMailFolder;
-use einfach_mail_domain::CalendarViewRange;
+use einfach_mail_domain::{CalendarViewRange, MailFolderKind};
 
 const GRAPH_API_PATH_PREFIX: &str = "/v1.0/";
 const FOLDER_SELECT: &str = "id,displayName,isHidden";
@@ -52,13 +51,14 @@ impl GraphAuthority {
         self.validated_url(url)
     }
 
-    pub fn well_known_folder_path(
-        &self,
-        folder: WellKnownMailFolder,
-    ) -> Result<GraphUrl, GraphError> {
+    pub fn well_known_folder_path(&self, folder: MailFolderKind) -> Result<GraphUrl, GraphError> {
         let folder_name = match folder {
-            WellKnownMailFolder::Archive => "archive",
-            WellKnownMailFolder::DeletedItems => "deleteditems",
+            MailFolderKind::Inbox => "inbox",
+            MailFolderKind::SentItems => "sentitems",
+            MailFolderKind::Drafts => "drafts",
+            MailFolderKind::Archive => "archive",
+            MailFolderKind::DeletedItems => "deleteditems",
+            MailFolderKind::JunkEmail => "junkemail",
         };
         let mut url = self.base_url.clone();
         url.path_segments_mut()

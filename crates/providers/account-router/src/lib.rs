@@ -8,12 +8,12 @@ use einfach_mail_application::{
     CalendarOperationError, CalendarProvider, CalendarSyncStrategy, CalendarViewSnapshotResponse,
     ConnectedAccount, ExchangeEwsDiscoveryRequest, ExchangeEwsDiscoveryResult, MailOperationError,
     MailProvider, MailSendProviderError, MessageDeltaRequest, MessageDeltaResponse,
-    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, CalendarCapabilities, CalendarEventCreation, CalendarEventUpdate,
     CalendarOccurrence, CalendarViewReference, FolderReference, FollowUpFlagStatus, MailDraft,
-    MailFolder, MailReplyDraft, MessageBody, MessageId, ReadState, VersionedCalendarEvent,
+    MailFolder, MailFolderKind, MailReplyDraft, MessageBody, MessageId, ReadState,
+    VersionedCalendarEvent,
 };
 use einfach_mail_exchange_ews::ExchangeEwsProvider;
 use einfach_mail_microsoft_graph::MicrosoftGraphProvider;
@@ -327,7 +327,7 @@ where
     fn well_known_folder(
         &self,
         account_id: &AccountId,
-        folder: WellKnownMailFolder,
+        folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         let account_id = account_id.clone();
         async move {

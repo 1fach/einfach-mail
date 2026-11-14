@@ -187,7 +187,7 @@ async fn well_known_folder_lookup_is_account_scoped() {
     });
 
     let folder = provider
-        .well_known_folder(&account, WellKnownMailFolder::DeletedItems)
+        .well_known_folder(&account, MailFolderKind::DeletedItems)
         .await
         .expect("synthetic Deleted Items folder resolves");
     let other_account =
@@ -197,7 +197,7 @@ async fn well_known_folder_lookup_is_account_scoped() {
     assert_eq!(folder.folder_id().as_str(), "deleted-folder");
     assert_eq!(
         provider
-            .well_known_folder(&other_account, WellKnownMailFolder::DeletedItems)
+            .well_known_folder(&other_account, MailFolderKind::DeletedItems)
             .await,
         Err(MailOperationError::AccountMismatch)
     );

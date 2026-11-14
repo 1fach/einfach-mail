@@ -13,15 +13,14 @@ use url::Url;
 
 use einfach_mail_application::{
     CalendarDeltaRequest, CalendarDeltaResponse, MessageDeltaRequest, MessageDeltaResponse,
-    WellKnownMailFolder,
 };
 use einfach_mail_domain::{
     AccountId, AccountProfile, CalendarCapabilities, CalendarDeltaChange, CalendarDeltaLink,
     CalendarDeltaProgress, CalendarEventCreation, CalendarEventDraft, CalendarEventUpdate,
     CalendarEventUpdateDraft, CalendarOccurrence, CalendarOccurrenceTime, CalendarTimeZoneId,
     CalendarViewRange, CalendarViewReference, FolderId, FolderReference, FollowUpFlagStatus,
-    MailCapabilities, MailDraft, MailRecipient, MailReplyDraft, MailReplySource, MailSubject,
-    MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, ReadState,
+    MailCapabilities, MailDraft, MailFolderKind, MailRecipient, MailReplyDraft, MailReplySource,
+    MailSubject, MessageDeltaChange, MessageId, MessageMetadata, MessageOrigin, ReadState,
     VersionedCalendarEvent,
 };
 

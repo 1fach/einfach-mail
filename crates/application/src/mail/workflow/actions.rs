@@ -1,10 +1,12 @@
 use std::future::Future;
 
-use einfach_mail_domain::{FolderReference, FollowUpFlagStatus, MailFolder, MessageId, ReadState};
+use einfach_mail_domain::{
+    FolderReference, FollowUpFlagStatus, MailFolder, MailFolderKind, MessageId, ReadState,
+};
 
 use crate::shared::recovery::AccountWorkflowRecovery;
 use crate::shared::reservations::OperationReservation;
-use crate::{MailCache, MailCacheError, MailOperationError, MailProvider, WellKnownMailFolder};
+use crate::{MailCache, MailCacheError, MailOperationError, MailProvider};
 
 use super::{
     FollowUpFlagUpdateOutcome, MailWorkflow, MailWorkflowError, MessageMoveOutcome,
@@ -188,7 +190,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
         &self,
         source_folder: &FolderReference,
         message_id: &MessageId,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
     ) -> Result<WellKnownFolderMoveOutcome, MailWorkflowError> {
         self.ensure_folder_account(source_folder)?;
         let _source_reservation = self.reserve_folders(std::slice::from_ref(source_folder))?;
@@ -224,7 +226,7 @@ impl<P: MailProvider, C: MailCache> MailWorkflow<P, C> {
     async fn resolve_well_known_folder(
         &self,
         source_folder: &FolderReference,
-        destination: WellKnownMailFolder,
+        destination: MailFolderKind,
     ) -> Result<FolderReference, MailWorkflowError> {
         let destination_folder = self
             .provider

@@ -222,7 +222,7 @@ async fn resolves_archive_and_deleted_items_from_well_known_names() {
     let archive_folder = graph_api
         .well_known_folder(
             &account_id,
-            WellKnownMailFolder::Archive,
+            MailFolderKind::Archive,
             synthetic_access_token(),
         )
         .await
@@ -230,7 +230,7 @@ async fn resolves_archive_and_deleted_items_from_well_known_names() {
     let deleted_items_folder = graph_api
         .well_known_folder(
             &account_id,
-            WellKnownMailFolder::DeletedItems,
+            MailFolderKind::DeletedItems,
             synthetic_access_token(),
         )
         .await

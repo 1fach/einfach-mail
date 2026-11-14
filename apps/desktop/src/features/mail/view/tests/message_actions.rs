@@ -134,7 +134,7 @@ async fn partial_mail_capabilities_render_and_allow_only_supported_actions(
                 .prepare_message_move(archive_folder, "Archive".to_owned())
                 .is_none()
             && mail_view
-                .prepare_well_known_folder_action(WellKnownMailFolder::DeletedItems)
+                .prepare_well_known_folder_action(MailFolderKind::DeletedItems)
                 .is_none()
     }));
 
@@ -299,7 +299,7 @@ async fn denied_message_delete_shows_permission_recovery_and_keeps_source(cx: &m
         matches!(
             &view.read(cx).well_known_folder_action_status,
             WellKnownFolderActionStatus::Failed {
-                destination: WellKnownMailFolder::DeletedItems,
+                destination: MailFolderKind::DeletedItems,
                 error,
                 ..
             } if *error == MailWorkflowError::Provider(MailOperationError::AccessDenied)
@@ -431,10 +431,8 @@ async fn pending_message_delete_keeps_the_native_action_busy(cx: &mut TestAppCon
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert!(context.debug_bounds("message-delete-pending").is_some());
     assert!(context.cx.update(|cx| {
-        view.read(cx).well_known_folder_action_in_progress_for(
-            &message_id,
-            WellKnownMailFolder::DeletedItems,
-        )
+        view.read(cx)
+            .well_known_folder_action_in_progress_for(&message_id, MailFolderKind::DeletedItems)
     }));
 }
 

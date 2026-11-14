@@ -2,12 +2,12 @@ use std::{collections::HashSet, future::Future, sync::Arc, time::SystemTime};
 
 use einfach_mail_application::{
     ExchangeEwsAccountSettingsStore, MailOperationError, MailProvider, MailSendProviderError,
-    MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
-    AccountId, FolderId, FolderReference, MailAction, MailFolder, Mailbox, MessageBody,
-    MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress,
-    MessageId, MessageMetadataPatch, ReadState,
+    AccountId, FolderId, FolderReference, MailAction, MailFolder, MailFolderKind, Mailbox,
+    MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink, MessageDeltaPage,
+    MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
 };
 use einfach_mail_provider_runtime as worker;
 use ews::{
@@ -216,7 +216,7 @@ where
     fn well_known_folder(
         &self,
         _account_id: &AccountId,
-        _folder: WellKnownMailFolder,
+        _folder: MailFolderKind,
     ) -> impl Future<Output = Result<FolderReference, MailOperationError>> + Send + '_ {
         std::future::ready(Err(MailOperationError::UnsupportedOperation))
     }

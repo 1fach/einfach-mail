@@ -13,12 +13,13 @@ use crate::{
     transport::{GraphPatchOperation, GraphPostJsonOperation, GraphReadOperation, GraphResponse},
 };
 use einfach_mail_application::{
-    MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse, WellKnownMailFolder,
+    MessageDeltaPageResponse, MessageDeltaRequest, MessageDeltaResponse,
 };
 use einfach_mail_domain::{
     AccountId, FolderId, FolderReference, FollowUpFlagStatus, MailDraft, MailFolder,
-    MailReplyDraft, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange, MessageDeltaLink,
-    MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch, ReadState,
+    MailFolderKind, MailReplyDraft, Mailbox, MessageBody, MessageBodyType, MessageDeltaChange,
+    MessageDeltaLink, MessageDeltaPage, MessageDeltaProgress, MessageId, MessageMetadataPatch,
+    ReadState,
 };
 
 use super::{
@@ -63,7 +64,7 @@ impl GraphApi {
     pub(crate) async fn well_known_folder(
         &self,
         account_id: &AccountId,
-        folder: WellKnownMailFolder,
+        folder: MailFolderKind,
         token: Arc<AccessToken>,
     ) -> Result<FolderReference, GraphError> {
         let response = self
