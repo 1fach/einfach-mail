@@ -1,6 +1,6 @@
 # ADR 0011: Define the initial read-only mail synchronization scope
 
-- Status: Accepted
+- Status: Accepted; the message-list and folder metadata bullets are amended by [ADR 0067](0067-message-previews-folder-unread-counts-and-kinds.md)
 - Date: 2026-10-31
 - Owners: Project maintainer
 
@@ -27,6 +27,8 @@ Use this scope for the first read-only mail milestone:
 - Fetch a message body only after the user opens that message. Store the raw body in the encrypted cache so the user can reopen it offline. Sanitize it at display time. Do not download attachments in M2.
 - Keep synchronized message metadata until account removal. Clear an opened body's cached content when a message delta upsert updates its metadata, and clear retained bodies when a replacement scan completes. M2 does not add a rolling-retention setting or a separate history-import control. See [ADR 0034](0034-invalidate-cached-message-bodies-after-delta-updates.md).
 - Keep M2 read-only. Do not mark messages read, move, archive, flag, delete, or send mail from the app.
+
+Amendment, 2026-11-14: [ADR 0067](0067-message-previews-folder-unread-counts-and-kinds.md) amends the message-list and folder metadata bullets above. Folders gain a kind and a provider-reported unread count. Messages gain a sanitized preview of at most 256 characters, so the app now requests `bodyPreview`. Message bodies and attachments stay out of folder listing and delta responses.
 
 Treat Graph's next and delta links as opaque and follow the complete chain. A response may contain read-state changes or removal entries for messages outside the local cutoff. Apply those changes to records already in the local scope; do not insert unknown messages older than the cutoff. Updated records can contain only the changed properties, so preserve omitted values and distinguish them from explicit nulls when merging into cached records.
 
