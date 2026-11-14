@@ -152,22 +152,20 @@ fn a_folder_named_by_two_ids_keeps_the_earlier_kind() {
 
 #[test]
 fn a_success_without_exactly_one_plain_folder_fails_the_resolution() {
+    const ARCHIVE_FOLDER: &str = "<t:Folder>\n              \
+        <t:FolderId Id=\"synthetic-archive-id\" ChangeKey=\"synthetic-change-key\"/>\n            \
+        </t:Folder>";
     let resolved = String::from_utf8_lossy(GET_FOLDER_KINDS_RESOLVED);
-    for document in [
-        resolved.replace(
-            "<t:FolderId Id=\"synthetic-archive-id\" ChangeKey=\"synthetic-change-key\"/>",
-            "",
-        ),
-        resolved.replace(
-            "<t:Folder>\n              <t:FolderId Id=\"synthetic-archive-id\" ChangeKey=\"synthetic-change-key\"/>\n            </t:Folder>",
-            "",
-        ),
-        resolved.replace(
-            "<t:FolderId Id=\"synthetic-archive-id\" ChangeKey=\"synthetic-change-key\"/>\n            </t:Folder>",
-            "<t:FolderId Id=\"synthetic-archive-id\" ChangeKey=\"synthetic-change-key\"/>\n            </t:Folder>\n            <t:Folder><t:FolderId Id=\"synthetic-second-id\"/></t:Folder>",
-        ),
+    assert!(resolved.contains(ARCHIVE_FOLDER));
+    for archive_folders in [
+        "",
+        "<t:Folder></t:Folder>",
+        "<t:SearchFolder><t:FolderId Id=\"synthetic-archive-id\"/></t:SearchFolder>",
+        "<t:Folder><t:FolderId Id=\"synthetic-archive-id\"/></t:Folder>\
+         <t:Folder><t:FolderId Id=\"synthetic-second-id\"/></t:Folder>",
     ] {
-        assert_ne!(document, resolved, "the test edits the fixture");
+        let document = resolved.replace(ARCHIVE_FOLDER, archive_folders);
+
         assert_eq!(kinds_from_text(&document), Err(EwsError::InvalidResponse));
     }
 }
