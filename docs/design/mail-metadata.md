@@ -47,7 +47,7 @@ The synthesis lists the full scope of each unit. M3 must merge before M4, becaus
 
 Each unit appends one line when it merges: date, unit, PR, and verification evidence.
 
-- 2026-11-14, M2 (PR pending): `MailFolderKind` replaces `WellKnownMailFolder` in every caller, and the domain gains `MessagePreview`, `UnreadCount`, `MailFolderKinds`, the `MailFolder` and `MessageMetadata` builders, and `set_preview`. Providers pass no preview, kind, or count. `bash scripts/check-linux-local.sh` passed. The workspace test count went from 658 to 693 passed, with 3 ignored both times. Graph resolves all six aliases through one exhaustive match, and EWS still answers `UnsupportedOperation`.
+- 2026-11-14, M2 ([PR #481](https://github.com/1fach/einfach-mail/pull/481)): `MailFolderKind` replaces `WellKnownMailFolder` in every caller, and the domain gains `MessagePreview`, `UnreadCount`, `MailFolderKinds`, the `MailFolder` and `MessageMetadata` builders, and `set_preview`. Providers pass no preview, kind, or count. `bash scripts/check-linux-local.sh` passed. The workspace test count went from 658 to 693 passed, with 3 ignored both times. Graph resolves all six aliases through one exhaustive match, and EWS still answers `UnsupportedOperation`.
 
 ## Decisions while the owner was away
 
